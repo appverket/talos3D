@@ -181,7 +181,6 @@ impl HandleInteractionState {
 #[derive(Clone)]
 struct ResolvedHandle {
     entity: Entity,
-    snapshot: BoxedEntity,
     id: String,
     label: String,
     position: Vec3,
@@ -454,14 +453,33 @@ fn begin_handle_drag(world: &mut World, pending: PendingHandlePress) {
     };
     let display_mode = world.resource::<HandleContext>().display_mode;
 
-    if let HandleInteraction::Authored { handle_id } = &pending.handle.interaction {
-        if let Some(after) = pending.handle.snapshot.drag_handle(handle_id, cursor_world) {
+    // Capture geometry only when an authored drag starts. Transform grips carry
+    // identity and position, never a mesh copy for every vertex on every frame.
+    let authored_snapshot = if matches!(
+        pending.handle.interaction,
+        HandleInteraction::Authored { .. }
+    ) {
+        world
+            .get_entity(pending.handle.entity)
+            .ok()
+            .and_then(|entity_ref| {
+                world
+                    .resource::<CapabilityRegistry>()
+                    .capture_snapshot(&entity_ref, world)
+            })
+    } else {
+        None
+    };
+    if let (HandleInteraction::Authored { handle_id }, Some(snapshot)) =
+        (&pending.handle.interaction, authored_snapshot.as_ref())
+    {
+        if let Some(after) = snapshot.drag_handle(handle_id, cursor_world) {
             let mut preview_entity = None;
             preview_entity = after.sync_preview_entity(world, preview_entity);
             world.resource_mut::<HandleInteractionState>().property_drag =
                 Some(PropertyHandleDrag {
                     label: pending.handle.label.clone(),
-                    before: pending.handle.snapshot,
+                    before: snapshot.clone(),
                     current: after,
                     handle_id: handle_id.clone(),
                     preview_entity,
@@ -533,7 +551,10 @@ fn begin_handle_drag(world: &mut World, pending: PendingHandlePress) {
                             Some(cursor_world),
                         ),
                         pivot_override: Some(mirrored_pivot(
-                            pending.handle.snapshot.center(),
+                            authored_snapshot
+                                .as_ref()
+                                .map(|snapshot| snapshot.center())
+                                .unwrap_or(pending.handle.position),
                             pending.handle.position,
                         )),
                         confirm_on_release: true,
@@ -710,11 +731,11 @@ fn draw_rotate_ring(
     };
 
     let selected_entities = rotate_ring.selected_query.iter().collect::<Vec<_>>();
-    let snapshots = selected_entities
+    let bounds = selected_entities
         .iter()
         .filter_map(|entity| {
             let entity_ref = world.get_entity(*entity).ok()?;
-            rotate_ring.registry.capture_snapshot(&entity_ref, world)
+            entity_handle_bounds(world, &rotate_ring.registry, &entity_ref)
         })
         .collect::<Vec<_>>();
 
@@ -727,14 +748,23 @@ fn draw_rotate_ring(
                 .get_entity(entity)
                 .ok()
                 .and_then(|entity_ref| {
-                    rotate_ring
-                        .registry
-                        .capture_snapshot(&entity_ref, world)
-                        .and_then(|snapshot| transform_handle_bounds(world, &entity_ref, &snapshot))
+                    raw_mesh_handle_bounds(&entity_ref)
+                        .map(|local| TransformHandleBounds {
+                            local,
+                            frame: GroupFrame::identity(),
+                        })
+                        .or_else(|| {
+                            rotate_ring
+                                .registry
+                                .capture_snapshot(&entity_ref, world)
+                                .and_then(|snapshot| {
+                                    transform_handle_bounds(world, &entity_ref, &snapshot)
+                                })
+                        })
                 })
                 .map(|bounds| (bounds.world_center(), yaw_ring_radius(&bounds.local)))
         } else {
-            union_bounds(&snapshots).map(|bounds| (bounds.center(), yaw_ring_radius(&bounds)))
+            union_handle_bounds(&bounds).map(|bounds| (bounds.center(), yaw_ring_radius(&bounds)))
         };
         if let Some((center, radius)) = ring {
             draw_ring(&mut gizmos, center, radius, ROTATE_RING_COLOR);
@@ -746,7 +776,7 @@ fn draw_rotate_ring(
     let center = rotate_ring
         .pivot_point
         .position
-        .or_else(|| selection_center(&snapshots));
+        .or_else(|| union_handle_bounds(&bounds).map(|bounds| bounds.center()));
     let Some(center) = center else {
         return;
     };
@@ -848,6 +878,13 @@ fn resolve_entity_handles(
     pivot_position: Option<Vec3>,
 ) -> Option<Vec<ResolvedHandle>> {
     let entity_ref = world.get_entity(entity).ok()?;
+    if let Some(bounds) = raw_mesh_handle_bounds(&entity_ref) {
+        return Some(project_handles(
+            camera,
+            camera_transform,
+            bounds_only_handles(entity, bounds, display_mode, pivot_position),
+        ));
+    }
     let snapshot = registry.capture_snapshot(&entity_ref, world)?;
     let transform_bounds = transform_handle_bounds(world, &entity_ref, &snapshot);
     let viewport_offset = camera
@@ -904,48 +941,58 @@ fn aggregate_transform_handles(
     display_mode: HandleDisplayMode,
     pivot_position: Option<Vec3>,
 ) -> Option<Vec<ResolvedHandle>> {
-    let snapshots = selected
+    let bounds: Vec<_> = selected
         .iter()
         .filter_map(|entity| {
             let entity_ref = world.get_entity(*entity).ok()?;
-            let snapshot = registry.capture_snapshot(&entity_ref, world)?;
-            snapshot.bounds().map(|bounds| (*entity, snapshot, bounds))
+            entity_handle_bounds(world, registry, &entity_ref)
         })
-        .collect::<Vec<_>>();
-    let (entity, snapshot, bounds) = aggregate_handle_context(&snapshots)?;
+        .collect();
+    let bounds = union_handle_bounds(&bounds)?;
+    Some(bounds_only_handles(
+        *selected.first()?,
+        bounds,
+        display_mode,
+        pivot_position,
+    ))
+}
 
-    Some(match display_mode {
+fn raw_mesh_handle_bounds(entity: &EntityRef<'_>) -> Option<EntityBounds> {
+    if entity.contains::<crate::plugins::modeling::mesh_generation::DerivedGeometry>() {
+        return None;
+    }
+    crate::plugins::modeling::snapshots::authored_triangle_mesh_bounds(entity)
+}
+
+fn entity_handle_bounds(
+    world: &World,
+    registry: &CapabilityRegistry,
+    entity: &EntityRef<'_>,
+) -> Option<EntityBounds> {
+    raw_mesh_handle_bounds(entity).or_else(|| registry.capture_snapshot(entity, world)?.bounds())
+}
+
+fn bounds_only_handles(
+    entity: Entity,
+    bounds: EntityBounds,
+    display_mode: HandleDisplayMode,
+    pivot: Option<Vec3>,
+) -> Vec<ResolvedHandle> {
+    match display_mode {
         HandleDisplayMode::Combined => {
-            let mut handles = move_handles(entity, snapshot, bounds);
-            handles.push(vertical_lift_handle(entity, snapshot, bounds));
+            let mut handles = move_handles(entity, bounds);
+            handles.push(vertical_lift_handle(entity, bounds));
             handles.push(rotate_ring_grip(
                 entity,
-                snapshot,
                 bounds,
-                pivot_position.unwrap_or(bounds.center()),
+                pivot.unwrap_or(bounds.center()),
             ));
             handles
         }
-        HandleDisplayMode::Move => move_handles(entity, snapshot, bounds),
-        HandleDisplayMode::Scale => scale_handles(entity, snapshot, bounds),
-        HandleDisplayMode::Rotate => {
-            rotate_handles(entity, snapshot, pivot_position.unwrap_or(bounds.center()))
-        }
-    })
-}
-
-fn aggregate_handle_context(
-    snapshots: &[(Entity, BoxedEntity, EntityBounds)],
-) -> Option<(Entity, &BoxedEntity, EntityBounds)> {
-    let (first_entity, first_snapshot, first_bounds) = snapshots.first()?;
-    let bounds = snapshots
-        .iter()
-        .skip(1)
-        .fold(*first_bounds, |acc, (_, _, bounds)| EntityBounds {
-            min: acc.min.min(bounds.min),
-            max: acc.max.max(bounds.max),
-        });
-    Some((*first_entity, first_snapshot, bounds))
+        HandleDisplayMode::Move => move_handles(entity, bounds),
+        HandleDisplayMode::Scale => scale_handles(entity, bounds),
+        HandleDisplayMode::Rotate => rotate_handles(entity, pivot.unwrap_or(bounds.center())),
+    }
 }
 
 fn build_display_handles(
@@ -960,7 +1007,6 @@ fn build_display_handles(
         .into_iter()
         .map(|handle| ResolvedHandle {
             entity,
-            snapshot: snapshot.clone(),
             id: handle.id.clone(),
             label: handle.label.clone(),
             position: handle.position,
@@ -981,15 +1027,10 @@ fn build_display_handles(
         HandleDisplayMode::Combined => {
             // Unified manipulator: ground-plane move corners + a vertical-lift grip
             // + a yaw rotate grip on the ring, all grabbable without switching modes.
-            handles.extend(transform_bounds.map_handles(move_handles(entity, snapshot, bounds)));
-            handles
-                .push(transform_bounds.map_handle(vertical_lift_handle(entity, snapshot, bounds)));
-            let mut rotate_grip = transform_bounds.map_handle(rotate_ring_grip(
-                entity,
-                snapshot,
-                bounds,
-                bounds.center(),
-            ));
+            handles.extend(transform_bounds.map_handles(move_handles(entity, bounds)));
+            handles.push(transform_bounds.map_handle(vertical_lift_handle(entity, bounds)));
+            let mut rotate_grip =
+                transform_bounds.map_handle(rotate_ring_grip(entity, bounds, bounds.center()));
             set_transform_handle_pivot(
                 &mut rotate_grip,
                 pivot_position.unwrap_or_else(|| transform_bounds.world_center()),
@@ -997,7 +1038,7 @@ fn build_display_handles(
             handles.push(rotate_grip);
         }
         HandleDisplayMode::Move => {
-            handles.extend(transform_bounds.map_handles(move_handles(entity, snapshot, bounds)));
+            handles.extend(transform_bounds.map_handles(move_handles(entity, bounds)));
         }
         HandleDisplayMode::Scale => {
             // Scaling remains world-axis aligned until the semantic transform plan
@@ -1005,13 +1046,12 @@ fn build_display_handles(
             // scale presentation would make a local-looking grip perform a different
             // world-space edit.
             if let Some(world_bounds) = snapshot.bounds() {
-                handles.extend(scale_handles(entity, snapshot, world_bounds));
+                handles.extend(scale_handles(entity, world_bounds));
             }
         }
         HandleDisplayMode::Rotate => {
             handles.extend(rotate_handles(
                 entity,
-                snapshot,
                 pivot_position.unwrap_or_else(|| transform_bounds.world_center()),
             ));
         }
@@ -1080,18 +1120,13 @@ fn set_transform_handle_pivot(handle: &mut ResolvedHandle, pivot: Vec3) {
     }
 }
 
-fn move_handles(
-    entity: Entity,
-    snapshot: &BoxedEntity,
-    bounds: EntityBounds,
-) -> Vec<ResolvedHandle> {
+fn move_handles(entity: Entity, bounds: EntityBounds) -> Vec<ResolvedHandle> {
     bounds
         .corners()
         .into_iter()
         .enumerate()
         .map(|(index, position)| ResolvedHandle {
             entity,
-            snapshot: snapshot.clone(),
             id: format!("move_corner_{index}"),
             label: "Move".to_string(),
             position,
@@ -1106,11 +1141,7 @@ fn move_handles(
         .collect()
 }
 
-fn scale_handles(
-    entity: Entity,
-    snapshot: &BoxedEntity,
-    bounds: EntityBounds,
-) -> Vec<ResolvedHandle> {
+fn scale_handles(entity: Entity, bounds: EntityBounds) -> Vec<ResolvedHandle> {
     let center = bounds.center();
     let mut handles = bounds
         .corners()
@@ -1118,7 +1149,6 @@ fn scale_handles(
         .enumerate()
         .map(|(index, position)| ResolvedHandle {
             entity,
-            snapshot: snapshot.clone(),
             id: format!("scale_corner_{index}"),
             label: "Scale".to_string(),
             position,
@@ -1137,7 +1167,6 @@ fn scale_handles(
             let axis = axis_for_direction(normal);
             ResolvedHandle {
                 entity,
-                snapshot: snapshot.clone(),
                 id: format!("scale_face_{index}"),
                 label: format!("Scale {}", axis_label(axis)),
                 position,
@@ -1155,10 +1184,9 @@ fn scale_handles(
     handles
 }
 
-fn rotate_handles(entity: Entity, snapshot: &BoxedEntity, position: Vec3) -> Vec<ResolvedHandle> {
+fn rotate_handles(entity: Entity, position: Vec3) -> Vec<ResolvedHandle> {
     vec![ResolvedHandle {
         entity,
-        snapshot: snapshot.clone(),
         id: "rotate_center".to_string(),
         label: "Rotate".to_string(),
         position,
@@ -1175,16 +1203,11 @@ fn rotate_handles(entity: Entity, snapshot: &BoxedEntity, position: Vec3) -> Vec
 /// Combined-gizmo grip that raises/lowers the object along world Y. Placed at the
 /// top-face centre of the bounding box, above the white corner move grips. The Y move
 /// is driven by a camera-facing vertical plane (see `transform::vertical_axis_cursor_y`).
-fn vertical_lift_handle(
-    entity: Entity,
-    snapshot: &BoxedEntity,
-    bounds: EntityBounds,
-) -> ResolvedHandle {
+fn vertical_lift_handle(entity: Entity, bounds: EntityBounds) -> ResolvedHandle {
     // face_centers()[2] is the +Y face centre (see EntityBounds::face_centers).
     let (top_face, _) = bounds.face_centers()[2];
     ResolvedHandle {
         entity,
-        snapshot: snapshot.clone(),
         id: "move_vertical".to_string(),
         label: "Lift".to_string(),
         position: top_face,
@@ -1206,36 +1229,21 @@ fn yaw_ring_radius(bounds: &EntityBounds) -> f32 {
 }
 
 /// Axis-aligned union of the selection's bounding boxes (for the combined yaw ring).
-fn union_bounds(snapshots: &[BoxedEntity]) -> Option<EntityBounds> {
-    let mut acc: Option<EntityBounds> = None;
-    for snapshot in snapshots {
-        if let Some(b) = snapshot.bounds() {
-            acc = Some(match acc {
-                Some(a) => EntityBounds {
-                    min: a.min.min(b.min),
-                    max: a.max.max(b.max),
-                },
-                None => b,
-            });
-        }
-    }
-    acc
+fn union_handle_bounds(bounds: &[EntityBounds]) -> Option<EntityBounds> {
+    bounds.iter().copied().reduce(|a, b| EntityBounds {
+        min: a.min.min(b.min),
+        max: a.max.max(b.max),
+    })
 }
 
 /// Combined-gizmo grip that rotates the object about world vertical (yaw). Sits on
 /// the +X point of the yaw ring drawn by `draw_rotate_ring`; rotation pivots about
 /// the selection centre (or the explicit pivot when one is set).
-fn rotate_ring_grip(
-    entity: Entity,
-    snapshot: &BoxedEntity,
-    bounds: EntityBounds,
-    pivot: Vec3,
-) -> ResolvedHandle {
+fn rotate_ring_grip(entity: Entity, bounds: EntityBounds, pivot: Vec3) -> ResolvedHandle {
     let center = bounds.center();
     let radius = yaw_ring_radius(&bounds);
     ResolvedHandle {
         entity,
-        snapshot: snapshot.clone(),
         id: "rotate_yaw".to_string(),
         label: "Rotate".to_string(),
         position: Vec3::new(center.x + radius, center.y, center.z),
@@ -1439,21 +1447,6 @@ fn mirrored_pivot(center: Vec3, handle_position: Vec3) -> Vec3 {
     center - (handle_position - center)
 }
 
-fn selection_center(snapshots: &[BoxedEntity]) -> Option<Vec3> {
-    let count = snapshots.len();
-    if count == 0 {
-        return None;
-    }
-
-    Some(
-        snapshots
-            .iter()
-            .map(BoxedEntity::center)
-            .fold(Vec3::ZERO, |sum, center| sum + center)
-            / count as f32,
-    )
-}
-
 fn draw_ring(gizmos: &mut Gizmos<HandleGizmos>, center: Vec3, radius: f32, color: Color) {
     let mut previous = None;
     for index in 0..=ROTATE_RING_SEGMENTS {
@@ -1519,21 +1512,62 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_handle_context_unions_selected_bounds_once() {
-        let first = boxed_polyline(1, Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
-        let second = boxed_polyline(2, Vec3::new(4.0, -1.0, 2.0), Vec3::new(5.0, 3.0, 6.0));
-        let first_bounds = first.bounds().unwrap();
-        let second_bounds = second.bounds().unwrap();
-        let snapshots = vec![
-            (Entity::from_bits(10), first, first_bounds),
-            (Entity::from_bits(20), second, second_bounds),
-        ];
-
-        let (entity, _, bounds) = aggregate_handle_context(&snapshots).unwrap();
-
-        assert_eq!(entity, Entity::from_bits(10));
-        assert_eq!(bounds.min, Vec3::new(0.0, -1.0, 0.0));
+    fn large_import_uses_bounded_transform_grips_without_snapshot_factory() {
+        use crate::plugins::modeling::{
+            primitives::TriangleMesh, snapshots::TriangleMeshBoundsCache,
+        };
+        let mut world = World::new();
+        let mut vertices = vec![Vec3::ZERO; 100_000];
+        vertices[0] = Vec3::new(5.0, 3.0, 6.0);
+        let entity = world
+            .spawn((
+                ElementId(1),
+                TriangleMesh {
+                    vertices,
+                    faces: vec![],
+                    normals: None,
+                    name: None,
+                },
+            ))
+            .id();
+        let cache =
+            TriangleMeshBoundsCache::new(&world.entity(entity).get_ref::<TriangleMesh>().unwrap());
+        world.entity_mut(entity).insert(cache);
+        // Empty registry deliberately cannot capture any snapshot. The actual
+        // display/hover path must still resolve this large raw mesh.
+        let registry = CapabilityRegistry::default();
+        assert!(resolve_entity_handles(
+            &world,
+            &registry,
+            entity,
+            &Camera::default(),
+            &GlobalTransform::IDENTITY,
+            HandleDisplayMode::Combined,
+            None
+        )
+        .is_some());
+        let handles = aggregate_transform_handles(
+            &world,
+            &registry,
+            &[entity],
+            HandleDisplayMode::Combined,
+            None,
+        )
+        .unwrap();
+        assert_eq!(handles.len(), 10);
+        assert!(handles
+            .iter()
+            .all(|handle| matches!(handle.interaction, HandleInteraction::Transform { .. })));
+        let bounds = entity_handle_bounds(&world, &registry, &world.entity(entity)).unwrap();
         assert_eq!(bounds.max, Vec3::new(5.0, 3.0, 6.0));
+        world.increment_change_tick();
+        world.get_mut::<TriangleMesh>(entity).unwrap().vertices[0] = Vec3::splat(9.0);
+        assert_eq!(
+            entity_handle_bounds(&world, &registry, &world.entity(entity))
+                .unwrap()
+                .max,
+            Vec3::splat(9.0)
+        );
     }
 
     #[test]

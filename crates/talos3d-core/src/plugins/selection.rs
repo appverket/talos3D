@@ -1361,7 +1361,7 @@ fn include_backfaces_for_selection_picking(
     >,
 ) {
     for entity in &untagged {
-        commands.entity(entity).insert(RayCastBackfaces);
+        commands.entity(entity).try_insert(RayCastBackfaces);
     }
 }
 
@@ -1896,6 +1896,19 @@ mod tests {
 
     /// Selection must actually opt every selectable authored mesh into
     /// double-sided picking, and must leave preview/void entities alone.
+    #[test]
+    fn backface_tagging_tolerates_a_project_reload_before_deferred_commands_apply() {
+        let mut world = World::new();
+        let entity = world.spawn((ElementId(1), Mesh3d(Handle::default()))).id();
+        let mut system = IntoSystem::into_system(include_backfaces_for_selection_picking);
+        system.initialize(&mut world);
+        system
+            .run_without_applying_deferred((), &mut world)
+            .unwrap();
+        world.despawn(entity);
+        system.apply_deferred(&mut world);
+    }
+
     #[test]
     fn selectable_authored_meshes_are_tagged_for_double_sided_picking() {
         let mut app = App::new();

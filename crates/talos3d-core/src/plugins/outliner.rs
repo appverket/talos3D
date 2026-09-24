@@ -671,7 +671,7 @@ pub fn draw_outliner_window(
                 visible_rows
                     .iter()
                     .position(|(index, _)| tree.nodes[*index].node_id == node_id)
-                    .map(|row| row as f32 * OUTLINER_ROW_HEIGHT)
+                    .map(|row| row as f32 * (OUTLINER_ROW_HEIGHT + ui.spacing().item_spacing.y))
             });
             let mut scroll_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
             if let Some(offset) = reveal_offset {
@@ -754,6 +754,7 @@ fn render_outliner_row(
 
     ui.push_id(node_id, |ui| {
         ui.horizontal(|ui| {
+            ui.set_min_height(OUTLINER_ROW_HEIGHT);
             if let Some(id) = node.visibility_id {
                 let mut shown = !node.explicitly_hidden;
                 let response =

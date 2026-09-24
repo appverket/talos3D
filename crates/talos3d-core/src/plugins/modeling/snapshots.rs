@@ -544,17 +544,9 @@ impl AuthoredEntity for TriangleMeshSnapshot {
     }
 
     fn handles(&self) -> Vec<HandleInfo> {
-        self.primitive
-            .vertices
-            .iter()
-            .enumerate()
-            .map(|(index, vertex)| HandleInfo {
-                id: format!("vertex_{index}"),
-                position: *vertex,
-                kind: HandleKind::Vertex,
-                label: format!("Vertex {}", index + 1),
-            })
-            .collect()
+        // Import vertices are not object-level grips. Subobjects belong to face
+        // editing; ordinary selection uses bounded transform handles.
+        Vec::new()
     }
 
     fn bounds(&self) -> Option<EntityBounds> {
