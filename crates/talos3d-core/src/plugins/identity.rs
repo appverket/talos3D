@@ -10,7 +10,9 @@ impl Plugin for IdentityPlugin {
     }
 }
 
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct ElementId(pub u64);
 
 #[derive(Resource, Debug, Default)]

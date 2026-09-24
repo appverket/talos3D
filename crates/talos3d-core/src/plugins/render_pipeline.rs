@@ -1353,8 +1353,9 @@ fn draw_model_edge_overlays(
     for (entity, _element_id, mesh_handle, mesh_transform, visibility, wireframe_surface_hidden) in
         query.iter(world)
     {
-        if visibility.is_some_and(|visibility| *visibility == Visibility::Hidden)
-            && wireframe_surface_hidden.is_none()
+        if crate::plugins::layers::entity_document_hidden(world, entity)
+            || (visibility.is_some_and(|visibility| *visibility == Visibility::Hidden)
+                && wireframe_surface_hidden.is_none())
         {
             continue;
         }

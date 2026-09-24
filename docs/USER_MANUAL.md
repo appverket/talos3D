@@ -46,9 +46,28 @@ Fillet and chamfer are currently exposed through the Modeling toolbar, command
 palette, and MCP/automation surfaces rather than a dedicated keyboard shortcut.
 Select one source solid, then run `Create Fillet` or `Create Chamfer`.
 
+## Selecting and isolating imported objects
+
+Double-click a group to enter it; Escape returns to its parent. Click an Outliner
+row to select that exact object. Ctrl/Cmd-click in the viewport selects the
+individual authored object through its containing groups. Generated Definition
+parts still select their owning occurrence.
+
+Each model object or group has a visibility checkbox in the Outliner. Uncheck it
+to hide the object and its contents; check it to show them again. Dimmed rows stay
+in the tree so hidden objects can be found. A checked but dimmed row is hidden by
+its parent or layer. Showing a parent preserves its children's own settings.
+Object visibility is saved in the project and supports Undo/Redo.
+
+Imported material batches may contain multiple source surfaces. Direct selection
+addresses the authored object; it does not infer architectural boundaries inside
+one fused mesh or assign semantic identities automatically.
+
 ## Face Editing
 
-Double-click a supported solid to enter face editing.
+Double-click a supported primitive to enter face editing. Imported triangle meshes
+and composite results stay in object selection. To deliberately edit their faces,
+select the object and choose **Edit → Edit Faces**.
 
 Current face-edit workflows include:
 

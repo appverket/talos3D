@@ -2,8 +2,8 @@
 
 - agent: codex
 - created: 2026-09-24
-- branch: codex/uikpzkim-house-interaction
-- task-id: TALOS-uikpzkim
+- branch: codex/import-body-selection
+- task-id: TALOS-svkglpip
 - target base: origin/main
-- summary: Repair and validate imported house interactions and measured performance.
+- summary: Make imported objects individually selectable and add persistent Outliner hide/show.
 - status: active

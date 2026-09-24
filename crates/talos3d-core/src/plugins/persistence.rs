@@ -29,7 +29,7 @@ use crate::{
         document_state::DocumentState,
         history::{History, HistorySet, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
-        layers::{LayerRegistry, DEFAULT_LAYER_NAME},
+        layers::{DocumentVisibility, LayerRegistry, ObjectVisibility, DEFAULT_LAYER_NAME},
         lighting::{ensure_default_lighting_scene, SceneLightingSettings},
         materials::{
             ensure_builtin_materials, is_builtin_material_id, material_texture_asset_ids,
@@ -250,6 +250,8 @@ struct ProjectFile {
     document_properties: Option<DocumentProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layers: Option<LayerRegistry>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    hidden_objects: BTreeSet<ElementId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     materials: Option<MaterialRegistry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -552,6 +554,8 @@ pub fn new_document(world: &mut World) {
     world.insert_resource(props);
     world.insert_resource(OpaquePersistedEntities::default());
     world.insert_resource(LayerRegistry::default());
+    world.insert_resource(ObjectVisibility::default());
+    world.insert_resource(DocumentVisibility::default());
     world.insert_resource(MaterialRegistry::default());
     world.insert_resource(TextureRegistry::default());
     if let Some(mut materials) = world.get_resource_mut::<MaterialRegistry>() {
@@ -1052,6 +1056,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         next_element_id: world.resource::<ElementIdAllocator>().next_value(),
         document_properties: Some(doc_props),
         layers,
+        hidden_objects: referenced_hidden_objects(world, &entities),
         materials,
         textures,
         definitions,
@@ -1092,6 +1097,7 @@ pub(crate) fn serialize_entity_records_as_project(
         next_element_id,
         document_properties: doc_props,
         layers,
+        hidden_objects: referenced_hidden_objects(world, &entities),
         materials,
         textures,
         definitions,
@@ -1107,6 +1113,20 @@ pub(crate) fn serialize_entity_records_as_project(
         entities,
     };
     serde_json::to_vec_pretty(&project).map_err(|error| error.to_string())
+}
+
+fn referenced_hidden_objects(
+    world: &World,
+    entities: &[PersistedEntityRecord],
+) -> BTreeSet<ElementId> {
+    let Some(state) = world.get_resource::<ObjectVisibility>() else {
+        return BTreeSet::new();
+    };
+    entities
+        .iter()
+        .map(|record| ElementId(entity_record_sort_key(record).1))
+        .filter(|id| state.hidden.contains(id))
+        .collect()
 }
 
 fn referenced_project_layers(
@@ -1252,6 +1272,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         mut next_element_id,
         document_properties,
         layers,
+        hidden_objects,
         materials,
         textures,
         definitions,
@@ -1332,6 +1353,9 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
     world.insert_resource(doc_props);
     world.insert_resource(layers.unwrap_or_default());
+    world.insert_resource(ObjectVisibility {
+        hidden: hidden_objects,
+    });
     let mut textures = textures.unwrap_or_default();
     textures.rebuild_fingerprint_index();
     world.insert_resource(textures);
@@ -1771,6 +1795,7 @@ mod tests {
             next_element_id: 1,
             document_properties: Some(DocumentProperties::default()),
             layers: None,
+            hidden_objects: BTreeSet::from([ElementId(42)]),
             materials: None,
             textures: None,
             definitions: None,
@@ -1824,6 +1849,10 @@ mod tests {
 
         recover_project_from_path(&mut world, recovery_path).expect("recovery project should load");
 
+        assert!(world
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&ElementId(42)));
         let document = world.resource::<DocumentState>();
         assert_eq!(document.current_path, Some(original_path));
         assert!(
@@ -1842,6 +1871,8 @@ mod tests {
         world.insert_resource(CapabilityRegistry::default());
         world.insert_resource(DocumentProperties::default());
         world.insert_resource(LayerRegistry::default());
+        world.insert_resource(ObjectVisibility::default());
+        world.insert_resource(DocumentVisibility::default());
         world.insert_resource(MaterialRegistry::default());
         world.insert_resource(TextureRegistry::default());
         world.insert_resource(DefinitionRegistry::default());
@@ -1922,6 +1953,7 @@ mod tests {
                 next_element_id: 1,
                 document_properties: Some(DocumentProperties::default()),
                 layers: None,
+                hidden_objects: BTreeSet::new(),
                 materials: None,
                 textures: None,
                 definitions: None,
@@ -1956,6 +1988,8 @@ mod tests {
         world.insert_resource(registry);
         world.insert_resource(DocumentProperties::default());
         world.insert_resource(LayerRegistry::default());
+        world.insert_resource(ObjectVisibility::default());
+        world.insert_resource(DocumentVisibility::default());
         world.insert_resource(MaterialRegistry::default());
         world.insert_resource(TextureRegistry::default());
         world.insert_resource(DefinitionRegistry::default());
@@ -2369,6 +2403,7 @@ mod tests {
                 next_element_id: 1,
                 document_properties: Some(DocumentProperties::default()),
                 layers: None,
+                hidden_objects: BTreeSet::new(),
                 materials: None,
                 textures: None,
                 definitions: None,
@@ -2401,6 +2436,7 @@ mod tests {
                 next_element_id: 1,
                 document_properties: None,
                 layers: None,
+                hidden_objects: BTreeSet::new(),
                 materials: None,
                 textures: None,
                 definitions: None,
@@ -2436,6 +2472,7 @@ mod tests {
                 next_element_id: 1,
                 document_properties: None,
                 layers: None,
+                hidden_objects: BTreeSet::new(),
                 materials: None,
                 textures: None,
                 definitions: None,
@@ -2485,6 +2522,7 @@ mod tests {
             next_element_id: 43,
             document_properties: Some(DocumentProperties::default()),
             layers: None,
+            hidden_objects: BTreeSet::new(),
             materials: None,
             textures: None,
             definitions: None,
@@ -2539,6 +2577,7 @@ mod tests {
             next_element_id: 43,
             document_properties: Some(DocumentProperties::default()),
             layers: None,
+            hidden_objects: BTreeSet::new(),
             materials: None,
             textures: None,
             definitions: None,
@@ -2986,6 +3025,8 @@ mod tests {
         world.insert_resource(CapabilityRegistry::default());
         world.insert_resource(DocumentProperties::default());
         world.insert_resource(LayerRegistry::default());
+        world.insert_resource(ObjectVisibility::default());
+        world.insert_resource(DocumentVisibility::default());
         let mut materials = MaterialRegistry::default();
         ensure_builtin_materials(&mut materials);
         materials.create("Project Material");
@@ -3022,6 +3063,8 @@ mod tests {
         world.insert_resource(CapabilityRegistry::default());
         world.insert_resource(DocumentProperties::default());
         world.insert_resource(LayerRegistry::default());
+        world.insert_resource(ObjectVisibility::default());
+        world.insert_resource(DocumentVisibility::default());
 
         let mut materials = MaterialRegistry::default();
         let mut textures = TextureRegistry::default();
@@ -3190,6 +3233,7 @@ mod tests {
             next_element_id: 100,
             document_properties: Some(DocumentProperties::default()),
             layers: None,
+            hidden_objects: BTreeSet::new(),
             materials: None,
             textures: None,
             definitions: None,

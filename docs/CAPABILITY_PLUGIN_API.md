@@ -80,6 +80,12 @@ fail fast if:
 - derived evaluation and mesh pipelines
 - geometry semantics contributors
 
+`AuthoredEntityFactory::allows_automatic_face_edit` defaults to false. Opt in
+only for primitive entities; the generic `PrimitiveFactory` opts in. Aggregates
+are navigated structurally, while raw imported meshes and composite results
+require explicit **Edit Faces**. The affordance is a cheap component check and
+must not copy geometry during selection.
+
 ### Command registration
 
 - command id

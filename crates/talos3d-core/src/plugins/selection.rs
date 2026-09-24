@@ -128,7 +128,7 @@ impl Plugin for SelectionPlugin {
                 CommandDescriptor {
                     id: "modeling.enter_selected_group".to_string(),
                     label: "Enter Selected Group".to_string(),
-                    description: "Descend one level into the selected group, occurrence or solid — the same context entry the double-click gesture performs.".to_string(),
+                    description: "Descend into a selected group or occurrence, or edit a primitive — the same entry the double-click gesture performs. Imported meshes stay selected.".to_string(),
                     category: CommandCategory::Edit,
                     parameters: None,
                     default_shortcut: None,
@@ -141,6 +141,17 @@ impl Plugin for SelectionPlugin {
                     capability_id: None,
                 },
                 execute_enter_selected_group,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.edit_selected_faces".to_string(),
+                    label: "Edit Faces".to_string(),
+                    description: "Explicitly edit faces of the selected primitive, mesh or boolean result. Imported meshes never enter this mode automatically.".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: None, default_shortcut: None, icon: None, hint: None,
+                    requires_selection: true, show_in_menu: true, version: 1,
+                    activates_tool: None, capability_id: None,
+                }, execute_edit_selected_faces,
             )
             .register_command(
                 CommandDescriptor {
@@ -377,6 +388,8 @@ struct SelectionHitTest<'w, 's> {
     generated_part_query: Query<'w, 's, Option<&'static GeneratedOccurrencePart>>,
     element_layer_query: Query<'w, 's, (&'static ElementId, Option<&'static LayerAssignment>)>,
     layer_registry: Res<'w, LayerRegistry>,
+    document_visibility: Option<Res<'w, crate::plugins::layers::DocumentVisibility>>,
+    element_id_query: Query<'w, 's, &'static ElementId>,
     face_profile_feature_query: Query<'w, 's, (), With<FaceProfileFeature>>,
 }
 
@@ -635,6 +648,27 @@ fn resolve_selection_click_target(
     };
     let edit_context = world.resource::<GroupEditContext>().clone();
 
+    // Ctrl/Cmd-click addresses the actual authored object through nested groups.
+    // Generated occurrence parts still resolve to their stable authored owner.
+    let individual = world
+        .get_resource::<ButtonInput<KeyCode>>()
+        .is_some_and(|keys| {
+            [
+                KeyCode::ControlLeft,
+                KeyCode::ControlRight,
+                KeyCode::SuperLeft,
+                KeyCode::SuperRight,
+            ]
+            .iter()
+            .any(|key| keys.pressed(*key))
+        });
+    if individual {
+        let eligible = resolve_entity_for_selection(world, entity).is_some();
+        return SelectionClickTarget {
+            entity: eligible.then_some(entity),
+        };
+    }
+
     // Preserve the user's explicit aggregate target across the two clicks of a
     // double-click. Group entities usually have no render mesh of their own, so
     // the second physical hit lands on a descendant. Re-resolving that leaf from
@@ -768,7 +802,7 @@ fn handle_completed_double_click(world: &mut World, clicked_entity: Option<Entit
 /// The double-click gesture and the `modeling.enter_selected_group` command both
 /// call this, so a pointer descent and a scripted/keyboard descent cannot drift
 /// apart. Returns which context was entered, or `None` when the entity has no
-/// `ElementId`.
+/// `ElementId` or has not opted into automatic face editing.
 pub(crate) fn enter_edit_context_for_entity(
     world: &mut World,
     entity: Entity,
@@ -794,8 +828,18 @@ pub(crate) fn enter_edit_context_for_entity(
         world.insert_resource(group_context);
         "occurrence"
     } else {
-        // CSG nodes and ordinary solids share the same face-edit entry. CSG face
-        // hit testing resolves operand faces after the context is active.
+        let entity_ref = world.get_entity(entity).ok()?;
+        let allowed = world
+            .get_resource::<CapabilityRegistry>()
+            .is_some_and(|registry| {
+                registry
+                    .factories()
+                    .iter()
+                    .any(|factory| factory.allows_automatic_face_edit(&entity_ref))
+            });
+        if !allowed {
+            return None;
+        }
         world
             .resource_mut::<FaceEditContext>()
             .enter(entity, element_id);
@@ -863,6 +907,50 @@ fn execute_enter_selected_group(
             "entered": entered,
             "element_id": element_id.0,
         })),
+        ..Default::default()
+    })
+}
+
+fn execute_edit_selected_faces(
+    world: &mut World,
+    _: &serde_json::Value,
+) -> Result<CommandResult, String> {
+    use crate::plugins::modeling::{
+        csg::CsgNode, editable_mesh::EditableMesh, primitives::TriangleMesh,
+    };
+    let selected: Vec<_> = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .collect();
+    let [entity] = selected.as_slice() else {
+        return Err("Select one object to edit its faces".into());
+    };
+    let entity = *entity;
+    let entity_ref = world
+        .get_entity(entity)
+        .map_err(|_| "Object no longer exists")?;
+    let supported = !entity_ref.contains::<GroupMembers>()
+        && !entity_ref.contains::<OccurrenceIdentity>()
+        && (entity_ref.contains::<TriangleMesh>()
+            || entity_ref.contains::<EditableMesh>()
+            || entity_ref.contains::<CsgNode>()
+            || world
+                .resource::<CapabilityRegistry>()
+                .factories()
+                .iter()
+                .any(|factory| factory.allows_automatic_face_edit(&entity_ref)));
+    if !supported {
+        return Err(
+            "Select a primitive or mesh; enter a group to select one of its objects first".into(),
+        );
+    }
+    let id = *entity_ref
+        .get::<ElementId>()
+        .ok_or("Object has no identity")?;
+    world.resource_mut::<FaceEditContext>().enter(entity, id);
+    world.entity_mut(entity).remove::<Selected>();
+    Ok(CommandResult {
+        output: Some(serde_json::json!({"entered":"face", "element_id":id.0})),
         ..Default::default()
     })
 }
@@ -1174,6 +1262,9 @@ fn draw_bounds_wireframe(gizmos: &mut Gizmos, bounds: &EntityBounds, color: Colo
 }
 
 fn entity_is_visible(world: &World, entity: Entity) -> bool {
+    if crate::plugins::layers::entity_document_hidden(world, entity) {
+        return false;
+    }
     let Ok(entity_ref) = world.get_entity(entity) else {
         return false;
     };
@@ -1205,8 +1296,9 @@ fn entity_is_visible(world: &World, entity: Entity) -> bool {
         .and_then(|operand| find_entity_by_element_id_readonly(world, operand.owner))
         .filter(|feature_entity| entity_on_visible_layer(world, *feature_entity))
         .and_then(|feature_entity| world.get_entity(feature_entity).ok())
-        .and_then(|feature_ref| feature_ref.get::<Visibility>().copied())
-        != Some(Visibility::Hidden)
+        .is_some_and(|feature_ref| {
+            feature_ref.get::<Visibility>().copied() != Some(Visibility::Hidden)
+        })
 }
 
 fn mesh_entity_layer_visible_for_pick(
@@ -1310,6 +1402,8 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d, cursor_position: Vec2) ->
         generated_part_query,
         element_layer_query,
         layer_registry,
+        document_visibility,
+        element_id_query,
         face_profile_feature_query,
     } = &mut hit_test;
     let mesh_hit = ray_cast
@@ -1317,6 +1411,16 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d, cursor_position: Vec2) ->
             ray,
             &MeshRayCastSettings::default().with_filter(&|entity| {
                 mesh_selectable_query.contains(entity)
+                    && !document_visibility.as_ref().is_some_and(|state| {
+                        element_id_query
+                            .get(entity)
+                            .is_ok_and(|id| state.hidden.contains(id))
+                            || generated_part_query
+                                .get(entity)
+                                .ok()
+                                .flatten()
+                                .is_some_and(|part| state.hidden.contains(&part.owner))
+                    })
                     && !muted_query.contains(entity)
                     && !face_profile_feature_query.contains(entity)
                     && (visibility_query
@@ -1370,6 +1474,9 @@ fn screen_bounds_hit(world: &mut World, cursor_position: Vec2) -> Option<HitCand
             if entity_ref.contains::<PreviewOnly>()
                 || entity_ref.contains::<OpeningContext>()
                 || entity_ref.contains::<FaceProfileFeature>()
+                || entity_ref.contains::<Mesh3d>()
+                || entity_ref.contains::<GroupMembers>()
+                || entity_ref.contains::<crate::plugins::modeling::primitives::TriangleMesh>()
                 || !entity_is_visible(world, entity)
             {
                 return None;
@@ -1441,6 +1548,9 @@ fn snapshot_bounds_hit(world: &mut World, ray: Ray3d) -> Option<HitCandidate> {
             if entity_ref.contains::<PreviewOnly>()
                 || entity_ref.contains::<OpeningContext>()
                 || entity_ref.contains::<FaceProfileFeature>()
+                || entity_ref.contains::<Mesh3d>()
+                || entity_ref.contains::<GroupMembers>()
+                || entity_ref.contains::<crate::plugins::modeling::primitives::TriangleMesh>()
                 || entity_ref.contains::<OccurrenceIdentity>()
                 || !entity_is_visible(world, entity)
             {
@@ -2186,6 +2296,98 @@ mod tests {
         let target = resolve_selection_click_target(&mut world, Some(child));
 
         assert_eq!(target.entity, Some(parent));
+    }
+
+    #[test]
+    fn imported_mesh_double_click_keeps_object_selection_but_primitives_enter_faces() {
+        use crate::plugins::modeling::{
+            generic_factory::PrimitiveFactory,
+            primitives::{BoxPrimitive, TriangleMesh},
+        };
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+        world.insert_resource(GroupEditContext::default());
+        world.insert_resource(OccurrenceEditContext::default());
+        world.insert_resource(FaceEditContext::default());
+        world.insert_resource(DoubleClickTracker::default());
+        let mesh = world
+            .spawn((
+                ElementId(1),
+                TriangleMesh {
+                    vertices: vec![],
+                    faces: vec![],
+                    normals: None,
+                    name: Some("Imported material batch".into()),
+                },
+            ))
+            .id();
+        for time in [1.0, 1.1, 1.2, 1.3] {
+            complete_selection_click(&mut world, Some(mesh), false, time);
+        }
+        assert!(world.get::<Selected>(mesh).is_some());
+        assert!(!world.resource::<FaceEditContext>().is_active());
+        assert!(execute_enter_selected_group(&mut world, &serde_json::Value::Null).is_err());
+        let primitive = world
+            .spawn((
+                ElementId(2),
+                BoxPrimitive {
+                    centre: Vec3::ZERO,
+                    half_extents: Vec3::ONE,
+                },
+            ))
+            .id();
+        complete_selection_click(&mut world, Some(primitive), false, 2.0);
+        assert!(!world.resource::<FaceEditContext>().is_active());
+        complete_selection_click(&mut world, Some(primitive), false, 2.1);
+        assert_eq!(world.resource::<FaceEditContext>().entity, Some(primitive));
+        world.resource_mut::<FaceEditContext>().exit();
+        world.entity_mut(mesh).insert(Selected);
+        execute_edit_selected_faces(&mut world, &serde_json::Value::Null).unwrap();
+        assert_eq!(world.resource::<FaceEditContext>().entity, Some(mesh));
+    }
+
+    #[test]
+    fn individual_click_reaches_leaf_even_when_ancestor_is_selected_and_survives_normalization() {
+        let mut world = World::new();
+        world.insert_resource(GroupEditContext::default());
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(DoubleClickTracker::default());
+        let child = world.spawn(ElementId(1)).id();
+        let parent = world
+            .spawn((
+                ElementId(2),
+                GroupMembers {
+                    name: "Container".into(),
+                    member_ids: vec![ElementId(1)],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+                Selected,
+            ))
+            .id();
+        assert_eq!(
+            resolve_selection_click_target(&mut world, Some(child)).entity,
+            Some(parent)
+        );
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::SuperLeft);
+        world.insert_resource(keys);
+        let target = resolve_selection_click_target(&mut world, Some(child)).entity;
+        assert_eq!(target, Some(child));
+        complete_selection_click(&mut world, target, false, 1.0);
+        normalize_selection_boundaries(&mut world);
+        assert!(world.get::<Selected>(child).is_some());
+        assert!(world.get::<Selected>(parent).is_none());
+    }
+
+    #[test]
+    fn hidden_plain_geometry_is_not_resurrected_by_feature_operand_pick_exception() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        let entity = world.spawn((ElementId(1), Visibility::Hidden)).id();
+        assert!(!entity_is_visible(&world, entity));
     }
 
     #[test]
@@ -3223,7 +3425,7 @@ pub struct MutedMaterialRestore(pub Handle<StandardMaterial>);
 /// `None` means the entity did not carry a local `Visibility` component before
 /// focus mode inserted one.
 #[derive(Component)]
-struct GroupEditVisibilityRestore(Option<Visibility>);
+pub(crate) struct GroupEditVisibilityRestore(pub(crate) Option<Visibility>);
 
 fn update_group_edit_muting(
     mut commands: Commands,

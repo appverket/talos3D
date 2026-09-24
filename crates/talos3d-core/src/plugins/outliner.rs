@@ -73,6 +73,9 @@ pub struct OutlinerNode {
     pub label: String,
     pub kind: OutlinerKind,
     pub is_linked_model: bool,
+    pub visibility_id: Option<u64>,
+    pub explicitly_hidden: bool,
+    pub effectively_hidden: bool,
     /// Arena indices of child rows.
     pub children: Vec<usize>,
     /// Arena index of this row's parent, or `None` for a root row. Used to walk
@@ -358,6 +361,17 @@ fn flatten_entry(world: &World, entry: &OutlineEntry, nodes: &mut Vec<OutlinerNo
                 .get::<GroupMembers>(entry.entity)
                 .and_then(|members| members.linked_model.as_ref())
                 .is_some(),
+        visibility_id: entry.element_id.filter(|_| {
+            world
+                .get::<crate::plugins::layers::LayerVisibilityExempt>(entry.entity)
+                .is_none()
+        }),
+        explicitly_hidden: entry.element_id.is_some_and(|id| {
+            world
+                .get_resource::<crate::plugins::layers::ObjectVisibility>()
+                .is_some_and(|state| state.hidden.contains(&ElementId(id)))
+        }),
+        effectively_hidden: crate::plugins::layers::entity_document_hidden(world, entry.entity),
         children,
         parent: None,
         edit_context: OutlinerEditContext::default(),
@@ -647,6 +661,7 @@ pub fn draw_outliner_window(
                     state.collapsed.clear();
                 }
             });
+            ui.small("Checked = shown · Ctrl/Cmd-click picks an individual object");
             ui.separator();
             let visible_rows = collect_visible_outliner_rows(tree, state);
             // A selection made outside the panel is only communicated if the row
@@ -737,90 +752,116 @@ fn render_outliner_row(
     let node_id = node.node_id;
     let expanded = has_children && !state.collapsed.contains(&node_id);
 
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * OUTLINER_INDENT_PER_DEPTH);
-
-        if has_children {
-            if draw_disclosure_triangle(ui, expanded) {
-                if expanded {
-                    state.collapsed.insert(node_id);
-                } else {
-                    state.collapsed.remove(&node_id);
-                }
-            }
-        } else {
-            ui.add_space(OUTLINER_TOGGLE_WIDTH);
-        }
-
-        let is_selected = node
-            .select_entity
-            .is_some_and(|select_entity| selected.contains(&select_entity));
-        let mut text = egui::RichText::new(format!("{} {}", kind_glyph(node.kind), node.label));
-        // The group being edited is *where you are*, which is a different fact
-        // from what is selected — give it its own weight rather than reusing the
-        // selection highlight and making the two indistinguishable.
-        match node.edit_context {
-            OutlinerEditContext::Active => {
-                text = text.strong().color(ui.visuals().hyperlink_color);
-            }
-            OutlinerEditContext::Ancestor => {
-                text = text.color(ui.visuals().weak_text_color());
-            }
-            OutlinerEditContext::Outside => {}
-        }
-        let response = ui.selectable_label(is_selected, text);
-        if response.clicked() && node.select_entity.is_some() {
-            let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
-            *action = Some(OutlinerSelectAction {
-                target: node.select_entity.expect("checked selectable target"),
-                additive,
-            });
-        }
-        if response.clicked_by(egui::PointerButton::Secondary) && node.select_entity.is_some() {
-            *action = Some(OutlinerSelectAction {
-                target: node.select_entity.expect("checked selectable target"),
-                additive: false,
-            });
-        }
-        if matches!(node.kind, OutlinerKind::Group) {
-            response.context_menu(|ui| {
-                let (command_id, fallback_label) = if node.is_linked_model {
-                    ("modeling.open_linked_model", "Open Linked Model")
-                } else {
-                    (
-                        "modeling.create_linked_model_from_selection",
-                        "Create Linked Model",
-                    )
-                };
-                let label = command_registry
-                    .get(command_id)
-                    .map(|descriptor| descriptor.label.as_str())
-                    .unwrap_or(fallback_label);
-                if ui.button(label).clicked() {
+    ui.push_id(node_id, |ui| {
+        ui.horizontal(|ui| {
+            if let Some(id) = node.visibility_id {
+                let mut shown = !node.explicitly_hidden;
+                let response =
+                    ui.checkbox(&mut shown, "")
+                        .on_hover_text(if node.explicitly_hidden {
+                            "Show this object (hidden parents and layers still apply)"
+                        } else if node.effectively_hidden {
+                            "Hidden by a parent or layer; this object's own visibility is on"
+                        } else {
+                            "Hide this object and its contents"
+                        });
+                if response.changed() {
                     queue_command_invocation_resource(
                         pending_commands,
-                        command_id.to_string(),
-                        serde_json::json!({ "group_id": node.node_id }),
+                        "view.set_object_visibility".to_string(),
+                        serde_json::json!({"element_ids": [id], "visible": shown}),
                     );
-                    ui.close();
                 }
-                if node.is_linked_model {
-                    let command_id = "modeling.refresh_linked_models";
+            } else {
+                ui.add_space(20.0);
+            }
+            ui.add_space(depth as f32 * OUTLINER_INDENT_PER_DEPTH);
+
+            if has_children {
+                if draw_disclosure_triangle(ui, expanded) {
+                    if expanded {
+                        state.collapsed.insert(node_id);
+                    } else {
+                        state.collapsed.remove(&node_id);
+                    }
+                }
+            } else {
+                ui.add_space(OUTLINER_TOGGLE_WIDTH);
+            }
+
+            let is_selected = node
+                .select_entity
+                .is_some_and(|select_entity| selected.contains(&select_entity));
+            let mut text = egui::RichText::new(format!("{} {}", kind_glyph(node.kind), node.label));
+            // The group being edited is *where you are*, which is a different fact
+            // from what is selected — give it its own weight rather than reusing the
+            // selection highlight and making the two indistinguishable.
+            match node.edit_context {
+                OutlinerEditContext::Active => {
+                    text = text.strong().color(ui.visuals().hyperlink_color);
+                }
+                OutlinerEditContext::Ancestor => {
+                    text = text.color(ui.visuals().weak_text_color());
+                }
+                OutlinerEditContext::Outside => {}
+            }
+            if node.effectively_hidden {
+                text = text.color(ui.visuals().weak_text_color());
+            }
+            let response = ui.selectable_label(is_selected, text);
+            if response.clicked() && node.select_entity.is_some() {
+                let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
+                *action = Some(OutlinerSelectAction {
+                    target: node.select_entity.expect("checked selectable target"),
+                    additive,
+                });
+            }
+            if response.clicked_by(egui::PointerButton::Secondary) && node.select_entity.is_some() {
+                *action = Some(OutlinerSelectAction {
+                    target: node.select_entity.expect("checked selectable target"),
+                    additive: false,
+                });
+            }
+            if matches!(node.kind, OutlinerKind::Group) {
+                response.context_menu(|ui| {
+                    let (command_id, fallback_label) = if node.is_linked_model {
+                        ("modeling.open_linked_model", "Open Linked Model")
+                    } else {
+                        (
+                            "modeling.create_linked_model_from_selection",
+                            "Create Linked Model",
+                        )
+                    };
                     let label = command_registry
                         .get(command_id)
                         .map(|descriptor| descriptor.label.as_str())
-                        .unwrap_or("Refresh Linked Model");
+                        .unwrap_or(fallback_label);
                     if ui.button(label).clicked() {
                         queue_command_invocation_resource(
                             pending_commands,
                             command_id.to_string(),
-                            serde_json::json!({ "group_ids": [node.node_id], "force": true }),
+                            serde_json::json!({ "group_id": node.node_id }),
                         );
                         ui.close();
                     }
-                }
-            });
-        }
+                    if node.is_linked_model {
+                        let command_id = "modeling.refresh_linked_models";
+                        let label = command_registry
+                            .get(command_id)
+                            .map(|descriptor| descriptor.label.as_str())
+                            .unwrap_or("Refresh Linked Model");
+                        if ui.button(label).clicked() {
+                            queue_command_invocation_resource(
+                                pending_commands,
+                                command_id.to_string(),
+                                serde_json::json!({ "group_ids": [node.node_id], "force": true }),
+                            );
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        });
     });
 }
 

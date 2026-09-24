@@ -45,6 +45,10 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
         P::TYPE_NAME
     }
 
+    fn allows_automatic_face_edit(&self, entity_ref: &EntityRef) -> bool {
+        entity_ref.contains::<P>()
+    }
+
     fn capture_snapshot(&self, entity_ref: &EntityRef, _world: &World) -> Option<BoxedEntity> {
         let element_id = *entity_ref.get::<ElementId>()?;
         let primitive = entity_ref.get::<P>()?;

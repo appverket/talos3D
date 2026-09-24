@@ -1170,6 +1170,12 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
             .map(|snapshot| snapshot.label())
     }
 
+    /// Opt in only for a primitive whose faces form its editing surface. Raw
+    /// imported meshes and composite results must not hijack object selection.
+    fn allows_automatic_face_edit(&self, _entity_ref: &EntityRef) -> bool {
+        false
+    }
+
     fn capture_role(&self, _entity_ref: &EntityRef, _world: &World) -> SnapshotCaptureRole {
         SnapshotCaptureRole::PrimaryAuthored
     }
