@@ -79,7 +79,7 @@ use crate::plugins::{
     dimension_line::constrained_box_edge_dimension_line_point,
     document_properties::DocumentProperties,
     document_state::DocumentState,
-    history::{apply_pending_history_commands, History, HistorySet},
+    history::{apply_pending_history_commands, History},
     import::{import_file_now, ImportRegistry, ImporterDescriptor},
     layers::{LayerAssignment, LayerRegistry, LayerState},
     lighting::{
@@ -186,7 +186,10 @@ impl Plugin for ModelApiPlugin {
                     .resource_mut::<crate::curation::procedural_session::SessionToolRegistry>();
             register_model_api_session_tools(&mut session_tools);
         }
-        app.add_systems(Update, poll_model_api_requests.before(HistorySet::Queue));
+        // Requests can replace the document. Run at the frame boundary before
+        // Update systems queue presentation work for the current entities;
+        // World::flush cannot drain other systems' deferred command buffers.
+        app.add_systems(First, poll_model_api_requests);
         app.add_systems(
             Startup,
             (

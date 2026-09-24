@@ -3514,8 +3514,8 @@ fn update_group_edit_muting(
     let restore_entity =
         |commands: &mut Commands, entity: Entity, restore: &MutedMaterialRestore| {
             if let Ok(mut ec) = commands.get_entity(entity) {
-                ec.insert(MeshMaterial3d::<StandardMaterial>(restore.0.clone()));
-                ec.remove::<MutedMaterialRestore>();
+                ec.try_insert(MeshMaterial3d::<StandardMaterial>(restore.0.clone()));
+                ec.try_remove::<MutedMaterialRestore>();
             }
         };
 
@@ -3523,17 +3523,17 @@ fn update_group_edit_muting(
         for (entity, _, _, is_muted, _, visibility_restore, _) in &entity_query {
             if is_muted {
                 if let Ok(mut ec) = commands.get_entity(entity) {
-                    ec.remove::<GroupEditMuted>();
+                    ec.try_remove::<GroupEditMuted>();
                 }
             }
             if let Some(restore) = visibility_restore {
                 if let Ok(mut ec) = commands.get_entity(entity) {
                     if let Some(visibility) = restore.0 {
-                        ec.insert(visibility);
+                        ec.try_insert(visibility);
                     } else {
-                        ec.remove::<Visibility>();
+                        ec.try_remove::<Visibility>();
                     }
-                    ec.remove::<GroupEditVisibilityRestore>();
+                    ec.try_remove::<GroupEditVisibilityRestore>();
                 }
             }
         }
@@ -3569,29 +3569,29 @@ fn update_group_edit_muting(
 
             if is_active_member && is_muted {
                 if let Ok(mut ec) = commands.get_entity(entity) {
-                    ec.remove::<GroupEditMuted>();
+                    ec.try_remove::<GroupEditMuted>();
                 }
             } else if !is_active_member && !is_muted {
                 if let Ok(mut ec) = commands.get_entity(entity) {
-                    ec.insert(GroupEditMuted);
+                    ec.try_insert(GroupEditMuted);
                 }
             }
 
             if !is_active_member && focus_settings.hide_outside && !is_scene_light {
                 if let Ok(mut ec) = commands.get_entity(entity) {
                     if visibility_restore.is_none() {
-                        ec.insert(GroupEditVisibilityRestore(visibility.copied()));
+                        ec.try_insert(GroupEditVisibilityRestore(visibility.copied()));
                     }
-                    ec.insert(Visibility::Hidden);
+                    ec.try_insert(Visibility::Hidden);
                 }
             } else if let Some(restore) = visibility_restore {
                 if let Ok(mut ec) = commands.get_entity(entity) {
                     if let Some(visibility) = restore.0 {
-                        ec.insert(visibility);
+                        ec.try_insert(visibility);
                     } else {
-                        ec.remove::<Visibility>();
+                        ec.try_remove::<Visibility>();
                     }
-                    ec.remove::<GroupEditVisibilityRestore>();
+                    ec.try_remove::<GroupEditVisibilityRestore>();
                 }
             }
         }
@@ -3612,8 +3612,8 @@ fn update_group_edit_muting(
                 // muted handle as the "original".
                 if restore.is_none() {
                     if let Ok(mut ec) = commands.get_entity(entity) {
-                        ec.insert(MutedMaterialRestore(mat_handle.0.clone()));
-                        ec.insert(MeshMaterial3d::<StandardMaterial>(muted_handle.clone()));
+                        ec.try_insert(MutedMaterialRestore(mat_handle.0.clone()));
+                        ec.try_insert(MeshMaterial3d::<StandardMaterial>(muted_handle.clone()));
                     }
                 }
             } else if let Some(restore) = restore {

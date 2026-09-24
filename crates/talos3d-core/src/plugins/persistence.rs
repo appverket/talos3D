@@ -1595,8 +1595,8 @@ fn snapshot_dependency_order_by_name(type_name: &str) -> u8 {
 }
 
 fn clear_scene(world: &mut World) {
-    // Flush deferred commands so mesh-generation inserts on about-to-be-despawned
-    // entities don't fire after the entities are gone (causing a panic).
+    // Flush world-owned commands before removing authored content. System-local
+    // deferred buffers belong to their schedules; API replacement runs in First.
     world.flush();
 
     let mut entities_to_despawn = Vec::new();
