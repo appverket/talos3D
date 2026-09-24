@@ -780,6 +780,16 @@ impl AuthoredEntityFactory for PolylineFactory {
 }
 
 impl AuthoredEntityFactory for TriangleMeshFactory {
+    fn display_label(&self, entity_ref: &EntityRef, _world: &World) -> Option<String> {
+        entity_ref.get::<ElementId>()?;
+        let mesh = entity_ref.get::<TriangleMesh>()?;
+        Some(
+            mesh.name
+                .clone()
+                .unwrap_or_else(|| format!("Triangle Mesh ({} faces)", mesh.faces.len())),
+        )
+    }
+
     fn type_name(&self) -> &'static str {
         "triangle_mesh"
     }
@@ -1131,6 +1141,33 @@ fn draw_triangle_mesh_outline(gizmos: &mut Gizmos, primitive: &TriangleMesh, col
         gizmos.line(top[index], top[next_index], color);
         gizmos.line(bottom[index], top[index], color);
     }
+}
+
+/// Derived metadata only; never serialized. The source tick prevents stale
+/// bounds during command/preview edits before mesh generation has caught up.
+#[derive(Component)]
+pub(crate) struct TriangleMeshBoundsCache {
+    source_tick: bevy::ecs::change_detection::Tick,
+    bounds: Option<EntityBounds>,
+}
+
+impl TriangleMeshBoundsCache {
+    pub(crate) fn new(mesh: &Ref<TriangleMesh>) -> Self {
+        Self {
+            source_tick: mesh.last_changed(),
+            bounds: triangle_mesh_bounds(mesh).map(|(min, max)| EntityBounds { min, max }),
+        }
+    }
+}
+
+pub(crate) fn authored_triangle_mesh_bounds(entity: &EntityRef) -> Option<EntityBounds> {
+    let mesh = entity.get_ref::<TriangleMesh>()?;
+    if let Some(cache) = entity.get::<TriangleMeshBoundsCache>() {
+        if cache.source_tick == mesh.last_changed() {
+            return cache.bounds;
+        }
+    }
+    triangle_mesh_bounds(&mesh).map(|(min, max)| EntityBounds { min, max })
 }
 
 fn triangle_mesh_bounds(primitive: &TriangleMesh) -> Option<(Vec3, Vec3)> {
@@ -1707,6 +1744,43 @@ mod tests {
     type BoxSnapshot = PrimitiveSnapshot<BoxPrimitive>;
     type CylinderSnapshot = PrimitiveSnapshot<CylinderPrimitive>;
     type PlaneSnapshot = PrimitiveSnapshot<PlanePrimitive>;
+
+    #[test]
+    fn imported_mesh_bounds_cache_rejects_stale_geometry_before_regeneration() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(TriangleMesh {
+                name: None,
+                vertices: vec![Vec3::ZERO, Vec3::ONE],
+                faces: vec![],
+                normals: None,
+            })
+            .id();
+        let cache =
+            TriangleMeshBoundsCache::new(&world.entity(entity).get_ref::<TriangleMesh>().unwrap());
+        world.entity_mut(entity).insert(cache);
+        assert_eq!(
+            authored_triangle_mesh_bounds(&world.entity(entity))
+                .unwrap()
+                .max,
+            Vec3::ONE
+        );
+        world.increment_change_tick();
+        world.get_mut::<TriangleMesh>(entity).unwrap().vertices[1] = Vec3::splat(3.0);
+        assert_eq!(
+            authored_triangle_mesh_bounds(&world.entity(entity))
+                .unwrap()
+                .max,
+            Vec3::splat(3.0)
+        );
+        world.increment_change_tick();
+        world
+            .get_mut::<TriangleMesh>(entity)
+            .unwrap()
+            .vertices
+            .clear();
+        assert!(authored_triangle_mesh_bounds(&world.entity(entity)).is_none());
+    }
 
     #[test]
     fn plane_property_fields_use_vec3_corners() {

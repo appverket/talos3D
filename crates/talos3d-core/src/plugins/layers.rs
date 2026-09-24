@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bevy::{ecs::world::EntityRef, prelude::*};
 use serde::{Deserialize, Serialize};
 
-use crate::plugins::identity::ElementId;
+use crate::plugins::{identity::ElementId, modeling::group::GroupMembers};
 
 pub const DEFAULT_LAYER_NAME: &str = "Default";
 
@@ -232,13 +232,50 @@ pub fn assign_default_layer(
 
 fn apply_layer_visibility(
     registry: Res<LayerRegistry>,
-    mut query: Query<(&LayerAssignment, &mut Visibility), Without<LayerVisibilityExempt>>,
+    groups: Query<(&ElementId, &GroupMembers, Option<&LayerAssignment>)>,
+    changed: Query<(), Or<(Changed<LayerAssignment>, Changed<GroupMembers>)>>,
+    mut removed_groups: RemovedComponents<GroupMembers>,
+    mut query: Query<
+        (Option<&ElementId>, &LayerAssignment, &mut Visibility),
+        Without<LayerVisibilityExempt>,
+    >,
 ) {
-    if !registry.is_changed() {
+    // Imports and reassignment can change membership while the registry stays
+    // unchanged. Group membership is semantic, not a Bevy ChildOf hierarchy.
+    let removed = removed_groups.read().next().is_some();
+    if !registry.is_changed()
+        && changed.is_empty()
+        && !removed
+        && !query
+            .iter_mut()
+            .any(|(_, _, visibility)| visibility.is_added())
+    {
         return;
     }
-    for (assignment, mut visibility) in &mut query {
-        let target = if registry.is_visible(&assignment.layer) {
+    let group_index: HashMap<_, _> = groups
+        .iter()
+        .map(|(id, members, _)| (*id, members))
+        .collect();
+    let mut pending = Vec::new();
+    for (id, _, assignment) in &groups {
+        let layer = assignment.map_or(DEFAULT_LAYER_NAME, |assignment| assignment.layer.as_str());
+        if !registry.is_visible(layer) {
+            pending.push(*id);
+        }
+    }
+    let mut hidden = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !hidden.insert(id) {
+            continue;
+        }
+        if let Some(group) = group_index.get(&id) {
+            pending.extend_from_slice(&group.member_ids);
+        }
+    }
+    for (id, assignment, mut visibility) in &mut query {
+        let target = if registry.is_visible(&assignment.layer)
+            && !id.is_some_and(|id| hidden.contains(id))
+        {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -290,6 +327,136 @@ pub fn count_entities_per_layer(world: &World) -> BTreeMap<String, usize> {
 mod tests {
     use super::*;
     use bevy::ecs::system::SystemState;
+
+    #[test]
+    fn imported_and_reassigned_geometry_obeys_unchanged_layer_registry() {
+        let mut app = App::new();
+        app.add_plugins(LayerPlugin);
+        app.world_mut()
+            .resource_mut::<LayerRegistry>()
+            .ensure_layer("Hidden");
+        app.world_mut()
+            .resource_mut::<LayerRegistry>()
+            .layers
+            .get_mut("Hidden")
+            .unwrap()
+            .visible = false;
+        app.update();
+        app.update();
+        let imported = app
+            .world_mut()
+            .spawn((
+                ElementId(1),
+                LayerAssignment::new("Hidden"),
+                Visibility::Visible,
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(imported),
+            Some(&Visibility::Hidden)
+        );
+        app.world_mut()
+            .entity_mut(imported)
+            .insert(LayerAssignment::default_layer());
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(imported),
+            Some(&Visibility::Inherited)
+        );
+        app.world_mut()
+            .entity_mut(imported)
+            .insert(LayerAssignment::new("Hidden"));
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(imported),
+            Some(&Visibility::Hidden)
+        );
+    }
+
+    #[test]
+    fn hiding_group_layer_hides_nested_members_and_preserves_child_layer_state() {
+        let mut app = App::new();
+        app.add_plugins(LayerPlugin);
+        for name in ["House", "Roof", "Hidden"] {
+            app.world_mut()
+                .resource_mut::<LayerRegistry>()
+                .ensure_layer(name);
+        }
+        app.world_mut()
+            .resource_mut::<LayerRegistry>()
+            .layers
+            .get_mut("Hidden")
+            .unwrap()
+            .visible = false;
+        app.world_mut().spawn((
+            ElementId(1),
+            LayerAssignment::new("House"),
+            GroupMembers {
+                name: "House".into(),
+                member_ids: vec![ElementId(2)],
+                frame: Default::default(),
+                linked_model: None,
+            },
+        ));
+        app.world_mut().spawn((
+            ElementId(2),
+            LayerAssignment::new("Roof"),
+            GroupMembers {
+                name: "Roof".into(),
+                member_ids: vec![ElementId(3), ElementId(4)],
+                frame: Default::default(),
+                linked_model: None,
+            },
+        ));
+        let visible = app
+            .world_mut()
+            .spawn((
+                ElementId(3),
+                LayerAssignment::new("Roof"),
+                Visibility::Visible,
+            ))
+            .id();
+        let hidden = app
+            .world_mut()
+            .spawn((
+                ElementId(4),
+                LayerAssignment::new("Hidden"),
+                Visibility::Visible,
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(visible),
+            Some(&Visibility::Inherited)
+        );
+        app.world_mut()
+            .resource_mut::<LayerRegistry>()
+            .layers
+            .get_mut("House")
+            .unwrap()
+            .visible = false;
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(visible),
+            Some(&Visibility::Hidden)
+        );
+        app.world_mut()
+            .resource_mut::<LayerRegistry>()
+            .layers
+            .get_mut("House")
+            .unwrap()
+            .visible = true;
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(visible),
+            Some(&Visibility::Inherited)
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(hidden),
+            Some(&Visibility::Hidden)
+        );
+    }
 
     #[test]
     fn exempt_entities_are_never_layer_managed() {

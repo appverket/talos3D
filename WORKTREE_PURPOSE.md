@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-08-16T15:11:00+02:00
-- branch: codex/smssfhht-hosted-materialization-reset
-- task-id: TALOS-smssfhht
-- target base: main
-- summary: Purge transient compound-occurrence materializations when replacing a project.
+- created: 2026-09-24
+- branch: codex/uikpzkim-house-interaction
+- task-id: TALOS-uikpzkim
+- target base: origin/main
+- summary: Repair and validate imported house interactions and measured performance.
 - status: active

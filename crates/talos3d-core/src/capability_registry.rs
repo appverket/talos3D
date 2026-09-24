@@ -1163,6 +1163,13 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
 
     fn capture_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity>;
 
+    /// Lightweight display metadata. Geometry-heavy factories should override
+    /// this so browsing labels never copies mesh buffers or computes bounds.
+    fn display_label(&self, entity_ref: &EntityRef, world: &World) -> Option<String> {
+        self.capture_snapshot(entity_ref, world)
+            .map(|snapshot| snapshot.label())
+    }
+
     fn capture_role(&self, _entity_ref: &EntityRef, _world: &World) -> SnapshotCaptureRole {
         SnapshotCaptureRole::PrimaryAuthored
     }
@@ -1559,6 +1566,23 @@ impl CapabilityRegistry {
                 SnapshotCaptureRole::PrimaryAuthored => return Some(snapshot),
                 SnapshotCaptureRole::DerivedGeometry => {
                     derived.get_or_insert(snapshot);
+                }
+            }
+        }
+        derived
+    }
+
+    /// Resolve labels with the same primary/derived precedence as snapshots.
+    pub fn display_label(&self, entity_ref: &EntityRef, world: &World) -> Option<String> {
+        let mut derived = None;
+        for factory in &self.ordered_factories {
+            let Some(label) = factory.display_label(entity_ref, world) else {
+                continue;
+            };
+            match factory.capture_role(entity_ref, world) {
+                SnapshotCaptureRole::PrimaryAuthored => return Some(label),
+                SnapshotCaptureRole::DerivedGeometry => {
+                    derived.get_or_insert(label);
                 }
             }
         }

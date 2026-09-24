@@ -305,6 +305,11 @@ enum GroupSnapshotJson {
 pub struct GroupFactory;
 
 impl AuthoredEntityFactory for GroupFactory {
+    fn display_label(&self, entity_ref: &EntityRef, _world: &World) -> Option<String> {
+        entity_ref.get::<ElementId>()?;
+        Some(entity_ref.get::<GroupMembers>()?.name.clone())
+    }
+
     fn type_name(&self) -> &'static str {
         "group"
     }
@@ -944,6 +949,14 @@ pub fn compute_group_bounds_from_world(
         if let Some(members) = entity_ref.get::<GroupMembers>() {
             // Recurse into nested groups
             stack.extend_from_slice(&members.member_ids);
+        } else if entity_ref.contains::<super::primitives::TriangleMesh>()
+            && !entity_ref.contains::<super::mesh_generation::DerivedGeometry>()
+        {
+            if let Some(bounds) = super::snapshots::authored_triangle_mesh_bounds(&entity_ref) {
+                min = min.min(bounds.min);
+                max = max.max(bounds.max);
+                any = true;
+            }
         } else if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
             if let Some(bounds) = snapshot.bounds() {
                 min = min.min(bounds.min);

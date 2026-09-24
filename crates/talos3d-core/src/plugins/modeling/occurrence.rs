@@ -2796,6 +2796,8 @@ mod pp_098_occurrence_cache_tests {
         assert_ne!(changed_key, default_key);
 
         let mut app = App::new();
+        #[cfg(feature = "perf-stats")]
+        app.init_resource::<crate::plugins::perf_stats::PerfStats>();
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<RepresentationCache>()
@@ -2925,6 +2927,8 @@ mod pp_098_occurrence_cache_tests {
         assert_ne!(key_v2, key_v1);
 
         let mut app = App::new();
+        #[cfg(feature = "perf-stats")]
+        app.init_resource::<crate::plugins::perf_stats::PerfStats>();
         app.init_resource::<ChangedDefinitions>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
@@ -3031,6 +3035,8 @@ mod pp_098_occurrence_cache_tests {
         let identity = OccurrenceIdentity::new(compound.id.clone(), compound.definition_version);
 
         let mut app = App::new();
+        #[cfg(feature = "perf-stats")]
+        app.init_resource::<crate::plugins::perf_stats::PerfStats>();
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<RepresentationCache>()
@@ -3123,6 +3129,8 @@ mod pp_098_occurrence_cache_tests {
             ];
 
         let mut app = App::new();
+        #[cfg(feature = "perf-stats")]
+        app.init_resource::<crate::plugins::perf_stats::PerfStats>();
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<RepresentationCache>()

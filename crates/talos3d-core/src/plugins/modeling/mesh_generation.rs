@@ -168,7 +168,7 @@ type TriangleMeshQuery<'w, 's> = Query<
     's,
     (
         Entity,
-        &'static TriangleMesh,
+        Ref<'static, TriangleMesh>,
         Option<&'static Mesh3d>,
         Option<&'static MeshMaterial3d<StandardMaterial>>,
     ),
@@ -306,11 +306,14 @@ fn spawn_triangle_meshes(
     #[cfg(feature = "perf-stats")]
     let mut regenerated = 0usize;
     for (entity, primitive, mesh_handle, material_handle) in &query {
+        commands
+            .entity(entity)
+            .insert(super::snapshots::TriangleMeshBoundsCache::new(&primitive));
         upsert_mesh_entity(
             &mut commands,
             &mut meshes,
             (entity, mesh_handle, material_handle),
-            triangle_mesh_asset(primitive),
+            triangle_mesh_asset(&primitive),
             primitive_material.0.clone(),
             Transform::IDENTITY,
         );
@@ -830,6 +833,8 @@ mod pp_098_mesh_generation_cache_tests {
 
     fn test_app() -> App {
         let mut app = App::new();
+        #[cfg(feature = "perf-stats")]
+        app.init_resource::<PerfStats>();
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<RepresentationCache>()
             .insert_resource(PrimitiveMaterial(Handle::default()))

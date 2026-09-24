@@ -13,7 +13,7 @@
 //! - **Compound occurrences** aggregate transient `GeneratedOccurrencePart`
 //!   geometry under the owning occurrence.
 //!
-//! Display labels come from the generic `CapabilityRegistry::capture_snapshot`
+//! Display labels come from the generic `CapabilityRegistry::display_label`
 //! path so any authored entity contributes its own `label()`/`type_name()`
 //! without the outliner knowing about concrete entity kinds.
 
@@ -443,15 +443,14 @@ pub fn collect_outline_forest(world: &mut World) -> Vec<OutlineEntry> {
         }
     }
 
-    // --- Phase B: display labels via the generic snapshot path ---
+    // --- Phase B: display labels via the lightweight metadata path ---
     let mut labels: HashMap<u64, String> = HashMap::new();
     {
         let registry = world.resource::<CapabilityRegistry>();
         for (eid, entity) in &all_eids {
             if let Ok(entity_ref) = world.get_entity(*entity) {
                 let entity_ref: EntityRef = entity_ref;
-                if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
-                    let label = snapshot.label();
+                if let Some(label) = registry.display_label(&entity_ref, world) {
                     if !label.is_empty() {
                         labels.insert(*eid, label);
                     }
