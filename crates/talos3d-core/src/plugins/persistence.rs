@@ -1599,6 +1599,29 @@ fn clear_scene(world: &mut World) {
     // deferred buffers belong to their schedules; API replacement runs in First.
     world.flush();
 
+    // Edit scopes refer to the old document even when a replacement happens to
+    // reuse the same stable IDs. Reopening must start at the document root.
+    if let Some(mut context) =
+        world.get_resource_mut::<crate::plugins::modeling::group::GroupEditContext>()
+    {
+        context.reset();
+    }
+    if let Some(mut context) =
+        world.get_resource_mut::<crate::plugins::selection::OccurrenceEditContext>()
+    {
+        context.stack.clear();
+    }
+    if let Some(mut context) =
+        world.get_resource_mut::<crate::plugins::face_edit::FaceEditContext>()
+    {
+        context.exit();
+    }
+    if let Some(mut selection) =
+        world.get_resource_mut::<crate::capability_registry::SubobjectSelection>()
+    {
+        *selection = Default::default();
+    }
+
     let mut entities_to_despawn = Vec::new();
     let mut meshes_to_remove = Vec::new();
 
@@ -1698,6 +1721,31 @@ mod tests {
         tools::ActiveTool,
         transform::TransformState,
     };
+
+    #[test]
+    fn clear_scene_resets_document_edit_scopes() {
+        use crate::plugins::{
+            face_edit::FaceEditContext, modeling::group::GroupEditContext,
+            selection::OccurrenceEditContext,
+        };
+        let mut world = World::new();
+        let entity = world.spawn(ElementId(81)).id();
+        world.insert_resource(GroupEditContext {
+            stack: vec![ElementId(81)],
+        });
+        world.insert_resource(OccurrenceEditContext {
+            stack: vec![ElementId(82)],
+        });
+        let mut faces = FaceEditContext::default();
+        faces.enter(entity, ElementId(81));
+        world.insert_resource(faces);
+
+        clear_scene(&mut world);
+
+        assert!(world.resource::<GroupEditContext>().is_root());
+        assert!(world.resource::<OccurrenceEditContext>().stack.is_empty());
+        assert!(!world.resource::<FaceEditContext>().is_active());
+    }
 
     #[test]
     fn clear_scene_resets_transient_parametric_instances() {
