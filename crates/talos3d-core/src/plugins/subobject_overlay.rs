@@ -106,6 +106,11 @@ impl Material for FaceStippleMaterial {
         // away from the camera for half the faces of any solid. The highlight
         // must be visible on whichever face the user actually selected.
         descriptor.primitive.cull_mode = None;
+        // Reverse-Z: a tiny positive raster bias keeps a shared-mesh highlight
+        // above its source surface without showing through nearer geometry.
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.bias.constant = 2;
+        }
         Ok(())
     }
 }
@@ -144,6 +149,7 @@ impl Plugin for SubobjectOverlayPlugin {
         app.add_plugins(MaterialPlugin::<FaceStippleMaterial>::default())
             .init_resource::<FaceStippleOverlay>()
             .add_systems(Update, sync_selected_face_stipple);
+        crate::plugins::object_selection_overlay::install(app);
     }
 }
 

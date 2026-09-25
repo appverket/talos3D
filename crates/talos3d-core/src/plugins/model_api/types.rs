@@ -62,6 +62,10 @@ impl ModelApiAuthentication {
         })
     }
 
+    pub(crate) fn is_paired(&self) -> bool {
+        self.paired.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(crate) fn pairing_code_for_onboarding(&self) -> &str {
         &self.pairing_code
     }

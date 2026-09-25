@@ -831,3 +831,14 @@ Capability packs should contribute enough metadata that MCP clients can:
 
 If a capability only works through UI-specific logic and cannot be understood
 through MCP, it is not aligned with the platform direction.
+
+### Editing imported mesh positions
+
+`set_entity_property` / `set_property` accepts `vertices` for `triangle_mesh`
+entities. Supply the complete array of finite `[x,y,z]` positions with the
+existing vertex count. This changes positions through the shared undo/history
+command while preserving entity id, faces, name, layer, materials and group
+membership; derived normals are regenerated. It does not infer wall/window
+semantics, change topology, or establish a refinement claim. Read the current
+snapshot first and verify unchanged source geometry before applying a prepared
+edit. Use native hosted/parametric edits for semantic architectural entities.

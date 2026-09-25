@@ -511,6 +511,23 @@ impl AuthoredEntity for TriangleMeshSnapshot {
         }
         let mut snapshot = self.clone();
         match property_name {
+            // Geometry-only edits to imported shells retain stable identity,
+            // topology, materials and group membership through the same undoable
+            // property command used by the UI and model API.
+            "vertices" => {
+                let vertices = point_array(value)?;
+                if vertices.len() != self.primitive.vertices.len() {
+                    return Err(
+                        "Vertex edits must preserve the existing vertex count and topology".into(),
+                    );
+                }
+                if vertices.iter().any(|point| !point.is_finite()) {
+                    return Err("Vertex coordinates must be finite".into());
+                }
+                snapshot.primitive.vertices = vertices;
+                snapshot.primitive.normals = None;
+                validate_triangle_mesh(&snapshot.primitive)?;
+            }
             "name" => {
                 snapshot.primitive.name = match value {
                     Value::Null => None,
@@ -525,7 +542,12 @@ impl AuthoredEntity for TriangleMeshSnapshot {
                     _ => return Err("Triangle mesh layer must be a string or null".to_string()),
                 };
             }
-            _ => return Err(invalid_property_error("triangle_mesh", &["name", "layer"])),
+            _ => {
+                return Err(invalid_property_error(
+                    "triangle_mesh",
+                    &["name", "layer", "vertices"],
+                ))
+            }
         }
         Ok(snapshot.into())
     }
@@ -1736,6 +1758,48 @@ mod tests {
     type BoxSnapshot = PrimitiveSnapshot<BoxPrimitive>;
     type CylinderSnapshot = PrimitiveSnapshot<CylinderPrimitive>;
     type PlaneSnapshot = PrimitiveSnapshot<PlanePrimitive>;
+
+    #[test]
+    fn imported_vertex_edit_preserves_topology_and_identity_and_clears_stale_normals() {
+        let before = TriangleMeshSnapshot {
+            element_id: ElementId(42),
+            primitive: TriangleMesh {
+                name: Some("shell".into()),
+                vertices: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+                faces: vec![[0, 1, 2]],
+                normals: Some(vec![Vec3::Z; 3]),
+            },
+            layer: Some("original".into()),
+            material_assignment: None,
+            semantic_shadow: None,
+        };
+        let after = before
+            .set_property_json(
+                "vertices",
+                &serde_json::json!([[0, 0, 0], [0.8, 0, 0], [0, 1, 0]]),
+            )
+            .unwrap();
+        let after = after
+            .0
+            .as_any()
+            .downcast_ref::<TriangleMeshSnapshot>()
+            .unwrap();
+        assert_eq!(after.element_id, before.element_id);
+        assert_eq!(after.primitive.faces, before.primitive.faces);
+        assert_eq!(after.primitive.name, before.primitive.name);
+        assert_eq!(after.layer, before.layer);
+        assert!(after.primitive.normals.is_none());
+        assert_eq!(before.primitive.vertices[1], Vec3::X);
+        assert!(before
+            .set_property_json("vertices", &serde_json::json!([[0, 0, 0]]))
+            .is_err());
+        assert!(before
+            .set_property_json(
+                "vertices",
+                &serde_json::json!([[0, 0, 0], [1e99, 0, 0], [0, 1, 0]])
+            )
+            .is_err());
+    }
 
     #[test]
     fn imported_mesh_bounds_cache_rejects_stale_geometry_before_regeneration() {

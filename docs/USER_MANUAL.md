@@ -22,6 +22,7 @@ remain part of the saved document.
 | Key | Tool |
 | --- | --- |
 | `Esc` | Select |
+| `Shift+T` | Tape Measure |
 | `B` | Box |
 | `C` | Cylinder |
 | `P` | Plane |
@@ -46,7 +47,20 @@ Fillet and chamfer are currently exposed through the Modeling toolbar, command
 palette, and MCP/automation surfaces rather than a dedicated keyboard shortcut.
 Select one source solid, then run `Create Fillet` or `Create Chamfer`.
 
+## Measuring
+
+The ruler button in the top **Measure** toolbar activates Tape Measure. It is
+also available under **Create → Reference → Tape Measure**, or with `Shift+T`.
+Click two points to measure; hold X, Y or Z to constrain the direction. Escape
+cancels a measurement or returns to Select. Select and Tape use their own pointer
+feedback, without the yellow drawing-plane cross.
+
 ## Selecting and isolating imported objects
+
+Selected surfaces show a blue tint and screen-space dots. A selected group
+highlights its contents; the status bar keeps the selected object's name and
+active group path visible even while a tool or handle hint is shown. Highlights
+are temporary and excluded from clean viewport exports.
 
 Double-click a group to enter it; Escape returns to its parent. Click an Outliner
 row to select that exact object. Ctrl/Cmd-click in the viewport selects the

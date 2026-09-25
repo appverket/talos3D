@@ -2097,10 +2097,11 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                 runtime.instance_id.clone(),
                 runtime.http_url.clone(),
                 authentication.pairing_code_for_onboarding().to_string(),
+                authentication.is_paired(),
             )
         });
     #[cfg(not(feature = "model-api"))]
-    let agent_connection_details: Option<(String, String, String)> = None;
+    let agent_connection_details: Option<(String, String, String, bool)> = None;
     draw_agent_connection_window(
         &ctx,
         &mut data.agent_connection_window_state,
@@ -2147,7 +2148,10 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     );
 
     data.status_bar_data.command_hint = hovered_menu_hint;
-    let status_hint = hint_text(&data.status_bar_data);
+    let mut status_hint = hint_text(&data.status_bar_data);
+    if status_hint == data.status_bar_data.selection_summary {
+        status_hint.clear();
+    }
     let coordinates = coordinate_text(&data.cursor_world_pos, &data.doc_props);
     show_top_level_panel(
         egui::Panel::bottom("status_bar").resizable(false),
@@ -2158,6 +2162,18 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                     "[{}]",
                     data.status_bar_data.tool_name
                 )));
+                ui.separator();
+                // Keep selection identity visible even while handles or toolbar
+                // hover hints occupy the right side of the status bar.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&data.status_bar_data.selection_summary)
+                            .strong()
+                            .color(egui::Color32::from_rgb(100, 175, 255)),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&data.status_bar_data.selection_summary);
                 ui.separator();
                 ui.label(coordinates);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2572,7 +2588,7 @@ fn default_assistant_mcp_url<'a>(_data: &'a ChromeData) -> Option<&'a str> {
 fn draw_agent_connection_window(
     ctx: &egui::Context,
     state: &mut AgentConnectionWindowState,
-    runtime: Option<&(String, String, String)>,
+    runtime: Option<&(String, String, String, bool)>,
 ) {
     if !state.visible {
         return;
@@ -2592,13 +2608,21 @@ fn draw_agent_connection_window(
             );
             ui.add_space(8.0);
 
-            let Some((instance_id, http_url, pairing_code)) = runtime else {
+            let Some((instance_id, http_url, pairing_code, paired)) = runtime else {
                 ui.colored_label(
                     egui::Color32::YELLOW,
                     "The Talos3D Model API is not running in this app build. Start a model-api-enabled app to generate an instance-specific onboarding prompt.",
                 );
                 return;
             };
+
+            if *paired {
+                ui.label("An agent connection has already been paired with this app session.");
+                ui.label("Existing agents can reconnect with their session credential. The previous one-time pairing code has been used and cannot connect another agent.");
+                ui.monospace(http_url);
+                ui.weak("To start a new pairing session, save your model and restart the app.");
+                return;
+            }
 
             egui::Grid::new("agent_connection_runtime")
                 .num_columns(2)

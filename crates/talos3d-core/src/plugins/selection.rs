@@ -46,7 +46,7 @@ use crate::{
     },
 };
 
-const SELECTION_HIGHLIGHT_COLOR: Color = Color::srgb(1.0, 0.8, 0.2);
+const SELECTION_HIGHLIGHT_COLOR: Color = Color::srgb(0.15, 0.5, 1.0);
 const ACTIVE_TRANSFORM_HIGHLIGHT_COLOR: Color = Color::srgba(1.0, 0.8, 0.2, 0.5);
 const BOX_SELECT_WINDOW_COLOR: Color = Color::srgba(0.2, 0.5, 1.0, 0.15);
 const BOX_SELECT_CROSSING_COLOR: Color = Color::srgba(0.2, 1.0, 0.5, 0.15);
@@ -1058,61 +1058,55 @@ fn handle_delete_shortcut(
     delete_entities_commands.write(DeleteEntitiesCommand { element_ids });
 }
 
-fn update_selection_status(
-    selected_query: Query<(), With<Selected>>,
-    edit_context: Res<GroupEditContext>,
-    occurrence_edit_context: Res<OccurrenceEditContext>,
-    group_query: Query<(&ElementId, &GroupMembers)>,
-    occurrence_query: Query<(&ElementId, &OccurrenceIdentity)>,
-    mut status_bar_data: ResMut<StatusBarData>,
-) {
-    let selection_count = selected_query.iter().count();
-    let mut summary = match selection_count {
-        0 => String::new(),
-        1 => "1 element selected".to_string(),
-        count => format!("{count} elements selected"),
+fn update_selection_status(world: &mut World) {
+    let selected: Vec<Entity> = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .collect();
+    let mut summary = match selected.as_slice() {
+        [] => "Nothing selected".to_string(),
+        [entity] => {
+            let label = crate::plugins::entity_labels::entity_label(world, *entity)
+                .unwrap_or_else(|| "Element".into());
+            format!("Selected: {label}")
+        }
+        entities => format!("{} elements selected", entities.len()),
     };
-    if !edit_context.is_root() {
-        let breadcrumb: Vec<&str> = edit_context
+    let context = world.resource::<GroupEditContext>();
+    if !context.is_root() {
+        let labels: Vec<String> = context
             .stack
             .iter()
             .filter_map(|id| {
-                group_query
-                    .iter()
-                    .find(|(eid, _)| *eid == id)
-                    .map(|(_, m)| m.name.as_str())
+                let entity = find_entity_by_element_id_readonly(world, *id)?;
+                Some(world.get::<GroupMembers>(entity)?.name.clone())
             })
             .collect();
-        let breadcrumb = breadcrumb.join(" > ");
-        if !breadcrumb.is_empty() {
-            summary = if summary.is_empty() {
-                format!("Editing: {breadcrumb}")
-            } else {
-                format!("{summary} | Editing: {breadcrumb}")
-            };
+        if !labels.is_empty() {
+            summary.push_str(&format!(" | Editing: {}", labels.join(" > ")));
         }
     }
-    if !occurrence_edit_context.is_root() {
-        let breadcrumb: Vec<&str> = occurrence_edit_context
+    let context = world.resource::<OccurrenceEditContext>();
+    if !context.is_root() {
+        let labels: Vec<String> = context
             .stack
             .iter()
             .filter_map(|id| {
-                occurrence_query
-                    .iter()
-                    .find(|(eid, _)| *eid == id)
-                    .map(|(_, identity)| identity.definition_id.as_str())
+                let entity = find_entity_by_element_id_readonly(world, *id)?;
+                Some(
+                    world
+                        .get::<OccurrenceIdentity>(entity)?
+                        .definition_id
+                        .as_str()
+                        .to_string(),
+                )
             })
             .collect();
-        let breadcrumb = breadcrumb.join(" > ");
-        if !breadcrumb.is_empty() {
-            summary = if summary.is_empty() {
-                format!("Editing Occurrence: {breadcrumb}")
-            } else {
-                format!("{summary} | Editing Occurrence: {breadcrumb}")
-            };
+        if !labels.is_empty() {
+            summary.push_str(&format!(" | Editing Occurrence: {}", labels.join(" > ")));
         }
     }
-    status_bar_data.selection_summary = summary;
+    world.resource_mut::<StatusBarData>().selection_summary = summary;
 }
 
 fn draw_selected_outlines(
@@ -1161,6 +1155,25 @@ fn draw_selected_outlines(
         let Ok(entity_ref) = world.get_entity(entity) else {
             continue;
         };
+        // Imported surface selection is rendered by a shared GPU mesh overlay.
+        // Keep only its 12-edge extent here: copying all vertices and rebuilding
+        // every triangle edge on every idle frame is both noisy and expensive.
+        if !is_active_transform {
+            if entity_ref.contains::<crate::plugins::modeling::primitives::TriangleMesh>() {
+                if let Some(bounds) =
+                    crate::plugins::modeling::snapshots::authored_triangle_mesh_bounds(&entity_ref)
+                {
+                    draw_bounds_wireframe(&mut gizmos, &bounds, SELECTION_HIGHLIGHT_COLOR);
+                }
+                continue;
+            }
+            if entity_ref.contains::<GroupMembers>() {
+                if let Some(factory) = registry.factory_for("group") {
+                    factory.draw_selection(world, entity, &mut gizmos, SELECTION_HIGHLIGHT_COLOR);
+                }
+                continue;
+            }
+        }
         let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
             continue;
         };

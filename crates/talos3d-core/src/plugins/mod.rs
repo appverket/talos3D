@@ -59,6 +59,7 @@ pub mod model_api;
 pub mod model_export;
 pub mod modeling;
 pub mod named_views;
+mod object_selection_overlay;
 pub mod outliner;
 pub mod palette;
 pub mod parametric_mcp;

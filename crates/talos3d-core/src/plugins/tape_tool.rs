@@ -20,6 +20,7 @@ use crate::{
         modeling::group::{GroupEditContext, GroupMembers},
         scene_ray,
         snap::{SnapResult, SnapSystems},
+        toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
         tools::ActiveTool,
         ui::StatusBarData,
     },
@@ -57,12 +58,12 @@ impl Plugin for TapeToolPlugin {
         app.register_command(
             CommandDescriptor {
                 id: "tools.tape".to_string(),
-                label: "Tape".to_string(),
+                label: "Tape Measure".to_string(),
                 description: "Measure point-to-point distances".to_string(),
                 category: CommandCategory::Create,
                 parameters: None,
                 default_shortcut: Some("Shift+T".to_string()),
-                icon: None,
+                icon: Some("icon.tape".to_string()),
                 hint: Some("Click start point, then click end point to measure".to_string()),
                 requires_selection: false,
                 show_in_menu: true,
@@ -72,6 +73,16 @@ impl Plugin for TapeToolPlugin {
             },
             execute_tape_tool,
         )
+        .register_toolbar(ToolbarDescriptor {
+            id: "measure".into(),
+            label: "Measure".into(),
+            default_dock: ToolbarDock::Top,
+            default_visible: true,
+            sections: vec![ToolbarSection {
+                label: "Measure".into(),
+                command_ids: vec!["tools.tape".into()],
+            }],
+        })
         .add_systems(OnEnter(ActiveTool::Tape), initialize_tape_tool)
         .add_systems(OnExit(ActiveTool::Tape), cleanup_tape_tool)
         .add_systems(

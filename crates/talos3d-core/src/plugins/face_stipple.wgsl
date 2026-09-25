@@ -21,7 +21,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let pixel = floor(in.position.xy);
     let cell = pixel - floor(pixel / pitch) * pitch;
     if (cell.x >= dot_size || cell.y >= dot_size) {
-        discard;
+        if (stipple_params.z <= 0.0) { discard; }
+        return vec4<f32>(stipple_color.rgb, stipple_params.z);
     }
 
     return stipple_color;

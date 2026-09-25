@@ -836,6 +836,7 @@ fn setup_core_icons(mut images: ResMut<Assets<Image>>, mut icon_registry: ResMut
         ("icon.create_polyline", "create_polyline"),
         ("icon.create_fillet", "create_fillet"),
         ("icon.create_chamfer", "create_chamfer"),
+        ("icon.tape", "ruler"),
         ("icon.dimension", "dimension"),
         ("icon.dimensions", "dimensions"),
         ("icon.guide_line", "guide_line"),

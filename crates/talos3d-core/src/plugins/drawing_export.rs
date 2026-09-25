@@ -603,7 +603,8 @@ fn suppress_overlays_during_viewport_export(
     if *saved_overlays {
         *saved_overlays = false;
         for mut visibility in &mut overlay_query {
-            *visibility = Visibility::Visible;
+            // Overlays attached to a source must continue to honor its visibility.
+            *visibility = Visibility::Inherited;
         }
     }
     for (type_id, config, _) in config_store.iter_mut() {

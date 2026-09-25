@@ -353,6 +353,16 @@ fn draw_deselect(c: &mut Canvas) {
 }
 
 // Lucide: crosshair (set pivot)
+fn draw_ruler(c: &mut Canvas) {
+    c.line(3.0, 7.0, 21.0, 7.0);
+    c.line(21.0, 7.0, 21.0, 17.0);
+    c.line(21.0, 17.0, 3.0, 17.0);
+    c.line(3.0, 17.0, 3.0, 7.0);
+    for x in [7.0, 12.0, 17.0] {
+        c.line(x, 7.0, x, 12.0);
+    }
+}
+
 fn draw_crosshair(c: &mut Canvas) {
     c.circle(12.0, 12.0, 10.0);
     c.line(22.0, 12.0, 18.0, 12.0);
@@ -725,6 +735,7 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "export" => draw_export(&mut c),
         "box_select" => draw_box_select(&mut c),
         "deselect" => draw_deselect(&mut c),
+        "ruler" => draw_ruler(&mut c),
         "crosshair" => draw_crosshair(&mut c),
         "zoom_extents" => draw_zoom_extents(&mut c),
         "zoom_selection" => draw_zoom_selection(&mut c),

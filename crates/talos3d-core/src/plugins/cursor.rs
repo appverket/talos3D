@@ -46,7 +46,9 @@ impl Plugin for CursorPlugin {
             )
             .add_systems(
                 Update,
-                draw_cursor_crosshair.in_set(CursorSystems::DrawCrosshair),
+                draw_cursor_crosshair
+                    .in_set(CursorSystems::DrawCrosshair)
+                    .run_if(show_drawing_crosshair),
             );
 
         #[cfg(target_arch = "wasm32")]
@@ -594,6 +596,12 @@ fn scene_surface_layer_visible(
         .and_then(|(_, assignment)| assignment)
         .map(|assignment| layer_registry.is_visible(&assignment.layer))
         .unwrap_or(true)
+}
+
+// Select and Tape have their own precise pointer/measurement feedback. A
+// world-sized drawing-plane cross obscures geometry when inspecting close up.
+fn show_drawing_crosshair(tool: Res<State<ActiveTool>>) -> bool {
+    !matches!(tool.get(), ActiveTool::Select | ActiveTool::Tape)
 }
 
 fn draw_cursor_crosshair(
