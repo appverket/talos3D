@@ -6,4 +6,4 @@
 - task-id: TALOS-wqudpmai
 - target base: main
 - summary: Bounded generic semantic authoring profile and actionable concept/anchor discovery for PP-TDR-1.
-- status: active
+- status: awaiting-merge

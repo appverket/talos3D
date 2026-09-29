@@ -511,6 +511,15 @@ pub(super) fn tool_category(name: &str) -> ToolCategory {
 /// session contract remains available; unsupported next steps return the normal
 /// profile-switch diagnostic instead of silently expanding the surface.
 pub(super) const FOCUSED_AUTHORING_TOOLS: &[&str] = &[
+    "infer_refinement_goal",
+    "apply_refinement_goal",
+    "list_refinement_goals",
+    "plan_refinement_goal",
+    "promote_refinement",
+    "resolve_obligation",
+    "create_assembly",
+    "get_assembly",
+    "list_assembly_members",
     "list_entities",
     "get_entity",
     "get_entity_details",
