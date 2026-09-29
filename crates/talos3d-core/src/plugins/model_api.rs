@@ -12194,7 +12194,7 @@ fn handle_get_authoring_provenance(
         })
         .unwrap_or_else(|| AuthoringProvenanceInfo {
             element_id,
-            mode: "Freeform".to_string(),
+            mode: "Unrecorded".to_string(),
             rationale: None,
         });
 

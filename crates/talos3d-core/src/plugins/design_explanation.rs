@@ -253,7 +253,7 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
                                     })
                                     .unwrap_or_default();
                                 controls.add(parameter.name.replace('_', " "), format!("{}{unit} · {value_source}{}",display_value(&value),if editable {""} else {" · read only"}),
-                                    json!({"parameter":parameter.name,"value":value,"value_source":value_source,"unit":parameter.metadata.unit,"editable":editable,"override_policy":parameter.override_policy,"scale_behavior":parameter.metadata.scale_behavior,"authority":"definition_parameter","next_tool":"occurrence.resolve"}));
+                                    json!({"parameter":parameter.name,"value":value,"value_source":value_source,"unit":parameter.metadata.unit,"min":parameter.metadata.min,"max":parameter.metadata.max,"geometry_affecting":parameter.geometry_affecting,"editable":editable,"override_policy":parameter.override_policy,"scale_behavior":parameter.metadata.scale_behavior,"authority":"definition_parameter","next_tool":"occurrence.resolve"}));
                             }
                         }
                         Err(error) => unresolved.add("Parameter resolution", error, Value::Null),
@@ -270,10 +270,17 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
             }
         }
         if let Some(hosting) = &identity.hosting {
+            let mut details = encoded(hosting);
+            if let Some(object) = details.as_object_mut() {
+                if let Some(id) = hosting.opening_element_id.or(hosting.host_element_id) {
+                    object.insert("next_tool".into(), json!("get_entity_details"));
+                    object.insert("element_id".into(), json!(id.0));
+                }
+            }
             controls.add(
                 "Hosting",
                 "Placement is controlled by the host contract.",
-                encoded(hosting),
+                details,
             );
         }
     } else if let Some(snapshot) = &snapshot {
@@ -362,6 +369,14 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
             json!({"direct_grounding_present":false}),
         );
     }
+    if let Some(identity) = entity.get::<OccurrenceIdentity>() {
+        if world
+            .get_resource::<DefinitionRegistry>()
+            .is_some_and(|r| r.get(&identity.definition_id).is_some())
+        {
+            evidence.add("Reusable source context", "Inspect the Definition for its source evidence and limits; these do not establish this instance's claims.", json!({"definition_id":identity.definition_id,"next_tool":"definition.explain","scope":"context_only_not_inherited_claim_grounding"}));
+        }
+    }
     if let Some(intent) = entity.get::<SemanticIntent>() {
         for item in &intent.unresolved_decisions {
             unresolved.add(&item.question, &item.reason, encoded(item));
@@ -389,6 +404,9 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
                 );
             }
         }
+    }
+    if unresolved.rows.is_empty() {
+        unresolved.add("Recorded state", "No unresolved choices are recorded. This does not establish that all design requirements are resolved.", json!({"unresolved_records_present":false}));
     }
     let findings = world.get_resource::<Findings>();
     if let Some(findings) = findings {
@@ -502,6 +520,10 @@ mod tests {
         assert_eq!(result.sections[2].rows[0].details["element_id"], 3);
         assert_eq!(
             result.sections[3].rows[0].details["direct_grounding_present"],
+            false
+        );
+        assert_eq!(
+            result.sections[4].rows[0].details["unresolved_records_present"],
             false
         );
         assert!(explain_design(&world, 999).is_err());

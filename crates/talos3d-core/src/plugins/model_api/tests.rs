@@ -14116,6 +14116,8 @@ mod capability_profiles {
         let names = profile_tool_names(CapabilityProfile::Inspection);
         for tool in [
             "create_entity",
+            "declare_elevation_intent",
+            "bind_elevation_intent",
             "create_box",
             "delete_entities",
             "transform",
@@ -14388,3 +14390,21 @@ fn discover_curated_paths_definition_routes_use_registered_tools_and_profiles() 
 mod session_atomic;
 #[cfg(feature = "model-api")]
 mod session_safety;
+
+#[test]
+fn absent_authoring_record_is_distinct_from_explicit_freeform() {
+    use crate::plugins::refinement::AuthoringProvenance;
+    let mut world = World::new();
+    let entity = world.spawn(ElementId(78)).id();
+    assert_eq!(
+        handle_get_authoring_provenance(&world, 78).unwrap().mode,
+        "Unrecorded"
+    );
+    world
+        .entity_mut(entity)
+        .insert(AuthoringProvenance::default());
+    assert_eq!(
+        handle_get_authoring_provenance(&world, 78).unwrap().mode,
+        "Freeform"
+    );
+}

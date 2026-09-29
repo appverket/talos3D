@@ -4126,7 +4126,8 @@ pub struct ObligationInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AuthoringProvenanceInfo {
     pub element_id: u64,
-    /// `"Freeform"`, `"ViaRecipe:<id>"`, `"Imported:<ref>"`, or `"Refined:<id>"`.
+    /// `"Unrecorded"` when no component exists; otherwise `"Freeform"`,
+    /// `"ViaRecipe:<id>"`, `"Imported:<ref>"`, or `"Refined:<id>"`.
     pub mode: String,
     pub rationale: Option<String>,
 }

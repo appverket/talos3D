@@ -939,3 +939,7 @@ The inspector refreshes on selection, revision, Definition registry, relevant
 source-component or dependency-graph changes. It clears while a transform is
 active and offers an explicit Refresh action for a new validation observation.
 No dependency scan is performed per frame for an unchanged selection.
+
+`get_authoring_provenance` likewise returns `mode: "Unrecorded"` when no direct
+component exists. Explicit Freeform records remain Freeform. Elevation-intent
+declaration and binding are editing operations and are not in inspection.
