@@ -14392,6 +14392,7 @@ mod session_atomic;
 mod session_safety;
 
 #[test]
+#[cfg(feature = "model-api")]
 fn absent_authoring_record_is_distinct_from_explicit_freeform() {
     use crate::plugins::refinement::AuthoringProvenance;
     let mut world = World::new();
