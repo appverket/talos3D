@@ -203,6 +203,19 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
     if let Some(c) = entity.get::<ElementClassAssignment>() {
         source.add("Classification", &c.element_class.0, encoded(c));
     }
+    if let Some(concept) = entity.get::<crate::semantics::ConceptAssignment>() {
+        source.add("Design concept", concept.concept.as_str(), encoded(concept));
+    }
+    if let Some(anchors) = entity.get::<crate::semantics::PublishedAnchors>() {
+        controls.add(
+            "Published anchors",
+            "Declared identities; geometry resolution is a separate capability.",
+            encoded(anchors),
+        );
+    }
+    if let Some(bindings) = entity.get::<crate::semantics::SemanticBindings>() {
+        controls.add("Anchor bindings", "Semantic attachment to named host anchors; does not by itself place or regenerate geometry.", encoded(bindings));
+    }
     if let Some(state) = entity.get::<RefinementStateComponent>() {
         source.add(
             "Resolved detail",

@@ -549,6 +549,9 @@ fn capture_entity_snapshot(
 }
 
 fn entity_details_from_snapshot(world: &World, snapshot: &BoxedEntity) -> EntityDetails {
+    let entity =
+        crate::plugins::commands::find_entity_by_element_id_readonly(world, snapshot.element_id())
+            .and_then(|id| world.get_entity(id).ok());
     EntityDetails {
         element_id: snapshot.element_id().0,
         entity_type: snapshot.type_name().to_string(),
@@ -557,6 +560,20 @@ fn entity_details_from_snapshot(world: &World, snapshot: &BoxedEntity) -> Entity
         geometry_semantics: geometry_semantics_for_snapshot(world, snapshot),
         semantic: semantic_details_for_entity(world, snapshot.element_id()),
         semantic_shadow: semantic_shadow_for_entity(world, snapshot.element_id()),
+        design_concept: entity
+            .as_ref()
+            .and_then(|e| e.get::<crate::semantics::ConceptAssignment>())
+            .cloned(),
+        published_anchors: entity
+            .as_ref()
+            .and_then(|e| e.get::<crate::semantics::PublishedAnchors>())
+            .map(|p| p.anchors.clone())
+            .unwrap_or_default(),
+        anchor_bindings: entity
+            .as_ref()
+            .and_then(|e| e.get::<crate::semantics::SemanticBindings>())
+            .map(|b| b.bindings.clone())
+            .unwrap_or_default(),
         properties: snapshot
             .property_fields()
             .into_iter()
@@ -10913,6 +10930,43 @@ fn apply_captured_plan_and_flush(
 #[cfg(feature = "model-api")]
 fn register_model_api_edit_requests(world: &mut World) {
     world.init_resource::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>();
+    world.resource_mut::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>()
+        .register(crate::plugins::authored_edit_plan::requests::EditRequestDescriptor::new(
+            "core.semantic", 1,
+            "Preview concept assignment/downgrade, declared anchor publication, and explicit anchor binding. Captures existing semantic components; does not place geometry or claim a geometry resolver. Apply only the returned plan_id.",
+            serde_json::to_value(rmcp::schemars::schema_for!(crate::semantics::SemanticPlan)).expect("semantic schema"),
+            |world, parameters| {
+                let semantic_intents: crate::semantics::SemanticPlan = serde_json::from_value(parameters)
+                    .map_err(|error| format!("Invalid semantic request: {error}"))?;
+                if semantic_intents.intents.is_empty() || semantic_intents.intents.len() > 128 {
+                    return Err("Supply between 1 and 128 semantic intents".into());
+                }
+                for intent in &semantic_intents.intents {
+                    if let crate::semantics::PlanIntent::PublishAnchors { anchors, .. } = intent {
+                        if anchors.len() > 128 {
+                            return Err("At most 128 anchor identities may be published per intent".into());
+                        }
+                    }
+                    let id = match intent {
+                        crate::semantics::PlanIntent::AssignConcept { entity, .. }
+                        | crate::semantics::PlanIntent::RemoveConcept { entity, .. }
+                        | crate::semantics::PlanIntent::PublishAnchors { entity, .. } => *entity,
+                        crate::semantics::PlanIntent::Bind { subject, .. } => *subject,
+                    };
+                    ensure_user_editable_entity(world, id, "semantically edited")?;
+                }
+                Ok(crate::plugins::authored_edit_plan::modifiers::EditPlanDraft {
+                    context: crate::plugins::authored_edit_plan::PlanContext {
+                        planner_id: "core.semantic".into(), planner_version: 1,
+                        request_kind: "core.semantic".into(), mutation_scope: "semantic components".into(),
+                        intent: "Edit declared meaning and anchor bindings".into(),
+                        assumptions: vec!["Declared anchor identity does not prove resolved geometry or engineering validity".into()],
+                        ..Default::default()
+                    },
+                    before: Vec::new(), after: Vec::new(), semantic_intents,
+                })
+            },
+        )).expect("unique core semantic request");
     world.resource_mut::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>()
             .register(crate::plugins::authored_edit_plan::requests::EditRequestDescriptor::new(
                 "core.transform", 1, "Move, rotate or scale authored selection with registered semantic modifiers and dependent snapshots.",

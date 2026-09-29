@@ -171,6 +171,12 @@ pub struct EntityDetails {
     pub geometry_semantics: Option<GeometrySemantics>,
     pub semantic: Option<EntitySemanticDetails>,
     pub semantic_shadow: Option<crate::plugins::semantic_shadow::SemanticShadow>,
+    #[serde(default)]
+    pub design_concept: Option<crate::semantics::ConceptAssignment>,
+    #[serde(default)]
+    pub published_anchors: Vec<crate::semantics::PublishedAnchor>,
+    #[serde(default)]
+    pub anchor_bindings: Vec<crate::semantics::SemanticBinding>,
     pub properties: Vec<EntityPropertyDetails>,
 }
 

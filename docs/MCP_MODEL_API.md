@@ -350,7 +350,7 @@ it only with the intended agent.
 ## Capability Profiles (tool gating)
 
 The full router registers a large tool surface, whose schemas cost a connecting agent
-roughly 196 KB (~35k tokens) of cold-start context. To keep sessions lean, the
+a substantial cold-start context budget. Measure the current schemas and mandatory guidance together rather than relying on historical tool counts. To keep sessions lean, the
 advertised tool surface is gated by a named **capability profile**. The session
 contract — `get_instance_info`, `negotiate_agent_session`, `get_authoring_guidance`,
 `get_capability_snapshot`, `list_guidance_cards` / `get_guidance_card`,
@@ -360,7 +360,8 @@ discover guidance and curated paths regardless of gating.
 
 | Profile         | Scope                                                                                                                    |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `authoring`     | Default. The standard authoring loop: inspection, entity/geometry editing, materials, recipes/discovery and the ADR-042 corpus-gap flow, definitions/occurrences/hosted placement, parametric types, validation and structured geometric checks, refinement and obligations, camera/screenshot capture, project save/load/import, and the `list_commands`/`invoke_command` escape hatch (~102 tools, ~87 KB). |
+| `authoring`     | Default. The standard authoring loop: inspection, entity/geometry editing, materials, recipes/discovery and the ADR-042 corpus-gap flow, definitions/occurrences/hosted placement, parametric types, validation and structured geometric checks, refinement and obligations, camera/screenshot capture, project save/load/import, and the `list_commands`/`invoke_command` escape hatch (149 tools / 149,528 compact schema bytes at the focused-authoring checkpoint). |
+| `focused-authoring` | Bounded curated authoring and semantic edits: bootstrap/discovery, authored inspection and evidence, shared edit requests, recipes/Definitions/parametrics, gaps, validation, capture, history and save/reload. Omits raw primitive creation and bulk/advanced operations; switch profiles when required. Checkpoint: 74 tools / 56,403 schema bytes, below the fixed gates of 100 tools and 75% of authoring bytes. |
 | `inspection`    | Read-only: model/scene/semantic reads, validation checks, camera and screenshot. No model writes.                          |
 | `curation`      | Knowledge curation: corpus passages, recipe/assembly-pattern draft management, definition libraries and workspaces, material specs, rule packs, procedural sessions, provenance/grounding, plus inspection and capture. |
 | `ux-automation` | UI automation: `ux_*` input simulation, named views, clip planes, toolbars, render/lighting look-dev, command invocation, plus inspection and capture. |
@@ -370,7 +371,7 @@ Selecting a profile:
 
 - **At connect (HTTP):** each profile has its own endpoint —
   `http://127.0.0.1:<port>/mcp/authoring`, `/mcp/inspection`, `/mcp/curation`,
-  `/mcp/ux-automation`, `/mcp/full`. Plain `/mcp` serves the default profile
+  `/mcp/focused-authoring`, `/mcp/ux-automation`, `/mcp/full`. Plain `/mcp` serves the default profile
   (`authoring`, or `TALOS3D_MCP_PROFILE` when set).
 - **At runtime (any transport):** call `set_session_profile` with
   `{"profile": "full"}` (or omit `profile` to report the current one). Re-fetch
@@ -1019,3 +1020,34 @@ neither geometric correctness nor that an intended grip was selected. A release
 without a captured candidate has no commit verdict and cannot pass the gesture
 gate. Exported viewport images intentionally suppress manipulator overlays;
 `include_ui: true` requires a capturable native window.
+
+### Captured semantic edits
+
+`list_edit_requests` advertises `core.semantic` alongside `core.transform`.
+Its live schema accepts `AssignConcept`, `RemoveConcept`, `PublishAnchors` and
+`Bind` intents (externally tagged JSON variants). An anchor target contains
+`publisher`, `kind` and `role`. Preview with `preview_edit_plan`, inspect the
+captured `semantic_changes` and `semantic_refusals`, and apply only the returned
+`plan_id`. Refusals include the proposition, observed host, repair, contrasts
+and evidence; compatible current anchors are named when available.
+
+The existing AuthoredEditPlan captures before/after views of ConceptAssignment,
+PublishedAnchors and SemanticBindings. Apply, undo and redo restore those exact
+components. Both revision checks and semantic before-state checks fence stale
+proposals, including changes made by legacy metadata writers. Existing native
+semantic sidecars persist this state; no additional durable graph is introduced.
+The compatibility tools `assign_concept` and `publish_anchors` use this same
+captured command/history path.
+
+`resolve_domain_term` returns publication contracts and current required-anchor
+candidates. `get_entity_details` and the shared design explanation expose the
+recorded meaning and bindings. Publication roles must satisfy the installed
+contract. Reidentifying a concept validates retained bindings and publications;
+explicit removal records a downgrade and clears its own semantic components.
+Bare-entity relations remain the responsibility of their relation planners.
+
+Declared anchor identity does **not** prove resolved geometry, automatic
+placement/reseating, engineering validity or parametric driver persistence.
+Geometry edits still use the appropriate shared edit request or curated
+materializer. This bounded semantic request has no dedicated native drag UI;
+the wider interactive anchor-binding and regeneration acceptance remains open.

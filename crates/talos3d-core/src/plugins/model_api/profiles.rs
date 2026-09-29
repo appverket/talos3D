@@ -40,15 +40,19 @@ pub enum CapabilityProfile {
     UxAutomation = 3,
     /// The entire tool surface, including tools not yet classified.
     Full = 4,
+    /// Bounded semantic authoring: curated creation, concepts/anchors, captured
+    /// edits, explanation and verification. Escalate explicitly for other work.
+    FocusedAuthoring = 5,
 }
 
 impl CapabilityProfile {
-    pub const ALL: [CapabilityProfile; 5] = [
+    pub const ALL: [CapabilityProfile; 6] = [
         CapabilityProfile::Authoring,
         CapabilityProfile::Inspection,
         CapabilityProfile::Curation,
         CapabilityProfile::UxAutomation,
         CapabilityProfile::Full,
+        CapabilityProfile::FocusedAuthoring,
     ];
 
     pub const DEFAULT: CapabilityProfile = CapabilityProfile::Authoring;
@@ -60,6 +64,7 @@ impl CapabilityProfile {
             CapabilityProfile::Curation => "curation",
             CapabilityProfile::UxAutomation => "ux-automation",
             CapabilityProfile::Full => "full",
+            CapabilityProfile::FocusedAuthoring => "focused-authoring",
         }
     }
 
@@ -82,6 +87,7 @@ impl CapabilityProfile {
                  toolbars, command invocation, plus inspection and capture."
             }
             CapabilityProfile::Full => "The entire MCP tool surface.",
+            CapabilityProfile::FocusedAuthoring => "Bounded semantic authoring: curated paths, concepts and live anchors, captured preview/apply, explanation, validation and save/reload. Use full for advanced diagnostics.",
         }
     }
 
@@ -94,6 +100,7 @@ impl CapabilityProfile {
             "curation" => Some(CapabilityProfile::Curation),
             "ux-automation" | "ux_automation" => Some(CapabilityProfile::UxAutomation),
             "full" => Some(CapabilityProfile::Full),
+            "focused-authoring" | "focused_authoring" => Some(CapabilityProfile::FocusedAuthoring),
             _ => None,
         }
     }
@@ -116,6 +123,9 @@ impl CapabilityProfile {
         use ToolCategory::*;
         match self {
             CapabilityProfile::Full => true,
+            CapabilityProfile::FocusedAuthoring => {
+                matches!(category, SessionContract | Validation | Capture | Commands)
+            }
             CapabilityProfile::Authoring => matches!(
                 category,
                 SessionContract
@@ -497,6 +507,57 @@ pub(super) fn tool_category(name: &str) -> ToolCategory {
     ToolCategory::Unclassified
 }
 
+/// Generic focused workflow, independent of any domain vocabulary. The shared
+/// session contract remains available; unsupported next steps return the normal
+/// profile-switch diagnostic instead of silently expanding the surface.
+pub(super) const FOCUSED_AUTHORING_TOOLS: &[&str] = &[
+    "list_entities",
+    "get_entity",
+    "get_entity_details",
+    "get_entities_details",
+    "model_summary",
+    "get_selection",
+    "set_selection",
+    "entity_dependencies",
+    "query_relations",
+    "explain_design",
+    "get_authoring_provenance",
+    "get_claim_grounding",
+    "lookup_source_passage",
+    "resolve_domain_term",
+    "assign_concept",
+    "publish_anchors",
+    "list_edit_requests",
+    "preview_edit_plan",
+    "inspect_edit_plan",
+    "apply_edit_plan",
+    "list_element_classes",
+    "list_vocabulary",
+    "select_recipe",
+    "list_recipe_families",
+    "list_generation_priors",
+    "instantiate_recipe",
+    "request_corpus_expansion",
+    "list_corpus_gaps",
+    "definition.list",
+    "definition.get",
+    "definition.explain",
+    "definition.instantiate",
+    "definition.instantiate_hosted",
+    "definition.library.list",
+    "definition.library.get",
+    "occurrence.explain",
+    "occurrence.resolve",
+    "parametric.list_types",
+    "parametric.create",
+    "parametric.inspect",
+    "parametric.explain",
+    "get_refinement_state",
+    "get_obligations",
+    "save_project",
+    "load_project",
+];
+
 /// Whether `tool_name` is advertised and callable under `profile`.
 pub(super) fn profile_allows(profile: CapabilityProfile, tool_name: &str) -> bool {
     // Keep the deprecated duplicate callable in full for old clients; compact
@@ -504,7 +565,10 @@ pub(super) fn profile_allows(profile: CapabilityProfile, tool_name: &str) -> boo
     if profile != CapabilityProfile::Full && tool_name == "set_entity_property" {
         return false;
     }
-    profile == CapabilityProfile::Full || profile.includes(tool_category(tool_name))
+    profile == CapabilityProfile::Full
+        || profile.includes(tool_category(tool_name))
+        || (profile == CapabilityProfile::FocusedAuthoring
+            && FOCUSED_AUTHORING_TOOLS.contains(&tool_name))
 }
 
 /// Profiles (other than `full`) that include `tool_name`, for gate errors.

@@ -2768,7 +2768,7 @@ impl ServerHandler for ModelApiServer {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(super) struct SetSessionProfileRequest {
     /// Profile to activate: `authoring` (default), `inspection`, `curation`,
-    /// `ux-automation`, or `full`. Omit to report the current profile without
+    /// `ux-automation`, `focused-authoring`, or `full`. Omit to report the current profile without
     /// changing it.
     #[serde(default)]
     pub(super) profile: Option<String>,
@@ -5584,7 +5584,7 @@ impl ModelApiServer {
             advertised MCP tool surface. Profiles: 'authoring' (default; the standard \
             authoring loop), 'inspection' (read-only inspection + validation + capture), \
             'curation' (knowledge curation: drafts, libraries, specs, passages), \
-            'ux-automation' (UI/view/clip-plane/toolbar automation), 'full' (every tool). \
+            'ux-automation' (UI/view/clip-plane/toolbar automation), 'focused-authoring' (bounded semantic/curated loop), 'full' (every tool). \
             Omit 'profile' to report the current profile without changing it. On change the \
             stdio emits tools/list_changed; HTTP clients should re-fetch tools/list."
     )]

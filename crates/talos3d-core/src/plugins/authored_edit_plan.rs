@@ -2,6 +2,7 @@
 //! durable IR. Presentation borrows captured snapshots; apply never replans.
 pub mod modifiers;
 pub mod requests;
+mod semantic_state;
 use super::{
     history::{EditorCommand, History, ModelRevision, PendingCommandQueue},
     identity::{ElementId, ElementIdAllocator},
@@ -55,6 +56,8 @@ pub struct AuthoredEditPlan {
     created_ids: Vec<ElementId>,
     removed_ids: Vec<ElementId>,
     semantic_intents: SemanticPlan,
+    semantic_changes: Vec<semantic_state::Change>,
+    semantic_refusals: Vec<Value>,
     can_commit: bool,
     /// Content fingerprint, independent of the immutable candidate identity.
     digest: String,
@@ -139,6 +142,11 @@ impl AuthoredEditPlan {
         {
             return Err(PlanError::Stale);
         }
+        if !semantic_intents.is_empty() && !world.contains_resource::<SemanticGraph>() {
+            return Err(PlanError::InvalidSnapshots(
+                "No semantic graph is installed".into(),
+            ));
+        }
         let old = ids(&before)?;
         let new = ids(&after)?;
         if new.contains(&ElementId(u64::MAX)) {
@@ -166,6 +174,8 @@ impl AuthoredEditPlan {
             created_ids: new.difference(&old).copied().collect(),
             removed_ids: old.difference(&new).copied().collect(),
             semantic_intents,
+            semantic_changes: Vec::new(),
+            semantic_refusals: Vec::new(),
             can_commit: true,
             digest: String::new(),
             retained_bytes: 0,
@@ -178,6 +188,11 @@ impl AuthoredEditPlan {
             ) {
                 Verdict::Refuse(refusals) => {
                     plan.can_commit = false;
+                    plan.semantic_refusals = refusals.iter().map(|r| json!({
+                        "violated":r.violated, "reason":r.reason, "observed":r.observed,
+                        "repair":r.repair, "contrasts":r.contrasts,
+                        "evidence":r.violated.as_ref().and_then(|id| graph.proposition(id)).map(|p| &p.evidence),
+                    })).collect();
                     plan.context
                         .findings
                         .extend(refusals.iter().map(Refusal::summary));
@@ -189,6 +204,12 @@ impl AuthoredEditPlan {
                 Verdict::Admit => {}
             }
         }
+        plan.semantic_changes = semantic_state::capture(
+            world,
+            &plan.semantic_intents,
+            &plan.created_ids,
+            plan.can_commit,
+        )?;
         let encoded = serde_json::to_vec(&plan.content())
             .map_err(|e| PlanError::InvalidSnapshots(e.to_string()))?;
         plan.retained_bytes = encoded.len();
@@ -202,7 +223,8 @@ impl AuthoredEditPlan {
         json!({"format":"talos.authored_edit_plan.transient.v1","base_model_revision":self.base_model_revision,
             "context":self.context,"before":self.before_snapshots.iter().map(BoxedEntity::to_json).collect::<Vec<_>>(),
             "after":self.after_snapshots.iter().map(BoxedEntity::to_json).collect::<Vec<_>>(),
-            "semantic_intents":self.semantic_intents,"can_commit":self.can_commit})
+            "semantic_intents":self.semantic_intents,"semantic_changes":self.semantic_changes,
+            "semantic_refusals":self.semantic_refusals,"can_commit":self.can_commit})
     }
 
     fn preflight(&self, world: &World) -> Option<Refusal> {
@@ -236,6 +258,15 @@ impl AuthoredEditPlan {
                     "The captured before-state no longer matches the model.",
                 ));
             }
+        }
+        if self
+            .semantic_changes
+            .iter()
+            .any(|change| !change.matches_before(world))
+        {
+            return Some(refusal(
+                "The captured semantic before-state no longer matches the model.",
+            ));
         }
         for id in &self.created_ids {
             if entity_exists(world, *id) {
@@ -484,9 +515,15 @@ impl EditorCommand for CapturedPlanCommand {
     }
     fn apply(&mut self, world: &mut World) {
         apply_snapshots(world, &self.0.after_snapshots, &self.0.before_snapshots);
+        for change in &self.0.semantic_changes {
+            change.apply(world, false);
+        }
     }
     fn undo(&mut self, world: &mut World) {
         apply_snapshots(world, &self.0.before_snapshots, &self.0.after_snapshots);
+        for change in &self.0.semantic_changes {
+            change.apply(world, true);
+        }
     }
     // Redo deliberately uses captured content rather than the original revision.
 }

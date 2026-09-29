@@ -13797,6 +13797,39 @@ mod capability_profiles {
     }
 
     #[test]
+    fn focused_profile_is_bounded_and_keeps_discovery_edit_and_recovery_routes() {
+        let catalog = profile_tool_catalog();
+        let focused = catalog.tools_for(CapabilityProfile::FocusedAuthoring);
+        let authoring = catalog.tools_for(CapabilityProfile::Authoring);
+        let focused_bytes = serde_json::to_vec(focused.as_ref()).unwrap().len();
+        let authoring_bytes = serde_json::to_vec(authoring.as_ref()).unwrap().len();
+        assert!(focused.len() < 100);
+        assert!(focused_bytes * 4 < authoring_bytes * 3);
+        eprintln!(
+            "focused {} tools / {} schema bytes; authoring {} / {}",
+            focused.len(),
+            focused_bytes,
+            authoring.len(),
+            authoring_bytes
+        );
+        let names = profile_tool_names(CapabilityProfile::FocusedAuthoring);
+        for tool in super::super::profiles::FOCUSED_AUTHORING_TOOLS {
+            assert!(
+                router_tool_names().contains(*tool),
+                "stale focused tool {tool}"
+            );
+            assert!(names.contains(*tool));
+        }
+        assert!(!names.contains("create_box"));
+        assert!(!names.contains("import_file"));
+        assert!(profile_allows(CapabilityProfile::Full, "import_file"));
+        assert_eq!(
+            CapabilityProfile::from_name("focused-authoring"),
+            Some(CapabilityProfile::FocusedAuthoring)
+        );
+    }
+
+    #[test]
     fn full_profile_exposes_entire_router() {
         let catalog = profile_tool_catalog();
         assert_eq!(

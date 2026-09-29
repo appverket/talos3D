@@ -13,6 +13,7 @@ impl Plugin for IdentityPlugin {
 #[derive(
     Component, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ElementId(pub u64);
 
 #[derive(Resource, Debug, Default)]
