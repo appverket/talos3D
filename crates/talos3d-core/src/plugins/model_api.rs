@@ -14685,6 +14685,12 @@ pub fn handle_discover_curated_paths(
                 .map(|registry| {
                     let mut assets = Vec::new();
                     for library in registry.list() {
+                        let mut resolver = world.get_resource::<crate::plugins::modeling::definition::DefinitionRegistry>()
+                            .cloned().unwrap_or_default();
+                        for definition in library.definitions.values() {
+                            resolver.insert(definition.clone());
+                        }
+
                         for definition in library.definitions.values() {
                             let definition_kind = format!("{:?}", definition.definition_kind);
                             if !request.element_class.as_deref().is_none_or(|needle| {
@@ -14701,27 +14707,28 @@ pub fn handle_discover_curated_paths(
                             }) {
                                 continue;
                             }
-                            let tool = if definition.interface.void_declaration.is_some() {
+                            let effective = resolver.effective_definition(&definition.id);
+                            let hosted = effective.as_ref().is_ok_and(|definition| definition.interface.void_declaration.is_some());
+                            let tool = if hosted {
                                 "definition.instantiate_hosted"
                             } else {
-                                // Library assets need the importing instantiation path;
-                                // occurrence.place requires an already-local Definition.
+                                // Library assets require import before occurrence placement.
                                 "definition.instantiate"
                             };
-                            let instantiate_tool = profile_tool_catalog().router.has_route(tool)
+                            let instantiate_tool = (effective.is_ok() && profile_tool_catalog().router.has_route(tool))
                                 .then(|| tool.to_string());
-                            let how_to_instantiate = if instantiate_tool.is_none() {
-                                "No registered instantiation tool; inspect guidance and report the missing capability.".to_string()
-                            } else {
-                                format!(
+                            let how_to_instantiate = match effective {
+                                Err(error) => format!("Definition is not executable: {error}. Repair its library dependencies before instantiation."),
+                                Ok(_) if instantiate_tool.is_none() => "No registered instantiation tool; inspect guidance and report the missing capability.".to_string(),
+                                Ok(_) => format!(
                                     "Call {tool} with definition_id {:?} and library_id {:?}.{}",
                                     definition.id.to_string(), library.id.to_string(),
-                                    if definition.interface.void_declaration.is_some() {
+                                    if hosted {
                                         " First create the native host and its opening, then supply hosting; this Definition declares a void and must not be placed unhosted or substituted with boxes."
                                     } else {
                                         " Inspect definition.library.get for parameter controls; library_id imports the Definition when needed."
                                     }
-                                )
+                                ),
                             };
                             assets.push(DefinitionPathInfo {
                                 library_id: library.id.to_string(),
@@ -14829,7 +14836,13 @@ pub fn handle_discover_curated_paths(
     let definition_next_tool = definition_assets
         .iter()
         .filter_map(|asset| asset.instantiate_tool.as_deref())
-        .next();
+        .min_by_key(|tool| {
+            if *tool == "definition.instantiate_hosted" {
+                0
+            } else {
+                1
+            }
+        });
     related_asset_ids.extend(curated_assets.iter().map(|asset| asset.asset_id.clone()));
     related_asset_ids.extend(
         parametric_types

@@ -14290,6 +14290,31 @@ fn discover_curated_paths_definition_routes_use_registered_tools_and_profiles() 
         )
         .unwrap();
     }
+    let variant = handle_create_definition(
+        &mut world,
+        json!({
+            "name": "Derived Window", "base_definition_id": window.definition_id,
+            "definition_kind": "Solid", "parameters": [], "evaluators": [],
+        }),
+    )
+    .unwrap();
+    handle_add_definition_to_library(
+        &mut world,
+        json!({
+            "library_id": library.library_id, "definition_id": variant.definition_id,
+        }),
+    )
+    .unwrap();
+    let mut component = make_rect_extrusion_request();
+    component["name"] = json!("Window A Component");
+    let component = handle_create_definition(&mut world, component).unwrap();
+    handle_add_definition_to_library(
+        &mut world,
+        json!({
+            "library_id": library.library_id, "definition_id": component.definition_id,
+        }),
+    )
+    .unwrap();
     for (term, expected) in [
         ("door", "definition.instantiate"),
         ("window", "definition.instantiate_hosted"),
@@ -14304,12 +14329,26 @@ fn discover_curated_paths_definition_routes_use_registered_tools_and_profiles() 
             },
         )
         .unwrap();
-        assert_eq!(result.definition_assets.len(), 1);
-        assert_eq!(result.suggested_next_tool, expected);
         assert_eq!(
-            result.definition_assets[0].instantiate_tool.as_deref(),
-            Some(expected)
+            result.definition_assets.len(),
+            if term == "window" { 3 } else { 1 }
         );
+        if term == "window" {
+            let inherited = result
+                .definition_assets
+                .iter()
+                .find(|asset| asset.definition_id == variant.definition_id)
+                .unwrap();
+            assert_eq!(
+                inherited.instantiate_tool.as_deref(),
+                Some("definition.instantiate_hosted")
+            );
+        }
+        assert_eq!(result.suggested_next_tool, expected);
+        assert!(result
+            .definition_assets
+            .iter()
+            .any(|asset| asset.instantiate_tool.as_deref() == Some(expected)));
         assert!(profile_tool_catalog().router.has_route(expected));
         assert!(result.definition_assets[0]
             .how_to_instantiate
