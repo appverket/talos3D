@@ -8170,7 +8170,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "inspect_refinement_branches",
-        description = "List active and parked refinement branches for an entity. Parked branches are dormant but inspectable and can be reactivated by promoting to the same target state."
+        description = "List active and parked refinement branches for an entity. Parked branches are dormant but inspectable. Reactivation requires compatible native inputs and the same target state; inspect compatibility and available_actions. Changed native inputs or legacy basis require regeneration."
     )]
     pub(super) async fn inspect_refinement_branches_tool(
         &self,
@@ -8185,7 +8185,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "rebase_refinement_branch",
-        description = "Explicitly three-way rebase a PARKED refinement branch over current generator controls. The stored branch basis is the merge base. Supply current authored controls and the new generator controls. Conflicts are returned without mutation unless each path is listed in confirm_authored_wins; confirmed authored values win and are never silently dropped. The branch remains parked after rebase."
+        description = "Explicitly three-way rebase a PARKED refinement branch over current generator controls. The stored branch basis is the merge base. Supply current authored controls and the new generator controls. Conflicts are returned without mutation unless each path is listed in confirm_authored_wins; confirmed authored values win and are never silently dropped. The branch remains parked after rebase. Changed native inputs, dimensional contracts or legacy basis require regeneration; parameter-only rebase cannot validate old geometry."
     )]
     pub(super) async fn rebase_refinement_branch_tool(
         &self,

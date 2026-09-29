@@ -157,6 +157,8 @@ fn sync_property_panel_data(world: &mut World) {
                     e.get_ref::<ObligationSet>().map(|r| r.last_changed().get()),
                     e.get_ref::<SemanticIntent>()
                         .map(|r| r.last_changed().get()),
+                    e.get_ref::<SettingOutContract>()
+                        .map(|r| r.last_changed().get()),
                     e.get_ref::<RefinementStateComponent>()
                         .map(|r| r.last_changed().get()),
                     e.get_ref::<OccurrenceIdentity>()

@@ -1010,6 +1010,24 @@ No dependency scan is performed per frame for an unchanged selection.
 component exists. Explicit Freeform records remain Freeform. Elevation-intent
 declaration and binding are editing operations and are not in inspection.
 
+The projection includes the coarse `SemanticIntent` brief, actual
+`SettingOutContract`, recorded refinement lineage, hosted opening/fill links,
+and enclosing aggregate context. Parent unresolved decisions are linked as
+context, without inventing local obligations or inheriting claim grounding.
+A recorded relationship is not proof that every edit propagates through it.
+
+### Native refinement continuation
+
+Refinement branch basis v2 retains the actual dimensional contract and
+fingerprints native authored inputs reached through membership, factory-declared
+inputs, participating semantic relations and core hosting contracts. Definition
+changes, host/opening edits and reservation changes invalidate old content even
+when no anchor revision exists. This is a one-shot read of existing authorities,
+not a new source graph. Legacy v1 bases load but require regeneration before
+silent reactivation. Parameter-only three-way rebase cannot certify changed
+native geometry or migrate a legacy basis. Unchanged native input preserves the
+existing park/reactivate path; persisted undo history is still not promised.
+
 ### Explicit project reload
 
 `load_project` always reads the requested file and replaces document state, even

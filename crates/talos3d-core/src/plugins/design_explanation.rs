@@ -8,6 +8,7 @@ use crate::{
         history::{History, ModelRevision},
         identity::ElementId,
         modeling::{
+            assembly::{SemanticAssembly, SemanticRelation},
             definition::{DefinitionRegistry, OverridePolicy, ParameterMutability},
             dependency_graph::EntityDependencies,
             group::GroupMembers,
@@ -15,7 +16,8 @@ use crate::{
         },
         refinement::{
             AuthoringProvenance, ClaimGrounding, Grounding, ObligationSet, ObligationStatus,
-            PassageRef, RefinementStateComponent, SemanticIntent,
+            PassageRef, RefinementBranch, RefinementStateComponent, SemanticIntent,
+            SettingOutContract,
         },
         validation::Findings,
     },
@@ -291,6 +293,19 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
             encoded(state),
         );
     }
+    // The actual dimensional reservation takes precedence over a long parameter
+    // list in this bounded projection. Recipe defaults are not its authority.
+    if let Some(contract) = entity.get::<SettingOutContract>() {
+        controls.add("Dimensional reservation", format!("{} mm about {:?} · revision {}", contract.reserved_thickness_mm(), contract.datum, contract.revision),
+            json!({"authority":"setting_out_contract","element_id":element_id,"contract":contract,"next_tool":"get_setting_out_contract"}));
+    }
+    if let Some(intent) = entity.get::<SemanticIntent>() {
+        if let Some(parameters) = intent.parameters.as_object() {
+            for (name, value) in parameters {
+                controls.add(name.replace('_', " "), display_value(value), json!({"parameter":name,"value":value,"authority":"semantic_intent","scope":"authored_brief","next_tool":"get_entity_details"}));
+            }
+        }
+    }
     if let Some(identity) = entity.get::<OccurrenceIdentity>() {
         if let Some(registry) = world.get_resource::<DefinitionRegistry>() {
             if let Some(definition) = registry.get(&identity.definition_id) {
@@ -405,12 +420,86 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
                 }
             }
         }
-        if let Some(group) = other.get::<GroupMembers>() {
-            if group.member_ids.contains(&ElementId(element_id)) {
-                source.add("Assembly context", &group.name, json!({"element_id":id.0,"relationship":"member_of","provenance":other.get::<AuthoringProvenance>().map(encoded),"scope":"context_only_not_inherited_claim_grounding"}));
+        // Read the core hosting contract directly even before derived factory
+        // dependency edges have caught up with the preceding edit.
+        if let Some(hosting) = other
+            .get::<OccurrenceIdentity>()
+            .and_then(|i| i.hosting.as_ref())
+        {
+            let role = if hosting.opening_element_id == Some(ElementId(element_id)) {
+                Some("opening_driver")
+            } else if hosting.host_element_id == Some(ElementId(element_id)) {
+                Some("hosted_on")
+            } else {
+                None
+            };
+            if let Some(role) = role {
+                let already_shown = dependencies.rows.iter().any(|r| {
+                    r.details["element_id"] == json!(id.0) && r.details["direction"] == "dependent"
+                });
+                if !already_shown {
+                    dependencies.add("Hosted dependent", format!("Element {} · {role}", id.0), json!({"element_id":id.0,"role":role,"direction":"dependent","authority":"occurrence_hosting","next_tool":"get_entity_details"}));
+                }
+                if hosting.host_element_id == Some(ElementId(element_id)) {
+                    if let Some(opening) = hosting.opening_element_id {
+                        dependencies.add("Hosted opening", format!("Element {} controls element {}", opening.0, id.0), json!({"element_id":opening.0,"fill_element_id":id.0,"role":"opening_driver","direction":"context","authority":"occurrence_hosting","next_tool":"get_entity_details"}));
+                    }
+                }
+            }
+        }
+        let member_context = other
+            .get::<GroupMembers>()
+            .filter(|g| g.member_ids.contains(&ElementId(element_id)))
+            .map(|g| g.name.as_str())
+            .or_else(|| {
+                other
+                    .get::<SemanticAssembly>()
+                    .filter(|a| a.members.iter().any(|m| m.target.0 == element_id))
+                    .map(|a| a.label.as_str())
+            });
+        if let Some(label) = member_context {
+            source.add("Assembly context", label, json!({"element_id":id.0,"relationship":"member_of","provenance":other.get::<AuthoringProvenance>().map(encoded),"scope":"context_only_not_inherited_claim_grounding","next_tool":"explain_design"}));
+            if let Some(contract) = other.get::<SettingOutContract>() {
+                controls.add("Assembly reservation", format!("Element {} owns a {} mm dimensional reservation", id.0, contract.reserved_thickness_mm()), json!({"element_id":id.0,"scope":"context_only","authority":"setting_out_contract","next_tool":"get_setting_out_contract"}));
+            }
+        }
+        if let Some(relation) = other.get::<SemanticRelation>() {
+            if relation.source.0 == element_id || relation.target.0 == element_id {
+                let peer = if relation.source.0 == element_id {
+                    relation.target
+                } else {
+                    relation.source
+                };
+                if matches!(
+                    relation.relation_type.as_str(),
+                    "refined_into" | "refinement_of"
+                ) {
+                    // Both persisted directions describe the same lineage;
+                    // present the canonical parent -> child record once.
+                    if relation.relation_type == "refined_into" {
+                        source.add("Refinement lineage", format!("Element {} refines into {}", relation.source.0, relation.target.0), json!({"element_id":peer.0,"parent_element_id":relation.source.0,"child_element_id":relation.target.0,"branch_status":other.get::<RefinementBranch>().map(|b| &b.status),"scope":"recorded_lineage","next_tool":"explain_design"}));
+                        if relation.target.0 == element_id {
+                            if let Some(parent) =
+                                crate::plugins::commands::find_entity_by_element_id_readonly(
+                                    world,
+                                    relation.source,
+                                )
+                            {
+                                if let Some(intent) = world.get::<SemanticIntent>(parent) {
+                                    for item in &intent.unresolved_decisions {
+                                        unresolved.add("Parent design decision", &item.question, json!({"element_id":relation.source.0,"decision":item,"scope":"parent_context_not_local_obligation","next_tool":"explain_design"}));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    dependencies.add("Recorded relationship", format!("{} → {} · {}", relation.source.0, relation.target.0, relation.relation_type), json!({"element_id":peer.0,"relation_id":id.0,"relation_type":relation.relation_type,"direction":"context","scope":"relationship_not_proof_of_edit_propagation","next_tool":"get_entity_details"}));
+                }
             }
         }
     }
+
     if let Some(claims) = entity.get::<ClaimGrounding>() {
         let mut entries: Vec<_> = claims.claims.iter().collect();
         entries.sort_by_key(|(path, _)| &path.0);
@@ -587,6 +676,120 @@ mod tests {
         ));
         world
     }
+    #[test]
+    fn continuation_context_exposes_brief_contract_lineage_and_hosted_impact() {
+        use crate::plugins::modeling::occurrence::HostedOccurrenceContext;
+        use crate::plugins::refinement::{
+            SettingOutDatum, SettingOutLockedDimension, SettingOutSource,
+        };
+        let mut world = world();
+        world.spawn((
+            ElementId(2),
+            GroupMembers {
+                name: "Coarse brief".into(),
+                member_ids: vec![ElementId(1)],
+                frame: Default::default(),
+                linked_model: None,
+            },
+            SemanticIntent {
+                parameters: json!({"length_m":4,"height_m":2.7}),
+                unresolved_decisions: vec![UnresolvedDecisionRecord {
+                    id: "design".into(),
+                    question: "Resolve design".into(),
+                    reason: "Sizing is preliminary".into(),
+                    grounding: "unresolved".into(),
+                }],
+                source_refs: vec![],
+            },
+            SettingOutContract {
+                revision: 1,
+                datum: SettingOutDatum::Centreline,
+                locked_dimensions: std::collections::BTreeSet::from([
+                    SettingOutLockedDimension::ExteriorEnvelope,
+                ]),
+                reserved_negative_offset_mm: 110.5,
+                reserved_positive_offset_mm: 110.5,
+                source: SettingOutSource::AuthoredPhysical,
+                confidence: 1.0,
+                tolerance_mm: 0.1,
+                source_ref: None,
+            },
+        ));
+        world.spawn((
+            ElementId(3),
+            SemanticAssembly {
+                assembly_type: "fixture".into(),
+                label: "Added content".into(),
+                members: vec![crate::plugins::modeling::assembly::AssemblyMemberRef {
+                    target: ElementId(1),
+                    role: "host".into(),
+                }],
+                parameters: Value::Null,
+                metadata: Value::Null,
+            },
+        ));
+        world.spawn((
+            ElementId(7),
+            SemanticRelation {
+                source: ElementId(2),
+                target: ElementId(3),
+                relation_type: "refined_into".into(),
+                parameters: Value::Null,
+            },
+        ));
+        world.spawn((ElementId(5),));
+        let mut identity = OccurrenceIdentity::new(DefinitionId("fill".into()), 1);
+        identity.hosting = Some(HostedOccurrenceContext {
+            host_element_id: Some(ElementId(1)),
+            opening_element_id: Some(ElementId(5)),
+            binding: None,
+            anchors: vec![],
+        });
+        world.spawn((ElementId(6), identity));
+        let root = explain_design(&world, 2).unwrap();
+        assert!(root.sections[1]
+            .rows
+            .iter()
+            .any(|r| r.details["authority"] == "semantic_intent" && r.details["value"] == 4));
+        assert!(root.sections[1]
+            .rows
+            .iter()
+            .any(|r| r.details["authority"] == "setting_out_contract"
+                && r.details["contract"]["revision"] == 1));
+        assert!(root.sections[0]
+            .rows
+            .iter()
+            .any(|r| r.details["child_element_id"] == 3));
+        let child = explain_design(&world, 3).unwrap();
+        assert!(child.sections[4]
+            .rows
+            .iter()
+            .any(|r| r.details["scope"] == "parent_context_not_local_obligation"));
+        let opening = explain_design(&world, 5).unwrap();
+        assert!(opening.sections[2]
+            .rows
+            .iter()
+            .any(|r| r.details["element_id"] == 6 && r.details["role"] == "opening_driver"));
+        let host = explain_design(&world, 1).unwrap();
+        assert!(host.sections[1]
+            .rows
+            .iter()
+            .any(|r| r.details["element_id"] == 2
+                && r.details["authority"] == "setting_out_contract"));
+        assert!(host.sections[0]
+            .rows
+            .iter()
+            .any(|r| r.details["element_id"] == 3 && r.details["relationship"] == "member_of"));
+        assert!(host.sections[2]
+            .rows
+            .iter()
+            .any(|r| r.details["element_id"] == 5));
+        assert_eq!(
+            world.resource::<History>().revision_token(),
+            root.model_revision.unwrap()
+        );
+    }
+
     #[test]
     fn domain_notes_are_bounded_and_do_not_create_instance_claims() {
         let mut world = world();

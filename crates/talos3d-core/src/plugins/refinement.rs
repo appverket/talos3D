@@ -1450,6 +1450,9 @@ pub struct RefinementBasisIdentity {
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct RefinementSettingOutBasis {
     pub contract_revision: String,
+    /// Actual authored contract; absent in legacy bases and implicit recipes.
+    #[serde(default)]
+    pub contract: Option<SettingOutContract>,
     #[serde(default)]
     pub locks: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
@@ -1787,6 +1790,10 @@ pub struct RefinementBranchBasis {
     pub resolved_controls: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pub dependency_revisions: BTreeMap<String, u64>,
+    /// Fingerprints of native authored inputs, separate from recipe overrides.
+    /// No geometry cache, second source graph, or copied authored model.
+    #[serde(default)]
+    pub input_fingerprints: BTreeMap<String, String>,
     pub obligation_schema_version: String,
     pub fingerprint: String,
 }
@@ -2901,7 +2908,7 @@ pub fn register_refinement_relations(app: &mut App) {
 
 use crate::plugins::identity::ElementIdAllocator;
 
-const REFINEMENT_BRANCH_BASIS_SCHEMA_VERSION: &str = "refinement-branch-basis.v1";
+const REFINEMENT_BRANCH_BASIS_SCHEMA_VERSION: &str = "refinement-branch-basis.v2";
 
 fn json_display(value: &impl Serialize) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string())
@@ -2919,18 +2926,25 @@ fn parent_resolved_controls(
     requested: &HashMap<ClaimPath, serde_json::Value>,
 ) -> BTreeMap<String, serde_json::Value> {
     let mut controls = baseline.cloned().unwrap_or_default();
-    let model_controls: BTreeMap<String, serde_json::Value> =
-        find_entity_by_element_id_readonly(world, parent_eid)
-            .and_then(|entity| world.get::<SemanticAssembly>(entity))
-            .and_then(|assembly| assembly.parameters.as_object())
-            .map(|parameters| {
-                parameters
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-    controls.extend(model_controls);
+    if let Some(entity) = find_entity_by_element_id_readonly(world, parent_eid) {
+        // A coarse native Group carries its brief in SemanticIntent; it need
+        // not masquerade as a SemanticAssembly to retain generator controls.
+        for parameters in [
+            world
+                .get::<SemanticIntent>(entity)
+                .map(|intent| &intent.parameters),
+            world
+                .get::<SemanticAssembly>(entity)
+                .map(|assembly| &assembly.parameters),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(parameters) = parameters.as_object() {
+                controls.extend(parameters.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+    }
     controls.extend(
         requested
             .iter()
@@ -2939,7 +2953,10 @@ fn parent_resolved_controls(
     controls
 }
 
-fn setting_out_basis(controls: &BTreeMap<String, serde_json::Value>) -> RefinementSettingOutBasis {
+fn setting_out_basis(
+    controls: &BTreeMap<String, serde_json::Value>,
+    contract: Option<&SettingOutContract>,
+) -> RefinementSettingOutBasis {
     fn selected(
         controls: &BTreeMap<String, serde_json::Value>,
         fragments: &[&str],
@@ -2976,12 +2993,15 @@ fn setting_out_basis(controls: &BTreeMap<String, serde_json::Value>) -> Refineme
         ],
     );
     let tolerances = selected(controls, &["tolerance", "allowance", "deviation"]);
-    let contract_revision = controls
-        .get("setting_out_contract_revision")
-        .map(json_display)
-        .unwrap_or_else(|| "implicit-v1".to_string());
+    let contract_revision = contract.map(|c| c.revision.to_string()).unwrap_or_else(|| {
+        controls
+            .get("setting_out_contract_revision")
+            .map(json_display)
+            .unwrap_or_else(|| "implicit-v1".to_string())
+    });
     RefinementSettingOutBasis {
         contract_revision,
+        contract: contract.cloned(),
         locks,
         reservations,
         tolerances,
@@ -3011,37 +3031,171 @@ fn construction_system_basis(
     Some(RefinementBasisIdentity { id, version })
 }
 
-fn dependency_revisions(world: &World, parent_eid: ElementId) -> BTreeMap<String, u64> {
-    let mut dependencies = BTreeSet::from([parent_eid.0]);
-    if let Some(mut query) = world.try_query::<(EntityRef,)>() {
-        for (entity_ref,) in query.iter(world) {
-            let Some(relation) = entity_ref.get::<SemanticRelation>() else {
-                continue;
-            };
-            if relation.source == parent_eid {
-                dependencies.insert(relation.target.0);
-            } else if relation.target == parent_eid {
-                dependencies.insert(relation.source.0);
+/// One-shot projection of existing authored membership, factory dependencies,
+/// participating relations and core hosting contracts. Refined outputs are not
+/// inputs to their own branch. Nothing is cached as a competing source graph.
+fn native_input_basis(
+    world: &World,
+    parent_eid: ElementId,
+) -> (BTreeMap<String, String>, BTreeMap<String, u64>) {
+    use crate::capability_registry::CapabilityRegistry;
+    use crate::plugins::modeling::{
+        definition::DefinitionRegistry, dependency_graph::EntityDependencies, group::GroupMembers,
+        occurrence::OccurrenceIdentity,
+    };
+    let Some(mut query) = world.try_query::<EntityRef>() else {
+        return Default::default();
+    };
+    let entities: BTreeMap<_, _> = query
+        .iter(world)
+        .filter_map(|e| e.get::<ElementId>().map(|id| (id.0, e)))
+        .collect();
+    let registry = world.get_resource::<CapabilityRegistry>();
+    let mut inputs = BTreeMap::new();
+    let mut revisions = BTreeMap::new();
+    let mut visited = BTreeSet::new();
+    let mut pending = VecDeque::from([parent_eid.0]);
+    let children: BTreeSet<_> = entities
+        .values()
+        .filter_map(|e| e.get::<SemanticRelation>())
+        .filter(|r| r.relation_type == "refined_into" && r.source == parent_eid)
+        .map(|r| r.target.0)
+        .collect();
+    let participating: BTreeSet<_> = registry
+        .map(|r| {
+            r.relation_type_descriptors()
+                .iter()
+                .filter(|d| d.participates_in_dependency_graph)
+                .map(|d| d.relation_type.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut hosted_by: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    let mut relations_by: BTreeMap<u64, Vec<(u64, &SemanticRelation)>> = BTreeMap::new();
+    for (id, entity) in &entities {
+        if let Some(hosting) = entity
+            .get::<OccurrenceIdentity>()
+            .and_then(|i| i.hosting.as_ref())
+        {
+            for host in [hosting.host_element_id, hosting.opening_element_id]
+                .into_iter()
+                .flatten()
+            {
+                hosted_by.entry(host.0).or_default().push(*id);
+            }
+        }
+        if let Some(relation) = entity.get::<SemanticRelation>() {
+            if participating.contains(relation.relation_type.as_str())
+                && !matches!(
+                    relation.relation_type.as_str(),
+                    "refined_into" | "refinement_of"
+                )
+            {
+                relations_by
+                    .entry(relation.source.0)
+                    .or_default()
+                    .push((*id, relation));
+            }
+        }
+    }
+    while let Some(id) = pending.pop_front() {
+        if !visited.insert(id) || (id != parent_eid.0 && children.contains(&id)) {
+            continue;
+        }
+        let Some(entity) = entities.get(&id) else {
+            inputs.insert(format!("element:{id}"), "missing".into());
+            continue;
+        };
+        let snapshot = registry.and_then(|r| r.capture_snapshot(entity, world));
+        // AssemblySnapshot includes its mutable maturity/obligation state;
+        // those are branch outputs, not the native assembly design inputs.
+        let authored = if let Some(assembly) = entity.get::<SemanticAssembly>() {
+            serde_json::to_value(assembly).unwrap_or_default()
+        } else {
+            snapshot.as_ref().map(|s| s.to_json()).unwrap_or_default()
+        };
+        inputs.insert(
+            format!("element:{id}"),
+            fingerprint_value(&serde_json::json!({
+                "authored": authored,
+                "brief": entity.get::<SemanticIntent>().map(|i| &i.parameters),
+                "contract": entity.get::<SettingOutContract>(),
+                "hosting": entity.get::<OccurrenceIdentity>().and_then(|i| i.hosting.as_ref()),
+            "dependency_state": (id != parent_eid.0).then(|| entity.get::<RefinementStateComponent>()),
+            "dependency_obligations": (id != parent_eid.0).then(|| entity.get::<ObligationSet>()),
+            })),
+        );
+        if let Some(anchors) = entity.get::<PublishedAnchors>() {
+            for anchor in &anchors.anchors {
+                revisions.insert(
+                    format!("{id}/{}/{}", anchor.kind.0, anchor.role.0),
+                    anchor.revision,
+                );
+            }
+        }
+        if let Some(group) = entity.get::<GroupMembers>() {
+            pending.extend(group.member_ids.iter().map(|id| id.0));
+        }
+        if let Some(assembly) = entity.get::<SemanticAssembly>() {
+            pending.extend(assembly.members.iter().map(|m| m.target.0));
+        }
+        // Ask the existing factory, avoiding one-frame-old derived edges after
+        // command application. Preserve standalone explicitly authored edges.
+        let deps = snapshot
+            .as_ref()
+            .and_then(|s| registry.and_then(|r| r.factory_for(s.type_name())))
+            .map(|f| f.dependency_edges(world, entity.id()))
+            .unwrap_or_else(|| {
+                entity
+                    .get::<EntityDependencies>()
+                    .cloned()
+                    .unwrap_or_default()
+            });
+        pending.extend(
+            deps.edges
+                .iter()
+                .filter(|edge| {
+                    !matches!(
+                        edge.role.as_str(),
+                        "relation:refined_into" | "relation:refinement_of"
+                    )
+                })
+                .map(|edge| edge.on.0),
+        );
+        if let Some(identity) = entity.get::<OccurrenceIdentity>() {
+            let definition = world
+                .get_resource::<DefinitionRegistry>()
+                .and_then(|r| r.get(&identity.definition_id));
+            inputs.insert(
+                format!("definition:{}", identity.definition_id.0),
+                fingerprint_value(&serde_json::to_value(definition).unwrap_or_default()),
+            );
+            if let Some(hosting) = &identity.hosting {
+                pending.extend(
+                    [hosting.host_element_id, hosting.opening_element_id]
+                        .into_iter()
+                        .flatten()
+                        .map(|id| id.0),
+                );
+            }
+        }
+        // Indexed once per capture: do not rescan the entire document for
+        // every member of a large authored aggregate.
+        if let Some(hosted) = hosted_by.get(&id) {
+            pending.extend(hosted);
+        }
+        if let Some(relations) = relations_by.get(&id) {
+            for (relation_id, relation) in relations {
+                inputs.insert(
+                    format!("relation:{relation_id}"),
+                    fingerprint_value(relation),
+                );
+                pending.push_back(relation.target.0);
             }
         }
     }
 
-    let mut revisions = BTreeMap::new();
-    for dependency in dependencies.into_iter().map(ElementId) {
-        let Some(entity) = find_entity_by_element_id_readonly(world, dependency) else {
-            continue;
-        };
-        let Some(anchors) = world.get::<PublishedAnchors>(entity) else {
-            continue;
-        };
-        for anchor in &anchors.anchors {
-            revisions.insert(
-                format!("{}/{}/{}", dependency.0, anchor.kind.0, anchor.role.0),
-                anchor.revision,
-            );
-        }
-    }
-    revisions
+    (inputs, revisions)
 }
 
 fn obligation_schema_version(
@@ -3108,13 +3262,17 @@ fn capture_refinement_branch_basis(
             obligation_schema_version
         ),
     });
+    let (input_fingerprints, dependency_revisions) = native_input_basis(world, parent_eid);
+    let contract = find_entity_by_element_id_readonly(world, parent_eid)
+        .and_then(|e| world.get::<SettingOutContract>(e));
     let mut basis = RefinementBranchBasis {
         schema_version: REFINEMENT_BRANCH_BASIS_SCHEMA_VERSION.to_string(),
         construction_system: construction_system_basis(&resolved_controls),
-        setting_out: setting_out_basis(&resolved_controls),
+        setting_out: setting_out_basis(&resolved_controls, contract),
         generator,
         resolved_controls,
-        dependency_revisions: dependency_revisions(world, parent_eid),
+        dependency_revisions,
+        input_fingerprints,
         obligation_schema_version,
         fingerprint: String::new(),
     };
@@ -3193,6 +3351,12 @@ fn compare_branch_basis(
         "a relevant host/dependency anchor revision changed"
     );
     compare_field!(
+        "input_fingerprints",
+        &previous.input_fingerprints,
+        &current.input_fingerprints,
+        "native authored inputs, hosting or reusable source changed"
+    );
+    compare_field!(
         "obligation_schema_version",
         &previous.obligation_schema_version,
         &current.obligation_schema_version,
@@ -3216,12 +3380,17 @@ fn compare_branch_basis(
         });
     }
     let can_reactivate_silently = mismatches.is_empty() && obligations_satisfied;
+    let requires_regeneration = previous.schema_version != current.schema_version
+        || previous.input_fingerprints != current.input_fingerprints
+        || previous.setting_out.contract != current.setting_out.contract;
     RefinementBranchCompatibility {
         can_reactivate_silently,
         target_obligations_satisfied: obligations_satisfied,
         mismatches,
         available_actions: if can_reactivate_silently {
             vec!["reactivate".to_string()]
+        } else if requires_regeneration {
+            vec!["regenerate".to_string()]
         } else {
             vec![
                 "regenerate".to_string(),
@@ -3618,6 +3787,21 @@ pub fn rebase_refinement_branch(
             parent_eid.0, child_eid.0
         )
     })?;
+
+    let current_native = capture_refinement_branch_basis(
+        world,
+        parent_eid,
+        branch.target_state,
+        branch.recipe_id.as_ref(),
+        Some(&branch.basis.resolved_controls),
+        &HashMap::new(),
+    );
+    if branch.basis.schema_version != current_native.schema_version
+        || branch.basis.input_fingerprints != current_native.input_fingerprints
+        || branch.basis.setting_out.contract != current_native.setting_out.contract
+    {
+        return Err("Native refinement inputs or basis schema changed; regenerate the branch. Parameter-only rebase cannot validate existing generated content.".into());
+    }
 
     let authored_request: HashMap<ClaimPath, serde_json::Value> = request
         .current_authored_controls
@@ -4205,6 +4389,250 @@ mod tests {
         world.init_resource::<Messages<ApplyEntityChangesCommand>>();
         world.init_resource::<Messages<EndCommandGroup>>();
         world
+    }
+
+    fn native_basis_world() -> (World, Entity, Entity, Entity) {
+        use crate::capability_registry::CapabilityRegistry;
+        use crate::plugins::modeling::{
+            definition::DefinitionId,
+            generic_factory::PrimitiveFactory,
+            group::{GroupFactory, GroupMembers},
+            occurrence::{HostedOccurrenceContext, OccurrenceFactory, OccurrenceIdentity},
+            primitives::{BoxPrimitive, ShapeRotation},
+        };
+        let mut world = refinement_command_world();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(GroupFactory);
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        registry.register_factory(OccurrenceFactory);
+        world.insert_resource(registry);
+        let root = world
+            .spawn((
+                ElementId(1),
+                GroupMembers {
+                    name: "Native aggregate".into(),
+                    member_ids: vec![ElementId(2)],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+                SemanticIntent {
+                    parameters: serde_json::json!({"length_mm":4000}),
+                    ..Default::default()
+                },
+                RefinementStateComponent {
+                    state: RefinementState::Schematic,
+                },
+                SettingOutContract {
+                    revision: 7,
+                    datum: SettingOutDatum::Centreline,
+                    locked_dimensions: BTreeSet::from([
+                        SettingOutLockedDimension::ExteriorEnvelope,
+                    ]),
+                    reserved_negative_offset_mm: 110.5,
+                    reserved_positive_offset_mm: 110.5,
+                    source: SettingOutSource::AuthoredPhysical,
+                    confidence: 1.0,
+                    tolerance_mm: 0.1,
+                    source_ref: None,
+                },
+            ))
+            .id();
+        let host = world
+            .spawn((
+                ElementId(2),
+                BoxPrimitive {
+                    centre: Vec3::ZERO,
+                    half_extents: Vec3::ONE,
+                },
+                ShapeRotation::default(),
+            ))
+            .id();
+        world.spawn((
+            ElementId(3),
+            BoxPrimitive {
+                centre: Vec3::Y,
+                half_extents: Vec3::splat(0.2),
+            },
+            ShapeRotation::default(),
+        ));
+        let mut identity = OccurrenceIdentity::new(DefinitionId("fixture.fill".into()), 1);
+        identity.hosting = Some(HostedOccurrenceContext {
+            host_element_id: Some(ElementId(2)),
+            opening_element_id: Some(ElementId(3)),
+            binding: None,
+            anchors: vec![],
+        });
+        let fill = world
+            .spawn((
+                ElementId(4),
+                identity,
+                Transform::default(),
+                Name::new("Native fill"),
+            ))
+            .id();
+        world.spawn((ElementId(6),));
+        world.spawn((
+            ElementId(99),
+            BoxPrimitive {
+                centre: Vec3::X * 10.0,
+                half_extents: Vec3::ONE,
+            },
+            ShapeRotation::default(),
+        ));
+        create_refinement_relation_pair(
+            &mut world,
+            ElementId(1),
+            ElementId(6),
+            RefinementState::Conceptual,
+            RefinementState::Schematic,
+        );
+        (world, root, host, fill)
+    }
+
+    fn native_basis(world: &World) -> RefinementBranchBasis {
+        capture_refinement_branch_basis(
+            world,
+            ElementId(1),
+            RefinementState::Schematic,
+            None,
+            None,
+            &HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn native_basis_captures_brief_contract_and_hosted_inputs_without_branch_outputs() {
+        use crate::plugins::modeling::{occurrence::OccurrenceIdentity, primitives::BoxPrimitive};
+        let (mut world, root, host, fill) = native_basis_world();
+        let baseline = native_basis(&world);
+        assert_eq!(baseline.resolved_controls["length_mm"], 4000);
+        assert_eq!(baseline.setting_out.contract_revision, "7");
+        assert_eq!(
+            baseline
+                .setting_out
+                .contract
+                .as_ref()
+                .unwrap()
+                .reserved_thickness_mm(),
+            221.0
+        );
+        for id in [1, 2, 3, 4] {
+            assert!(baseline
+                .input_fingerprints
+                .contains_key(&format!("element:{id}")));
+        }
+        for id in [6, 99] {
+            assert!(!baseline
+                .input_fingerprints
+                .contains_key(&format!("element:{id}")));
+        }
+        // A genuinely unchanged parked branch can still reactivate. Hiding the
+        // branch and changing its maturity must not invalidate its own inputs.
+        apply_demote_refinement(
+            &mut world,
+            DemoteRefinementRequest {
+                entity_element_id: 1,
+                target_state: RefinementState::Conceptual,
+            },
+        )
+        .unwrap();
+        assert_eq!(baseline, native_basis(&world));
+        let unrelated = find_entity_by_element_id_readonly(&world, ElementId(99)).unwrap();
+        world.get_mut::<BoxPrimitive>(unrelated).unwrap().centre.x += 1.0;
+        assert_eq!(baseline, native_basis(&world));
+        let opening = find_entity_by_element_id_readonly(&world, ElementId(3)).unwrap();
+        world
+            .get_mut::<BoxPrimitive>(opening)
+            .unwrap()
+            .half_extents
+            .x += 0.2;
+        assert_ne!(
+            baseline.input_fingerprints,
+            native_basis(&world).input_fingerprints
+        );
+        world
+            .get_mut::<BoxPrimitive>(opening)
+            .unwrap()
+            .half_extents
+            .x = 0.2;
+        assert_eq!(baseline, native_basis(&world));
+        // Native host and fill edits invalidate even without published anchors.
+        world.get_mut::<BoxPrimitive>(host).unwrap().centre.x += 0.25;
+        let changed = native_basis(&world);
+        let compatibility = compare_branch_basis(&baseline, &changed, true);
+        assert!(!compatibility.can_reactivate_silently);
+        assert_eq!(compatibility.available_actions, vec!["regenerate"]);
+        world.get_mut::<BoxPrimitive>(host).unwrap().centre.x -= 0.25;
+        assert_eq!(baseline, native_basis(&world));
+        world
+            .get_mut::<OccurrenceIdentity>(fill)
+            .unwrap()
+            .overrides
+            .set("width", serde_json::json!(1.25));
+        assert_ne!(
+            baseline.input_fingerprints,
+            native_basis(&world).input_fingerprints
+        );
+        world
+            .get_mut::<SettingOutContract>(root)
+            .unwrap()
+            .reserved_positive_offset_mm += 10.0;
+        assert_ne!(baseline.setting_out, native_basis(&world).setting_out);
+        // Real JSON bytes retain the new contract and exact native basis.
+        let current = native_basis(&world);
+        let restored: RefinementBranchBasis =
+            serde_json::from_slice(&serde_json::to_vec(&current).unwrap()).unwrap();
+        assert_eq!(current, restored);
+    }
+
+    #[test]
+    fn native_changes_cannot_be_blessed_by_parameter_only_rebase_or_legacy_basis() {
+        use crate::plugins::modeling::primitives::BoxPrimitive;
+        let (mut world, _, host, _) = native_basis_world();
+        let baseline = native_basis(&world);
+        apply_demote_refinement(
+            &mut world,
+            DemoteRefinementRequest {
+                entity_element_id: 1,
+                target_state: RefinementState::Conceptual,
+            },
+        )
+        .unwrap();
+        world.get_mut::<BoxPrimitive>(host).unwrap().centre.x += 0.25;
+        let error = rebase_refinement_branch(
+            &mut world,
+            RefinementBranchRebaseRequest {
+                parent_element_id: 1,
+                child_element_id: 6,
+                current_authored_controls: BTreeMap::new(),
+                new_generator_controls: BTreeMap::new(),
+                confirm_authored_wins: BTreeSet::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("regenerate"));
+        let error = apply_promote_refinement(
+            &mut world,
+            PromoteRefinementRequest {
+                entity_element_id: 1,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                overrides: HashMap::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, PromoteError::StaleRefinementBranch { .. }));
+        let mut legacy = serde_json::to_value(&baseline).unwrap();
+        legacy["schema_version"] = serde_json::json!("refinement-branch-basis.v1");
+        legacy.as_object_mut().unwrap().remove("input_fingerprints");
+        legacy["setting_out"]
+            .as_object_mut()
+            .unwrap()
+            .remove("contract");
+        let legacy: RefinementBranchBasis = serde_json::from_value(legacy).unwrap();
+        let compatibility = compare_branch_basis(&legacy, &baseline, true);
+        assert!(!compatibility.can_reactivate_silently);
+        assert_eq!(compatibility.available_actions, vec!["regenerate"]);
     }
 
     #[test]
