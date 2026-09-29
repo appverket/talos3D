@@ -198,6 +198,104 @@ pub(crate) fn rollback_to_undo_depth(world: &mut World, target_depth: usize) -> 
     rolled_back
 }
 
+/// A synchronous command transaction. Intermediate effects are visible to later
+/// steps, but prior undo/redo history is kept out of reach until acceptance.
+/// Only executors whose effects are entirely represented by EditorCommands may
+/// enter. Pending user work is refused before entry, never drained into the edit.
+pub(crate) struct HistoryTransaction {
+    previous: History,
+    document: Option<crate::plugins::document_state::DocumentState>,
+    next_element_id: Option<u64>,
+}
+
+impl HistoryTransaction {
+    pub(crate) fn begin(world: &mut World) -> Result<Self, String> {
+        if !world.resource::<PendingCommandQueue>().is_empty() {
+            return Err(
+                "pending commands or an open command group must finish before commit".into(),
+            );
+        }
+        let previous = world
+            .remove_resource::<History>()
+            .expect("History installed");
+        let working = History {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            save_point: None,
+            model_revision: previous.model_revision,
+            document_id: previous.document_id.clone(),
+        };
+        // Preserve a save point on another branch of history on abort; a
+        // successful edit invalidates it when that saved future is discarded.
+        let document = world
+            .get_resource::<crate::plugins::document_state::DocumentState>()
+            .cloned();
+        let next_element_id = world
+            .get_resource::<crate::plugins::identity::ElementIdAllocator>()
+            .map(|a| a.next_value());
+        world.insert_resource(working);
+        // Retain the original history itself (commands cannot be cloned).
+        Ok(Self {
+            previous,
+            document,
+            next_element_id,
+        })
+    }
+
+    pub(crate) fn finish(mut self, world: &mut World, accept: bool) {
+        let mut working = world
+            .remove_resource::<History>()
+            .expect("transaction history installed");
+        self.previous.model_revision = working.model_revision;
+        world.insert_resource(History {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            save_point: None,
+            model_revision: working.model_revision,
+            document_id: self.previous.document_id.clone(),
+        });
+        let had_effects = !working.undo_stack.is_empty();
+        if accept && had_effects {
+            if self
+                .previous
+                .save_point
+                .is_some_and(|point| point > self.previous.undo_stack.len())
+            {
+                self.previous.save_point = None;
+            }
+            self.previous.undo_stack.push(Box::new(GroupedCommand {
+                label: "Procedural session",
+                commands: mem::take(&mut working.undo_stack),
+            }));
+            self.previous.redo_stack.clear();
+        } else if !accept {
+            for mut command in working.undo_stack.into_iter().rev() {
+                command.undo(world);
+                self.previous.model_revision = self.previous.model_revision.saturating_add(1);
+            }
+            world.resource_mut::<PendingCommandQueue>().clear();
+            if let (Some(next), Some(mut allocator)) = (
+                self.next_element_id,
+                world.get_resource_mut::<crate::plugins::identity::ElementIdAllocator>(),
+            ) {
+                allocator.set_next(next);
+            }
+            if let Some(document) = self.document {
+                world.insert_resource(document);
+            }
+        }
+        let dirty = !self.previous.at_save_point();
+        world.insert_resource(self.previous);
+        if accept && had_effects {
+            if let Some(mut document) =
+                world.get_resource_mut::<crate::plugins::document_state::DocumentState>()
+            {
+                document.dirty = dirty;
+            }
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct PendingCommandQueue {
     pub commands: Vec<Box<dyn EditorCommand>>,
@@ -206,6 +304,10 @@ pub struct PendingCommandQueue {
 }
 
 impl PendingCommandQueue {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.commands.is_empty() && self.actions.is_empty() && self.open_groups.is_empty()
+    }
+
     pub fn clear(&mut self) {
         self.commands.clear();
         self.actions.clear();
@@ -360,7 +462,7 @@ fn record_refusals(world: &mut World, label: &str, refusals: Vec<Refusal>) {
 ///
 /// Preview reads the same kernel through the same [`evaluate`] call without
 /// pushing a command, so preview and commit cannot diverge (ADR-064 §3.3).
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug, Default, Clone)]
 pub struct SemanticEnforcement {
     /// Refusals from the last drain. Cleared by whoever presents them.
     pub refusals: Vec<Refusal>,

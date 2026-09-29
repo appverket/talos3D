@@ -878,3 +878,38 @@ not the current existence of its output entities. Different commit options or
 another identity are refused after success; further evaluation is also refused.
 For a deliberate rerun, create a new session. Sessions and receipts are transient
 and are not restored by loading a project or restarting the app.
+
+### Procedural commit transaction and validation
+
+The live session executor applies supported commands provisionally, checks real
+postconditions and current whole-document validators/obligations, then accepts
+one history action. A late dispatch error, unmet postcondition, policy refusal,
+or failed inline export rolls back admitted commands and preserves the prior
+undo/redo history, save point, and pending user work. A successful compound
+commit has one undo/redo unit. Rollback advances the revision fence; rebuild a
+failed proposal from the current document before retrying it.
+
+The audited set is `create_box`, `create_entity`, `definition.create`,
+`definition.instantiate`, `occurrence.place`, `set_property`, `model_summary`,
+and `run_validation_v2`. `ProjectRoot` edits apply to new content; `set_property`
+cannot modify a pre-existing element through that scope. Refinement scopes,
+organization-library writes, nested session instructions, and `parametric.create`
+currently return `unsupported_transaction` before any step executes. Their
+native APIs remain available; they need an audited command transaction before
+being admitted to a procedural commit. Pending user commands also refuse commit
+so they cannot be swept into a procedure's rollback or undo group.
+
+Dry-run responses explicitly say `structural_projection_only`. Their stub IDs,
+findings, and bindings are descriptor projections, not a live preview or proof
+of geometric feasibility. The commit receipt identifies `live_model` validation,
+its registered constraint IDs and whole-document scope. No findings does not
+mean unregistered constraints passed or that rendered geometry was reviewed.
+
+`require_clean` rejects live findings and unresolved/deferred obligations.
+`accept_with_waivers` requires exactly identified current findings and non-empty
+rationales; it cannot silently waive outstanding obligations. `accept_partial`
+reports current findings and carries unresolved obligations explicitly. `options.postconditions` supplies additional commit promises and is included
+in the retry identity and accepted script export. Relation
+postconditions inspect real endpoints; claim grounding must match on an
+unambiguous target; obligation satisfaction must refer to the actual output
+entity of the specified step. Missing or ambiguous evidence fails closed.

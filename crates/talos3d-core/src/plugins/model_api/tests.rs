@@ -14381,4 +14381,6 @@ fn discover_curated_paths_definition_routes_use_registered_tools_and_profiles() 
 }
 
 #[cfg(feature = "model-api")]
+mod session_atomic;
+#[cfg(feature = "model-api")]
 mod session_safety;

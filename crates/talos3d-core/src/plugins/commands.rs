@@ -504,6 +504,26 @@ fn queue_end_command_groups(world: &mut World) {
     }
 }
 
+/// Refuse a procedural transaction while any user command event is pending.
+/// These events must not accidentally become part of its rollback/undo group.
+#[cfg(feature = "model-api")]
+pub(crate) fn has_pending_command_events(world: &World) -> bool {
+    macro_rules! pending { ($($ty:ty),*) => { false $(|| world.get_resource::<Messages<$ty>>().is_some_and(|events| !events.is_empty()))* }; }
+    pending!(
+        BeginCommandGroup,
+        EndCommandGroup,
+        CreateEntityCommand,
+        CreateBoxCommand,
+        CreateCylinderCommand,
+        CreateSphereCommand,
+        CreatePlaneCommand,
+        CreatePolylineCommand,
+        CreateTriangleMeshCommand,
+        DeleteEntitiesCommand,
+        ApplyEntityChangesCommand
+    )
+}
+
 #[cfg(feature = "model-api")]
 pub(crate) fn queue_command_events(world: &mut World) {
     queue_begin_command_groups(world);

@@ -9,7 +9,7 @@ use crate::plugins::procedural_session_mcp::{
     SessionCreateRequest, SessionEvalRequest,
 };
 
-fn prepared_world() -> (World, SessionCommitRequest) {
+pub(super) fn prepared_world() -> (World, SessionCommitRequest) {
     let mut world = init_model_api_test_world();
     let mut app = App::new();
     register_model_api_primitive_commands(&mut app);

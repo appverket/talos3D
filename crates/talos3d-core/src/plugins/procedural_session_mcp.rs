@@ -21,6 +21,8 @@
 //! `ModelApiServer` and is added in the same PP. This module is the
 //! transport-neutral substrate it depends on.
 
+mod live_commit;
+
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -134,6 +136,14 @@ impl EditorCommand for SessionStubCommand {
 /// supplied, [`CommandQueueDispatcher`] falls back to a no-op
 /// [`SessionStubCommand`] so the substrate is still exercised end-to-end.
 pub trait SessionStepExecutor {
+    /// Opt-in: every admitted effect must be captured by undoable commands.
+    fn supports_atomic_step(&self, _tool: &McpToolId) -> bool {
+        false
+    }
+    fn prepare_transaction(&self, _world: &World) -> Result<(), String> {
+        Err("Executor has no audited transaction contract".into())
+    }
+
     fn execute(
         &mut self,
         world: &mut World,
@@ -310,28 +320,41 @@ pub fn world_commit_with_executor(
         }
     }
 
-    let step_order: std::collections::VecDeque<StepId> = session
-        .script
-        .steps
-        .iter()
-        .map(|s| s.id().clone())
-        .collect();
-    let oracle = AlwaysPassOracle;
-    let result = {
-        let mut dispatcher = CommandQueueDispatcher {
+    let result = if let Some(executor) = executor {
+        live_commit::commit_live(
             world,
-            session_id: session.id.clone(),
-            step_order,
-            executor,
-        };
-        session_commit(
             &mut session,
             &tool_registry,
             &config,
             req.options,
-            &mut dispatcher,
-            &oracle,
+            executor,
         )
+    } else {
+        // Structural test adapter only. Production MCP always supplies the
+        // audited live executor above; this path has no authored effects.
+        let step_order: std::collections::VecDeque<StepId> = session
+            .script
+            .steps
+            .iter()
+            .map(|s| s.id().clone())
+            .collect();
+        let oracle = AlwaysPassOracle;
+        {
+            let mut dispatcher = CommandQueueDispatcher {
+                world,
+                session_id: session.id.clone(),
+                step_order,
+                executor: None,
+            };
+            session_commit(
+                &mut session,
+                &tool_registry,
+                &config,
+                req.options,
+                &mut dispatcher,
+                &oracle,
+            )
+        }
     };
 
     // Write the updated session state back.

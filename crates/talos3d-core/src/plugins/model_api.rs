@@ -10122,6 +10122,25 @@ pub struct ModelApiStepExecutor;
 
 #[cfg(feature = "model-api")]
 impl crate::plugins::procedural_session_mcp::SessionStepExecutor for ModelApiStepExecutor {
+    fn supports_atomic_step(&self, tool: &crate::curation::McpToolId) -> bool {
+        matches!(
+            tool.as_str(),
+            "create_box"
+                | "create_entity"
+                | "definition.create"
+                | "definition.instantiate"
+                | "occurrence.place"
+                | "set_property"
+                | "model_summary"
+                | "run_validation_v2"
+        )
+    }
+    fn prepare_transaction(&self, world: &World) -> Result<(), String> {
+        if crate::plugins::commands::has_pending_command_events(world) {
+            return Err("Pending user command events must finish before procedural commit".into());
+        }
+        Ok(())
+    }
     fn execute(
         &mut self,
         world: &mut World,

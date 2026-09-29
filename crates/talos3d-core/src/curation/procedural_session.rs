@@ -223,6 +223,10 @@ pub enum EvalMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct DryRunProjection {
+    /// Descriptor-only projection; no live geometry, admissibility, or
+    /// feasibility validation has run. Use commit-time validation and inspect
+    /// the actual result before making design claims.
+    pub evidence_kind: String,
     pub tool: McpToolId,
     pub resolved_args: Map<String, Value>,
     pub stub_response: Value,
@@ -360,9 +364,24 @@ pub struct CarriedOverObligation {
     pub onto_target: Option<Value>,
 }
 
+/// Coverage is explicit: zero live findings do not establish visual quality or
+/// construction correctness beyond the installed validators.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CommitValidationEvidence {
+    DescriptorProjection,
+    LiveModel {
+        registered_constraint_ids: Vec<String>,
+        scope: String,
+        geometry_reviewed: bool,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct CommitReport {
+    pub validation_evidence: CommitValidationEvidence,
     pub session_id: SessionId,
     /// Stable identity of this execution, also returned on every retry.
     pub commit_id: String,
@@ -454,6 +473,12 @@ pub struct ExportedAuthoringScript {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionError {
     UnknownSession(SessionId),
+    UnsupportedTransaction {
+        reason: String,
+    },
+    InvalidWaivers {
+        reason: String,
+    },
     StaleModel {
         expected: crate::plugins::history::ModelRevision,
         actual: crate::plugins::history::ModelRevision,
@@ -510,6 +535,8 @@ pub enum SessionError {
 impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnsupportedTransaction { reason } => write!(f, "unsupported_transaction: {reason}"),
+            Self::InvalidWaivers { reason } => write!(f, "invalid_waivers: {reason}"),
             Self::UnknownSession(s) => write!(f, "unknown session '{}'", s.0),
             Self::StaleModel { expected, actual } => write!(f,
                 "stale_model: proposal was prepared at {}:{}, current model is {}:{}. Create a new session from the current model.",
@@ -1133,6 +1160,7 @@ fn project_single_step(
                 .map(|(_, a)| a)
                 .unwrap_or_default();
             Ok(DryRunProjection {
+                evidence_kind: "structural_projection_only".into(),
                 tool: step.tool.clone(),
                 resolved_args,
                 stub_response,
@@ -1267,6 +1295,10 @@ impl<'a, D: ToolDispatcher> ToolDispatcher for CommitTaggingDispatcher<'a, D> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct CommitOptions {
+    /// Additional promises for this commit; evaluated against the live model.
+    /// Part of the immutable retry identity. Exported with the accepted script.
+    #[serde(default)]
+    pub postconditions: Vec<Postcondition>,
     pub policy: CommitPolicyDe,
     #[serde(default)]
     pub waivers: Vec<Waiver>,
@@ -1313,6 +1345,77 @@ pub struct InlineExportRequest {
     pub metadata: ExportMetadata,
 }
 
+fn check_commit_policy(
+    session: &mut ProceduralSession,
+    options: &CommitOptions,
+) -> Result<(), SessionError> {
+    let policy: CommitPolicy = options.policy.into();
+    let remaining_obligations = session.outstanding_obligations.clone();
+    let remaining_findings = session.findings.clone();
+    match policy {
+        CommitPolicy::RequireClean => {
+            if !remaining_obligations.is_empty() || !remaining_findings.is_empty() {
+                let reason = format!(
+                    "{} obligations + {} findings remain",
+                    remaining_obligations.len(),
+                    remaining_findings.len(),
+                );
+                session.push_audit(AuditEvent::CommitRejected {
+                    policy,
+                    reason: reason.clone(),
+                });
+                return Err(SessionError::CommitNotClean {
+                    remaining_obligations: remaining_obligations.len(),
+                    remaining_findings: remaining_findings.len(),
+                });
+            }
+        }
+        CommitPolicy::AcceptWithWaivers => {
+            if !remaining_obligations.is_empty() {
+                return Err(SessionError::CommitNotClean {
+                    remaining_obligations: remaining_obligations.len(),
+                    remaining_findings: remaining_findings.len(),
+                });
+            }
+            let known: BTreeSet<&str> = remaining_findings.iter().map(|f| f.id.as_str()).collect();
+            let mut unique = BTreeSet::new();
+            for waiver in &options.waivers {
+                if waiver.justification.trim().is_empty()
+                    || !known.contains(waiver.finding_id.as_str())
+                    || !unique.insert(waiver.finding_id.as_str())
+                {
+                    return Err(SessionError::InvalidWaivers {
+                        reason:
+                            "Waivers require one current finding id and a non-empty rationale each"
+                                .into(),
+                    });
+                }
+            }
+            let waiver_ids: BTreeSet<&str> = options
+                .waivers
+                .iter()
+                .map(|w| w.finding_id.as_str())
+                .collect();
+            let missing: Vec<String> = remaining_findings
+                .iter()
+                .filter(|f| !waiver_ids.contains(f.id.as_str()))
+                .map(|f| f.id.clone())
+                .collect();
+            if !missing.is_empty() {
+                session.push_audit(AuditEvent::CommitRejected {
+                    policy,
+                    reason: format!("missing waivers: {}", missing.join(",")),
+                });
+                return Err(SessionError::CommitMissingWaivers { missing });
+            }
+        }
+        CommitPolicy::AcceptPartial => {
+            // Allowed; carry-over recorded below.
+        }
+    }
+    Ok(())
+}
+
 /// Commit the session's accumulated `AuthoringScript` through the
 /// caller-supplied dispatcher. The dispatcher is the live bridge to
 /// `PendingCommandQueue` in the hosting app; tests use a fixture
@@ -1326,6 +1429,34 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
     options: CommitOptions,
     dispatcher: &mut D,
     oracle: &O,
+) -> Result<CommitReport, SessionError> {
+    if session.committed.is_none() {
+        check_commit_policy(session, &options)?;
+    }
+    commit_with_validation(
+        session,
+        registry,
+        config,
+        options,
+        dispatcher,
+        oracle,
+        || Ok(None),
+    )
+}
+
+/// The hosting app supplies live findings/obligations after replay. Policy is
+/// evaluated against that result, before a receipt or export is accepted. The
+/// host owns rollback of replay effects when this function returns an error.
+#[allow(clippy::too_many_arguments)]
+pub fn commit_with_validation<D: ToolDispatcher, O: PostconditionOracle>(
+    session: &mut ProceduralSession,
+    registry: &SessionToolRegistry,
+    config: &ProceduralSessionConfig,
+    options: CommitOptions,
+    dispatcher: &mut D,
+    oracle: &O,
+    validate: impl FnOnce()
+        -> Result<Option<(Vec<SessionFinding>, Vec<SessionObligation>)>, SessionError>,
 ) -> Result<CommitReport, SessionError> {
     if session.closed {
         return Err(SessionError::UnknownSession(session.id.clone()));
@@ -1349,51 +1480,6 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
         });
     }
 
-    // Policy gate.
-    let remaining_obligations = session.outstanding_obligations.clone();
-    let remaining_findings = session.findings.clone();
-    match policy {
-        CommitPolicy::RequireClean => {
-            if !remaining_obligations.is_empty() || !remaining_findings.is_empty() {
-                let reason = format!(
-                    "{} obligations + {} findings remain",
-                    remaining_obligations.len(),
-                    remaining_findings.len(),
-                );
-                session.push_audit(AuditEvent::CommitRejected {
-                    policy,
-                    reason: reason.clone(),
-                });
-                return Err(SessionError::CommitNotClean {
-                    remaining_obligations: remaining_obligations.len(),
-                    remaining_findings: remaining_findings.len(),
-                });
-            }
-        }
-        CommitPolicy::AcceptWithWaivers => {
-            let waiver_ids: BTreeSet<&str> = options
-                .waivers
-                .iter()
-                .map(|w| w.finding_id.as_str())
-                .collect();
-            let missing: Vec<String> = remaining_findings
-                .iter()
-                .filter(|f| !waiver_ids.contains(f.id.as_str()))
-                .map(|f| f.id.clone())
-                .collect();
-            if !missing.is_empty() {
-                session.push_audit(AuditEvent::CommitRejected {
-                    policy,
-                    reason: format!("missing waivers: {}", missing.join(",")),
-                });
-                return Err(SessionError::CommitMissingWaivers { missing });
-            }
-        }
-        CommitPolicy::AcceptPartial => {
-            // Allowed; carry-over recorded below.
-        }
-    }
-
     // Replay the script through a tagging dispatcher that also enforces
     // MutationScope::None against mutating tools.
     let step_order: Vec<StepId> = session
@@ -1405,7 +1491,11 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
     let mut tagger =
         CommitTaggingDispatcher::new(dispatcher, session.id.clone(), registry, step_order.clone());
 
-    let report_result = replay(&session.script, Map::new(), &mut tagger, oracle);
+    let mut committed_script = session.script.clone();
+    committed_script
+        .postconditions
+        .extend(options.postconditions.clone());
+    let report_result = replay(&committed_script, Map::new(), &mut tagger, oracle);
     let tagged = std::mem::take(&mut tagger.tagged);
     let mutation_violations = std::mem::take(&mut tagger.mutation_violations);
     drop(tagger);
@@ -1455,6 +1545,19 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
         return Err(SessionError::MutationOutOfScope { step, reason });
     }
 
+    // Policy gate.
+    let (remaining_findings, remaining_obligations) = validate()?.unwrap_or_else(|| {
+        (
+            session.findings.clone(),
+            session.outstanding_obligations.clone(),
+        )
+    });
+    // Snapshot retains diagnostics from the attempted result on policy refusal;
+    // the host rolls back that candidate, so these are not a current-world cache.
+    session.findings = remaining_findings.clone();
+    session.outstanding_obligations = remaining_obligations.clone();
+    check_commit_policy(session, &options)?;
+
     // Carry-over remaining obligations for AcceptPartial.
     let carried_over = if let CommitPolicy::AcceptPartial = policy {
         remaining_obligations
@@ -1475,6 +1578,7 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
     }
 
     let mut commit_report = CommitReport {
+        validation_evidence: CommitValidationEvidence::DescriptorProjection,
         session_id: session.id.clone(),
         commit_id: session.commit_id.clone(),
         policy,
@@ -1494,6 +1598,8 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
         remaining_obligations: commit_report.remaining_obligations.len(),
         remaining_findings: commit_report.post_commit_findings.len(),
     });
+
+    session.script = committed_script;
 
     // In-line export.
     if let Some(req) = options.export {
@@ -1927,6 +2033,7 @@ mod tests {
                 policy: CommitPolicyDe::AcceptWithWaivers,
                 waivers: vec![],
                 export: None,
+                postconditions: Vec::new(),
             },
             &mut dispatcher,
             &AlwaysPassOracle,
@@ -1946,6 +2053,7 @@ mod tests {
                     justification: "test".into(),
                 }],
                 export: None,
+                postconditions: Vec::new(),
             },
             &mut dispatcher,
             &AlwaysPassOracle,
@@ -1984,6 +2092,7 @@ mod tests {
                 policy: CommitPolicyDe::AcceptPartial,
                 waivers: vec![],
                 export: None,
+                postconditions: Vec::new(),
             },
             &mut dispatcher,
             &AlwaysPassOracle,

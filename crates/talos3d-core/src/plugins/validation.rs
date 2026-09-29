@@ -48,7 +48,7 @@ use crate::plugins::{
 ///
 /// The sweep system replaces the entire per-`(constraint, entity)` entry on
 /// every run — it does not merge.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct Findings {
     /// Primary cache keyed by `(constraint_id, element_id)`.
     pub cache: HashMap<(ConstraintId, u64), Vec<Finding>>,
