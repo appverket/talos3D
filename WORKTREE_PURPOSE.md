@@ -6,4 +6,4 @@
 - task-id: TALOS-maayislm
 - target base: main (217b8fe)
 - summary: Preserve bounded parametric intent in canonical Definition/Occurrence bodies and shared edits; no persisted parallel instance store.
-- status: active
+- status: awaiting-merge
