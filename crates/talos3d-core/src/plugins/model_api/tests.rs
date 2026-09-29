@@ -12228,6 +12228,30 @@ fn install_definition_occurrence_recipe(
 
 #[cfg(feature = "model-api")]
 #[test]
+fn instantiate_recipe_unknown_family_refuses_before_any_authored_effect() {
+    let mut world = init_model_api_test_world();
+    let next_id = world.resource::<ElementIdAllocator>().next_value();
+    let revision = world.resource::<History>().revision_token();
+    let error = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "invented-recipe".into(),
+            target_class: "unclassified".into(),
+            parameters: json!({}),
+            placement: None,
+            target_state: Some("Conceptual".into()),
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("not installed or registered"));
+    assert!(list_entities(&world).is_empty());
+    assert_eq!(world.resource::<ElementIdAllocator>().next_value(), next_id);
+    assert_eq!(world.resource::<History>().revision_token(), revision);
+    assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn instantiate_recipe_can_create_definition_and_bind_reusable_occurrence() {
     use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
     use crate::plugins::modeling::occurrence::OccurrenceIdentity;

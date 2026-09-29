@@ -12722,6 +12722,19 @@ fn handle_instantiate_recipe(
     world: &mut World,
     request: InstantiateRecipeRequest,
 ) -> ApiResult<InstantiateRecipeResult> {
+    let family = crate::capability_registry::RecipeFamilyId(request.family_id.clone());
+    let installed = world
+        .get_resource::<crate::curation::RecipeArtifactRegistry>()
+        .is_some_and(|registry| registry.get_by_family(&family).is_some());
+    let native = world
+        .get_resource::<CapabilityRegistry>()
+        .is_some_and(|registry| registry.recipe_family_descriptor(&family).is_some());
+    if !installed && !native {
+        return Err(format!(
+            "Recipe '{}' is not installed or registered. Use select_recipe/discover_curated_paths for an executable path; draft or unknown recipe IDs cannot create ViaRecipe provenance.",
+            request.family_id
+        ));
+    }
     // The recipe needs intermediate results to place and group its outputs.
     // Isolate that history, then accept one complete edit or restore the prior
     // undo/redo branch on failure. Pending human commands must not join it.
