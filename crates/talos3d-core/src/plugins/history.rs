@@ -101,7 +101,16 @@ struct CommandGroupBuilder {
     commands: Vec<Box<dyn EditorCommand>>,
 }
 
-#[derive(Resource, Default)]
+/// Transient identity of an authored document and its monotonic edit revision.
+/// Replacing a document invalidates proposals even when revision counters match.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct ModelRevision {
+    pub document_id: String,
+    pub revision: u64,
+}
+
+#[derive(Resource)]
 pub struct History {
     undo_stack: Vec<Box<dyn EditorCommand>>,
     redo_stack: Vec<Box<dyn EditorCommand>>,
@@ -111,6 +120,19 @@ pub struct History {
     /// depth this also advances on undo and redo, so an old preview can never
     /// become accidentally current again.
     model_revision: u64,
+    document_id: String,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            save_point: None,
+            model_revision: 0,
+            document_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
 }
 
 impl History {
@@ -124,7 +146,16 @@ impl History {
         self.model_revision
     }
 
+    pub fn revision_token(&self) -> ModelRevision {
+        ModelRevision {
+            document_id: self.document_id.clone(),
+            revision: self.model_revision,
+        }
+    }
+
     pub fn clear(&mut self) {
+        self.document_id = uuid::Uuid::new_v4().to_string();
+        self.model_revision = self.model_revision.saturating_add(1);
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.save_point = None;

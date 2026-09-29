@@ -2305,6 +2305,7 @@ async fn procedural_session_builds_post_and_beam_pavilion_through_mcp() {
     }
     let pure_commit: crate::curation::CommitReport = server
         .procedural_session_commit_tool(Parameters(SessionCommitRequest {
+            commit_id: None,
             session_id: pure_query.session_id.clone(),
             options: crate::curation::CommitOptions::default(),
         }))
@@ -2446,6 +2447,7 @@ async fn procedural_session_builds_post_and_beam_pavilion_through_mcp() {
     //    ModelApiStepExecutor turns each step into a real create_box.
     let commit: crate::curation::CommitReport = server
         .procedural_session_commit_tool(Parameters(SessionCommitRequest {
+            commit_id: None,
             session_id: session_id.clone(),
             options: crate::curation::CommitOptions::default(), // require_clean
         }))
@@ -14377,3 +14379,6 @@ fn discover_curated_paths_definition_routes_use_registered_tools_and_profiles() 
         }
     }
 }
+
+#[cfg(feature = "model-api")]
+mod session_safety;

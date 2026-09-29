@@ -857,3 +857,24 @@ membership; derived normals are regenerated. It does not infer wall/window
 semantics, change topology, or establish a refinement claim. Read the current
 snapshot first and verify unchanged source geometry before applying a prepared
 edit. Use native hosted/parametric edits for semantic architectural entities.
+
+## Procedural session freshness and retries
+
+`procedural_session.create` captures a transient document identity and monotonic
+model revision in `snapshot.base_model_revision`, plus a `commit_id`. Include
+that identity in `procedural_session.commit`. Older clients may omit it; omission
+uses the prepared identity and does not request another execution.
+
+An accepted edit, undo, redo, new document, or project load invalidates an
+uncommitted proposal. Commit refuses before mutation when its captured revision
+is stale. Create a new session from the current model and reevaluate the steps.
+Changing a document back to its previous shape does not make an old proposal
+current again.
+
+Each session has one successful execution. Retrying with the same options
+returns the original receipt, including its `commit_id`, without replay—even
+after undo or document replacement. The receipt describes the original execution,
+not the current existence of its output entities. Different commit options or
+another identity are refused after success; further evaluation is also refused.
+For a deliberate rerun, create a new session. Sessions and receipts are transient
+and are not restored by loading a project or restarting the app.

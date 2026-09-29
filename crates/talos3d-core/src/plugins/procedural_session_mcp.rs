@@ -63,6 +63,10 @@ pub struct SessionSnapshotRequest {
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct SessionCommitRequest {
     pub session_id: SessionId,
+    /// Echo the id from create/snapshot. Omission uses that same prepared id
+    /// for compatibility; it never creates a new execution.
+    #[serde(default)]
+    pub commit_id: Option<String>,
     pub options: CommitOptions,
 }
 
@@ -202,8 +206,14 @@ impl<'w, 'e> ToolDispatcher for CommandQueueDispatcher<'w, 'e> {
 // ---------------------------------------------------------------------
 
 pub fn world_create(world: &mut World, req: SessionCreateRequest) -> SessionCreateResponse {
+    world.init_resource::<super::history::History>();
+    let base = world.resource::<super::history::History>().revision_token();
     let mut registry = world.resource_mut::<ProceduralSessionRegistry>();
     let session_id = registry.create(req.spec);
+    registry
+        .get_mut(&session_id)
+        .expect("created session")
+        .base_model_revision = Some(base);
     let snapshot = registry
         .get_mut(&session_id)
         .expect("session just created")
@@ -271,6 +281,34 @@ pub fn world_commit_with_executor(
             .ok_or_else(|| SessionError::UnknownSession(req.session_id.clone()))?
             .clone()
     };
+
+    if req
+        .commit_id
+        .as_ref()
+        .is_some_and(|id| id != &session.commit_id)
+    {
+        return Err(SessionError::CommitIdentityMismatch {
+            expected: session.commit_id.clone(),
+        });
+    }
+    // Return a successful receipt before checking freshness. A retry after undo
+    // or document replacement must never recreate the committed effects.
+    if let Some((options, receipt)) = &session.committed {
+        return if options == &req.options {
+            Ok(receipt.clone())
+        } else {
+            Err(SessionError::AlreadyCommitted(session.id.clone()))
+        };
+    }
+    if let Some(expected) = &session.base_model_revision {
+        let actual = world.resource::<super::history::History>().revision_token();
+        if expected != &actual {
+            return Err(SessionError::StaleModel {
+                expected: expected.clone(),
+                actual,
+            });
+        }
+    }
 
     let step_order: std::collections::VecDeque<StepId> = session
         .script
@@ -445,6 +483,7 @@ mod tests {
         let commit_report = world_commit(
             app.world_mut(),
             SessionCommitRequest {
+                commit_id: None,
                 session_id: resp.session_id.clone(),
                 options: CommitOptions::default(),
             },
@@ -528,6 +567,7 @@ mod tests {
         let err = world_commit(
             app.world_mut(),
             SessionCommitRequest {
+                commit_id: None,
                 session_id: resp.session_id.clone(),
                 options: CommitOptions::default(),
             },

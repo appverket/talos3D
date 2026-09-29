@@ -364,6 +364,8 @@ pub struct CarriedOverObligation {
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct CommitReport {
     pub session_id: SessionId,
+    /// Stable identity of this execution, also returned on every retry.
+    pub commit_id: String,
     pub policy: CommitPolicy,
     pub steps_run: Vec<StepId>,
     pub steps_skipped: Vec<StepId>,
@@ -452,6 +454,14 @@ pub struct ExportedAuthoringScript {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionError {
     UnknownSession(SessionId),
+    StaleModel {
+        expected: crate::plugins::history::ModelRevision,
+        actual: crate::plugins::history::ModelRevision,
+    },
+    AlreadyCommitted(SessionId),
+    CommitIdentityMismatch {
+        expected: String,
+    },
     UnknownTool {
         tool: McpToolId,
     },
@@ -501,6 +511,11 @@ impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownSession(s) => write!(f, "unknown session '{}'", s.0),
+            Self::StaleModel { expected, actual } => write!(f,
+                "stale_model: proposal was prepared at {}:{}, current model is {}:{}. Create a new session from the current model.",
+                expected.document_id, expected.revision, actual.document_id, actual.revision),
+            Self::AlreadyCommitted(s) => write!(f, "session '{}' already committed; retry with identical options for its receipt, or create a new session for a deliberate rerun", s.0),
+            Self::CommitIdentityMismatch { expected } => write!(f, "commit identity mismatch: expected {expected}; a different id cannot rerun this session"),
             Self::UnknownTool { tool } => {
                 write!(f, "tool '{}' has no descriptor registered", tool.0)
             }
@@ -643,6 +658,11 @@ impl SessionToolRegistry {
 pub struct ProceduralSession {
     pub id: SessionId,
     pub spec: SessionSpec,
+    /// Captured by the world service; substrate-only sessions have no world.
+    pub base_model_revision: Option<crate::plugins::history::ModelRevision>,
+    /// One commit per session. New executions require a new session.
+    pub commit_id: String,
+    pub(crate) committed: Option<(CommitOptions, CommitReport)>,
     /// The accumulated body. Grown by `BindOnly` / `DryRunAndBind` evals.
     pub script: AuthoringScript,
     /// Bindings keyed by `StepId`, capturing dry-run response shapes for
@@ -668,6 +688,9 @@ impl ProceduralSession {
         script.parameter_schema = parameter_schema;
         script.allowed_tools = spec.allowed_tools.clone();
         let mut s = Self {
+            commit_id: uuid::Uuid::new_v4().to_string(),
+            base_model_revision: None,
+            committed: None,
             id,
             spec,
             script,
@@ -713,6 +736,9 @@ impl ProceduralSession {
         SessionSnapshot {
             session_id: self.id.clone(),
             spec: self.spec.clone(),
+            base_model_revision: self.base_model_revision.clone(),
+            commit_id: self.commit_id.clone(),
+            committed: self.committed.is_some(),
             script: self.script.clone(),
             bindings: self.bindings.clone(),
             outstanding_obligations: self.outstanding_obligations.clone(),
@@ -729,6 +755,9 @@ impl ProceduralSession {
 pub struct SessionSnapshot {
     pub session_id: SessionId,
     pub spec: SessionSpec,
+    pub base_model_revision: Option<crate::plugins::history::ModelRevision>,
+    pub commit_id: String,
+    pub committed: bool,
     pub script: AuthoringScript,
     pub bindings: BTreeMap<StepId, Map<String, Value>>,
     pub outstanding_obligations: Vec<SessionObligation>,
@@ -906,6 +935,9 @@ pub fn eval(
 ) -> Result<EvalReport, SessionError> {
     if session.closed {
         return Err(SessionError::UnknownSession(session.id.clone()));
+    }
+    if session.committed.is_some() {
+        return Err(SessionError::AlreadyCommitted(session.id.clone()));
     }
     let started = Instant::now();
 
@@ -1298,6 +1330,14 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
     if session.closed {
         return Err(SessionError::UnknownSession(session.id.clone()));
     }
+    if let Some((original_options, receipt)) = &session.committed {
+        return if original_options == &options {
+            Ok(receipt.clone())
+        } else {
+            Err(SessionError::AlreadyCommitted(session.id.clone()))
+        };
+    }
+    let receipt_options = options.clone();
     let policy: CommitPolicy = options.policy.into();
     // Quota gate.
     if session.cumulative_eval >= config.per_session_wall_clock {
@@ -1436,6 +1476,7 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
 
     let mut commit_report = CommitReport {
         session_id: session.id.clone(),
+        commit_id: session.commit_id.clone(),
         policy,
         steps_run: report.steps_run,
         steps_skipped: report.steps_skipped,
@@ -1460,6 +1501,7 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
         commit_report.export_handle = Some(handle);
     }
 
+    session.committed = Some((receipt_options, commit_report.clone()));
     Ok(commit_report)
 }
 

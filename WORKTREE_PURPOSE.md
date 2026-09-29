@@ -6,6 +6,6 @@
 - task-id: TALOS-rvwsswvw; TALOS-uynfsnun follows
 - target base: main (stacked on core MCP contract PR46)
 - summary: Fence procedural commits and make admitted effects atomic and truthfully validated.
-- status: active
+- status: awaiting-merge
 
 Live assignment and handoff authority: Fiberplane.
