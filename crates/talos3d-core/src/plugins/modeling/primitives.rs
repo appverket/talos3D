@@ -995,7 +995,9 @@ fn box_mesh_with_physical_uvs(size: Vec3) -> Mesh {
         positions.extend(corners);
         normals.extend([normal; 4]);
         uvs.extend([[0.0, 0.0], [width, 0.0], [width, height], [0.0, height]]);
-        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        // The physical-UV corner order runs clockwise from outside. Reverse
+        // the triangles to match the outward shading normals and Bevy culling.
+        indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
     };
 
     push_face(
@@ -1193,6 +1195,40 @@ mod tests {
         assert_eq!(uvs[1], [4.0, 0.0]);
         assert_eq!(uvs[2], [4.0, 3.0]);
         assert_eq!(uvs[3], [0.0, 3.0]);
+    }
+
+    #[test]
+    fn every_box_triangle_faces_outward_and_matches_its_shading_normal() {
+        use bevy::mesh::VertexAttributeValues;
+        for size in [Vec3::ONE, Vec3::new(2.0, 3.0, 4.0)] {
+            let mesh = box_mesh_with_physical_uvs(size);
+            let Some(VertexAttributeValues::Float32x3(positions)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("positions");
+            };
+            let Some(VertexAttributeValues::Float32x3(normals)) =
+                mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+            else {
+                panic!("normals");
+            };
+            let Some(Indices::U32(indices)) = mesh.indices() else {
+                panic!("indices");
+            };
+            assert_eq!(indices.len(), 36);
+            for triangle in indices.chunks_exact(3) {
+                let [a, b, c] = [triangle[0], triangle[1], triangle[2]]
+                    .map(|i| Vec3::from(positions[i as usize]));
+                let outward = (b - a).cross(c - a).normalize();
+                assert!(
+                    outward.dot((a + b + c) / 3.0) > 0.0,
+                    "triangle {triangle:?} must be visible from outside the solid"
+                );
+                for index in triangle {
+                    assert!(outward.dot(Vec3::from(normals[*index as usize])) > 0.999);
+                }
+            }
+        }
     }
 
     #[test]
