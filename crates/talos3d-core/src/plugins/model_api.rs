@@ -9074,6 +9074,7 @@ pub fn prepare_occurrence_override_request(
         &mut after_snapshots,
     )?;
     Ok(EditPlanDraft {
+        source_artifacts: Vec::new(),
         context: PlanContext {
             planner_id: "core.occurrence_parameters".into(),
             planner_version: 1,
@@ -10943,6 +10944,7 @@ fn apply_captured_plan_and_flush(
 /// authored entity factories. Call once per app composition.
 pub fn register_model_api_edit_requests(world: &mut World) {
     world.init_resource::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>();
+    crate::plugins::foreign_source::register_requests(world);
     world.resource_mut::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>()
         .register(crate::plugins::authored_edit_plan::requests::EditRequestDescriptor::new(
             "core.occurrence_parameters", 1,
@@ -10982,6 +10984,7 @@ pub fn register_model_api_edit_requests(world: &mut World) {
                     ensure_user_editable_entity(world, id, "semantically edited")?;
                 }
                 Ok(crate::plugins::authored_edit_plan::modifiers::EditPlanDraft {
+                    source_artifacts: Vec::new(),
                     context: crate::plugins::authored_edit_plan::PlanContext {
                         planner_id: "core.semantic".into(), planner_version: 1,
                         request_kind: "core.semantic".into(), mutation_scope: "semantic components".into(),

@@ -1417,6 +1417,7 @@ pub fn prepare_transform_edit(
     after: Vec<BoxedEntity>,
 ) -> EditPlanDraft {
     let mut draft = EditPlanDraft {
+        source_artifacts: Vec::new(),
         context: PlanContext {
             planner_id: "core.transform".into(),
             planner_version: 1,

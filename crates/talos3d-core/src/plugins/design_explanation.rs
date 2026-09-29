@@ -486,6 +486,14 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
             }
         }
     }
+    for note in crate::plugins::foreign_source::explanation_notes(world, entity.id()) {
+        let (section, row) = match note {
+            ExplanationNote::Source(row) => (&mut source, row),
+            ExplanationNote::Evidence(row) => (&mut evidence, row),
+            ExplanationNote::Unresolved(row) => (&mut unresolved, row),
+        };
+        section.add(row.label, row.text, row.details);
+    }
     if let Some(providers) = world.get_resource::<DesignExplanationProviders>() {
         for provider in providers.entries.values() {
             for note in provider(world, entity.id()) {

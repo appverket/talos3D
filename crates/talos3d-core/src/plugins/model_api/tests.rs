@@ -14761,3 +14761,6 @@ fn inspector_control_actions_use_captured_occurrence_plan_and_refuse_stale_input
         "changing selection clears unfinished edits"
     );
 }
+
+#[cfg(feature = "model-api")]
+mod foreign_source;

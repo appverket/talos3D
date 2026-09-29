@@ -5749,6 +5749,22 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "get_foreign_sources",
+        description = "Inspect retained foreign source manifests, producer/release/license assertions and typed import losses. Supply a digest and include_bytes=true for exact retained input bytes (max 64 KiB). Read-only; native interpretation requires a reviewed edit plan."
+    )]
+    pub(super) async fn get_foreign_sources_tool(
+        &self,
+        Parameters(request): Parameters<crate::plugins::foreign_source::GetForeignSourcesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .round_trip(|response| ModelApiRequest::GetForeignSources { request, response })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
         name = "explain_design",
         description = "Explain one element's controls, recorded creation, direct dependencies, evidence and unresolved choices. Same bounded read projection as the property inspector; includes model revision, omitted counts and last validation sweep. Evidence presence is not proof of applicability. Refresh after changes; does not perform edits or validation."
     )]

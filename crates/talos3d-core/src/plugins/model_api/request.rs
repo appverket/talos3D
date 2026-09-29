@@ -21,6 +21,10 @@ pub(super) enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<Option<serde_json::Value>>,
     },
+    GetForeignSources {
+        request: crate::plugins::foreign_source::GetForeignSourcesRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     ExplainDesign {
         element_id: u64,
         response: oneshot::Sender<ApiResult<crate::plugins::design_explanation::DesignExplanation>>,
@@ -1264,6 +1268,11 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             response,
         } => {
             let _ = response.send(get_entity_snapshot(world, ElementId(element_id)));
+        }
+        ModelApiRequest::GetForeignSources { request, response } => {
+            let _ = response.send(crate::plugins::foreign_source::inspect_sources(
+                world, request,
+            ));
         }
         ModelApiRequest::ExplainDesign {
             element_id,

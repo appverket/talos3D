@@ -21,6 +21,7 @@ impl<'a> EditModifierRequest<'a> {
 /// Mutable only during planning. Publication captures its final contents in
 /// the single immutable `AuthoredEditPlan` carrier.
 pub struct EditPlanDraft {
+    pub source_artifacts: Vec<crate::plugins::foreign_source::SourceArtifactChange>,
     pub context: PlanContext,
     pub before: Vec<BoxedEntity>,
     pub after: Vec<BoxedEntity>,
@@ -41,7 +42,8 @@ impl EditPlanDraft {
             self.before,
             self.after,
             self.semantic_intents,
-        )
+        )?
+        .with_source_artifacts(world, self.source_artifacts)
     }
 }
 
@@ -183,6 +185,7 @@ mod tests {
         assert!(registry.register(modifier("generic-a", 0, "test")).is_err());
         world.insert_resource(registry);
         let mut draft = EditPlanDraft {
+            source_artifacts: Vec::new(),
             context: Default::default(),
             before: vec![],
             after: vec![],
@@ -254,6 +257,7 @@ mod tests {
         let mut samples = Vec::new();
         for _ in 0..250 {
             let mut draft = EditPlanDraft {
+                source_artifacts: Vec::new(),
                 context: Default::default(),
                 before: snapshots.clone(),
                 after: snapshots.clone(),

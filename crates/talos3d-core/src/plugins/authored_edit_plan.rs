@@ -57,6 +57,7 @@ pub struct AuthoredEditPlan {
     removed_ids: Vec<ElementId>,
     semantic_intents: SemanticPlan,
     semantic_changes: Vec<semantic_state::Change>,
+    source_artifacts: Vec<super::foreign_source::SourceArtifactChange>,
     semantic_refusals: Vec<Value>,
     can_commit: bool,
     /// Content fingerprint, independent of the immutable candidate identity.
@@ -175,6 +176,7 @@ impl AuthoredEditPlan {
             removed_ids: old.difference(&new).copied().collect(),
             semantic_intents,
             semantic_changes: Vec::new(),
+            source_artifacts: Vec::new(),
             semantic_refusals: Vec::new(),
             can_commit: true,
             digest: String::new(),
@@ -217,6 +219,30 @@ impl AuthoredEditPlan {
         Ok(plan)
     }
 
+    /// Attach validated immutable project assets before publishing this carrier.
+    pub fn with_source_artifacts(
+        mut self,
+        world: &World,
+        changes: Vec<super::foreign_source::SourceArtifactChange>,
+    ) -> Result<Self, PlanError> {
+        if changes.is_empty() {
+            return Ok(self);
+        }
+        super::foreign_source::validate_changes(world, &changes)
+            .map_err(PlanError::InvalidSnapshots)?;
+        self.source_artifacts = changes;
+        let encoded = serde_json::to_vec(&self.content())
+            .map_err(|e| PlanError::InvalidSnapshots(e.to_string()))?;
+        self.retained_bytes = encoded.len()
+            + self
+                .source_artifacts
+                .iter()
+                .map(|c| c.retained_bytes())
+                .sum::<usize>();
+        self.digest = blake3::hash(&encoded).to_hex().to_string();
+        Ok(self)
+    }
+
     /// Normalized digest input. Snapshot application order remains captured in
     /// the carrier; the digest preserves it because dependency order matters.
     pub fn content(&self) -> Value {
@@ -224,6 +250,7 @@ impl AuthoredEditPlan {
             "context":self.context,"before":self.before_snapshots.iter().map(BoxedEntity::to_json).collect::<Vec<_>>(),
             "after":self.after_snapshots.iter().map(BoxedEntity::to_json).collect::<Vec<_>>(),
             "semantic_intents":self.semantic_intents,"semantic_changes":self.semantic_changes,
+            "source_artifact_changes":self.source_artifacts.iter().map(|c|c.manifest()).collect::<Vec<_>>(),
             "semantic_refusals":self.semantic_refusals,"can_commit":self.can_commit})
     }
 
@@ -266,6 +293,15 @@ impl AuthoredEditPlan {
         {
             return Some(refusal(
                 "The captured semantic before-state no longer matches the model.",
+            ));
+        }
+        if self
+            .source_artifacts
+            .iter()
+            .any(|change| !change.matches_before(world))
+        {
+            return Some(refusal(
+                "The captured foreign source before-state no longer matches the model.",
             ));
         }
         for id in &self.created_ids {
@@ -514,6 +550,9 @@ impl EditorCommand for CapturedPlanCommand {
         self.0.semantic_intents.clone()
     }
     fn apply(&mut self, world: &mut World) {
+        for change in &self.0.source_artifacts {
+            change.apply(world, false);
+        }
         apply_snapshots(world, &self.0.after_snapshots, &self.0.before_snapshots);
         for change in &self.0.semantic_changes {
             change.apply(world, false);
@@ -522,6 +561,9 @@ impl EditorCommand for CapturedPlanCommand {
     fn undo(&mut self, world: &mut World) {
         apply_snapshots(world, &self.0.before_snapshots, &self.0.after_snapshots);
         for change in &self.0.semantic_changes {
+            change.apply(world, true);
+        }
+        for change in &self.0.source_artifacts {
             change.apply(world, true);
         }
     }

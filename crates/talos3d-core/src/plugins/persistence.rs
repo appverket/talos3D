@@ -242,6 +242,8 @@ pub struct OpaquePersistedEntities(pub Vec<PersistedEntityRecord>);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ProjectFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    foreign_sources: Option<crate::plugins::foreign_source::SourceArtifacts>,
     version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_by: Option<ProjectCreatedBy>,
@@ -553,6 +555,7 @@ pub fn new_document(world: &mut World) {
     }
     world.insert_resource(props);
     world.insert_resource(OpaquePersistedEntities::default());
+    world.insert_resource(crate::plugins::foreign_source::SourceArtifacts::default());
     world.insert_resource(LayerRegistry::default());
     world.insert_resource(ObjectVisibility::default());
     world.insert_resource(DocumentVisibility::default());
@@ -1061,6 +1064,10 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     });
 
     Ok(ProjectFile {
+        foreign_sources: world
+            .get_resource::<crate::plugins::foreign_source::SourceArtifacts>()
+            .filter(|a| !a.0.is_empty())
+            .cloned(),
         version: PROJECT_FILE_VERSION,
         created_by: Some(current_project_created_by()),
         next_element_id: world.resource::<ElementIdAllocator>().next_value(),
@@ -1101,7 +1108,32 @@ pub(crate) fn serialize_entity_records_as_project(
     let lighting = world.get_resource::<SceneLightingSettings>().cloned();
     let (materials, textures) = referenced_project_materials(world, &entities);
 
+    let referenced_digests: BTreeSet<String> = entities
+        .iter()
+        .filter_map(|e| {
+            let link = e
+                .data
+                .pointer("/TriangleMesh/semantic_shadow/source/retained_source/digest")
+                .or_else(|| {
+                    e.data
+                        .pointer("/identity/foreign_interpretation/source/digest")
+                });
+            link.and_then(Value::as_str).map(str::to_owned)
+        })
+        .collect();
+    let foreign_sources = world
+        .get_resource::<crate::plugins::foreign_source::SourceArtifacts>()
+        .map(|a| {
+            crate::plugins::foreign_source::SourceArtifacts(
+                a.0.iter()
+                    .filter(|(d, _)| referenced_digests.contains(*d))
+                    .map(|(d, a)| (d.clone(), a.clone()))
+                    .collect(),
+            )
+        })
+        .filter(|a| !a.0.is_empty());
     let project = ProjectFile {
+        foreign_sources,
         version: PROJECT_FILE_VERSION,
         created_by: Some(current_project_created_by()),
         next_element_id,
@@ -1268,6 +1300,13 @@ pub(crate) fn deserialize_project_entity_records_with_assets(
         project.created_by.as_ref(),
         "linked model project",
     )?;
+    if project
+        .foreign_sources
+        .as_ref()
+        .is_some_and(|a| !a.0.is_empty())
+    {
+        return Err("Linked-model import of retained foreign sources requires an asset migration; open this project normally to preserve its source context".into());
+    }
     Ok(ProjectEntityRecords {
         entities: project.entities,
         materials: project.materials,
@@ -1277,6 +1316,7 @@ pub(crate) fn deserialize_project_entity_records_with_assets(
 
 fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     let ProjectFile {
+        foreign_sources,
         version,
         created_by,
         mut next_element_id,
@@ -1299,6 +1339,8 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     } = project;
 
     validate_project_header(version, created_by.as_ref(), "project")?;
+    let foreign_sources = foreign_sources.unwrap_or_default();
+    foreign_sources.validate()?;
 
     let had_lighting = lighting.is_some();
     let registry = world.resource::<CapabilityRegistry>();
@@ -1308,6 +1350,19 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     let mut legacy_section_views = Vec::new();
 
     for mut record in entities {
+        let source_link = record
+            .data
+            .pointer("/TriangleMesh/semantic_shadow/source/retained_source/digest")
+            .or_else(|| {
+                record
+                    .data
+                    .pointer("/identity/foreign_interpretation/source/digest")
+            });
+        if let Some(digest) = source_link.and_then(Value::as_str) {
+            if !foreign_sources.0.contains_key(digest) {
+                return Err(format!("Retained source artifact {digest} is missing"));
+            }
+        }
         upgrade_legacy_entity_record(&mut record, &mut next_element_id);
         if matches!(record.type_name.as_str(), "dimension_line" | "clip_plane") {
             ensure_metadata_record_element_id(&mut record.data, &mut next_element_id);
@@ -1329,6 +1384,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
 
     clear_scene(world);
+    world.insert_resource(foreign_sources);
 
     let doc_props = match document_properties {
         Some(props) => props,
@@ -1858,6 +1914,7 @@ mod tests {
         let recovery_path = temp.path().join("autosave-session.talos3d");
         let original_path = temp.path().join("original.talos3d");
         let project = ProjectFile {
+            foreign_sources: None,
             version: PROJECT_FILE_VERSION,
             created_by: Some(current_project_created_by()),
             next_element_id: 1,
@@ -2016,6 +2073,7 @@ mod tests {
         load_project(
             &mut world,
             ProjectFile {
+                foreign_sources: None,
                 version: PROJECT_FILE_VERSION,
                 created_by: Some(current_project_created_by()),
                 next_element_id: 1,
@@ -2466,6 +2524,7 @@ mod tests {
         let error = load_project(
             &mut world,
             ProjectFile {
+                foreign_sources: None,
                 version: 1,
                 created_by: None,
                 next_element_id: 1,
@@ -2499,6 +2558,7 @@ mod tests {
         let error = load_project(
             &mut world,
             ProjectFile {
+                foreign_sources: None,
                 version: PROJECT_FILE_VERSION,
                 created_by: None,
                 next_element_id: 1,
@@ -2532,6 +2592,7 @@ mod tests {
         let error = load_project(
             &mut world,
             ProjectFile {
+                foreign_sources: None,
                 version: PROJECT_FILE_VERSION,
                 created_by: Some(ProjectCreatedBy {
                     format_tag: "pre-adr049".to_string(),
@@ -2585,6 +2646,7 @@ mod tests {
             semantic: None,
         };
         let project = ProjectFile {
+            foreign_sources: None,
             version: PROJECT_FILE_VERSION,
             created_by: Some(current_project_created_by()),
             next_element_id: 43,
@@ -2640,6 +2702,7 @@ mod tests {
 
         let model_center = Vec3::new(20.0, 5.0, -7.0);
         let project = ProjectFile {
+            foreign_sources: None,
             version: PROJECT_FILE_VERSION,
             created_by: Some(current_project_created_by()),
             next_element_id: 43,
@@ -3296,6 +3359,7 @@ mod tests {
         world.insert_resource(NextState::<ActiveTool>::default());
 
         let project = ProjectFile {
+            foreign_sources: None,
             version: PROJECT_FILE_VERSION,
             created_by: Some(current_project_created_by()),
             next_element_id: 100,

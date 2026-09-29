@@ -112,6 +112,9 @@ impl HostedOccurrenceContext {
 
 #[derive(Debug, Clone, Component, Serialize, Deserialize)]
 pub struct OccurrenceIdentity {
+    /// Explicit foreign-input interpretation; never recovered source intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreign_interpretation: Option<crate::plugins::foreign_source::NativeInterpretation>,
     /// The definition this occurrence instantiates.
     pub definition_id: DefinitionId,
     /// The definition version this occurrence was last evaluated against.
@@ -142,6 +145,7 @@ impl OccurrenceIdentity {
         Self {
             definition_id,
             definition_version,
+            foreign_interpretation: None,
             overrides: OverrideMap::default(),
             material_override: None,
             domain_data: Value::Null,
@@ -2002,10 +2006,18 @@ pub fn validate_occurrence_geometry(
     registry: &DefinitionRegistry,
     identity: &OccurrenceIdentity,
 ) -> Result<(), String> {
+    occurrence_geometry_part_count(registry, identity).map(|_| ())
+}
+
+/// Same pure body preflight, with a count for callers that require visible content.
+pub fn occurrence_geometry_part_count(
+    registry: &DefinitionRegistry,
+    identity: &OccurrenceIdentity,
+) -> Result<usize, String> {
     let definition = registry.effective_definition(&identity.definition_id)?;
     let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
     let state = evaluate_definition_state(&definition, &resolved)?;
-    build_extrusion(&definition, &state, Vec3::ZERO)?;
+    let root_count = usize::from(build_extrusion(&definition, &state, Vec3::ZERO)?.is_some());
     let mut parts = Vec::new();
     if let Some(compound) = &definition.body.compound {
         for slot in &compound.child_slots {
@@ -2024,7 +2036,7 @@ pub fn validate_occurrence_geometry(
             )?;
         }
     }
-    Ok(())
+    Ok(root_count + parts.len())
 }
 
 fn mesh_cache_key_for_definition(

@@ -1096,3 +1096,45 @@ Domain capabilities can register bounded, read-only `DesignExplanationProviders`
 to project source context, evidence and unresolved limits from their existing
 registries. These notes feed the same inspector/MCP explanation; they do not
 promote instance refinement, manufacture obligations, or persist another graph.
+
+### Retained foreign inputs and native interpretation
+
+`list_edit_requests` exposes two bounded, provider-independent requests:
+
+- `core.foreign_reference`: exact input bytes (1..65536), source name, format and
+  release, producer/version, license/provenance, and explicit length unit,
+  right-handed Y-up or Z-up frame, world translation in metres and unit quaternion.
+  The OBJ adapter proposes reference meshes with typed degradation records. It
+  reports loss of editable history, native semantics, materials/UV and precision;
+  unsupported records and fan triangulation are explicit. Unsupported formats or
+  adapter failures propose source-only retention without partial geometry.
+- `core.foreign_native_mapping`: one unconnected reference element, an already
+  registered native Definition, explicit overrides and world placement, rationale
+  and unresolved assumptions. Acceptance replaces only that part with a native
+  occurrence. It retains the original source and other parts. This is a new native
+  interpretation; it does not recover foreign intent or establish refinement.
+  Connected/claimed/linked or layered references require a future capability-owned
+  migration and are refused by this bounded path.
+
+Both requests use `preview_edit_plan`, `inspect_edit_plan` and `apply_edit_plan`.
+Discarding a preview leaves the document unchanged. Apply is atomic with source
+retention, is history-backed, and rejects stale or consumed plans. Undo restores
+references and removes sources created by the undone import; redo restores the
+captured content. Sources already present are immutable, and conflicting provenance
+for the same bytes is refused rather than overwritten.
+
+`get_foreign_sources` lists manifests and adapter assessments. For exact retained
+input, provide one `digest` with `include_bytes:true`. Source bytes are BLAKE3
+addressed project assets (128 artifacts / 4 MiB total), persisted in `.talos3d`;
+no original file or provider is needed after reload. Digests and source links are
+validated before replacing the open document. This slice does not implement a
+foreign component lifecycle, general vendor/IFC adapters or released Definition
+package identity. `explain_design` and the inspector expose the same source links,
+interpretation rationale and uncertainty.
+
+Linked-model import of a project containing retained foreign sources is explicitly
+gated until the linked asset migration exists. Open that project normally to
+preserve its context. Subset export includes referenced artifacts; it omits
+unrelated project inputs. Plans that reuse an existing source capture an unchanged
+before/after resource condition, so legacy writers cannot silently change their
+source context between preview and apply.

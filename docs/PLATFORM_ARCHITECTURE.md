@@ -116,7 +116,7 @@ distinct ID, document/revision fence, and content digest. `AuthoringScript`
 remains the durable procedural representation; plans are not project data.
 
 `HistoryPlugin` installs a bounded registry (64 candidates and 64 interactions;
-4 MiB serialized content per candidate and per interaction's original snapshots).
+4 MiB per candidate, including retained source bytes, and 4 MiB per interaction's original snapshots).
 An interaction retains its initial revision and originals while replacing its
 active candidate. Cancellation, eviction and consumption remove access by ID;
 republishing recovered content creates a new identity. New interactions release
@@ -129,7 +129,8 @@ immediately before mutation and runs the shared semantic admissibility kernel.
 A successful candidate applies its captured snapshots as one undoable command;
 redo uses the same content. Snapshot implementations own their authored fields
 and dependency ordering. Retyping needs an explicit capability migration;
-arbitrary resource or library writes are outside this snapshot carrier.
+typed retained-source changes are a bounded project-resource extension. Arbitrary
+resource or library writes remain outside this carrier.
 
 The shared modifier stage merges capability callbacks and the existing transform
 callbacks by descending priority, with stable registration order inside each
@@ -166,3 +167,14 @@ from existing authored components, Definition parameter resolution, recorded
 dependencies and validation. The property inspector and MCP consume this one
 projection. It is never persisted as another source graph, does not infer missing
 provenance, and cannot execute edits from explanation prose.
+
+Retained foreign inputs live in `plugins::foreign_source::SourceArtifacts`, a
+bounded project asset collection of immutable BLAKE3-addressed bytes, source
+assertions and adapter assessments. They are not reusable components. Reference
+meshes carry typed source-part/unit/frame links; accepted native occurrences carry
+an explicit interpretation record and uncertainty. Definition/Occurrence remains
+the native component authority. The existing AuthoredEditPlan includes typed
+before/after source-resource changes in its digest, memory budget, freshness checks
+and atomic history application. No sibling import transaction or durable procedural
+IR is introduced. Original bytes and source-only adapter failures survive project
+persistence independently of providers.

@@ -34,6 +34,7 @@ pub mod elevation_profile;
 pub mod entity_labels;
 pub mod export_fidelity;
 pub mod face_edit;
+pub mod foreign_source;
 pub mod grid;
 pub mod grounding_gate;
 pub mod guide_line;
