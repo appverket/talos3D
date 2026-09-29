@@ -20,6 +20,8 @@ pub mod linked_model;
 pub mod mesh_generation;
 pub mod mirror;
 pub mod occurrence;
+pub mod parametric_definition;
+mod polygon_evaluator;
 pub mod primitive_trait;
 pub mod primitives;
 pub mod profile;

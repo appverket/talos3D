@@ -8978,6 +8978,7 @@ fn build_occurrence_snapshot_for_place(
     {
         let registry = world.resource::<DefinitionRegistry>();
         registry.validate_overrides(&identity.definition_id, &identity.overrides)?;
+        crate::plugins::modeling::occurrence::validate_occurrence_geometry(registry, &identity)?;
     }
 
     let label = obj
@@ -9012,76 +9013,79 @@ pub fn handle_update_occurrence_overrides(
     element_id: u64,
     overrides: Value,
 ) -> ApiResult<Value> {
-    use crate::plugins::commands::enqueue_apply_entity_changes;
-    use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+    use crate::plugins::{authored_edit_plan::AuthoredEditPlanRegistry, history::History};
+    crate::plugins::authored_edit_plan::requests::ensure_authored_base(world)?;
+    let draft = prepare_occurrence_override_request(world, element_id, overrides)?;
+    let result = draft.after[0].to_json();
+    let plan = draft
+        .capture(world, None, world.resource::<History>().revision_token())
+        .map_err(|error| error.to_string())?;
+    let plan = world
+        .resource_mut::<AuthoredEditPlanRegistry>()
+        .publish(plan)
+        .map_err(|error| error.to_string())?;
+    apply_captured_plan_and_flush(world, &plan)?;
+    Ok(result)
+}
 
+#[cfg(feature = "model-api")]
+pub fn prepare_occurrence_override_request(
+    world: &World,
+    element_id: u64,
+    overrides: Value,
+) -> Result<crate::plugins::authored_edit_plan::modifiers::EditPlanDraft, String> {
+    use crate::plugins::{
+        authored_edit_plan::{modifiers::EditPlanDraft, PlanContext},
+        modeling::{
+            definition::DefinitionRegistry,
+            occurrence::{validate_occurrence_geometry, OccurrenceSnapshot},
+        },
+    };
     let eid = ElementId(element_id);
-
-    // Capture before snapshot
+    ensure_user_editable_entity(world, eid, "edited")?;
+    let map = overrides
+        .as_object()
+        .ok_or("Occurrence overrides must be an object")?;
+    if map.is_empty() || map.len() > 128 {
+        return Err("Supply between 1 and 128 occurrence overrides".into());
+    }
     let before = capture_entity_snapshot(world, eid)
         .ok_or_else(|| format!("Entity {element_id} not found"))?;
-
-    // Verify it is an occurrence
-    let mut q = world.try_query::<EntityRef>().unwrap();
-    let has_identity = q
-        .iter(world)
-        .find(|e| e.get::<ElementId>().copied() == Some(eid))
-        .map(|e| e.get::<OccurrenceIdentity>().is_some())
-        .unwrap_or(false);
-    drop(q);
-
-    if !has_identity {
-        return Err(format!("Entity {element_id} is not an occurrence"));
-    }
-
-    // Apply overrides through the AuthoredEntity set_property_json pathway for each key.
-    let mut after = before.clone();
-    if let Some(map) = overrides.as_object() {
-        for (k, v) in map {
-            after = after
-                .set_property_json(k, v)
-                .map_err(|e| format!("Failed to set '{k}': {e}"))?;
-        }
-    }
-
-    if let Some(snapshot) = after
+    let mut next = before
         .0
         .as_any()
-        .downcast_ref::<crate::plugins::modeling::occurrence::OccurrenceSnapshot>()
-    {
-        let registry = world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
-        registry.validate_overrides(
-            &snapshot.identity.definition_id,
-            &snapshot.identity.overrides,
-        )?;
-    }
-
-    let after_json = after.to_json();
-    let mut before_snapshots = vec![before];
-    let mut after_snapshots = vec![after];
-    let occurrence_after = after_snapshots
-        .first()
-        .ok_or_else(|| "Updated occurrence snapshot missing".to_string())?
+        .downcast_ref::<OccurrenceSnapshot>()
+        .ok_or_else(|| format!("Entity {element_id} is not an occurrence"))?
         .clone();
+    for (name, value) in map {
+        next.identity.overrides.set(name.clone(), value.clone());
+    }
+    let registry = world.resource::<DefinitionRegistry>();
+    registry.validate_overrides(&next.identity.definition_id, &next.identity.overrides)?;
+    validate_occurrence_geometry(registry, &next.identity)?;
+    let after: BoxedEntity = next.into();
+    let mut before_snapshots = vec![before];
+    let mut after_snapshots = vec![after.clone()];
     append_host_opening_sync_snapshots(
         world,
         eid,
-        &occurrence_after,
+        &after,
         &mut before_snapshots,
         &mut after_snapshots,
     )?;
-
-    enqueue_apply_entity_changes(
-        world,
-        ApplyEntityChangesCommand {
-            label: "Update occurrence overrides",
-            before: before_snapshots,
-            after: after_snapshots,
+    Ok(EditPlanDraft {
+        context: PlanContext {
+            planner_id: "core.occurrence_parameters".into(),
+            planner_version: 1,
+            request_kind: "core.occurrence_parameters".into(),
+            mutation_scope: "occurrence controls and dependent openings".into(),
+            intent: "Edit occurrence parameters".into(),
+            ..Default::default()
         },
-    );
-
-    flush_model_api_write_pipeline(world);
-    Ok(after_json)
+        before: before_snapshots,
+        after: after_snapshots,
+        semantic_intents: crate::semantics::SemanticPlan::none(),
+    })
 }
 
 #[cfg(feature = "model-api")]
@@ -9625,6 +9629,10 @@ pub fn handle_explain_occurrence(
         resolved_parameters: serde_json::to_value(resolved).unwrap_or(Value::Null),
         anchors,
         generated_parts,
+        evaluation_error: crate::plugins::modeling::occurrence::validate_occurrence_geometry(
+            registry, &identity,
+        )
+        .err(),
     })
 }
 
@@ -10937,6 +10945,19 @@ pub fn register_model_api_edit_requests(world: &mut World) {
     world.init_resource::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>();
     world.resource_mut::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>()
         .register(crate::plugins::authored_edit_plan::requests::EditRequestDescriptor::new(
+            "core.occurrence_parameters", 1,
+            "Preview typed Definition occurrence control edits, complete body evaluation and dependent openings. Apply the captured plan_id; unknown, locked, invalid or stale edits are refused.",
+            json!({"type":"object", "required":["element_id","overrides"], "additionalProperties":false,
+                "properties":{"element_id":{"type":"integer","minimum":0}, "overrides":{"type":"object","minProperties":1,"maxProperties":128}}}),
+            |world, parameters| {
+                let id = parameters.get("element_id").and_then(Value::as_u64).ok_or("element_id must be a non-negative integer")?;
+                let overrides = parameters.get("overrides").cloned().ok_or("overrides is required")?;
+                prepare_occurrence_override_request(world, id, overrides)
+            },
+        )).expect("unique occurrence parameters request");
+
+    world.resource_mut::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>()
+        .register(crate::plugins::authored_edit_plan::requests::EditRequestDescriptor::new(
             "core.semantic", 1,
             "Preview concept assignment/downgrade, declared anchor publication, and explicit anchor binding. Captures existing semantic components; does not place geometry or claim a geometry resolver. Apply only the returned plan_id.",
             serde_json::to_value(rmcp::schemars::schema_for!(crate::semantics::SemanticPlan)).expect("semantic schema"),
@@ -11061,6 +11082,11 @@ pub fn handle_set_property(
 ) -> Result<Value, String> {
     ensure_user_editable_entity(world, ElementId(element_id), "edited")?;
     let snapshot = capture_snapshot_by_id(world, ElementId(element_id))?;
+    if snapshot.type_name() == "occurrence" {
+        let mut overrides = serde_json::Map::new();
+        overrides.insert(property_name.to_string(), value);
+        return handle_update_occurrence_overrides(world, element_id, Value::Object(overrides));
+    }
     let updated = snapshot.set_property_json(property_name, &value)?;
     send_event(
         world,
@@ -14838,6 +14864,9 @@ pub fn handle_discover_curated_paths(
                         }
 
                         for definition in library.definitions.values() {
+                            if !definition.visibility.is_public() {
+                                continue;
+                            }
                             let definition_kind = format!("{:?}", definition.definition_kind);
                             if !request.element_class.as_deref().is_none_or(|needle| {
                                 curated_path_text_matches(

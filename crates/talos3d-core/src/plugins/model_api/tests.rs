@@ -4293,6 +4293,11 @@ fn definition_library_workflow_exports_imports_and_instantiates() {
 
 #[cfg(feature = "model-api")]
 fn register_hosted_on_relation(world: &mut World) {
+    // The real ModelingPlugin installs this factory. Captured edit plans must
+    // be able to recapture dependent relations for before-state guards.
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::assembly::RelationFactory);
     world
         .resource_mut::<CapabilityRegistry>()
         .register_relation_type(crate::capability_registry::RelationTypeDescriptor {
@@ -14561,3 +14566,198 @@ fn absent_authoring_record_is_distinct_from_explicit_freeform() {
 
 #[cfg(feature = "model-api")]
 mod edit_plans;
+
+#[cfg(feature = "model-api")]
+#[test]
+fn polygon_occurrence_controls_share_plan_history_and_native_reload() {
+    use crate::plugins::{
+        authored_edit_plan::{queue_captured_plan, requests},
+        modeling::profile::ProfileExtrusion,
+    };
+    let mut world = init_model_api_test_world();
+    register_model_api_edit_requests(&mut world);
+    let mut request = make_rect_extrusion_request();
+    for key in ["width_param", "depth_param", "height_param"] {
+        request.as_object_mut().unwrap().remove(key);
+    }
+    request["parameters"][0]["default_value"] = json!(2000.0);
+    request["parameters"][1]["default_value"] = json!(100.0);
+    request["parameters"][2]["default_value"] = json!(1000.0);
+    for param in request["parameters"].as_array_mut().unwrap() {
+        param["metadata"] = json!({"unit":"mm"});
+    }
+    let reference = |name| json!({"expr_kind":"reference","path":name});
+    let zero = json!({"expr_kind":"literal","value":0.0});
+    request["body"] = json!({"evaluators":[{"PolygonExtrusion":{
+        "coordinate_unit":"mm", "height": reference("depth"),
+        "profile_xz":[[zero.clone(),zero.clone()],[reference("width"),zero.clone()],[zero,reference("height")]]
+    }}]});
+    let definition = handle_create_definition(&mut world, request).unwrap();
+    let id = handle_place_occurrence(
+        &mut world,
+        json!({"definition_id":definition.definition_id,"offset":[5.0,2.0,3.0]}),
+    )
+    .unwrap();
+    let geometry = |world: &World| -> ProfileExtrusion {
+        world
+            .entity(find_entity_by_element_id_readonly(world, ElementId(id)).unwrap())
+            .get::<ProfileExtrusion>()
+            .unwrap()
+            .clone()
+    };
+    let original = geometry(&world);
+    let plan = requests::preview(
+        &mut world,
+        "core.occurrence_parameters",
+        json!({"element_id":id,"overrides":{"width":3000.0}}),
+    )
+    .unwrap();
+    assert_eq!(
+        geometry(&world),
+        original,
+        "preview must not mutate live geometry"
+    );
+    queue_captured_plan(&mut world, plan.plan_id()).unwrap();
+    flush_model_api_write_pipeline(&mut world);
+    let changed = geometry(&world);
+    assert_ne!(changed.profile, original.profile);
+    assert_eq!(changed.centre, original.centre);
+    assert!(changed.profile.tessellate(1).contains(&Vec2::new(3.0, 0.0)));
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    apply_pending_history_commands(&mut world);
+    assert_eq!(geometry(&world), original);
+    let revision = world.resource::<History>().revision_token();
+    assert!(handle_update_occurrence_overrides(&mut world, id, json!({"width":0.0})).is_err());
+    assert!(handle_set_property(&mut world, id, "unknown", json!(42)).is_err());
+    assert_eq!(world.resource::<History>().revision_token(), revision);
+    assert_eq!(geometry(&world), original);
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    apply_pending_history_commands(&mut world);
+    assert_eq!(
+        geometry(&world),
+        changed,
+        "failed proposal must preserve redo"
+    );
+    let stale = requests::preview(
+        &mut world,
+        "core.occurrence_parameters",
+        json!({"element_id":id,"overrides":{"width":4000.0}}),
+    )
+    .unwrap();
+    handle_set_property(&mut world, id, "width", json!(3500.0)).unwrap();
+    assert!(queue_captured_plan(&mut world, stale.plan_id()).is_err());
+    let before_save = geometry(&world);
+    let path = temp_json_path("native-polygon-controls").with_extension("talos3d");
+    handle_save_project(&mut world, path.to_str().unwrap()).unwrap();
+    let mut loaded = init_model_api_test_world();
+    handle_load_project(&mut loaded, path.to_str().unwrap()).unwrap();
+    assert_eq!(geometry(&loaded), before_save);
+    assert_eq!(
+        handle_resolve_occurrence(&loaded, id).unwrap()["width"]["value"],
+        json!(3500.0)
+    );
+    handle_update_occurrence_overrides(&mut loaded, id, json!({"width":3000.0})).unwrap();
+    assert_eq!(
+        geometry(&loaded),
+        changed,
+        "same controls after reload must produce same geometry"
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn inspector_control_actions_use_captured_occurrence_plan_and_refuse_stale_input() {
+    use crate::plugins::{
+        occurrence_controls::{self, Action, ControlSession},
+        property_edit::PropertyPanelData,
+    };
+    let mut world = init_model_api_test_world();
+    world.init_resource::<PropertyPanelData>();
+    register_model_api_edit_requests(&mut world);
+    let definition = handle_create_definition(&mut world, make_rect_extrusion_request()).unwrap();
+    let id = handle_place_occurrence(
+        &mut world,
+        json!({"definition_id":definition.definition_id}),
+    )
+    .unwrap();
+    let session = |world: &World| ControlSession {
+        element_id: id,
+        parameter: "width".into(),
+        buffer: "6.0".into(),
+        original_value: json!(4.0),
+        base_revision: world.resource::<History>().revision_token(),
+        plan: None,
+        feedback: String::new(),
+    };
+    let edit = session(&world);
+    world
+        .resource_mut::<PropertyPanelData>()
+        .control_editor
+        .session = Some(edit);
+    world
+        .resource_mut::<PropertyPanelData>()
+        .control_editor
+        .action = Some(Action::Preview);
+    occurrence_controls::process(&mut world, Some(id));
+    assert_eq!(
+        handle_resolve_occurrence(&world, id).unwrap()["width"]["value"],
+        json!(4.0)
+    );
+    assert!(world
+        .resource::<PropertyPanelData>()
+        .control_editor
+        .session
+        .as_ref()
+        .unwrap()
+        .plan
+        .is_some());
+    world
+        .resource_mut::<PropertyPanelData>()
+        .control_editor
+        .action = Some(Action::Apply);
+    occurrence_controls::process(&mut world, Some(id));
+    apply_pending_history_commands(&mut world);
+    assert_eq!(
+        handle_resolve_occurrence(&world, id).unwrap()["width"]["value"],
+        json!(6.0)
+    );
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    apply_pending_history_commands(&mut world);
+    assert_eq!(
+        handle_resolve_occurrence(&world, id).unwrap()["width"]["value"],
+        json!(4.0)
+    );
+    let edit = session(&world);
+    world
+        .resource_mut::<PropertyPanelData>()
+        .control_editor
+        .session = Some(edit);
+    handle_update_occurrence_overrides(&mut world, id, json!({"width":5.0})).unwrap();
+    world
+        .resource_mut::<PropertyPanelData>()
+        .control_editor
+        .action = Some(Action::Preview);
+    occurrence_controls::process(&mut world, Some(id));
+    let editor = &world.resource::<PropertyPanelData>().control_editor;
+    assert!(editor.session.as_ref().unwrap().plan.is_none());
+    assert!(editor
+        .session
+        .as_ref()
+        .unwrap()
+        .feedback
+        .contains("design changed"));
+    assert_eq!(
+        handle_resolve_occurrence(&world, id).unwrap()["width"]["value"],
+        json!(5.0)
+    );
+    occurrence_controls::process(&mut world, None);
+    assert!(
+        world
+            .resource::<PropertyPanelData>()
+            .control_editor
+            .session
+            .is_none(),
+        "changing selection clears unfinished edits"
+    );
+}

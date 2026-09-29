@@ -1057,3 +1057,37 @@ placement/reseating, engineering validity or parametric driver persistence.
 Geometry edits still use the appropriate shared edit request or curated
 materializer. This bounded semantic request has no dedicated native drag UI;
 the wider interactive anchor-binding and regeneration acceptance remains open.
+
+### Native occurrence controls and polygon bodies
+
+`list_edit_requests` exposes `core.occurrence_parameters` when model-api planners
+are installed. Supply an occurrence `element_id` and an `overrides` object to
+`preview_edit_plan`; inspect and apply the returned plan ID. The property
+inspector's **Edit occurrence controls** editor uses this same request. It
+validates the proposed value without changing the live geometry, then commits
+through captured history. A model change while typing requires reopening the
+control from the current value. Compatibility `occurrence.update_overrides`
+and occurrence `set_property` calls use the same planner and guards.
+
+Full body evaluation precedes edits, including child expressions and dependent
+opening snapshots. Unknown/locked controls, invalid profiles and stale plans
+are refusals. Native save/reload preserves Definition bodies and occurrence
+overrides; it does not reconstruct missing controls from old frozen geometry.
+`occurrence.explain` reports `evaluation_error` for unresolved saved bodies.
+
+The canonical body additionally supports `PolygonExtrusion`: 3–256 local X/Z
+vertices expressed as `BodyExpr`, an extrusion height along local Y, and an
+explicit length `coordinate_unit`. Dimensional expressions must match that
+unit; literals use it. Coordinates convert to world metres at evaluation.
+Non-finite, degenerate and self-intersecting profiles are refused. Compound
+`TransformBinding.translation_unit` similarly makes the translation boundary
+explicit; omitted units retain the legacy world-metre convention.
+
+`modeling::parametric_definition::translate_representation` provides a bounded
+translation of curated emitting representations into a root Definition and
+internal child Definitions. It preserves source member annotations as opaque
+child metadata, typed driver defaults and lock policy, expression dependencies,
+placements and stable occurrence/slot identities. Domain validation and semantic
+projection remain the domain pack's responsibility. This is a draft native body,
+not a released package, inferred reverse engineering, or a serialized parallel
+parametric instance store.

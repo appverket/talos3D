@@ -102,6 +102,7 @@ pub enum SelectionSemanticKind {
 
 #[derive(Resource, Default, Clone)]
 pub struct PropertyPanelData {
+    pub control_editor: crate::plugins::occurrence_controls::OccurrenceControlEditor,
     pub explanation: Option<crate::plugins::design_explanation::DesignExplanation>,
     pub explanation_refresh: bool,
     explanation_source_ticks: Vec<Option<u32>>,
@@ -131,6 +132,7 @@ fn sync_property_panel_data(world: &mut World) {
     // or explicit refresh. Never scan dependencies in the live drag loop.
     let single_id = (snapshots.len() == 1 && world.resource::<TransformState>().is_idle())
         .then(|| snapshots[0].element_id().0);
+    crate::plugins::occurrence_controls::process(world, single_id);
     let revision = world
         .get_resource::<crate::plugins::history::History>()
         .map(|h| h.revision_token());

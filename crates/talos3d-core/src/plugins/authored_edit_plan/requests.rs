@@ -33,6 +33,9 @@ pub struct EditRequestRegistry {
     entries: BTreeMap<String, EditRequestDescriptor>,
 }
 impl EditRequestRegistry {
+    pub fn contains(&self, id: &str) -> bool {
+        self.entries.contains_key(id)
+    }
     pub fn register(&mut self, descriptor: EditRequestDescriptor) -> Result<(), String> {
         if self.entries.contains_key(&descriptor.id) {
             return Err(format!("Duplicate edit request: {}", descriptor.id));

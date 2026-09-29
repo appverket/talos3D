@@ -2487,6 +2487,12 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
             apply_property_panel_action(data, &fields, action);
         }
 
+        if !blocked {
+            let panel = &mut *data.property_panel_data;
+            if let Some(explanation) = &panel.explanation {
+                crate::plugins::occurrence_controls::draw(ui, explanation, &mut panel.control_editor);
+            }
+        }
         if let Some(explanation) = &data.property_panel_data.explanation {
             let mut refresh = false;
             egui::CollapsingHeader::new("Design explanation")

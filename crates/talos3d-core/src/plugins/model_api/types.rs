@@ -1549,6 +1549,8 @@ pub struct OccurrenceExplainResult {
     pub resolved_parameters: Value,
     pub anchors: Vec<Value>,
     pub generated_parts: Vec<GeneratedOccurrencePartEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation_error: Option<String>,
 }
 
 // --- Assembly / Relation types ---

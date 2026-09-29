@@ -623,6 +623,19 @@ impl AuthoredEntity for OccurrenceSnapshot {
             transform,
             Some(&self.label),
         ) {
+            // Older documents can contain unresolved bodies. Keep their authored
+            // identity/controls on reload even when materialization is refused.
+            // For an existing live occurrence, retain its last valid geometry.
+            if crate::plugins::commands::find_entity_by_element_id(world, self.element_id).is_none()
+            {
+                ensure_occurrence_root_entity(
+                    world,
+                    self.element_id,
+                    &self.identity,
+                    transform,
+                    Some(&self.label),
+                );
+            }
             warn!(
                 "Failed to evaluate occurrence {} from definition '{}': {}",
                 self.element_id.0, self.identity.definition_id, error
@@ -1275,13 +1288,34 @@ pub(crate) fn render_occurrence(
     transform: Transform,
     label: Option<&str>,
 ) -> Result<(), String> {
-    let root_entity = ensure_occurrence_root_entity(world, element_id, identity, transform, label);
-    cleanup_generated_occurrence_parts(world, element_id);
-
+    // Resolve every child before touching the live model. A late expression
+    // failure must not erase a previously valid occurrence or leave half a body.
     let definition = registry.effective_definition(&identity.definition_id)?;
     let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
     let resolved_values = resolved_param_values(&resolved);
     let cache_key = mesh_cache_key_for_definition(&definition, &resolved_values);
+    let state = evaluate_definition_state(&definition, &resolved)?;
+    let root_geometry = build_extrusion(&definition, &state, transform.translation)?;
+    let mut parts = Vec::new();
+    if let Some(compound) = &definition.body.compound {
+        for slot in &compound.child_slots {
+            prepare_compound_slot(
+                &mut parts,
+                registry,
+                slot,
+                &state,
+                CompoundSpawnContext {
+                    owner: element_id,
+                    parent_translation: transform.translation,
+                    parent_rotation: transform.rotation,
+                    slot_path: slot.slot_id.clone(),
+                    local_translation_offset: Vec3::ZERO,
+                },
+            )?;
+        }
+    }
+    let root_entity = ensure_occurrence_root_entity(world, element_id, identity, transform, label);
+    cleanup_generated_occurrence_parts(world, element_id);
 
     if definition.body.compound.is_none()
         && apply_cached_occurrence_mesh(world, root_entity, &cache_key, transform)
@@ -1297,11 +1331,7 @@ pub(crate) fn render_occurrence(
         return Ok(());
     }
 
-    let state = evaluate_definition_state(&definition, &resolved)?;
-
-    if let Some(extrusion) =
-        build_rectangular_extrusion_from_values(&definition, &state.values, transform.translation)
-    {
+    if let Some(extrusion) = root_geometry {
         if !apply_cached_occurrence_mesh(
             world,
             root_entity,
@@ -1323,22 +1353,16 @@ pub(crate) fn render_occurrence(
         clear_occurrence_material_assignment(world, root_entity);
     }
 
-    if let Some(compound) = &definition.body.compound {
-        for slot in &compound.child_slots {
-            spawn_compound_slot(
-                world,
-                registry,
-                slot,
-                &state,
-                CompoundSpawnContext {
-                    owner: element_id,
-                    parent_translation: transform.translation,
-                    parent_rotation: transform.rotation,
-                    slot_path: slot.slot_id.clone(),
-                    local_translation_offset: Vec3::ZERO,
-                },
-            )?;
-        }
+    for part in parts {
+        let mut entity = world.spawn((
+            part.extrusion,
+            ShapeRotation(part.rotation),
+            NeedsMesh,
+            Visibility::Visible,
+            part.identity,
+            part.cache_key,
+        ));
+        apply_spawned_material_assignment(&mut entity, &part.definition);
     }
 
     if let Ok(mut entity_mut) = world.get_entity_mut(root_entity) {
@@ -1388,8 +1412,16 @@ fn ensure_occurrence_root_entity(
     }
 }
 
-fn spawn_compound_slot(
-    world: &mut World,
+struct PreparedOccurrencePart {
+    extrusion: ProfileExtrusion,
+    rotation: Quat,
+    identity: GeneratedOccurrencePart,
+    cache_key: MeshCacheKey,
+    definition: Definition,
+}
+
+fn prepare_compound_slot(
+    parts: &mut Vec<PreparedOccurrencePart>,
     registry: &DefinitionRegistry,
     slot: &ChildSlotDef,
     parent_state: &EvaluatedDefinitionState,
@@ -1397,13 +1429,13 @@ fn spawn_compound_slot(
 ) -> Result<(), String> {
     match &slot.multiplicity {
         SlotMultiplicity::Single => {
-            spawn_compound_slot_instance(world, registry, slot, parent_state, context)
+            prepare_compound_slot_instance(parts, registry, slot, parent_state, context)
         }
         SlotMultiplicity::Collection { layout, count } => {
             let instances = resolve_collection_instances(slot, layout, count, parent_state)?;
             for instance in instances {
-                spawn_compound_slot_instance(
-                    world,
+                prepare_compound_slot_instance(
+                    parts,
                     registry,
                     slot,
                     parent_state,
@@ -1421,8 +1453,8 @@ fn spawn_compound_slot(
     }
 }
 
-fn spawn_compound_slot_instance(
-    world: &mut World,
+fn prepare_compound_slot_instance(
+    parts: &mut Vec<PreparedOccurrencePart>,
     registry: &DefinitionRegistry,
     slot: &ChildSlotDef,
     parent_state: &EvaluatedDefinitionState,
@@ -1462,28 +1494,24 @@ fn spawn_compound_slot_instance(
     let world_translation =
         context.parent_translation + context.parent_rotation * local_translation;
 
-    if let Some(extrusion) =
-        build_rectangular_extrusion_from_values(&child_definition, &state.values, world_translation)
-    {
-        let mut entity = world.spawn((
+    if let Some(extrusion) = build_extrusion(&child_definition, &state, world_translation)? {
+        parts.push(PreparedOccurrencePart {
             extrusion,
-            ShapeRotation(composed_rotation),
-            NeedsMesh,
-            Visibility::Visible,
-            GeneratedOccurrencePart {
+            rotation: composed_rotation,
+            identity: GeneratedOccurrencePart {
                 owner: context.owner,
                 slot_path: context.slot_path.clone(),
                 definition_id: slot.definition_id.clone(),
             },
             cache_key,
-        ));
-        apply_spawned_material_assignment(&mut entity, &child_definition);
+            definition: child_definition.clone(),
+        });
     }
 
     if let Some(compound) = &child_definition.body.compound {
         for child_slot in &compound.child_slots {
-            spawn_compound_slot(
-                world,
+            prepare_compound_slot(
+                parts,
                 registry,
                 child_slot,
                 &state,
@@ -1798,7 +1826,15 @@ fn evaluate_translation(
             slot.slot_id
         ));
     }
-
+    if let Some(unit) = slot.transform_binding.translation_unit {
+        let evaluate =
+            |expr| super::polygon_evaluator::evaluate_coordinate(expr, values, units, unit);
+        return Ok(Vec3::new(
+            evaluate(&translation[0])?,
+            evaluate(&translation[1])?,
+            evaluate(&translation[2])?,
+        ));
+    }
     Ok(Vec3::new(
         evaluate_expr_f32(&translation[0], values, units)?,
         evaluate_expr_f32(&translation[1], values, units)?,
@@ -1826,9 +1862,23 @@ fn evaluate_rotation_euler_deg(
             slot.slot_id
         ));
     }
-    let rx = evaluate_expr_f32(&rotation[0], values, units)?.to_radians();
-    let ry = evaluate_expr_f32(&rotation[1], values, units)?.to_radians();
-    let rz = evaluate_expr_f32(&rotation[2], values, units)?.to_radians();
+    let angle = |expr: &BodyExpr| -> Result<f32, String> {
+        use crate::plugins::units::Unit;
+        if !matches!(
+            expr.evaluated_unit(values, units)?,
+            None | Some(Unit::Deg | Unit::Dimensionless)
+        ) {
+            return Err("rotation_euler_deg requires degrees or untyped degree literals".into());
+        }
+        let value = evaluate_expr_f32(expr, values, units)?.to_radians();
+        if !value.is_finite() {
+            return Err("Rotation must be finite".into());
+        }
+        Ok(value)
+    };
+    let rx = angle(&rotation[0])?;
+    let ry = angle(&rotation[1])?;
+    let rz = angle(&rotation[2])?;
     Ok(Some(Quat::from_euler(EulerRot::XYZ, rx, ry, rz)))
 }
 
@@ -1913,7 +1963,9 @@ fn build_rectangular_extrusion_from_values(
     values: &HashMap<String, Value>,
     centre: Vec3,
 ) -> Option<ProfileExtrusion> {
-    let EvaluatorDecl::RectangularExtrusion(evaluator) = definition.body.evaluators.first()?;
+    let EvaluatorDecl::RectangularExtrusion(evaluator) = definition.body.evaluators.first()? else {
+        return None;
+    };
 
     let width = values.get(&evaluator.width_param)?.as_f64()? as f32;
     let depth = values.get(&evaluator.depth_param)?.as_f64()? as f32;
@@ -1924,6 +1976,55 @@ fn build_rectangular_extrusion_from_values(
         profile: Profile2d::rectangle(width, depth),
         height,
     })
+}
+
+fn build_extrusion(
+    definition: &Definition,
+    state: &EvaluatedDefinitionState,
+    centre: Vec3,
+) -> Result<Option<ProfileExtrusion>, String> {
+    match definition.body.evaluators.first() {
+        Some(EvaluatorDecl::PolygonExtrusion(evaluator)) => {
+            super::polygon_evaluator::evaluate(evaluator, &state.values, &state.units, centre)
+                .map(Some)
+        }
+        _ => Ok(build_rectangular_extrusion_from_values(
+            definition,
+            &state.values,
+            centre,
+        )),
+    }
+}
+
+/// Pure preflight shared by parameter edits and occurrence materialization.
+/// Resolves the complete body, including late child expressions and constraints.
+pub fn validate_occurrence_geometry(
+    registry: &DefinitionRegistry,
+    identity: &OccurrenceIdentity,
+) -> Result<(), String> {
+    let definition = registry.effective_definition(&identity.definition_id)?;
+    let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
+    let state = evaluate_definition_state(&definition, &resolved)?;
+    build_extrusion(&definition, &state, Vec3::ZERO)?;
+    let mut parts = Vec::new();
+    if let Some(compound) = &definition.body.compound {
+        for slot in &compound.child_slots {
+            prepare_compound_slot(
+                &mut parts,
+                registry,
+                slot,
+                &state,
+                CompoundSpawnContext {
+                    owner: ElementId(0),
+                    parent_translation: Vec3::ZERO,
+                    parent_rotation: Quat::IDENTITY,
+                    slot_path: slot.slot_id.clone(),
+                    local_translation_offset: Vec3::ZERO,
+                },
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn mesh_cache_key_for_definition(
@@ -3359,6 +3460,7 @@ mod trig_and_rotation_tests {
                         definition_id: child_id,
                         parameter_bindings: Vec::new(),
                         transform_binding: TransformBinding {
+                            translation_unit: None,
                             translation: None,
                             rotation_euler_deg: Some(vec![
                                 ExprNode::Literal { value: json!(0.0) }.into(),

@@ -491,6 +491,18 @@ pub struct RectangularExtrusionEvaluator {
 pub enum EvaluatorDecl {
     /// Extrude a rectangular `Profile2d` to produce a box-like solid.
     RectangularExtrusion(RectangularExtrusionEvaluator),
+    /// A bounded, expression-driven polygon in local X/Z, extruded along Y.
+    /// This is part of the canonical body, not a separately persisted evaluator.
+    PolygonExtrusion(PolygonExtrusionEvaluator),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolygonExtrusionEvaluator {
+    /// Explicit coordinate unit for literals and dimensionless expressions.
+    /// Dimensional expressions must produce this same length unit.
+    pub coordinate_unit: crate::plugins::units::Unit,
+    pub profile_xz: Vec<[BodyExpr; 2]>,
+    pub height: BodyExpr,
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,6 +1191,10 @@ pub struct ParameterBinding {
 pub struct TransformBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translation: Option<Vec<BodyExpr>>,
+    /// Explicit source unit for translation expressions. Omitted legacy
+    /// bindings retain their established raw world-metre convention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation_unit: Option<crate::plugins::units::Unit>,
     /// Intrinsic XYZ Euler rotation in degrees applied to the child part in
     /// the parent's local frame. Must contain exactly 3 expressions when
     /// present; corresponds to `Quat::from_euler(EulerRot::XYZ, rx, ry, rz)`
@@ -1884,10 +1900,26 @@ impl Definition {
     /// machine-readable so importers can report unsupported legacy content
     /// without guessing at a replacement.
     pub fn body_findings(&self) -> Vec<DefinitionBodyFinding> {
-        let Some(compound) = &self.body.compound else {
-            return Vec::new();
-        };
         let mut findings = Vec::new();
+        for (index, evaluator) in self.body.evaluators.iter().enumerate() {
+            if let EvaluatorDecl::PolygonExtrusion(polygon) = evaluator {
+                polygon.height.collect_unsupported_legacy(
+                    &format!("body.evaluators[{index}].height"),
+                    &mut findings,
+                );
+                for (point, axes) in polygon.profile_xz.iter().enumerate() {
+                    for (axis, expr) in axes.iter().enumerate() {
+                        expr.collect_unsupported_legacy(
+                            &format!("body.evaluators[{index}].profile_xz[{point}][{axis}]"),
+                            &mut findings,
+                        );
+                    }
+                }
+            }
+        }
+        let Some(compound) = &self.body.compound else {
+            return findings;
+        };
         let input_names: HashSet<&str> = self
             .interface
             .parameters
@@ -1984,6 +2016,17 @@ impl Definition {
         F: FnMut(&DefinitionId) -> bool,
     {
         self.body.validate_schema_version()?;
+        if self.body.evaluators.len() > 1 {
+            return Err("A Definition body supports one geometry evaluator; use compound child slots for multiple parts".into());
+        }
+        for evaluator in &self.body.evaluators {
+            if let EvaluatorDecl::PolygonExtrusion(polygon) = evaluator {
+                super::polygon_evaluator::length_scale(polygon.coordinate_unit)?;
+                if !(3..=256).contains(&polygon.profile_xz.len()) {
+                    return Err("Polygon extrusion requires 3..=256 vertices".into());
+                }
+            }
+        }
         if let Some(finding) = self.body_findings().into_iter().next() {
             return Err(format!(
                 "Definition '{}' body finding: {finding:?}",
@@ -2075,6 +2118,9 @@ impl Definition {
                 }
                 slot.validate_multiplicity()
                     .map_err(|error| error.to_string())?;
+                if let Some(unit) = slot.transform_binding.translation_unit {
+                    super::polygon_evaluator::length_scale(unit)?;
+                }
                 if let Some(translation) = &slot.transform_binding.translation {
                     if translation.len() != 3 {
                         return Err(format!(
