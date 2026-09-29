@@ -130,6 +130,15 @@ capability crates:
 This is a source-level Rust capability API. Dynamic loading is not required for
 the API to be publishable.
 
+Transient native editing contracts are available in
+`talos3d_capability_api::edit_plans`. Capabilities register uniquely named,
+priority-ordered `OrderedEditModifier` callbacks on `EditPlanModifiers` for a
+specific request kind. They edit a draft's snapshots and diagnostic/semantic
+context; `AuthoredEditPlan` captures the immutable result. The typed request
+payload is ephemeral capability input, not a persistence schema. See
+[Platform Architecture](PLATFORM_ARCHITECTURE.md#captured-edit-plans) for the
+current integration boundary and legacy-transform compatibility behavior.
+
 ## Workbench Packaging
 
 Workbenches are curated user-facing workflows built from capabilities, not

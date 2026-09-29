@@ -131,10 +131,27 @@ redo uses the same content. Snapshot implementations own their authored fields
 and dependency ordering. Retyping needs an explicit capability migration;
 arbitrary resource or library writes are outside this snapshot carrier.
 
-The carrier does not yet change transform presentation or add an MCP endpoint.
-Interactive integration must restore any transient authored preview before
-preflight, apply the exact displayed candidate, exercise the actual presentation
-path, and pass the measured performance gate before it ships.
+The shared modifier stage merges capability callbacks and the existing transform
+callbacks by descending priority, with stable registration order inside each
+registry. At equal priority generic callbacks run before compatibility callbacks.
+`prepare_transform_edit` is the pure stage consumed by viewport calculation and
+the retained `apply_transform_plan_modifiers` compatibility wrapper. Dependent
+original snapshots come from the same capability factories for both paths.
+Model API transforms and linked-model placement still call that wrapper; the
+existing terrain planting callback runs unchanged through an adapter.
+
+`talos3d_capability_api::edit_plans` exposes the transient planning surface.
+Callbacks mutate `EditPlanDraft` before capture and receive capability-owned,
+typed ephemeral input. They must not mutate the world. Request kinds keep
+unrelated operations out of a callback. Duplicate generic modifier IDs refuse
+registration. Draft context and semantic intents are consumed by captured-plan
+callers; the legacy snapshot wrapper currently only returns before/after state.
+
+Exact-candidate interactive application and MCP exposure are the next integration
+gate. It must restore any transient authored preview before preflight, apply the
+exact displayed candidate, exercise the actual presentation path, and pass the
+full measured performance gate. Modifier-stage measurements alone do not establish
+frame-time or drag latency.
 
 ## Architectural Summary
 

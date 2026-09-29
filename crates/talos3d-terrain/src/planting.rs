@@ -4676,7 +4676,46 @@ mod tests {
         let mut before = vec![roof_before.clone()];
         let mut after = vec![roof_before.translate_by(Vec3::new(2.0, 0.0, 0.0))];
 
+        let viewport_state = TransformState {
+            mode: TransformMode::Moving,
+            initial_snapshots: before
+                .iter()
+                .map(|snapshot| {
+                    (
+                        talos3d_core::plugins::commands::find_entity_by_element_id_readonly(
+                            world,
+                            snapshot.element_id(),
+                        )
+                        .unwrap(),
+                        snapshot.clone(),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let viewport_plan = talos3d_core::plugins::transform::prepare_transform_edit(
+            world,
+            &viewport_state,
+            before.clone(),
+            after.clone(),
+        );
         apply_transform_plan_modifiers(world, TransformMode::Moving, &mut before, &mut after);
+        assert_eq!(
+            viewport_plan
+                .before
+                .iter()
+                .map(BoxedEntity::to_json)
+                .collect::<Vec<_>>(),
+            before.iter().map(BoxedEntity::to_json).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            viewport_plan
+                .after
+                .iter()
+                .map(BoxedEntity::to_json)
+                .collect::<Vec<_>>(),
+            after.iter().map(BoxedEntity::to_json).collect::<Vec<_>>()
+        );
 
         assert!(
             after

@@ -16,6 +16,13 @@ use crate::{
     authored_entity::BoxedEntity,
     capability_registry::CapabilityRegistry,
     plugins::{
+        authored_edit_plan::{
+            modifiers::{
+                apply_edit_modifiers, EditModifierRequest, EditPlanDraft, EditPlanModifiers,
+                OrderedEditModifier,
+            },
+            PlanContext,
+        },
         camera::OrbitCamera,
         commands::{
             find_entity_by_element_id_readonly, ApplyEntityChangesCommand, CreateEntityCommand,
@@ -60,6 +67,7 @@ impl Plugin for TransformPlugin {
         app.init_resource::<TransformState>()
             .init_resource::<ActiveTransformPreview>()
             .init_resource::<TransformPreviewModifiers>()
+            .init_resource::<EditPlanModifiers>()
             .init_resource::<PivotPoint>()
             .configure_sets(
                 Update,
@@ -123,7 +131,7 @@ pub type TransformPreviewModifier = fn(&World, &TransformState, &mut Vec<BoxedEn
 
 #[derive(Resource, Default, Clone)]
 pub struct TransformPreviewModifiers {
-    modifiers: Vec<(i32, TransformPreviewModifier)>,
+    modifiers: Vec<OrderedEditModifier>,
 }
 
 impl TransformPreviewModifiers {
@@ -138,9 +146,26 @@ impl TransformPreviewModifiers {
     /// must be able to rewrite the direct edit before broader aggregate
     /// contracts (for example a building planted on terrain) interpret it.
     pub fn register_with_priority(&mut self, priority: i32, modifier: TransformPreviewModifier) {
-        self.modifiers.push((priority, modifier));
+        let id = format!("legacy.transform.{}", self.modifiers.len());
+        self.modifiers.push(OrderedEditModifier::new(
+            id,
+            priority,
+            "transform",
+            move |world, request, draft| {
+                if let Some(state) = request.payload::<TransformState>() {
+                    modifier(world, state, &mut draft.after);
+                }
+            },
+        ));
         self.modifiers
-            .sort_by(|(left, _), (right, _)| right.cmp(left));
+            .sort_by_key(|entry| std::cmp::Reverse(entry.priority()));
+    }
+
+    /// Audit the compatibility callbacks without exposing mutable registration.
+    pub fn registered_modifiers(&self) -> impl Iterator<Item = (&str, i32)> {
+        self.modifiers
+            .iter()
+            .map(|entry| (entry.id(), entry.priority()))
     }
 }
 
@@ -1124,12 +1149,52 @@ fn apply_transform_preview_modifiers(
     state: &TransformState,
     after: &mut Vec<BoxedEntity>,
 ) {
-    let Some(modifiers) = world.get_resource::<TransformPreviewModifiers>() else {
-        return;
+    let draft = prepare_transform_edit(
+        world,
+        state,
+        state
+            .initial_snapshots
+            .iter()
+            .map(|(_, snapshot)| snapshot.clone())
+            .collect(),
+        std::mem::take(after),
+    );
+    *after = draft.after;
+}
+
+/// Shared pure planning stage for the viewport, Model API and linked placement.
+/// The interaction layer chooses presentation only; callbacks see the original
+/// complete TransformState through the compatibility adapter.
+pub fn prepare_transform_edit(
+    world: &World,
+    state: &TransformState,
+    before: Vec<BoxedEntity>,
+    after: Vec<BoxedEntity>,
+) -> EditPlanDraft {
+    let mut draft = EditPlanDraft {
+        context: PlanContext {
+            planner_id: "core.transform".into(),
+            planner_version: 1,
+            request_kind: "transform".into(),
+            mutation_scope: "selection_and_dependents".into(),
+            intent: transform_label(state.mode).into(),
+            ..Default::default()
+        },
+        before,
+        after,
+        semantic_intents: crate::semantics::SemanticPlan::none(),
     };
-    for (_, modifier) in &modifiers.modifiers {
-        modifier(world, state, after);
-    }
+    let legacy = world
+        .get_resource::<TransformPreviewModifiers>()
+        .map(|registry| registry.modifiers.as_slice())
+        .unwrap_or_default();
+    apply_edit_modifiers(
+        world,
+        &EditModifierRequest::new("transform", state),
+        &mut draft,
+        legacy,
+    );
+    draft
 }
 
 /// Apply the registered semantic transform modifiers to a command/API edit
@@ -1158,33 +1223,10 @@ pub fn apply_transform_plan_modifiers(
         initial_snapshots,
         ..Default::default()
     };
-    apply_transform_preview_modifiers(world, &state, after);
-
-    let mut before_ids = before
-        .iter()
-        .map(BoxedEntity::element_id)
-        .collect::<HashSet<_>>();
-    let dependent_ids = after
-        .iter()
-        .map(BoxedEntity::element_id)
-        .filter(|element_id| before_ids.insert(*element_id))
-        .collect::<Vec<_>>();
-    if dependent_ids.is_empty() {
-        return;
-    }
-
-    let registry = world.resource::<CapabilityRegistry>();
-    for element_id in dependent_ids {
-        let Some(entity) = find_entity_by_element_id_readonly(world, element_id) else {
-            continue;
-        };
-        let Ok(entity_ref) = world.get_entity(entity) else {
-            continue;
-        };
-        if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
-            before.push(snapshot);
-        }
-    }
+    let draft =
+        prepare_transform_edit(world, &state, std::mem::take(before), std::mem::take(after));
+    *before = draft.before;
+    *after = draft.after;
 }
 
 fn group_snapshot(snapshot: &BoxedEntity) -> Option<&GroupSnapshot> {
@@ -2396,6 +2438,100 @@ mod tests {
             *world.resource::<ModifierOrder>().0.lock().unwrap(),
             vec!["specialized", "generic"]
         );
+    }
+
+    #[test]
+    fn shared_modifier_stage_matches_api_snapshots_and_actual_rigid_presentation() {
+        use crate::plugins::authored_edit_plan::capture_snapshot;
+        use crate::plugins::modeling::{
+            generic_factory::PrimitiveFactory,
+            primitives::{BoxPrimitive, ShapeRotation},
+        };
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+        world.init_resource::<PivotPoint>();
+        world.init_resource::<PushPullContext>();
+        world.init_resource::<ActiveTransformPreview>();
+        world.init_resource::<SnapResult>();
+        world.insert_resource(CursorWorldPos {
+            raw: Some(Vec3::new(2., 0., 0.)),
+            ..Default::default()
+        });
+        #[cfg(feature = "perf-stats")]
+        world.init_resource::<PerfStats>();
+        let mut originals = Vec::new();
+        for id in 1..=2 {
+            let snapshot: BoxedEntity = PrimitiveSnapshot {
+                element_id: ElementId(id),
+                primitive: BoxPrimitive {
+                    centre: Vec3::new(0., id as f32, 0.),
+                    half_extents: Vec3::splat(0.5),
+                },
+                rotation: ShapeRotation::default(),
+                material_assignment: None,
+                opening_context: None,
+                subobject_display_overrides: None,
+            }
+            .into();
+            snapshot.apply_to(&mut world);
+            originals.push((
+                find_entity_by_element_id_readonly(&world, ElementId(id)).unwrap(),
+                snapshot,
+            ));
+        }
+        let mut modifiers = TransformPreviewModifiers::default();
+        modifiers.register(|_, state, after| {
+            assert_eq!(state.mode, TransformMode::Moving);
+            for snapshot in after {
+                *snapshot = snapshot.translate_by(Vec3::Y);
+            }
+        });
+        world.insert_resource(modifiers);
+        world.insert_resource(TransformState {
+            mode: TransformMode::Moving,
+            axis: AxisConstraint::X,
+            initial_cursor: Some(Vec3::ZERO),
+            numeric_buffer: Some("2".into()),
+            initial_snapshots: originals.clone(),
+            ..Default::default()
+        });
+        update_transform_preview(&mut world);
+        let displayed = world.resource::<ActiveTransformPreview>().snapshots.clone();
+        let mut api_before: Vec<_> = originals.iter().map(|(_, s)| s.clone()).collect();
+        let mut api_after = api_before
+            .iter()
+            .map(|s| s.translate_by(Vec3::X * 2.))
+            .collect();
+        apply_transform_plan_modifiers(
+            &world,
+            TransformMode::Moving,
+            &mut api_before,
+            &mut api_after,
+        );
+        assert_eq!(
+            displayed
+                .iter()
+                .map(BoxedEntity::to_json)
+                .collect::<Vec<_>>(),
+            api_after
+                .iter()
+                .map(BoxedEntity::to_json)
+                .collect::<Vec<_>>()
+        );
+        for ((entity, before), after) in originals.iter().zip(&displayed) {
+            assert_eq!(
+                world.get::<Transform>(*entity).unwrap(),
+                &after.preview_transform().unwrap(),
+                "the presentation must consume the shared final snapshot"
+            );
+            assert_eq!(
+                capture_snapshot(&world, before.element_id()).as_ref(),
+                Some(before),
+                "rigid presentation must leave authored primitive state unchanged"
+            );
+        }
     }
 
     /// The vertical-lift plane (camera-facing, through the grab point) must turn

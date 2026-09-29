@@ -17,6 +17,7 @@ impl Plugin for HistoryPlugin {
         app.configure_sets(Update, (HistorySet::Queue, HistorySet::Apply).chain())
             .init_resource::<History>()
             .init_resource::<super::authored_edit_plan::AuthoredEditPlanRegistry>()
+            .init_resource::<super::authored_edit_plan::modifiers::EditPlanModifiers>()
             .init_resource::<PendingCommandQueue>()
             .init_resource::<SemanticEnforcement>()
             .add_systems(

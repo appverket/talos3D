@@ -45,6 +45,16 @@ pub mod commands {
     };
 }
 
+/// Transient native planning contracts. AuthoringScript remains the durable IR.
+pub mod edit_plans {
+    pub use talos3d_core::plugins::authored_edit_plan::{
+        modifiers::{EditModifierRequest, EditPlanDraft, EditPlanModifiers, OrderedEditModifier},
+        queue_captured_plan, AuthoredEditPlan, AuthoredEditPlanRegistry, InteractionId,
+        PlanContext, PlanError, PlanId,
+    };
+    pub use talos3d_core::plugins::history::ModelRevision;
+}
+
 pub mod definitions {
     pub use talos3d_core::plugins::modeling::definition::{
         BindingSide, ConstraintSeverity, OverridePolicy, ParamType, ParameterBinding, ParameterDef,

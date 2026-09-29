@@ -6,4 +6,4 @@
 - task-id: TALOS-khlqjvoc
 - target base: main (stacked on box fix PR50 0ba48ce)
 - summary: Shared ordered edit modifiers and legacy transform parity adapter
-- status: active
+- status: awaiting-merge

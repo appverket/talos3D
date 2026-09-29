@@ -1,5 +1,6 @@
 //! ADR-065's transient, immutable mutation carrier. AuthoringScript remains the
 //! durable IR. Presentation borrows captured snapshots; apply never replans.
+pub mod modifiers;
 use super::{
     history::{EditorCommand, History, ModelRevision, PendingCommandQueue},
     identity::{ElementId, ElementIdAllocator},
