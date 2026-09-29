@@ -17,12 +17,15 @@ impl Plugin for HistoryPlugin {
         app.configure_sets(Update, (HistorySet::Queue, HistorySet::Apply).chain())
             .init_resource::<History>()
             .init_resource::<super::authored_edit_plan::AuthoredEditPlanRegistry>()
+            .init_resource::<super::authored_edit_plan::requests::EditRequestRegistry>()
             .init_resource::<super::authored_edit_plan::modifiers::EditPlanModifiers>()
             .init_resource::<PendingCommandQueue>()
             .init_resource::<SemanticEnforcement>()
             .add_systems(
                 Update,
-                apply_pending_history_commands.in_set(HistorySet::Apply),
+                apply_pending_history_commands
+                    .in_set(HistorySet::Apply)
+                    .after(super::input_ownership::InputPhase::ToolInput),
             );
     }
 }
@@ -387,6 +390,9 @@ pub(crate) fn apply_pending_history_commands_for_test(world: &mut World) {
 }
 
 pub(crate) fn apply_pending_history_commands(world: &mut World) {
+    if !world.resource::<PendingCommandQueue>().is_empty() {
+        super::transform::cancel_for_external_command(world);
+    }
     let (pending_commands, pending_actions) = {
         let mut pending_command_queue = world.resource_mut::<PendingCommandQueue>();
         (

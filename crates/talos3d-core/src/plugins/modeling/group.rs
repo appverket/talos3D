@@ -286,10 +286,16 @@ impl AuthoredEntity for GroupSnapshot {
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        other
-            .as_any()
-            .downcast_ref::<Self>()
-            .is_some_and(|other| self == other)
+        other.as_any().downcast_ref::<Self>().is_some_and(|other| {
+            // Derived bounds may be absent on a planned frame snapshot.
+            // Only authored fields participate in revision preflight.
+            self.element_id == other.element_id
+                && self.name == other.name
+                && self.member_ids == other.member_ids
+                && self.frame == other.frame
+                && self.composite == other.composite
+                && self.linked_model == other.linked_model
+        })
     }
 }
 

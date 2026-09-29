@@ -387,6 +387,10 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("save_material_spec", ToolCategory::CurationExtended),
     ("publish_material_spec", ToolCategory::CurationExtended),
     ("explain_design", ToolCategory::Inspection),
+    ("list_edit_requests", ToolCategory::Inspection),
+    ("inspect_edit_plan", ToolCategory::Inspection),
+    ("preview_edit_plan", ToolCategory::Editing),
+    ("apply_edit_plan", ToolCategory::Editing),
     ("get_authoring_provenance", ToolCategory::Inspection),
     ("get_claim_grounding", ToolCategory::Inspection),
     ("definition.compile", ToolCategory::CurationExtended),
@@ -495,6 +499,11 @@ pub(super) fn tool_category(name: &str) -> ToolCategory {
 
 /// Whether `tool_name` is advertised and callable under `profile`.
 pub(super) fn profile_allows(profile: CapabilityProfile, tool_name: &str) -> bool {
+    // Keep the deprecated duplicate callable in full for old clients; compact
+    // profiles advertise the canonical set_property schema once.
+    if profile != CapabilityProfile::Full && tool_name == "set_entity_property" {
+        return false;
+    }
     profile == CapabilityProfile::Full || profile.includes(tool_category(tool_name))
 }
 

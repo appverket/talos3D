@@ -762,6 +762,8 @@ fn init_model_api_test_world() -> World {
     world.insert_resource(Messages::<EndCommandGroup>::default());
     world.insert_resource(PendingCommandQueue::default());
     world.insert_resource(History::default());
+    world.init_resource::<crate::plugins::authored_edit_plan::AuthoredEditPlanRegistry>();
+    world.init_resource::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>();
     world.insert_resource(crate::plugins::refinement::RefinementGoalRegistry::default());
     world.insert_resource(TextureRegistry::default());
     world.insert_resource(MaterialRegistry::default());
@@ -14432,3 +14434,6 @@ fn absent_authoring_record_is_distinct_from_explicit_freeform() {
         "Freeform"
     );
 }
+
+#[cfg(feature = "model-api")]
+mod edit_plans;

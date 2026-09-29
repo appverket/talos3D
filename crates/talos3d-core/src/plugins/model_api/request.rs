@@ -6,6 +6,15 @@ pub(super) struct ModelApiReceiver(pub(super) Mutex<mpsc::Receiver<ModelApiReque
 
 #[cfg(feature = "model-api")]
 pub(super) enum ModelApiRequest {
+    Guarded {
+        request: Box<ModelApiRequest>,
+        response: oneshot::Sender<ApiResult<()>>,
+    },
+    EditPlan {
+        action: String,
+        parameters: Value,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     GetInstanceInfo(oneshot::Sender<InstanceInfo>),
     ListEntities(oneshot::Sender<Vec<EntityEntry>>),
     GetEntity {
@@ -1230,6 +1239,20 @@ pub(super) type ApiResult<T> = Result<T, String>;
 #[cfg(feature = "model-api")]
 pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
     match request {
+        ModelApiRequest::Guarded { request, response } => {
+            let result = crate::plugins::authored_edit_plan::requests::ensure_authored_base(world);
+            if result.is_ok() {
+                handle_model_api_request(world, *request);
+            }
+            let _ = response.send(result);
+        }
+        ModelApiRequest::EditPlan {
+            action,
+            parameters,
+            response,
+        } => {
+            let _ = response.send(handle_edit_plan_request(world, &action, parameters));
+        }
         ModelApiRequest::GetInstanceInfo(response) => {
             let _ = response.send(handle_get_instance_info(world));
         }
@@ -2743,4 +2766,46 @@ fn handle_acquire_corpus_passage(
         registry_size,
         persisted_path,
     })
+}
+
+#[cfg(feature = "model-api")]
+pub(super) fn handle_edit_plan_request(
+    world: &mut World,
+    action: &str,
+    parameters: Value,
+) -> ApiResult<Value> {
+    use crate::plugins::authored_edit_plan::{requests, AuthoredEditPlanRegistry, PlanId};
+    match action {
+        "list" => {
+            Ok(json!({"requests":world.resource::<requests::EditRequestRegistry>().descriptors()}))
+        }
+        "preview" => {
+            let kind = parameters["request_kind"]
+                .as_str()
+                .ok_or("request_kind is required")?;
+            let plan = requests::preview(world, kind, parameters["parameters"].clone())?;
+            Ok(requests::inspect(world, &plan))
+        }
+        "inspect" | "apply" => {
+            let id = PlanId(
+                parameters["plan_id"]
+                    .as_str()
+                    .ok_or("plan_id is required")?
+                    .into(),
+            );
+            let plan = world
+                .resource::<AuthoredEditPlanRegistry>()
+                .get(&id)
+                .ok_or("Unknown, superseded, consumed or evicted plan")?;
+            if action == "apply" {
+                requests::ensure_authored_base(world)?;
+                apply_captured_plan_and_flush(world, &plan)?;
+                Ok(json!({"applied":true,"plan_id":id,"digest":plan.digest(),
+                    "model_revision":world.resource::<crate::plugins::history::History>().revision_token()}))
+            } else {
+                Ok(requests::inspect(world, &plan))
+            }
+        }
+        _ => Err("Unknown edit-plan action".into()),
+    }
 }

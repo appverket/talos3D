@@ -1,6 +1,7 @@
 //! ADR-065's transient, immutable mutation carrier. AuthoringScript remains the
 //! durable IR. Presentation borrows captured snapshots; apply never replans.
 pub mod modifiers;
+pub mod requests;
 use super::{
     history::{EditorCommand, History, ModelRevision, PendingCommandQueue},
     identity::{ElementId, ElementIdAllocator},
@@ -225,8 +226,12 @@ impl AuthoredEditPlan {
         }
         // Also catch authored changes made by a legacy writer that did not yet
         // advance history. Presentation must restore its transient state first.
+        let current = capture_snapshot_index(
+            world,
+            self.before_snapshots.iter().map(BoxedEntity::element_id),
+        );
         for snapshot in &self.before_snapshots {
-            if capture_snapshot(world, snapshot.element_id()).as_ref() != Some(snapshot) {
+            if current.get(&snapshot.element_id()).map(|(_, s)| s) != Some(snapshot) {
                 return Some(refusal(
                     "The captured before-state no longer matches the model.",
                 ));
@@ -247,12 +252,36 @@ fn entity_exists(world: &World, id: ElementId) -> bool {
         .is_some_and(|mut q| q.iter(world).any(|current| *current == id))
 }
 pub fn capture_snapshot(world: &World, id: ElementId) -> Option<BoxedEntity> {
-    let registry = world.get_resource::<CapabilityRegistry>()?;
-    let mut query = world.try_query::<(Entity, &ElementId)>()?;
-    let entity = query
+    capture_snapshot_index(world, [id])
+        .remove(&id)
+        .map(|(_, snapshot)| snapshot)
+}
+
+/// One entity scan per batch, including sparse dependent snapshots. Live
+/// presentation and preflight must not scan the whole model once per member.
+pub(crate) fn capture_snapshot_index(
+    world: &World,
+    ids: impl IntoIterator<Item = ElementId>,
+) -> BTreeMap<ElementId, (Entity, BoxedEntity)> {
+    let wanted = ids.into_iter().collect::<BTreeSet<_>>();
+    if wanted.is_empty() {
+        return BTreeMap::new();
+    }
+    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+        return BTreeMap::new();
+    };
+    let Some(mut query) = world.try_query::<(Entity, &ElementId)>() else {
+        return BTreeMap::new();
+    };
+    query
         .iter(world)
-        .find_map(|(entity, current)| (*current == id).then_some(entity))?;
-    registry.capture_snapshot(&world.entity(entity), world)
+        .filter(|(_, id)| wanted.contains(id))
+        .filter_map(|(entity, id)| {
+            registry
+                .capture_snapshot(&world.entity(entity), world)
+                .map(|snapshot| (*id, (entity, snapshot)))
+        })
+        .collect()
 }
 
 struct Interaction {
@@ -385,6 +414,15 @@ impl AuthoredEditPlanRegistry {
             .active
             .as_ref()
             .and_then(|id| self.get(id))
+    }
+    /// Invalidate presentation without losing the fixed interaction base.
+    pub fn discard_candidate(&mut self, id: &InteractionId) {
+        if let Some(interaction) = self.interactions.get_mut(id) {
+            if let Some(plan) = interaction.active.take() {
+                self.plans.remove(&plan);
+                self.order.retain(|p| p != &plan);
+            }
+        }
     }
     pub fn cancel(&mut self, id: &InteractionId) {
         if let Some(interaction) = self.interactions.remove(id) {

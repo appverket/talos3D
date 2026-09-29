@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
+use std::sync::Arc;
 #[cfg(feature = "perf-stats")]
 use std::time::Instant;
 
@@ -21,6 +22,7 @@ use crate::{
                 apply_edit_modifiers, EditModifierRequest, EditPlanDraft, EditPlanModifiers,
                 OrderedEditModifier,
             },
+            queue_captured_plan, AuthoredEditPlan, AuthoredEditPlanRegistry, InteractionId,
             PlanContext,
         },
         camera::OrbitCamera,
@@ -33,6 +35,7 @@ use crate::{
             authoring_rotation_axis,
         },
         face_edit::{FaceEditContext, PushPullContext, PushPullFace},
+        history::{History, ModelRevision},
         identity::ElementId,
         inference::InferenceEngine,
         input_ownership::{InputOwnership, InputPhase, ModalKind},
@@ -84,20 +87,24 @@ impl Plugin for TransformPlugin {
                         .in_set(InputPhase::ToolInput)
                         .run_if(in_state(ActiveTool::Select)),
                     handle_transform_input
+                        .before(arm_scale_drag_on_mouse_press)
                         .in_set(InputPhase::ModalInput)
                         .run_if(in_state(ActiveTool::Select)),
                     arm_scale_drag_on_mouse_press
                         .in_set(InputPhase::ModalInput)
-                        .before(update_transform_preview)
-                        .before(confirm_transform)
+                        .before(cancel_transform)
                         .run_if(in_state(ActiveTool::Select)),
                     update_transform_preview
+                        .after(confirm_transform)
+                        .before(update_transform_status)
+                        .in_set(InputPhase::ModalInput)
                         .in_set(TransformVisualSystems::PreviewUpdate)
                         .run_if(in_state(ActiveTool::Select)),
                     confirm_transform
                         .in_set(InputPhase::ModalInput)
                         .run_if(in_state(ActiveTool::Select)),
                     cancel_transform
+                        .before(confirm_transform)
                         .in_set(InputPhase::ModalInput)
                         .run_if(in_state(ActiveTool::Select)),
                     update_transform_status
@@ -125,6 +132,11 @@ pub struct ActiveTransformPreview {
     pub snapshots: Vec<BoxedEntity>,
     pub live_snapshot_application: bool,
     pub extra_originals: Vec<BoxedEntity>,
+    /// The exact immutable candidate currently presented by the viewport.
+    pub plan: Option<Arc<AuthoredEditPlan>>,
+    pub interaction: Option<(InteractionId, ModelRevision)>,
+    pub display_value: Option<f32>,
+    pub refusal: Option<String>,
 }
 
 pub type TransformPreviewModifier = fn(&World, &TransformState, &mut Vec<BoxedEntity>);
@@ -252,8 +264,8 @@ pub enum AxisConstraint {
     Custom(Vec3),
 }
 
-#[derive(Clone)]
 struct TransformPreview {
+    draft: Option<EditPlanDraft>,
     after: Vec<BoxedEntity>,
     display_value: Option<f32>,
 }
@@ -307,6 +319,7 @@ pub fn start_transform_mode_with_options(
         return Err("Cursor is not over the modeling viewport".to_string());
     };
 
+    begin_plan_interaction(world)?;
     let mut transform_state = world.resource_mut::<TransformState>();
     transform_state.mode = mode;
     transform_state.axis = axis;
@@ -353,6 +366,14 @@ fn activate_pending_transform(world: &mut World) {
         .resource::<ButtonInput<KeyCode>>()
         .just_pressed(KeyCode::Escape)
     {
+        let interaction = world
+            .resource_mut::<ActiveTransformPreview>()
+            .interaction
+            .take();
+        if let Some((id, _)) = interaction {
+            world.resource_mut::<AuthoredEditPlanRegistry>().cancel(&id);
+        }
+        *world.resource_mut::<ActiveTransformPreview>() = ActiveTransformPreview::default();
         world.resource_mut::<TransformState>().clear();
         world.resource_mut::<StatusBarData>().hint.clear();
         return;
@@ -464,19 +485,29 @@ fn handle_transform_input(world: &mut World) {
 fn update_transform_preview(world: &mut World) {
     #[cfg(feature = "perf-stats")]
     let start = Instant::now();
-    let Some(preview) = compute_preview(world) else {
-        world
-            .resource_mut::<ActiveTransformPreview>()
-            .snapshots
-            .clear();
-        #[cfg(feature = "perf-stats")]
-        {
-            let elapsed = start.elapsed();
-            let mut perf_stats = world.resource_mut::<PerfStats>();
-            add_transform_preview_time(&mut perf_stats, elapsed);
+    if world.resource::<TransformState>().is_idle() {
+        return;
+    }
+    // Modifiers read authored data. Remove last frame's non-rigid presentation
+    // before planning so a dependent never becomes its own next-frame base.
+    if world.resource::<PushPullContext>().active_face.is_none() {
+        if let Err(reason) = restore_captured_presentation(world) {
+            invalidate_transform_candidate(world, &reason);
+            return;
         }
+    }
+    let Some(preview) = compute_preview(world) else {
+        invalidate_transform_candidate(world, "No candidate at this cursor");
         return;
     };
+    let push_pull = world.resource::<PushPullContext>().active_face.is_some();
+    if !push_pull {
+        if let Err(error) = publish_transform_candidate(world, &preview) {
+            invalidate_transform_candidate(world, &error);
+            return;
+        }
+    }
+    world.resource_mut::<ActiveTransformPreview>().display_value = preview.display_value;
 
     let live_snapshot_application = preview_requires_snapshot_application(&preview.after);
     remember_preview_extra_originals(world, &preview.after);
@@ -575,6 +606,144 @@ fn update_transform_preview(world: &mut World) {
         let mut perf_stats = world.resource_mut::<PerfStats>();
         add_transform_preview_time(&mut perf_stats, elapsed);
     }
+}
+
+/// Restore only state owned by this presentation. Never overwrite an external
+/// authored edit, even when a legacy writer forgot to advance History.
+fn restore_captured_presentation(world: &mut World) -> Result<(), String> {
+    use crate::plugins::authored_edit_plan::capture_snapshot_index;
+    let active = world.resource::<ActiveTransformPreview>().clone();
+    let Some((_, base)) = &active.interaction else {
+        return Ok(());
+    };
+    let current_revision = world.resource::<History>().revision_token();
+    if current_revision.document_id != base.document_id {
+        return Err("The document was replaced; this gesture is stale".into());
+    }
+    let originals = world
+        .resource::<TransformState>()
+        .initial_snapshots
+        .iter()
+        .map(|(_, s)| s.clone())
+        .chain(active.extra_originals.iter().cloned())
+        .collect::<Vec<_>>();
+    let after = active
+        .snapshots
+        .iter()
+        .map(|s| (s.element_id(), s))
+        .collect::<HashMap<_, _>>();
+    let mut changed = current_revision != *base;
+    let current_snapshots =
+        capture_snapshot_index(world, originals.iter().map(BoxedEntity::element_id));
+    for before in originals {
+        let current_entry = current_snapshots.get(&before.element_id());
+        let current = current_entry.map(|(_, snapshot)| snapshot);
+        if current == Some(&before) {
+            if let (Some(entity), Some(transform)) = (
+                current_entry.map(|(entity, _)| *entity),
+                before.preview_transform(),
+            ) {
+                world.entity_mut(entity).insert(transform);
+            }
+        } else if active.live_snapshot_application
+            && current == after.get(&before.element_id()).copied()
+        {
+            before.apply_to(world);
+        } else {
+            changed = true;
+        }
+    }
+    world
+        .resource_mut::<ActiveTransformPreview>()
+        .live_snapshot_application = false;
+    if changed {
+        Err("The authored model changed during the gesture; preview again".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// A native command arriving while a gesture is active gets the restored
+/// authored base. It cannot commit on top of transient dependent geometry.
+pub(crate) fn cancel_for_external_command(world: &mut World) {
+    if !world
+        .get_resource::<TransformState>()
+        .is_some_and(|s| !s.is_idle())
+    {
+        return;
+    }
+    let push_pull = world.resource::<PushPullContext>().active_face.clone();
+    if let Some(id) = push_pull.as_ref().and_then(|p| p.live_csg) {
+        teardown_live_csg(world, id);
+    }
+    restore_previews_and_clear_session(world, push_pull.is_some());
+}
+
+fn begin_plan_interaction(world: &mut World) -> Result<(), String> {
+    let base = world.resource::<History>().revision_token();
+    let id = world
+        .resource_mut::<AuthoredEditPlanRegistry>()
+        .begin_interaction(base.clone())
+        .map_err(|e| e.to_string())?;
+    world.resource_mut::<ActiveTransformPreview>().interaction = Some((id, base));
+    Ok(())
+}
+
+fn publish_transform_candidate(
+    world: &mut World,
+    preview: &TransformPreview,
+) -> Result<(), String> {
+    if world
+        .resource::<ActiveTransformPreview>()
+        .interaction
+        .is_none()
+    {
+        begin_plan_interaction(world)?;
+    }
+    let (interaction, base) = world
+        .resource::<ActiveTransformPreview>()
+        .interaction
+        .clone()
+        .unwrap();
+    let draft = preview
+        .draft
+        .as_ref()
+        .expect("ordinary transform has a draft");
+    let plan = AuthoredEditPlan::capture(
+        world,
+        Some(interaction),
+        base,
+        draft.context.clone(),
+        draft.before.clone(),
+        draft.after.clone(),
+        draft.semantic_intents.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    let plan = world
+        .resource_mut::<AuthoredEditPlanRegistry>()
+        .publish(plan)
+        .map_err(|e| e.to_string())?;
+    let mut active = world.resource_mut::<ActiveTransformPreview>();
+    active.refusal = (!plan.can_commit()).then(|| plan.context().findings.join("; "));
+    active.plan = Some(plan);
+    Ok(())
+}
+
+fn invalidate_transform_candidate(world: &mut World, reason: &str) {
+    let interaction = world
+        .resource::<ActiveTransformPreview>()
+        .interaction
+        .clone();
+    if let Some((id, _)) = interaction {
+        world
+            .resource_mut::<AuthoredEditPlanRegistry>()
+            .discard_candidate(&id);
+    }
+    let mut active = world.resource_mut::<ActiveTransformPreview>();
+    active.plan = None;
+    active.snapshots.clear();
+    active.live_snapshot_application = false;
+    active.refusal = Some(reason.into());
 }
 
 /// A semantic modifier can make consecutive drag frames use different preview
@@ -714,10 +883,18 @@ fn confirm_transform(world: &mut World) {
         return;
     }
 
-    let Some(preview) = compute_preview(world) else {
+    if world.resource::<PushPullContext>().active_face.is_none() {
+        confirm_captured_transform(world);
         return;
+    }
+    // Feature push/pull still has a separate type-migration/CSG finalization
+    // contract. It uses the presented snapshots, never a fresh release replan.
+    let active = world.resource::<ActiveTransformPreview>();
+    let preview = TransformPreview {
+        after: active.snapshots.clone(),
+        display_value: active.display_value,
+        draft: None,
     };
-
     let mut before = world
         .resource::<TransformState>()
         .initial_snapshots
@@ -808,38 +985,72 @@ fn confirm_transform(world: &mut World) {
     deselect_all_after_push_pull(world, was_push_pull);
 }
 
+fn confirm_captured_transform(world: &mut World) {
+    let active = world.resource::<ActiveTransformPreview>().clone();
+    let Some(plan) = active.plan else {
+        return;
+    };
+    let mode = world.resource::<TransformState>().mode;
+    // Presentation is transient. Preflight compares the captured authored base,
+    // not the displayed pose. Queue before cancelling its registry interaction.
+    let restored = restore_captured_presentation(world);
+    let result = if let Err(error) = restored {
+        Err(error)
+    } else if !plan.can_commit() {
+        Err(plan.context().findings.join("; "))
+    } else if plan.before_snapshots() == plan.after_snapshots() {
+        Ok(())
+    } else {
+        queue_captured_plan(world, plan.plan_id()).map_err(|e| e.to_string())
+    };
+    restore_previews_and_clear_session(world, false);
+    match result {
+        Ok(()) => {
+            if let Some(value) = active.display_value {
+                let mut engine = world.resource_mut::<InferenceEngine>();
+                engine.last_distance = Some(value);
+                engine.last_mode = Some(mode);
+            }
+        }
+        Err(error) => world.resource_mut::<StatusBarData>().hint = format!("Edit refused: {error}"),
+    }
+}
+
 /// Shared modal-session teardown for confirm and cancel: restore live-geometry
 /// previews (push/pull, and members previewed via `apply_to` such as conforming
 /// foundations) from their initial snapshots so any follow-up command applies
 /// from a clean base, restore rigid Transform previews, and clear all transform
 /// session state.
 fn restore_previews_and_clear_session(world: &mut World, was_push_pull: bool) {
-    let live_snapshot_application = world
-        .resource::<ActiveTransformPreview>()
-        .live_snapshot_application;
-    let originals: Vec<_> = world
-        .resource::<TransformState>()
-        .initial_snapshots
-        .iter()
-        .filter(|(_, s)| {
-            was_push_pull || live_snapshot_application || s.preview_transform().is_none()
-        })
-        .map(|(_, s)| s.clone())
-        .collect();
-    for snapshot in &originals {
-        snapshot.apply_to(world);
-    }
-    let extra_originals = world
-        .resource::<ActiveTransformPreview>()
-        .extra_originals
-        .clone();
-    for snapshot in &extra_originals {
-        snapshot.apply_to(world);
-    }
+    if was_push_pull {
+        let live_snapshot_application = world
+            .resource::<ActiveTransformPreview>()
+            .live_snapshot_application;
+        let originals: Vec<_> = world
+            .resource::<TransformState>()
+            .initial_snapshots
+            .iter()
+            .filter(|(_, s)| {
+                was_push_pull || live_snapshot_application || s.preview_transform().is_none()
+            })
+            .map(|(_, s)| s.clone())
+            .collect();
+        for snapshot in &originals {
+            snapshot.apply_to(world);
+        }
+        let extra_originals = world
+            .resource::<ActiveTransformPreview>()
+            .extra_originals
+            .clone();
+        for snapshot in &extra_originals {
+            snapshot.apply_to(world);
+        }
 
-    // Move/Rotate/Scale only modify the entity's Transform — restore it.
-    restore_preview_transforms(world);
-
+        // Move/Rotate/Scale only modify the entity's Transform — restore it.
+        restore_preview_transforms(world);
+    } else {
+        let _ = restore_captured_presentation(world);
+    }
     cleanup_preview_entities(world);
     world
         .resource_mut::<ActiveTransformPreview>()
@@ -852,6 +1063,14 @@ fn restore_previews_and_clear_session(world: &mut World, was_push_pull: bool) {
         .resource_mut::<ActiveTransformPreview>()
         .extra_originals
         .clear();
+    let interaction = world
+        .resource_mut::<ActiveTransformPreview>()
+        .interaction
+        .take();
+    if let Some((id, _)) = interaction {
+        world.resource_mut::<AuthoredEditPlanRegistry>().cancel(&id);
+    }
+    *world.resource_mut::<ActiveTransformPreview>() = ActiveTransformPreview::default();
     world.resource_mut::<TransformState>().clear();
     world.resource_mut::<PushPullContext>().active_face = None;
     world.resource_mut::<StatusBarData>().hint.clear();
@@ -922,10 +1141,12 @@ fn teardown_live_csg(world: &mut World, csg_element_id: ElementId) {
 }
 
 fn update_transform_status(world: &mut World) {
-    let Some(preview) = compute_preview(world) else {
+    if let Some(reason) = &world.resource::<ActiveTransformPreview>().refusal {
+        let hint = format!("Edit refused: {reason} · Esc cancel");
+        world.resource_mut::<StatusBarData>().hint = hint;
         return;
-    };
-
+    }
+    let display_value = world.resource::<ActiveTransformPreview>().display_value;
     let state = world.resource::<TransformState>().clone();
     let inference = world.resource::<InferenceEngine>();
     let is_push_pull = world.resource::<PushPullContext>().active_face.is_some();
@@ -939,16 +1160,13 @@ fn update_transform_status(world: &mut World) {
 
     let axis_label = axis_status_label(state.axis);
     let hint = match state.mode {
-        TransformMode::Moving => preview
-            .display_value
+        TransformMode::Moving => display_value
             .map(|value| format!("{mode_label}{axis_label}: {value:.2}m"))
             .unwrap_or_else(|| format!("{mode_label}{axis_label}: cursor")),
-        TransformMode::Rotating => preview
-            .display_value
+        TransformMode::Rotating => display_value
             .map(|value| format!("{mode_label}{axis_label}: {value:.1}\u{b0}"))
             .unwrap_or_else(|| format!("{mode_label}{axis_label}: cursor")),
-        TransformMode::Scaling => preview
-            .display_value
+        TransformMode::Scaling => display_value
             .map(|value| format!("{mode_label}{axis_label}: {value:.2}\u{d7}"))
             .unwrap_or_else(|| format!("{mode_label}{axis_label}: cursor")),
         TransformMode::Idle => String::new(),
@@ -1008,12 +1226,9 @@ fn draw_transform_preview(world: &World, mut gizmos: Gizmos) {
     }
 
     let mode = world.resource::<TransformState>().mode;
-    let Some(preview) = compute_preview(world) else {
-        return;
-    };
     let live_transform_preview = mode != TransformMode::Idle;
 
-    for snapshot in preview.after {
+    for snapshot in &world.resource::<ActiveTransformPreview>().snapshots {
         if live_transform_preview && snapshot.preview_transform().is_some() {
             continue;
         }
@@ -1086,6 +1301,7 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
                 let delta = pp.normal * distance;
                 // Push/pull mode: project delta onto face normal for signed distance
                 Some(TransformPreview {
+                    draft: None,
                     after: state
                         .initial_snapshots
                         .iter()
@@ -1104,6 +1320,7 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
             } else {
                 let delta = move_delta(world, &state, numeric_value)?;
                 Some(TransformPreview {
+                    draft: None,
                     after: state
                         .initial_snapshots
                         .iter()
@@ -1117,6 +1334,7 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
             let delta_radians = rotation_delta(world, &state, center, numeric_value)?;
             let rotation = rotation_quat(state.axis, delta_radians);
             Some(TransformPreview {
+                draft: None,
                 after: state
                     .initial_snapshots
                     .iter()
@@ -1130,6 +1348,7 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
             let display_value =
                 numeric_value.or_else(|| Some(display_scale_value(state.axis, factor)));
             Some(TransformPreview {
+                draft: None,
                 after: state
                     .initial_snapshots
                     .iter()
@@ -1140,10 +1359,22 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
         }
         TransformMode::Idle => return None,
     }?;
-    apply_transform_preview_modifiers(world, &state, &mut preview.after);
+    let draft = prepare_transform_edit(
+        world,
+        &state,
+        state
+            .initial_snapshots
+            .iter()
+            .map(|(_, snapshot)| snapshot.clone())
+            .collect(),
+        std::mem::take(&mut preview.after),
+    );
+    preview.after = draft.after.clone();
+    preview.draft = Some(draft);
     Some(preview)
 }
 
+#[cfg(test)]
 fn apply_transform_preview_modifiers(
     world: &World,
     state: &TransformState,
@@ -2454,6 +2685,8 @@ mod tests {
         world.init_resource::<PivotPoint>();
         world.init_resource::<PushPullContext>();
         world.init_resource::<ActiveTransformPreview>();
+        world.init_resource::<History>();
+        world.init_resource::<AuthoredEditPlanRegistry>();
         world.init_resource::<SnapResult>();
         world.insert_resource(CursorWorldPos {
             raw: Some(Vec3::new(2., 0., 0.)),
@@ -3290,3 +3523,6 @@ mod tests {
         assert!(should_confirm_transform(&state, &mouse_buttons, &keys));
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests;

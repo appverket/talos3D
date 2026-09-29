@@ -174,6 +174,9 @@ fn sanitize_schema_node(node: &mut serde_json::Value) {
 }
 
 #[cfg(feature = "model-api")]
+tokio::task_local! { static REQUIRES_AUTHORED_BASE: bool; }
+
+#[cfg(feature = "model-api")]
 impl ModelApiServer {
     pub(super) fn new(sender: ModelApiRequestSender) -> Self {
         Self {
@@ -246,10 +249,31 @@ impl ModelApiServer {
         &self,
         build: impl FnOnce(oneshot::Sender<T>) -> ModelApiRequest,
     ) -> Result<T, String> {
-        let (response, mut receiver) = oneshot::channel();
+        let (response, receiver) = oneshot::channel();
+        let mut request = build(response);
+        let guarded = REQUIRES_AUTHORED_BASE
+            .try_with(|value| *value)
+            .unwrap_or(false);
+        let guard_receiver = if guarded {
+            let (response, receiver) = oneshot::channel();
+            request = ModelApiRequest::Guarded {
+                request: Box::new(request),
+                response,
+            };
+            Some(receiver)
+        } else {
+            None
+        };
         self.sender
-            .send(build(response))
+            .send(request)
             .map_err(|_| "model API request channel closed".to_string())?;
+        if let Some(receiver) = guard_receiver {
+            self.receive_with_wake(receiver).await??;
+        }
+        self.receive_with_wake(receiver).await
+    }
+
+    async fn receive_with_wake<T>(&self, mut receiver: oneshot::Receiver<T>) -> Result<T, String> {
         loop {
             tokio::select! {
                 result = &mut receiver => {
@@ -2696,8 +2720,26 @@ impl ServerHandler for ModelApiServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.tool_call_allowed(request.name.as_ref())?;
+        use super::profiles::{tool_category, ToolCategory};
+        // Guard in the app world, in the same dispatch as the request. A
+        // separate precheck RPC could race a new native gesture.
+        let guarded = !matches!(
+            tool_category(request.name.as_ref()),
+            ToolCategory::SessionContract
+                | ToolCategory::Capture
+                | ToolCategory::Discovery
+                | ToolCategory::UxAutomation
+                | ToolCategory::Presentation
+        );
+        let guarded = guarded
+            && !matches!(
+                request.name.as_ref(),
+                "list_edit_requests" | "inspect_edit_plan"
+            );
         let tcc = ToolCallContext::new(self, request, context);
-        self.tool_router.call(tcc).await
+        REQUIRES_AUTHORED_BASE
+            .scope(guarded, self.tool_router.call(tcc))
+            .await
     }
 
     async fn list_tools(
@@ -3189,6 +3231,20 @@ pub struct TransformToolRequest {
     /// place. Ignored for non-rotate operations.
     #[serde(default)]
     pub pivot: Option<[f64; 3]>,
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PreviewEditPlanRequest {
+    request_kind: String,
+    parameters: Value,
+}
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct EditPlanIdRequest {
+    plan_id: String,
 }
 
 #[cfg(feature = "model-api")]
@@ -5606,6 +5662,90 @@ impl ModelApiServer {
                 McpError::invalid_params(format!("entity {} not found", params.element_id), None)
             })?;
         json_tool_result(snapshot)
+    }
+
+    #[tool(
+        name = "list_edit_requests",
+        description = "Discover capability-owned semantic edit requests and their typed schemas. Preview a request, inspect its exact captured plan, then apply its plan_id."
+    )]
+    pub(super) async fn list_edit_requests_tool(&self) -> Result<CallToolResult, McpError> {
+        let parameters = Value::Null;
+        let value = self
+            .round_trip(|response| ModelApiRequest::EditPlan {
+                action: "list".into(),
+                parameters,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "preview_edit_plan",
+        description = "Capture an immutable edit candidate through the same semantic modifiers as the viewport. Does not mutate the authored model. Returns exact snapshots, digest, base revision and admissibility; geometry_reviewed remains false."
+    )]
+    pub(super) async fn preview_edit_plan_tool(
+        &self,
+        Parameters(params): Parameters<PreviewEditPlanRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let parameters = serde_json::to_value(params)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let value = self
+            .round_trip(|response| ModelApiRequest::EditPlan {
+                action: "preview".into(),
+                parameters,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "inspect_edit_plan",
+        description = "Inspect a retained immutable candidate by plan_id. Superseded, consumed and evicted IDs fail. This does not replan or revalidate."
+    )]
+    pub(super) async fn inspect_edit_plan_tool(
+        &self,
+        Parameters(params): Parameters<EditPlanIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let parameters = serde_json::to_value(params)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let value = self
+            .round_trip(|response| ModelApiRequest::EditPlan {
+                action: "inspect".into(),
+                parameters,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "apply_edit_plan",
+        description = "Apply an exact captured plan_id once, as one undoable history item. Refuses stale bases, active gestures and semantic refusals. Never replans."
+    )]
+    pub(super) async fn apply_edit_plan_tool(
+        &self,
+        Parameters(params): Parameters<EditPlanIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let parameters = serde_json::to_value(params)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let value = self
+            .round_trip(|response| ModelApiRequest::EditPlan {
+                action: "apply".into(),
+                parameters,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
     }
 
     #[tool(

@@ -36,7 +36,8 @@ impl Plugin for CommandRegistryPlugin {
                     crate::plugins::keymap::dispatch_command_shortcuts,
                     execute_pending_commands,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(crate::plugins::input_ownership::InputPhase::ToolInput),
             )
             .add_systems(
                 Update,

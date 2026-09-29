@@ -64,7 +64,7 @@ use crate::plugins::modeling::subobject_topology::{
 #[cfg(feature = "model-api")]
 use crate::plugins::render_pipeline::{EdgeDisplayMode, RenderSettings, RenderTonemapping};
 #[cfg(feature = "model-api")]
-use crate::plugins::transform::{apply_transform_plan_modifiers, TransformMode};
+use crate::plugins::transform::{prepare_transform_edit, TransformMode, TransformState};
 #[cfg(feature = "model-api")]
 use crate::plugins::{
     camera::{
@@ -178,6 +178,7 @@ impl Plugin for ModelApiPlugin {
         // The public low-level MCP mutation tools call these commands and
         // return CommandResult; normal UI surfaces stay on interactive commands.
         register_model_api_primitive_commands(app);
+        register_model_api_edit_requests(app.world_mut());
         // Register the Model API tools a session may commit, so `eval`
         // accepts them and commit can route them to real geometry.
         {
@@ -10871,6 +10872,75 @@ fn handle_transform_with_modified(
     world: &mut World,
     request: TransformToolRequest,
 ) -> Result<(Vec<u64>, Vec<Value>), String> {
+    use crate::plugins::authored_edit_plan::AuthoredEditPlanRegistry;
+    crate::plugins::authored_edit_plan::requests::ensure_authored_base(world)?;
+    let draft = prepare_transform_request(world, request)?;
+    let changed = draft.before != draft.after;
+    let plan = draft
+        .capture(
+            world,
+            None,
+            world
+                .resource::<crate::plugins::history::History>()
+                .revision_token(),
+        )
+        .map_err(|e| e.to_string())?;
+    let plan = world
+        .resource_mut::<AuthoredEditPlanRegistry>()
+        .publish(plan)
+        .map_err(|e| e.to_string())?;
+    let modified = if changed {
+        plan.after_snapshots()
+            .iter()
+            .map(|s| s.element_id().0)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let snapshots = plan.after_snapshots().iter().map(|s| s.to_json()).collect();
+    if changed {
+        apply_captured_plan_and_flush(world, &plan)?;
+    }
+    Ok((modified, snapshots))
+}
+
+#[cfg(feature = "model-api")]
+fn apply_captured_plan_and_flush(
+    world: &mut World,
+    plan: &crate::plugins::authored_edit_plan::AuthoredEditPlan,
+) -> Result<(), String> {
+    use crate::plugins::{authored_edit_plan::queue_captured_plan, history::History};
+    let revision = world.resource::<History>().revision_token();
+    let depth = world.resource::<History>().undo_stack_len();
+    queue_captured_plan(world, plan.plan_id()).map_err(|e| e.to_string())?;
+    flush_model_api_write_pipeline(world);
+    if world.resource::<History>().undo_stack_len() != depth + 1
+        || world.resource::<History>().revision_token().revision != revision.revision + 1
+    {
+        return Err("Captured edit was refused by the history preflight".into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn register_model_api_edit_requests(world: &mut World) {
+    world.init_resource::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>();
+    world.resource_mut::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>()
+            .register(crate::plugins::authored_edit_plan::requests::EditRequestDescriptor::new(
+                "core.transform", 1, "Move, rotate or scale authored selection with registered semantic modifiers and dependent snapshots.",
+                serde_json::to_value(rmcp::schemars::schema_for!(TransformToolRequest)).expect("transform schema"),
+                |world, parameters| {
+                    let request = serde_json::from_value(parameters).map_err(|e| format!("Invalid transform request: {e}"))?;
+                    prepare_transform_request(world, request)
+                },
+            )).expect("unique core transform request");
+}
+
+#[cfg(feature = "model-api")]
+fn prepare_transform_request(
+    world: &World,
+    request: TransformToolRequest,
+) -> Result<crate::plugins::authored_edit_plan::modifiers::EditPlanDraft, String> {
     for element_id in &request.element_ids {
         ensure_user_editable_entity(world, ElementId(*element_id), "transformed")?;
     }
@@ -10920,27 +10990,19 @@ fn handle_transform_with_modified(
             ))
         }
     };
-    apply_transform_plan_modifiers(world, mode, &mut before, &mut after);
-    let modified = after
+    let initial_snapshots = before
         .iter()
-        .map(|snapshot| snapshot.element_id().0)
+        .filter_map(|snapshot| {
+            find_entity_by_element_id_readonly(world, snapshot.element_id())
+                .map(|entity| (entity, snapshot.clone()))
+        })
         .collect();
-
-    send_event(
-        world,
-        ApplyEntityChangesCommand {
-            label: "AI transform",
-            before,
-            after: after.clone(),
-        },
-    );
-    flush_model_api_write_pipeline(world);
-
-    let snapshots = after
-        .into_iter()
-        .map(|snapshot| snapshot.to_json())
-        .collect();
-    Ok((modified, snapshots))
+    let state = TransformState {
+        mode,
+        initial_snapshots,
+        ..Default::default()
+    };
+    Ok(prepare_transform_edit(world, &state, before, after))
 }
 
 #[cfg(feature = "model-api")]
@@ -13677,6 +13739,10 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
 #[cfg(feature = "model-api")]
 fn capability_snapshot_next_tools() -> Vec<String> {
     [
+        "list_edit_requests",
+        "preview_edit_plan",
+        "inspect_edit_plan",
+        "apply_edit_plan",
         "list_element_classes",
         "discover_curated_paths",
         "select_recipe",

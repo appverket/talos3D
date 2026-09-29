@@ -10,6 +10,48 @@ This is a public part of the platform rather than a private editor hook. The
 same command substrate backs keyboard shortcuts, toolbar actions, menus, the
 command palette, and MCP operations.
 
+## Captured edit plans
+
+Use `list_edit_requests` to discover capability-owned request schemas, then
+`preview_edit_plan` with `request_kind` and `parameters`. The initial request
+is `core.transform`, using the same move/rotate/scale planner and ordered
+semantic modifiers as the viewport. For example:
+
+```json
+{"request_kind":"core.transform","parameters":{"element_ids":[6],"operation":"move","axis":"x","value":0.2}}
+```
+
+Preview leaves authored state and history unchanged. Its transient `plan_id`
+identifies immutable before/after snapshots, a content digest, the base document
+revision, semantic intents and their capture-time verdict. `inspect_edit_plan`
+also reports the current revision, `stale`, `can_apply_now` and `apply_refusal`.
+`can_commit` is the captured semantic verdict, not a promise that the base is
+still current. A snapshot preview does not establish visual correctness;
+`geometry_reviewed` remains false.
+
+`apply_edit_plan` takes only that `plan_id`: it never replans. It refuses stale
+or changed before-state, pending history and semantic refusals; success is one
+history item with exact undo/redo. IDs are bounded, session-local and consumed
+once. Repeating an applied ID fails. Save durable work as native authored
+content/AuthoringScript, not as these transient carrier objects.
+
+Native move/rotate/scale retain the exact candidate displayed by the viewport.
+Release applies it without recomputing from a newer cursor. Cancel restores
+presentation without adding history. MCP writes and authored-state inspection
+are fenced while an interactive gesture owns transient geometry; UX observation,
+capture and plan inspection remain available. Finish or cancel the gesture
+before inspecting an authored base. Superseded candidate IDs cannot apply.
+
+Capabilities register `EditRequestDescriptor` schemas and pure planners in
+`EditRequestRegistry`; domain behavior belongs in those planners and the shared
+`EditPlanModifiers` stage. The existing transform-modifier adapter is retained
+for linked-placement callers. Feature push/pull's type migration and CSG
+finalization remain on their existing command path; they are not advertised as
+captured request support. No new preview renderer is introduced here.
+
+Compact profiles advertise the canonical `set_property` schema. Its deprecated
+`set_entity_property` alias remains available in `full`.
+
 ## What It Exposes
 
 The MCP surface is designed around the authored model rather than render

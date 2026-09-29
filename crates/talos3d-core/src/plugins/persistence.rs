@@ -595,6 +595,16 @@ pub fn new_document(world: &mut World) {
     world.resource_mut::<PendingCommandQueue>().clear();
     world.resource_mut::<PropertyEditState>().clear();
     world.resource_mut::<TransformState>().clear();
+    if let Some(mut active) =
+        world.get_resource_mut::<crate::plugins::transform::ActiveTransformPreview>()
+    {
+        *active = Default::default();
+    }
+    if let Some(mut plans) =
+        world.get_resource_mut::<crate::plugins::authored_edit_plan::AuthoredEditPlanRegistry>()
+    {
+        plans.clear();
+    }
     world
         .resource_mut::<NextState<ActiveTool>>()
         .set(ActiveTool::Select);
@@ -1474,6 +1484,16 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     world.resource_mut::<PendingCommandQueue>().clear();
     world.resource_mut::<PropertyEditState>().clear();
     world.resource_mut::<TransformState>().clear();
+    if let Some(mut active) =
+        world.get_resource_mut::<crate::plugins::transform::ActiveTransformPreview>()
+    {
+        *active = Default::default();
+    }
+    if let Some(mut plans) =
+        world.get_resource_mut::<crate::plugins::authored_edit_plan::AuthoredEditPlanRegistry>()
+    {
+        plans.clear();
+    }
     world
         .resource_mut::<NextState<ActiveTool>>()
         .set(ActiveTool::Select);

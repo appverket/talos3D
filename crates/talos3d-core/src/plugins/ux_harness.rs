@@ -564,7 +564,7 @@ fn parse_key_code(value: &str) -> Result<(KeyCode, Key), String> {
             .chars()
             .next()
             .expect("one-character key string has a char");
-        return key_code_for_letter(ch).map(|key_code| {
+        return key_code_for_character(ch).map(|key_code| {
             (
                 key_code,
                 Key::Character(ch.to_ascii_lowercase().to_string().into()),
@@ -572,6 +572,13 @@ fn parse_key_code(value: &str) -> Result<(KeyCode, Key), String> {
         });
     }
     match normalized.to_ascii_lowercase().as_str() {
+        value if value.starts_with("digit") && value.len() == 6 => {
+            let ch = value.chars().last().unwrap();
+            key_code_for_character(ch).map(|code| (code, Key::Character(ch.to_string().into())))
+        }
+        "period" => Ok((KeyCode::Period, Key::Character(".".into()))),
+        "minus" => Ok((KeyCode::Minus, Key::Character("-".into()))),
+        "tab" => Ok((KeyCode::Tab, Key::Tab)),
         "escape" | "esc" => Ok((KeyCode::Escape, Key::Escape)),
         "delete" | "del" => Ok((KeyCode::Delete, Key::Delete)),
         "backspace" => Ok((KeyCode::Backspace, Key::Backspace)),
@@ -594,6 +601,24 @@ fn parse_key_code(value: &str) -> Result<(KeyCode, Key), String> {
         other => Err(format!(
             "Unsupported key_code '{other}'. Use a letter, KeyG-style name, Escape, Delete, Backspace, Enter, ShiftLeft, or ShiftRight."
         )),
+    }
+}
+
+fn key_code_for_character(ch: char) -> Result<KeyCode, String> {
+    match ch {
+        '0' => Ok(KeyCode::Digit0),
+        '1' => Ok(KeyCode::Digit1),
+        '2' => Ok(KeyCode::Digit2),
+        '3' => Ok(KeyCode::Digit3),
+        '4' => Ok(KeyCode::Digit4),
+        '5' => Ok(KeyCode::Digit5),
+        '6' => Ok(KeyCode::Digit6),
+        '7' => Ok(KeyCode::Digit7),
+        '8' => Ok(KeyCode::Digit8),
+        '9' => Ok(KeyCode::Digit9),
+        '.' => Ok(KeyCode::Period),
+        '-' => Ok(KeyCode::Minus),
+        _ => key_code_for_letter(ch),
     }
 }
 
