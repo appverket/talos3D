@@ -168,6 +168,22 @@ pub struct UxHarnessSnapshot {
     /// Whether face editing is active (the leaf level of drill-down).
     pub face_edit_active: bool,
     pub entities: Vec<UxEntityProjection>,
+    /// Exact candidate presented by the native transform path, if supported.
+    #[serde(default)]
+    pub active_edit_plan: Option<UxActiveEditPlan>,
+    #[serde(default)]
+    pub preview_error: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UxActiveEditPlan {
+    pub plan_id: String,
+    pub digest: String,
+    pub base_model_revision: crate::plugins::history::ModelRevision,
+    pub can_commit: bool,
+    pub presentation: String,
+    pub after_entity_ids: Vec<u64>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -394,6 +410,30 @@ pub fn observe_ux(world: &mut World) -> Result<UxHarnessSnapshot, String> {
             .get_resource::<crate::plugins::face_edit::FaceEditContext>()
             .is_some_and(|context| context.is_active()),
         entities,
+        active_edit_plan: world
+            .get_resource::<crate::plugins::transform::ActiveTransformPreview>()
+            .and_then(|active| {
+                active.plan.as_ref().map(|plan| UxActiveEditPlan {
+                    plan_id: plan.plan_id().0.clone(),
+                    digest: plan.digest().into(),
+                    base_model_revision: plan.base_model_revision().clone(),
+                    can_commit: plan.can_commit(),
+                    presentation: if active.live_snapshot_application {
+                        "authored_snapshot_preview"
+                    } else {
+                        "rigid_transform_preview"
+                    }
+                    .into(),
+                    after_entity_ids: plan
+                        .after_snapshots()
+                        .iter()
+                        .map(|s| s.element_id().0)
+                        .collect(),
+                })
+            }),
+        preview_error: world
+            .get_resource::<crate::plugins::transform::ActiveTransformPreview>()
+            .and_then(|active| active.refusal.clone()),
     })
 }
 

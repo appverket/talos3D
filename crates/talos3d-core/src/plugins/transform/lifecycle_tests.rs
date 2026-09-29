@@ -253,3 +253,24 @@ fn bounded_full_candidate_stage_benchmark() {
     eprintln!("candidate CPU stage:256 selected/4096 unrelated/100 samples; p95={p95:.3}ms");
     assert!(p95 <= 20., "fixed CPU stage budget exceeded: {p95}ms");
 }
+
+#[test]
+fn stationary_input_keeps_the_inspectable_candidate_id_stable() {
+    let mut world = fixture();
+    update_transform_preview(&mut world);
+    let original = world
+        .resource::<ActiveTransformPreview>()
+        .plan
+        .clone()
+        .unwrap();
+    update_transform_preview(&mut world);
+    let observed = crate::plugins::ux_harness::observe_ux(&mut world).unwrap();
+    assert_eq!(
+        observed.active_edit_plan.unwrap().plan_id,
+        original.plan_id().0
+    );
+    assert!(world
+        .resource::<AuthoredEditPlanRegistry>()
+        .get(original.plan_id())
+        .is_some());
+}

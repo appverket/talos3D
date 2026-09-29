@@ -719,6 +719,20 @@ fn publish_transform_candidate(
         draft.semantic_intents.clone(),
     )
     .map_err(|e| e.to_string())?;
+    if world
+        .resource::<ActiveTransformPreview>()
+        .plan
+        .as_ref()
+        .is_some_and(|active| {
+            active.digest() == plan.digest()
+                && world
+                    .resource::<AuthoredEditPlanRegistry>()
+                    .get(active.plan_id())
+                    .is_some()
+        })
+    {
+        return Ok(());
+    }
     let plan = world
         .resource_mut::<AuthoredEditPlanRegistry>()
         .publish(plan)
