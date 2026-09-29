@@ -74,6 +74,28 @@ fn clip(text: &str) -> String {
     }
     out
 }
+// Human display only. Structured control values retain their exact precision.
+fn display_value(value: &Value) -> String {
+    match value {
+        Value::String(text) => clip(text),
+        Value::Number(number) => {
+            let value = number.as_f64().unwrap_or_default();
+            if value != 0.0 && !(0.000001..1e12).contains(&value.abs()) {
+                format!("{value:.6e}")
+            } else {
+                let text = format!("{value:.6}");
+                let text = text.trim_end_matches('0').trim_end_matches('.');
+                if text == "-0" {
+                    "0".into()
+                } else {
+                    text.into()
+                }
+            }
+        }
+        _ => clip(&value.to_string()),
+    }
+}
+
 fn bounded_details(value: Value) -> Value {
     let result = bounded(value, 0);
     if serde_json::to_vec(&result).map_or(true, |v| v.len() > 2048) {
@@ -230,7 +252,7 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
                                         }
                                     })
                                     .unwrap_or_default();
-                                controls.add(&parameter.name, format!("{}{unit} · {value_source}{}",clip(&value.to_string()),if editable {""} else {" · read only"}),
+                                controls.add(parameter.name.replace('_', " "), format!("{}{unit} · {value_source}{}",display_value(&value),if editable {""} else {" · read only"}),
                                     json!({"parameter":parameter.name,"value":value,"value_source":value_source,"unit":parameter.metadata.unit,"editable":editable,"override_policy":parameter.override_policy,"scale_behavior":parameter.metadata.scale_behavior,"authority":"definition_parameter","next_tool":"occurrence.resolve"}));
                             }
                         }
@@ -265,7 +287,7 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
                 .as_ref()
                 .map(|v| v.to_json())
                 .unwrap_or(Value::Null);
-            controls.add(field.label, clip(&value.to_string()), json!({"property":field.name,"value":value,"editable":field.editable,"authority":"authored_property"}));
+            controls.add(field.label, display_value(&value), json!({"property":field.name,"value":value,"editable":field.editable,"authority":"authored_property"}));
         }
     }
     if let Some(deps) = entity.get::<EntityDependencies>() {
@@ -492,10 +514,14 @@ mod tests {
         definitions.insert(definition);
         world.insert_resource(definitions);
         let mut identity = OccurrenceIdentity::new(DefinitionId("fixture".into()), 1);
-        identity.overrides.set("width", json!(1.2));
+        identity.overrides.set("width", json!(1.2f32 as f64));
         world.spawn((ElementId(4), identity));
         let result = explain_design(&world, 4).unwrap();
-        assert_eq!(result.sections[1].rows[0].details["value"], 1.2);
+        assert_eq!(
+            result.sections[1].rows[0].details["value"],
+            json!(1.2f32 as f64)
+        );
+        assert!(result.sections[1].rows[0].text.starts_with("1.2 ·"));
         assert_eq!(result.sections[1].rows[0].details["editable"], true);
         assert_eq!(result.sections[1].rows[1].details["editable"], false);
     }
