@@ -1,5 +1,7 @@
 #[cfg(feature = "model-api")]
 pub mod concept_tools;
+#[cfg(feature = "model-api")]
+mod recipe_history;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -12720,6 +12722,23 @@ fn handle_instantiate_recipe(
     world: &mut World,
     request: InstantiateRecipeRequest,
 ) -> ApiResult<InstantiateRecipeResult> {
+    // The recipe needs intermediate results to place and group its outputs.
+    // Isolate that history, then accept one complete edit or restore the prior
+    // undo/redo branch on failure. Pending human commands must not join it.
+    if crate::plugins::commands::has_pending_command_events(world) {
+        return Err("Pending user command events must finish before recipe creation".into());
+    }
+    let transaction = crate::plugins::history::HistoryTransaction::begin(world)?;
+    let result = instantiate_recipe_in_transaction(world, request);
+    transaction.finish_named(world, result.is_ok(), "Instantiate recipe");
+    result
+}
+
+#[cfg(feature = "model-api")]
+fn instantiate_recipe_in_transaction(
+    world: &mut World,
+    request: InstantiateRecipeRequest,
+) -> ApiResult<InstantiateRecipeResult> {
     let transaction_history_depth = world
         .get_resource::<crate::plugins::history::History>()
         .map(crate::plugins::history::History::undo_stack_len)
@@ -12943,10 +12962,17 @@ fn handle_instantiate_recipe(
         );
         send_event(world, CreateEntityCommand { snapshot });
         flush_model_api_write_pipeline(world);
-        move_recipe_semantics_from_anchor_to_group(world, ElementId(root), group_id);
         select_only_element(world, group_id);
         Some(group_id.0)
     };
+
+    recipe_history::finalize(
+        world,
+        ElementId(root),
+        &created_element_ids,
+        group_element_id.map(ElementId),
+        &request.family_id,
+    );
 
     // 5. Run validation on the semantic aggregate when the recipe produced one.
     //    Failures here are surfaced as structured findings, not as a hard error:

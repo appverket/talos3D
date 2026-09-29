@@ -652,11 +652,17 @@ the created geometry persists, so the response carries `created_element_ids`,
 the unchanged refinement `state`, and a `promotion_blocked` object
 (`unsatisfied_obligations` + `message`). Do not retry the call — that
 duplicates geometry. Resolve each listed obligation with `resolve_obligation`
-on the root element, then call `promote_refinement` again. A blocked
+on `promotion_blocked.obligation_element_id` (the aggregate group after
+instantiation), then call `promote_refinement` on that element. A blocked
 `promote_refinement` with no recipe side effects (no script ran, nothing
-created) still returns a plain error. Real execution failures that occur after
-elements were already created return an error whose message lists the
-persisted element ids.
+created) still returns a plain error. Hard execution or placement failures
+roll back the instantiation. Successful `instantiate_recipe` calls create one
+history item, including placement, group metadata and `ViaRecipe` provenance
+on the locator, generated members and group. One undo removes the complete
+result; redo restores the same IDs and captured metadata without rerunning the
+recipe. A failed attempt preserves prior history, its redo branch and the
+next element ID. This creation guarantee does not extend to arbitrary later
+`promote_refinement` calls.
 
 Session recipe drafts are still **not executable by `instantiate_recipe`**.
 Installed drafts can be appended to `list_recipe_families` and `select_recipe`

@@ -12281,6 +12281,19 @@ fn instantiate_recipe_can_create_definition_and_bind_reusable_occurrence() {
     );
     let snapshot = get_entity_snapshot(&world, occurrence_id).expect("occurrence resolves");
     assert_eq!(snapshot["offset"], serde_json::json!([1.0, 2.0, 3.0]));
+    let definition = handle_list_definitions(&world)[0].definition_id.clone();
+    assert_eq!(world.resource::<History>().undo_stack_len(), 1);
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    assert!(list_entities(&world).is_empty());
+    assert!(handle_list_definitions(&world).is_empty());
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(handle_list_definitions(&world)[0].definition_id, definition);
+    assert_eq!(
+        get_entity_snapshot(&world, occurrence_id).unwrap(),
+        snapshot
+    );
 }
 
 #[cfg(feature = "model-api")]
@@ -12353,7 +12366,7 @@ fn failed_recipe_rolls_back_created_definition_before_returning_error() {
 ///   4. Return `recipe_id_used` equal to the requested family id.
 ///   5. Leave all created entities in the authored model (verifiable via
 ///      list_entities).
-///   6. Leave the operations undoable: History must have at least one entry.
+///   6. Undo and redo the complete result in one history operation.
 #[cfg(feature = "model-api")]
 #[test]
 fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable() {
@@ -12474,10 +12487,27 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
         .expect("recipe output group must carry the semantic class");
     assert_eq!(assignment.element_class.0, "wall_assembly");
 
-    // Undo is available: the PendingCommandQueue was flushed (commands went
-    // through the pipeline), which means they are now in History. Verify by
-    // checking that the pending queue is empty (flush happened) and that the
-    // entity count persisted (entities survived the flush).
+    // Exercise actual history, not merely the presence of some queued entry.
+    let mut ids: Vec<_> = collect_element_ids(&mut world).into_iter().collect();
+    ids.sort_unstable();
+    let expected = serde_json::to_value(get_entities_details(&world, ids.clone())).unwrap();
+    assert_eq!(world.resource::<History>().undo_stack_len(), 1);
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(list_entities(&world).len(), entity_count_before);
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(
+        serde_json::to_value(get_entities_details(&world, ids.clone())).unwrap(),
+        expected,
+        "one redo must restore geometry and every generated member/group annotation"
+    );
+    for id in ids {
+        assert_eq!(
+            handle_get_authoring_provenance(&world, id).unwrap().mode,
+            "ViaRecipe:two_box_wall"
+        );
+    }
     let queue = world.resource::<crate::plugins::history::PendingCommandQueue>();
     assert!(
         queue.commands.is_empty(),
@@ -12692,6 +12722,17 @@ fn instantiate_recipe_hard_failure_rolls_back_root_and_completed_steps() {
         second.tool = crate::curation::authoring_script::McpToolId::new("missing_tool");
     }
 
+    let control = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box", "centre": [20.0, 0.0, 0.0], "half_extents": [0.5, 0.5, 0.5]
+        }),
+    )
+    .unwrap();
+    let control_snapshot = get_entity_snapshot(&world, ElementId(control)).unwrap();
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    let next_id = world.resource::<ElementIdAllocator>().next_value();
     let ids_before = collect_element_ids(&mut world);
     let history_depth_before = world
         .resource::<crate::plugins::history::History>()
@@ -12720,6 +12761,14 @@ fn instantiate_recipe_hard_failure_rolls_back_root_and_completed_steps() {
             .undo_stack_len(),
         history_depth_before,
         "failed transaction must not remain in undo history"
+    );
+    assert_eq!(world.resource::<ElementIdAllocator>().next_value(), next_id);
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(control)).unwrap(),
+        control_snapshot,
+        "failed recipe must preserve the human's prior redo branch"
     );
 }
 
@@ -12942,6 +12991,19 @@ fn instantiate_recipe_gated_promotion_reports_partial_state_not_bare_error() {
         world.get::<ObligationSet>(obligation_entity).is_some(),
         "the named element must carry the ObligationSet so resolve_obligation can run"
     );
+    let obligations = world
+        .get::<ObligationSet>(obligation_entity)
+        .unwrap()
+        .clone();
+    assert_eq!(world.resource::<History>().undo_stack_len(), 1);
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    assert!(list_entities(&world).is_empty());
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    flush_model_api_write_pipeline(&mut world);
+    let group =
+        find_entity_by_element_id_readonly(&world, ElementId(obligation_element_id)).unwrap();
+    assert_eq!(world.get::<ObligationSet>(group), Some(&obligations));
 }
 
 /// The same defect through the bare `promote_refinement{recipe_id}` path: the

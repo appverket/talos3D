@@ -8335,7 +8335,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "instantiate_recipe",
         description = "Create a semantic element and immediately run a curated recipe to generate \
-            its sub-element geometry in a single call. This is the preferred one-call alternative \
+            its sub-element geometry as one undo/redo operation, with recipe provenance on every output. This is the preferred one-call alternative \
             to the two-step pattern of `create_entity` + `promote_refinement { recipe_id }`. \
             \n\nRequired: `family_id` (recipe family id from `select_recipe`), `target_class` \
             (element class, e.g. `\"wall_assembly\"`), `parameters` (recipe-specific driver map, \
@@ -8348,12 +8348,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             as the visible wall/roof/foundation member of a larger building assembly when \
             `group_element_id` or `created_element_ids` are present. For validation-relevant \
             assemblies, add the aggregate `group_element_id` or the actual generated elements \
-            as members, and use `root_element_id` for refinement/obligation operations. \
+            as members. The aggregate carries the recipe's semantics when present. \
             \n\nIf the response carries `promotion_blocked`, the geometry WAS created (it is \
             listed in `created_element_ids`) but the promotion gate blocked the refinement \
             claim on the listed `unsatisfied_obligations`. Do NOT retry this call — that \
             duplicates geometry. Resolve each obligation with `resolve_obligation` on \
-            `root_element_id`, then call `promote_refinement`."
+            `promotion_blocked.obligation_element_id`, then call `promote_refinement` on that element."
     )]
     pub(super) async fn instantiate_recipe_tool(
         &self,

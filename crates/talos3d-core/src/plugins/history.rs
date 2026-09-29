@@ -258,7 +258,11 @@ impl HistoryTransaction {
         })
     }
 
-    pub(crate) fn finish(mut self, world: &mut World, accept: bool) {
+    pub(crate) fn finish(self, world: &mut World, accept: bool) {
+        self.finish_named(world, accept, "Procedural session");
+    }
+
+    pub(crate) fn finish_named(mut self, world: &mut World, accept: bool, label: &'static str) {
         let mut working = world
             .remove_resource::<History>()
             .expect("transaction history installed");
@@ -280,7 +284,7 @@ impl HistoryTransaction {
                 self.previous.save_point = None;
             }
             self.previous.undo_stack.push(Box::new(GroupedCommand {
-                label: "Procedural session",
+                label,
                 commands: mem::take(&mut working.undo_stack),
             }));
             self.previous.redo_stack.clear();
