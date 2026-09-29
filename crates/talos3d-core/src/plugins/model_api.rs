@@ -4610,34 +4610,11 @@ fn handle_save_project(world: &mut World, path: &str) -> Result<String, String> 
 
 #[cfg(feature = "model-api")]
 fn handle_load_project(world: &mut World, path: &str) -> Result<String, String> {
-    let requested_path = std::path::PathBuf::from(path);
-    if world
-        .get_resource::<DocumentState>()
-        .is_some_and(|document| {
-            !document.dirty
-                && document
-                    .current_path
-                    .as_ref()
-                    .is_some_and(|current| paths_identify_same_document(current, &requested_path))
-        })
-    {
-        return Ok(requested_path.to_string_lossy().into_owned());
-    }
-    load_project_from_path(world, requested_path).map(|path| path.to_string_lossy().to_string())
-}
-
-#[cfg(feature = "model-api")]
-fn paths_identify_same_document(current: &std::path::Path, requested: &std::path::Path) -> bool {
-    if current == requested {
-        return true;
-    }
-    match (
-        std::fs::canonicalize(current),
-        std::fs::canonicalize(requested),
-    ) {
-        (Ok(current), Ok(requested)) => current == requested,
-        _ => false,
-    }
+    // An explicit load reads disk and replaces the document, including when
+    // the path is unchanged. Dirty tracking cannot detect external file edits
+    // or all transient authoring state, and is not a content identity check.
+    load_project_from_path(world, std::path::PathBuf::from(path))
+        .map(|path| path.to_string_lossy().to_string())
 }
 
 #[cfg(feature = "model-api")]

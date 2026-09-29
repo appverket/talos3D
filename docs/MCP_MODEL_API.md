@@ -943,3 +943,11 @@ No dependency scan is performed per frame for an unchanged selection.
 `get_authoring_provenance` likewise returns `mode: "Unrecorded"` when no direct
 component exists. Explicit Freeform records remain Freeform. Elevation-intent
 declaration and binding are editing operations and are not in inspection.
+
+### Explicit project reload
+
+`load_project` always reads the requested file and replaces document state, even
+when it is the current path and the dirty flag is false. This discards unsaved
+state and invalidates old document revision tokens and transient parametric
+instances. A missing or invalid file reports an error before replacing the scene.
+Use `get_instance_info` to inspect the current document without reloading it.

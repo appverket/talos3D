@@ -4977,7 +4977,8 @@ fn primitive_round_trip_through_project_persistence() {
 
 #[cfg(feature = "model-api")]
 #[test]
-fn loading_the_same_clean_document_is_idempotent() {
+fn explicit_reload_replaces_transient_state_even_when_the_document_is_marked_clean() {
+    use crate::relational::registry::ParametricStore;
     let mut world = init_model_api_test_world();
     handle_create_entity(
         &mut world,
@@ -5001,16 +5002,38 @@ fn loading_the_same_clean_document_is_idempotent() {
         }),
     )
     .expect("transient marker should be created");
+    world.init_resource::<ParametricStore>();
+    let instance_id = world
+        .resource_mut::<ParametricStore>()
+        .instantiate("transient");
+    let before_revision = world.resource::<History>().revision_token();
     world.resource_mut::<DocumentState>().dirty = false;
 
     let opened = handle_load_project(&mut world, path.to_str().unwrap_or_default())
-        .expect("opening the same clean document should succeed as a no-op");
+        .expect("explicit same-path load should read the saved document");
 
     assert_eq!(opened, path.to_string_lossy());
     assert!(
-        get_entity_snapshot(&world, ElementId(transient_id)).is_some(),
-        "a same-clean-path open must not rebuild the scene"
+        get_entity_snapshot(&world, ElementId(transient_id)).is_none(),
+        "unsaved transient state must not survive an explicit reload"
     );
+    assert!(world
+        .resource::<ParametricStore>()
+        .get(instance_id)
+        .is_none());
+    assert_ne!(
+        world.resource::<History>().revision_token(),
+        before_revision
+    );
+    assert!(!world.resource::<DocumentState>().dirty);
+
+    // Same path and clean state must not conceal a changed/missing file.
+    fs::remove_file(&path).expect("fixture should exist");
+    let saved_state = list_entities(&world);
+    let revision = world.resource::<History>().revision_token();
+    assert!(handle_load_project(&mut world, path.to_str().unwrap()).is_err());
+    assert_eq!(list_entities(&world), saved_state);
+    assert_eq!(world.resource::<History>().revision_token(), revision);
 
     let _ = fs::remove_file(path);
 }

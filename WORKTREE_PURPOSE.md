@@ -6,4 +6,4 @@
 - task-id: TALOS-bwfgtfaz
 - target base: main, stacked on explanation PR52 8067398
 - summary: Explicit project reload must replace document state even when dirty tracking misses a mutation
-- status: active
+- status: awaiting-merge
