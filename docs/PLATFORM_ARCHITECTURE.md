@@ -107,6 +107,35 @@ The platform geometry model follows ADR-023:
 - semantic geometry summaries are exposed to AI
 - the definition model remains compatible with future DAG-based paradigms
 
+## Captured edit plans
+
+`plugins::authored_edit_plan` owns the transient `AuthoredEditPlan` carrier.
+Capability planners provide ordered before/after authored snapshots, semantic
+intents, and diagnostic context. The published candidate is immutable and has a
+distinct ID, document/revision fence, and content digest. `AuthoringScript`
+remains the durable procedural representation; plans are not project data.
+
+`HistoryPlugin` installs a bounded registry (64 candidates and 64 interactions;
+4 MiB serialized content per candidate and per interaction's original snapshots).
+An interaction retains its initial revision and originals while replacing its
+active candidate. Cancellation, eviction and consumption remove access by ID;
+republishing recovered content creates a new identity. New interactions release
+those from older revisions. Consumers holding an `Arc` must release it when
+presentation or history no longer needs it; registry limits do not bound history.
+
+`queue_captured_plan` refuses pending history work, stale candidates, occupied
+created identities, and mismatched before snapshots. History repeats the guard
+immediately before mutation and runs the shared semantic admissibility kernel.
+A successful candidate applies its captured snapshots as one undoable command;
+redo uses the same content. Snapshot implementations own their authored fields
+and dependency ordering. Retyping needs an explicit capability migration;
+arbitrary resource or library writes are outside this snapshot carrier.
+
+The carrier does not yet change transform presentation or add an MCP endpoint.
+Interactive integration must restore any transient authored preview before
+preflight, apply the exact displayed candidate, exercise the actual presentation
+path, and pass the measured performance gate before it ships.
+
 ## Architectural Summary
 
 Talos3D is a platform first. Features arrive through capabilities. Setups bundle

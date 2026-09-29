@@ -3,6 +3,7 @@ pub mod assembly_pattern_drafts;
 pub mod asset_browser;
 pub mod assistant_chat;
 pub mod assumption_log;
+pub mod authored_edit_plan;
 pub mod authoring_guidance;
 pub mod browser_mcp;
 pub mod bundled_definition_libraries;

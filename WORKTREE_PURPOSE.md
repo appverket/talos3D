@@ -6,4 +6,4 @@
 - task-id: TALOS-qqujefbb
 - target base: main (stacked on atomic PR48 cdae967)
 - summary: ADR065 generic immutable edit-plan identity and lifecycle
-- status: active
+- status: awaiting-merge

@@ -16,6 +16,7 @@ impl Plugin for HistoryPlugin {
     fn build(&self, app: &mut App) {
         app.configure_sets(Update, (HistorySet::Queue, HistorySet::Apply).chain())
             .init_resource::<History>()
+            .init_resource::<super::authored_edit_plan::AuthoredEditPlanRegistry>()
             .init_resource::<PendingCommandQueue>()
             .init_resource::<SemanticEnforcement>()
             .add_systems(
@@ -35,6 +36,11 @@ pub trait EditorCommand: Send + Sync + 'static {
     fn label(&self) -> &'static str;
     fn apply(&mut self, world: &mut World);
     fn undo(&mut self, world: &mut World);
+
+    /// Validate a captured command immediately before mutation.
+    fn preflight(&self, _world: &World) -> Option<Refusal> {
+        None
+    }
 
     fn redo(&mut self, world: &mut World) {
         self.apply(world);
@@ -64,6 +70,12 @@ struct GroupedCommand {
 impl EditorCommand for GroupedCommand {
     fn label(&self) -> &'static str {
         self.label
+    }
+
+    fn preflight(&self, world: &World) -> Option<Refusal> {
+        self.commands
+            .iter()
+            .find_map(|command| command.preflight(world))
     }
 
     /// A group is evaluated as one plan, so a refusal anywhere in the group
@@ -432,6 +444,9 @@ pub(crate) fn apply_pending_history_commands(world: &mut World) {
 /// Admits unconditionally when no graph is installed: a build without a domain
 /// pack must keep authoring, not refuse everything.
 fn evaluate_command_admissibility(world: &World, command: &dyn EditorCommand) -> Verdict {
+    if let Some(refusal) = command.preflight(world) {
+        return Verdict::Refuse(vec![refusal]);
+    }
     let Some(graph) = world.get_resource::<SemanticGraph>() else {
         return Verdict::Admit;
     };
