@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-09-29T08:16:00Z
-- branch: codex/co-creative-atomic-commit
-- task-id: TALOS-uynfsnun
-- target base: main (stacked on freshness PR47 at 8bf66e5)
-- summary: Atomic procedural commit, live validation and grouped undo
-- status: awaiting-merge
+- created: 2026-09-29T08:36:00Z
+- branch: codex/authored-edit-plan-lifecycle
+- task-id: TALOS-qqujefbb
+- target base: main (stacked on atomic PR48 cdae967)
+- summary: ADR065 generic immutable edit-plan identity and lifecycle
+- status: active
