@@ -131,54 +131,13 @@ pub(super) fn spawn_model_api_server(
 
             runtime.block_on(async move {
                 let ct = tokio_util::sync::CancellationToken::new();
-                let sender = http_sender;
-                let config = StreamableHttpServerConfig::default()
-                    .with_stateful_mode(false)
-                    .with_json_response(true)
-                    .with_cancellation_token(ct.clone());
-
-                // One MCP service per capability profile plus the default
-                // `/mcp` endpoint (profile from TALOS3D_MCP_PROFILE, default
-                // `authoring`). Each endpoint owns one shared
-                // SessionProfileState: the transport runs stateless (a fresh
-                // server per request), so connect-time profile selection is
-                // the endpoint path, and `set_session_profile` switches that
-                // endpoint's state for subsequent requests.
-                let profile_service = |profile: CapabilityProfile| {
-                    let state = SessionProfileState::new(profile);
-                    let sender = sender.clone();
-                    let service: StreamableHttpService<ModelApiServer, LocalSessionManager> =
-                        StreamableHttpService::new(
-                            move || {
-                                Ok(ModelApiServer::with_authenticated_http_profile_state(
-                                    sender.clone(),
-                                    state.clone(),
-                                ))
-                            },
-                            Default::default(),
-                            config.clone(),
-                        );
-                    service
-                };
-
-                let guard =
-                    LocalAccessGuard::for_port(runtime_info.http_port, authentication.clone());
-                let mut router = axum::Router::new()
-                    .route_service("/mcp", profile_service(default_profile_from_env()));
-                for profile in CapabilityProfile::ALL {
-                    router = router.route_service(
-                        format!("/mcp/{}", profile.name()).as_str(),
-                        profile_service(profile),
-                    );
-                }
-                let pairing_router = axum::Router::new()
-                    .route("/mcp/pair", axum::routing::post(redeem_local_pairing))
-                    .with_state(authentication);
-                let router = router.merge(pairing_router);
-                let router = router.layer(axum::middleware::from_fn_with_state(
-                    guard,
-                    enforce_local_access,
-                ));
+                let router = model_api_http_router(
+                    http_sender,
+                    runtime_info.http_port,
+                    authentication,
+                    default_profile_from_env(),
+                    ct.clone(),
+                );
                 let addr = format!("{}:{}", runtime_info.http_host, runtime_info.http_port);
                 let tcp_listener = match tokio::net::TcpListener::from_std(http_listener) {
                     Ok(listener) => listener,
@@ -217,6 +176,56 @@ pub(super) fn spawn_model_api_server(
 /// A random per-process bearer credential is enforced after these browser and
 /// host checks. The two layers are complementary: authentication does not make
 /// an attacker-controlled `Origin` or rebinding `Host` acceptable.
+/// The same authenticated router is used in production and HTTP contract tests.
+/// A service is created once per MCP initialize, never once per endpoint.
+#[cfg(feature = "model-api")]
+pub(super) fn model_api_http_router(
+    sender: ModelApiRequestSender,
+    port: u16,
+    authentication: ModelApiAuthentication,
+    default_profile: CapabilityProfile,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> axum::Router {
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(true)
+        .with_cancellation_token(cancellation);
+    let profile_service = |profile: CapabilityProfile| {
+        let sender = sender.clone();
+        let mut manager = LocalSessionManager::default();
+        // Bound abandoned clients; DELETE closes promptly. Reinitialize after
+        // expiry (404) to obtain a new session at the endpoint's initial profile.
+        manager.session_config.keep_alive = Some(std::time::Duration::from_secs(30 * 60));
+        StreamableHttpService::new(
+            move || {
+                Ok(ModelApiServer::with_authenticated_http_profile_state(
+                    sender.clone(),
+                    SessionProfileState::new(profile),
+                ))
+            },
+            std::sync::Arc::new(manager),
+            config.clone(),
+        )
+    };
+    let guard = LocalAccessGuard::for_port(port, authentication.clone());
+    let mut router = axum::Router::new().route_service("/mcp", profile_service(default_profile));
+    for profile in CapabilityProfile::ALL {
+        router = router.route_service(
+            format!("/mcp/{}", profile.name()).as_str(),
+            profile_service(profile),
+        );
+    }
+    router
+        .merge(
+            axum::Router::new()
+                .route("/mcp/pair", axum::routing::post(redeem_local_pairing))
+                .with_state(authentication),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            guard,
+            enforce_local_access,
+        ))
+}
+
 #[cfg(feature = "model-api")]
 #[derive(Clone)]
 struct LocalAccessGuard {

@@ -14071,8 +14071,8 @@ mod capability_profiles {
     /// The byte bound was 55% and ordinary growth crossed it by 0.5% — a single
     /// tool's schema, which is exactly the "adding a tool breaks the build" case
     /// this guard says it does not want to be. Measured at the time of writing:
-    /// 139/262 tools (53.1%) after adding explicit demotion preview plus
-    /// stale-branch rebase/regeneration recovery. The bound is set to leave
+    /// 145/267 tools (54.3%) after exposing two provenance reads in ordinary
+    /// authoring (TALOS-ionklwss). The 60% byte budget is unchanged. The bound leaves
     /// room for that kind of drift while still failing loudly on the thing it
     /// exists to catch: un-gating the surface wholesale would put both ratios
     /// near 100%.
@@ -14082,8 +14082,8 @@ mod capability_profiles {
         let authoring = catalog.tools_for(CapabilityProfile::Authoring);
         let full = catalog.tools_for(CapabilityProfile::Full);
         assert!(
-            authoring.len() * 100 <= full.len() * 54,
-            "authoring advertises {} of {} tools; expected at most 54%",
+            authoring.len() * 100 <= full.len() * 55,
+            "authoring advertises {} of {} tools; expected at most 55%",
             authoring.len(),
             full.len()
         );
@@ -14125,13 +14125,22 @@ mod capability_profiles {
             "save_project",
             "save_model",
             "invoke_command",
+            "install_recipe_from_session_export",
+            "save_recipe_draft",
+            "procedural_session.commit",
         ] {
             assert!(
                 !names.contains(tool),
                 "inspection profile must not advertise {tool}"
             );
         }
-        for tool in ["list_entities", "get_world_aabb", "take_screenshot"] {
+        for tool in [
+            "list_entities",
+            "get_world_aabb",
+            "take_screenshot",
+            "get_authoring_provenance",
+            "get_claim_grounding",
+        ] {
             assert!(
                 names.contains(tool),
                 "inspection profile must include {tool}"
@@ -14253,5 +14262,79 @@ mod capability_profiles {
         server
             .tool_call_allowed("ux_click")
             .expect("full allows everything");
+    }
+}
+
+#[cfg(feature = "model-api")]
+mod http_sessions;
+
+#[cfg(feature = "model-api")]
+#[test]
+fn discover_curated_paths_definition_routes_use_registered_tools_and_profiles() {
+    let mut world = init_model_api_test_world();
+    let mut request = make_rect_extrusion_request();
+    request["name"] = json!("Door Panel");
+    let panel = handle_create_definition(&mut world, request).unwrap();
+    let window = handle_create_definition(
+        &mut world,
+        make_compound_window_request(&panel.definition_id),
+    )
+    .unwrap();
+    let library = handle_create_definition_library(&mut world, json!({"name":"Products"})).unwrap();
+    for id in [&panel.definition_id, &window.definition_id] {
+        handle_add_definition_to_library(
+            &mut world,
+            json!({
+                "library_id": library.library_id, "definition_id": id,
+            }),
+        )
+        .unwrap();
+    }
+    for (term, expected) in [
+        ("door", "definition.instantiate"),
+        ("window", "definition.instantiate_hosted"),
+    ] {
+        let result = handle_discover_curated_paths(
+            &world,
+            CuratedPathDiscoveryRequest {
+                path_kind: Some("definition".into()),
+                element_class: Some(term.into()),
+                query: None,
+                context: json!({}),
+            },
+        )
+        .unwrap();
+        assert_eq!(result.definition_assets.len(), 1);
+        assert_eq!(result.suggested_next_tool, expected);
+        assert_eq!(
+            result.definition_assets[0].instantiate_tool.as_deref(),
+            Some(expected)
+        );
+        assert!(profile_tool_catalog().router.has_route(expected));
+        assert!(result.definition_assets[0]
+            .how_to_instantiate
+            .contains(&library.library_id));
+        assert!(!result.definition_assets[0]
+            .how_to_instantiate
+            .contains("occurrence.create"));
+        for profile in CapabilityProfile::ALL {
+            let mut projected = result.clone();
+            projected.for_profile(profile);
+            assert!(profile_tool_catalog()
+                .tools_for(profile)
+                .iter()
+                .any(|tool| tool.name == projected.suggested_next_tool));
+            if profile == CapabilityProfile::Inspection {
+                assert_eq!(projected.suggested_next_tool, "set_session_profile");
+                assert_eq!(projected.required_profile.as_deref(), Some("authoring"));
+                assert_eq!(
+                    projected.definition_assets[0].required_profile.as_deref(),
+                    Some("authoring")
+                );
+                assert!(projected.definition_assets[0]
+                    .how_to_instantiate
+                    .starts_with("First call set_session_profile"));
+            }
+        }
     }
 }

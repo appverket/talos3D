@@ -386,8 +386,8 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("list_material_specs", ToolCategory::CurationExtended),
     ("save_material_spec", ToolCategory::CurationExtended),
     ("publish_material_spec", ToolCategory::CurationExtended),
-    ("get_authoring_provenance", ToolCategory::CurationExtended),
-    ("get_claim_grounding", ToolCategory::CurationExtended),
+    ("get_authoring_provenance", ToolCategory::Inspection),
+    ("get_claim_grounding", ToolCategory::Inspection),
     ("definition.compile", ToolCategory::CurationExtended),
     // --- Modeling extended ---
     ("align_execute", ToolCategory::ModelingExtended),
@@ -509,10 +509,9 @@ pub(super) fn profiles_containing(tool_name: &str) -> Vec<&'static str> {
 
 /// Shared, atomically-switchable active profile for one MCP session scope.
 ///
-/// stdio gets one per connection; each HTTP profile endpoint shares one across
-/// its (stateless-mode) requests, so `set_session_profile` persists for that
-/// endpoint. Talos3D is a single-user local app, so endpoint scope is an
-/// acceptable session approximation.
+/// stdio gets one per connection; HTTP gets one per MCP session id. Endpoint
+/// paths choose the initial profile only. Clients sharing a bearer and endpoint
+/// do not share mutable profile state.
 #[derive(Debug, Clone)]
 pub(super) struct SessionProfileState(Arc<AtomicU8>);
 

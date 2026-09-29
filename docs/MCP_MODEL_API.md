@@ -331,20 +331,35 @@ Selecting a profile:
   `/mcp/ux-automation`, `/mcp/full`. Plain `/mcp` serves the default profile
   (`authoring`, or `TALOS3D_MCP_PROFILE` when set).
 - **At runtime (any transport):** call `set_session_profile` with
-  `{"profile": "full"}` (or any profile name; omit `profile` to report the
-  current one). Subsequent `tools/list` calls return the new frozen list. On
-  stdio the server also emits a `tools/list_changed` notification; the HTTP
-  transport is stateless with JSON responses (no channel for server-initiated
-  notifications between requests), so HTTP clients should re-fetch `tools/list`
-  after switching — the tool's response reports the change either way. The
-  switch is scoped to the endpoint/session you are connected to — fine for a
-  single-user local app.
+  `{"profile": "full"}` (or omit `profile` to report the current one). Re-fetch
+  `tools/list` after changing profiles. Stdio also emits `tools/list_changed`;
+  HTTP reports `changed` explicitly and does not require a notification listener.
+- **HTTP session lifetime:** initialize returns `Mcp-Session-Id`. Send
+  `notifications/initialized`, then include that id on subsequent requests.
+  Each initialized session owns its profile, even when clients share a URL and
+  instance bearer. Paths choose the initial profile only. A reconnect using the
+  same live id retains the profile; a new initialize starts from the path's
+  default. DELETE the session on exit. Sessions expire after 30 minutes of
+  inactivity or when the app exits; on HTTP 404 initialize again and bootstrap.
+  Stateful responses use SSE; read the response matching the request id and
+  tolerate intervening notification/priming events. The bearer remains required
+  on every request and is never used as a client identity.
+
+The workspace one-shot MCP helper creates and closes a session per invocation.
+Use a profile URL such as `/mcp/curation` for those calls; switching a temporary
+session does not alter the profile of later invocations or other clients.
 
 Gating is honest rather than silent: calling a tool outside the active profile
 returns a structured error naming the profiles that contain it and pointing at
 `set_session_profile`, and `get_capability_snapshot` filters its `next_tools`
 steering list to the active profile so a gated session is never pointed at a
-tool it cannot call. Per-profile tool lists are frozen, schema-sanitized once
+tool it cannot call. Curated Definition discovery identifies the registered
+`definition.instantiate` or `definition.instantiate_hosted` path and includes
+`library_id` in its instructions. When gated, `suggested_next_tool` is
+`set_session_profile` and `required_profile` identifies the transition; the
+asset retains its registered `instantiate_tool`. A profile gate is not a corpus
+gap. Read-only authoring provenance and claim grounding are available in both
+authoring and inspection without enabling curation writes. Per-profile tool lists are frozen, schema-sanitized once
 per process, and shared across sessions.
 
 Tool-to-profile membership lives in

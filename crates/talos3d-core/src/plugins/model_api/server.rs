@@ -185,8 +185,7 @@ impl ModelApiServer {
     }
 
     /// Build a server bound to an existing session profile state. The HTTP
-    /// transport passes one shared state per endpoint so its per-request
-    /// (stateless-mode) instances behave as one profile session.
+    /// transport creates one state for each initialized MCP session.
     #[cfg(test)]
     pub(super) fn with_profile_state(
         sender: ModelApiRequestSender,
@@ -1703,8 +1702,11 @@ impl ModelApiServer {
         &self,
         request: CuratedPathDiscoveryRequest,
     ) -> ApiResult<CuratedPathDiscoveryInfo> {
-        self.round_trip(|response| ModelApiRequest::DiscoverCuratedPaths { request, response })
-            .await?
+        let mut result = self
+            .round_trip(|response| ModelApiRequest::DiscoverCuratedPaths { request, response })
+            .await??;
+        result.for_profile(self.profile_state.get());
+        Ok(result)
     }
 
     async fn request_instantiate_recipe(
@@ -4739,7 +4741,59 @@ pub struct CuratedPathDiscoveryInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_class_term: Option<NonClassTermInfo>,
     pub suggested_next_tool: String,
+    /// Switch to this profile before continuing with the discovered execution path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_profile: Option<String>,
     pub guidance_card_ids: Vec<String>,
+}
+
+impl CuratedPathDiscoveryInfo {
+    /// Project recommendations through the same composed catalog used for calls.
+    /// A gated path is a profile transition, not a corpus gap or a made-up tool.
+    pub(super) fn for_profile(&mut self, profile: CapabilityProfile) {
+        let catalog = profile_tool_catalog();
+        let required_profile = |tool: &str| {
+            if catalog
+                .tools_for(profile)
+                .iter()
+                .any(|entry| entry.name == tool)
+            {
+                None
+            } else {
+                CapabilityProfile::ALL
+                    .into_iter()
+                    .find(|candidate| {
+                        catalog
+                            .tools_for(*candidate)
+                            .iter()
+                            .any(|entry| entry.name == tool)
+                    })
+                    .map(|candidate| candidate.name().to_string())
+            }
+        };
+        if !catalog.router.has_route(&self.suggested_next_tool) {
+            self.suggested_next_tool = "get_guidance_card".into();
+        } else if let Some(required) = required_profile(&self.suggested_next_tool) {
+            self.required_profile = Some(required);
+            self.suggested_next_tool = "set_session_profile".into();
+        }
+        for asset in &mut self.definition_assets {
+            if let Some(tool) = asset.instantiate_tool.as_deref() {
+                asset.required_profile = required_profile(tool);
+                if let Some(required) = &asset.required_profile {
+                    asset.how_to_instantiate = format!(
+                        "First call set_session_profile with profile {required:?}. {}",
+                        asset.how_to_instantiate
+                    );
+                }
+            }
+        }
+        if let Some(gap) = &mut self.no_curated_path {
+            if required_profile(&gap.suggested_next_tool).is_some() {
+                gap.suggested_next_tool = "set_session_profile".into();
+            }
+        }
+    }
 }
 
 /// Describes a requested term that is not a registered element class but does
@@ -4780,6 +4834,10 @@ pub struct DefinitionPathInfo {
     pub definition_id: String,
     pub name: String,
     pub definition_kind: String,
+    /// Registered execution path. None means the current app cannot instantiate it.
+    pub instantiate_tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_profile: Option<String>,
     pub how_to_instantiate: String,
 }
 
@@ -5460,7 +5518,7 @@ impl ModelApiServer {
             'curation' (knowledge curation: drafts, libraries, specs, passages), \
             'ux-automation' (UI/view/clip-plane/toolbar automation), 'full' (every tool). \
             Omit 'profile' to report the current profile without changing it. On change the \
-            server emits tools/list_changed so clients refresh their tool list."
+            stdio emits tools/list_changed; HTTP clients should re-fetch tools/list."
     )]
     pub(super) async fn set_session_profile_tool(
         &self,
@@ -5481,13 +5539,8 @@ impl ModelApiServer {
                 )
             })?;
             changed = self.profile_state.set(profile);
-            // Notify only stream-capable transports (stdio). Our streamable
-            // HTTP transport runs stateless with JSON responses, where the
-            // FIRST server->client message becomes the HTTP body — a
-            // notification emitted here would replace the tool result, and no
-            // HTTP client is listening for notifications between requests
-            // anyway. The HTTP transport marks its requests by injecting
-            // `http::request::Parts` into the request extensions.
+            // HTTP callers re-fetch tools/list from the explicit changed result.
+            // This also supports clients without a standalone SSE listener.
             let over_http = context
                 .extensions
                 .get::<axum::http::request::Parts>()

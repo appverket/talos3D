@@ -14701,20 +14701,26 @@ pub fn handle_discover_curated_paths(
                             }) {
                                 continue;
                             }
-                            let how_to_instantiate = if definition
-                                .interface
-                                .void_declaration
-                                .is_some()
-                            {
-                                format!(
-                                    "Call definition.instantiate_hosted with definition_id {:?} and library_id {:?} after creating the native host and its opening; this Definition declares a void and must not be placed as an unhosted occurrence or substituted with boxes.",
-                                    definition.id.to_string(),
-                                    library.id.to_string(),
-                                )
+                            let tool = if definition.interface.void_declaration.is_some() {
+                                "definition.instantiate_hosted"
+                            } else {
+                                // Library assets need the importing instantiation path;
+                                // occurrence.place requires an already-local Definition.
+                                "definition.instantiate"
+                            };
+                            let instantiate_tool = profile_tool_catalog().router.has_route(tool)
+                                .then(|| tool.to_string());
+                            let how_to_instantiate = if instantiate_tool.is_none() {
+                                "No registered instantiation tool; inspect guidance and report the missing capability.".to_string()
                             } else {
                                 format!(
-                                    "Call occurrence.create with definition_id {:?}; use definition.library.get first if parameters or hosted contracts must be inspected.",
-                                    definition.id.to_string()
+                                    "Call {tool} with definition_id {:?} and library_id {:?}.{}",
+                                    definition.id.to_string(), library.id.to_string(),
+                                    if definition.interface.void_declaration.is_some() {
+                                        " First create the native host and its opening, then supply hosting; this Definition declares a void and must not be placed unhosted or substituted with boxes."
+                                    } else {
+                                        " Inspect definition.library.get for parameter controls; library_id imports the Definition when needed."
+                                    }
                                 )
                             };
                             assets.push(DefinitionPathInfo {
@@ -14723,6 +14729,8 @@ pub fn handle_discover_curated_paths(
                                 definition_id: definition.id.to_string(),
                                 name: definition.name.clone(),
                                 definition_kind,
+                                instantiate_tool,
+                                required_profile: None,
                                 how_to_instantiate,
                             });
                         }
@@ -14814,13 +14822,14 @@ pub fn handle_discover_curated_paths(
         );
     let has_materializable_path = recipe_rankings.iter().any(|ranking| ranking.executable)
         || parametric_types.iter().any(|path| path.executable)
-        || !definition_assets.is_empty()
+        || definition_assets
+            .iter()
+            .any(|asset| asset.instantiate_tool.is_some())
         || !generation_priors.is_empty();
-    let has_hosted_definition_path = definition_assets.iter().any(|asset| {
-        asset
-            .how_to_instantiate
-            .starts_with("Call definition.instantiate_hosted")
-    });
+    let definition_next_tool = definition_assets
+        .iter()
+        .filter_map(|asset| asset.instantiate_tool.as_deref())
+        .next();
     related_asset_ids.extend(curated_assets.iter().map(|asset| asset.asset_id.clone()));
     related_asset_ids.extend(
         parametric_types
@@ -14848,10 +14857,8 @@ pub fn handle_discover_curated_paths(
             related_installed_or_learned_asset_ids: related_asset_ids.clone(),
         });
     let suggested_next_tool = if let Some(non_class_term) = &non_class_term {
-        if path_kind == "definition" && has_hosted_definition_path {
-            "definition.instantiate_hosted"
-        } else if path_kind == "definition" && !definition_assets.is_empty() {
-            "occurrence.create"
+        if let ("definition", Some(tool)) = (path_kind.as_str(), definition_next_tool) {
+            tool
         } else if non_class_term.native_entity_types.is_empty() {
             "list_vocabulary"
         } else {
@@ -14874,7 +14881,7 @@ pub fn handle_discover_curated_paths(
             "parametric" if parametric_types.iter().any(|path| path.executable) => {
                 "parametric.create"
             }
-            "definition" if !definition_assets.is_empty() => "occurrence.create",
+            "definition" => definition_next_tool.unwrap_or("get_guidance_card"),
             "prior" if !generation_priors.is_empty() => "list_generation_priors",
             _ => "get_guidance_card",
         }
@@ -14882,6 +14889,7 @@ pub fn handle_discover_curated_paths(
         "request_corpus_expansion"
     };
 
+    let suggested_next_tool = suggested_next_tool.to_string();
     Ok(CuratedPathDiscoveryInfo {
         path_kind,
         element_class: request.element_class,
@@ -14893,7 +14901,8 @@ pub fn handle_discover_curated_paths(
         related_asset_ids,
         no_curated_path,
         non_class_term,
-        suggested_next_tool: suggested_next_tool.into(),
+        suggested_next_tool,
+        required_profile: None,
         guidance_card_ids,
     })
 }
