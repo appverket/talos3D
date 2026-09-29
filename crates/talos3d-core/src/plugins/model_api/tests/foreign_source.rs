@@ -62,7 +62,19 @@ fn retained_bytes_units_frames_preview_and_atomic_history() {
     assert_eq!(artifact.bytes, OBJ);
     assert_eq!(artifact.digest, blake3::hash(OBJ).to_hex().as_str());
     let digest = artifact.digest.clone();
+    let explanation = serde_json::to_value(
+        crate::plugins::design_explanation::explain_design(&world, plan.created_ids()[0].0)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(explanation
+        .to_string()
+        .contains("semantic_class_unverified"));
     let id = plan.created_ids()[0];
+    assert_eq!(
+        get_entity_snapshot(&world, id).unwrap(),
+        plan.content()["after"][0]
+    );
     let entity = find_entity_by_element_id_readonly(&world, id).unwrap();
     let mesh = world
         .get::<crate::plugins::modeling::primitives::TriangleMesh>(entity)
@@ -119,6 +131,8 @@ fn failed_and_unknown_adapters_retain_source_without_partial_geometry() {
         let plan = preview(&mut world, request(bytes, format));
         assert!(plan.created_ids().is_empty());
         assert!(plan.content().to_string().contains(reason));
+        assert!(!plan.content().to_string().contains("float32_geometry"));
+        assert!(!plan.content().to_string().contains("fan_triangulation"));
         apply(&mut world, &plan);
         assert_eq!(
             world
@@ -430,4 +444,52 @@ fn an_empty_native_body_cannot_silently_replace_a_visible_reference() {
             .contains("visible geometry")
     );
     assert!(get_entity_snapshot(&world, id).is_some());
+}
+
+#[test]
+fn real_default_layer_assignment_and_custom_layers_survive_native_mapping_history_and_reload() {
+    use crate::plugins::layers::{assign_default_layer, LayerAssignment, LayerRegistry};
+    use bevy::ecs::system::RunSystemOnce;
+    for layer in ["Default", "Reference study"] {
+        let mut world = fixture();
+        let definition = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .unwrap()
+            .definition_id;
+        let import = preview(&mut world, request(OBJ, "obj"));
+        apply(&mut world, &import);
+        // Run the same bookkeeping system that exposed the live-only defect.
+        world.run_system_once(assign_default_layer).unwrap();
+        let reference = import.created_ids()[0];
+        let entity = find_entity_by_element_id_readonly(&world, reference).unwrap();
+        assert_eq!(
+            world.get::<LayerAssignment>(entity).unwrap().layer,
+            "Default"
+        );
+        world.resource_mut::<LayerRegistry>().ensure_layer(layer);
+        world.entity_mut(entity).insert(LayerAssignment::new(layer));
+        let original = get_entity_snapshot(&world, reference).unwrap();
+        let candidate = requests::preview(
+            &mut world,
+            "core.foreign_native_mapping",
+            native_request(reference.0, &definition),
+        )
+        .unwrap();
+        assert_eq!(candidate.content()["after"][0]["layer"], layer);
+        apply(&mut world, &candidate);
+        let native = candidate.created_ids()[0];
+        assert_eq!(get_entity_snapshot(&world, native).unwrap()["layer"], layer);
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        flush_model_api_write_pipeline(&mut world);
+        assert_eq!(get_entity_snapshot(&world, reference).unwrap(), original);
+        world.resource_mut::<PendingCommandQueue>().queue_redo();
+        flush_model_api_write_pipeline(&mut world);
+        assert_eq!(get_entity_snapshot(&world, native).unwrap()["layer"], layer);
+        let path = temp_json_path("foreign-layer-roundtrip").with_extension("talos3d");
+        handle_save_project(&mut world, path.to_str().unwrap()).unwrap();
+        handle_load_project(&mut world, path.to_str().unwrap()).unwrap();
+        assert_eq!(get_entity_snapshot(&world, native).unwrap()["layer"], layer);
+        handle_update_occurrence_overrides(&mut world, native.0, json!({"width":2.})).unwrap();
+        assert_eq!(get_entity_snapshot(&world, native).unwrap()["layer"], layer);
+        fs::remove_file(path).unwrap();
+    }
 }

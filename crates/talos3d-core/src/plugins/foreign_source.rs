@@ -67,7 +67,7 @@ pub struct SourceArtifact {
 }
 impl SourceArtifact {
     pub fn manifest(&self) -> Value {
-        json!({"digest":self.digest,"byte_count":self.bytes.len(),"metadata":self.metadata,
+        json!({"digest":self.digest,"digest_algorithm":"blake3","byte_count":self.bytes.len(),"metadata":self.metadata,
             "assessment":self.assessment,"authority":"retained_input_only",
             "next_tool":"get_foreign_sources"})
     }
@@ -346,9 +346,6 @@ pub fn reference_draft(
             degradation: vec![
                 Degradation::NoAuthoritativeSemantics,
                 Degradation::NoEditableHistory,
-                Degradation::MaterialsAndUvNotMapped,
-                Degradation::Float32Geometry,
-                Degradation::FanTriangulation,
             ],
             detail: String::new(),
         },
@@ -397,6 +394,13 @@ pub fn reference_draft(
         }
     }
     source.assessment.reference_geometry_available = !geometry.is_empty();
+    if !geometry.is_empty() {
+        source.assessment.degradation.extend([
+            Degradation::MaterialsAndUvNotMapped,
+            Degradation::Float32Geometry,
+            Degradation::FanTriangulation,
+        ]);
+    }
     let existing = world
         .get_resource::<SourceArtifacts>()
         .and_then(|r| r.0.get(&source.digest));
@@ -445,7 +449,7 @@ pub fn reference_draft(
             TriangleMeshSnapshot {
                 element_id: ElementId(id),
                 primitive,
-                layer: None,
+                layer: Some(super::layers::DEFAULT_LAYER_NAME.into()),
                 material_assignment: None,
                 semantic_shadow: Some(shadow),
             }
@@ -491,9 +495,6 @@ pub fn native_draft(world: &World, request: ForeignNativeRequest) -> Result<Edit
         .as_any()
         .downcast_ref::<TriangleMeshSnapshot>()
         .ok_or("Only a retained foreign reference mesh may be interpreted")?;
-    if mesh.layer.is_some() {
-        return Err("Layered references require an explicit layer migration".into());
-    }
     let source = mesh
         .semantic_shadow
         .as_ref()
@@ -572,6 +573,7 @@ pub fn native_draft(world: &World, request: ForeignNativeRequest) -> Result<Edit
         return Err("Identity capacity exhausted".into());
     }
     let mut occurrence = OccurrenceSnapshot::new(ElementId(new_id), identity, request.label);
+    occurrence.layer = mesh.layer.clone();
     occurrence.offset = Vec3::from_array(request.world_translation_m);
     occurrence.rotation = rotation(request.world_rotation_xyzw)?;
     if !occurrence.offset.is_finite() {
@@ -687,6 +689,21 @@ pub fn explanation_notes(
                 text: text.clone(),
                 details: json!({"instance_obligation":false}),
             }));
+        }
+    }
+    if interpretation.is_none() {
+        if let Some(shadow) = world.get::<SemanticShadow>(entity) {
+            for item in shadow
+                .candidates
+                .iter()
+                .flat_map(|c| c.unresolved_decisions.iter())
+                .take(16)
+            {
+                notes.push(ExplanationNote::Unresolved(ExplanationRow {
+                    label: "Source uncertainty".into(), text: item.question.clone(),
+                    details: json!({"id":item.id,"reason":item.reason,"grounding":item.grounding,"authority":"source_context","instance_obligation":false}),
+                }));
+            }
         }
     }
     if let Some(a) = world

@@ -1113,8 +1113,9 @@ promote instance refinement, manufacture obligations, or persist another graph.
   and unresolved assumptions. Acceptance replaces only that part with a native
   occurrence. It retains the original source and other parts. This is a new native
   interpretation; it does not recover foreign intent or establish refinement.
-  Connected/claimed/linked or layered references require a future capability-owned
-  migration and are refused by this bounded path.
+  Connected/claimed/linked references require a future capability-owned
+  migration and are refused by this bounded path. Native snapshots preserve the
+  reference layer and material assignment through replacement, controls and reload.
 
 Both requests use `preview_edit_plan`, `inspect_edit_plan` and `apply_edit_plan`.
 Discarding a preview leaves the document unchanged. Apply is atomic with source

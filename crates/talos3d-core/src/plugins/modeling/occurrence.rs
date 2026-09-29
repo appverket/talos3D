@@ -25,6 +25,7 @@ use crate::{
         commands::{apply_mesh_primitive, despawn_by_element_id},
         hosting_contracts::{HostedInteractionKind, HostingContractKindId},
         identity::ElementId,
+        layers::LayerAssignment,
         materials::{material_assignment_from_value, MaterialAssignment},
         modeling::{
             definition::{
@@ -500,6 +501,8 @@ pub struct OccurrenceSnapshot {
     pub identity: OccurrenceIdentity,
     /// Human-readable label shown in the UI.
     pub label: String,
+    /// Authored layer assignment, preserved across replacement and history.
+    pub layer: Option<String>,
     /// World-space translation offset (baked from user transforms).
     pub offset: Vec3,
     /// Additional rotation applied on top of the evaluated geometry.
@@ -525,10 +528,26 @@ impl OccurrenceSnapshot {
             element_id,
             identity,
             label: label.into(),
+            layer: None,
             offset: Vec3::ZERO,
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
             generated_bounds: None,
+        }
+    }
+
+    fn apply_layer(&self, world: &mut World) {
+        if let Some(entity) =
+            crate::plugins::commands::find_entity_by_element_id(world, self.element_id)
+        {
+            match &self.layer {
+                Some(layer) => {
+                    world.entity_mut(entity).insert(LayerAssignment::new(layer));
+                }
+                None => {
+                    world.entity_mut(entity).remove::<LayerAssignment>();
+                }
+            }
         }
     }
 }
@@ -601,14 +620,18 @@ impl AuthoredEntity for OccurrenceSnapshot {
     }
 
     fn to_json(&self) -> Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "element_id": self.element_id,
             "identity": self.identity,
             "label": self.label,
             "offset": [self.offset.x, self.offset.y, self.offset.z],
             "rotation": [self.rotation.x, self.rotation.y, self.rotation.z, self.rotation.w],
             "scale": [self.scale.x, self.scale.y, self.scale.z],
-        })
+        });
+        if let Some(layer) = &self.layer {
+            value["layer"] = serde_json::json!(layer);
+        }
+        value
     }
 
     fn apply_to(&self, world: &mut World) {
@@ -645,6 +668,7 @@ impl AuthoredEntity for OccurrenceSnapshot {
                 self.element_id.0, self.identity.definition_id, error
             );
         }
+        self.apply_layer(world);
     }
 
     fn apply_with_previous(&self, world: &mut World, previous: Option<&dyn AuthoredEntity>) {
@@ -672,6 +696,7 @@ impl AuthoredEntity for OccurrenceSnapshot {
                 entity_mut.insert(dirty);
             }
         }
+        self.apply_layer(world);
     }
 
     fn remove_from(&self, world: &mut World) {
@@ -809,6 +834,7 @@ impl AuthoredEntityFactory for OccurrenceFactory {
                 element_id,
                 identity,
                 label,
+                layer: entity_ref.get::<LayerAssignment>().map(|l| l.layer.clone()),
                 offset: transform.translation,
                 rotation: transform.rotation,
                 scale: transform.scale,
@@ -859,6 +885,7 @@ impl AuthoredEntityFactory for OccurrenceFactory {
             element_id,
             identity,
             label,
+            layer: data.get("layer").and_then(Value::as_str).map(str::to_owned),
             offset,
             rotation,
             scale,
