@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::plugins::camera::{
     apply_orbit_state, default_orthographic_scale, perspective_distance_to_orthographic_scale,
-    CameraProjectionMode, OrbitCamera,
+    CameraControlsState, CameraProjectionMode, OrbitCamera,
 };
 
 /// A saved camera position with a name.
@@ -210,6 +210,7 @@ fn seed_default_named_views(mut registry: ResMut<NamedViewRegistry>) {
 fn apply_restore_named_view_events(
     mut events: MessageReader<RestoreNamedView>,
     registry: Res<NamedViewRegistry>,
+    mut controls: Option<ResMut<CameraControlsState>>,
     mut camera_query: Query<(&mut OrbitCamera, &mut Transform, &mut Projection)>,
 ) {
     for event in events.read() {
@@ -222,5 +223,8 @@ fn apply_restore_named_view_events(
         };
         *cam_orbit = orbit;
         apply_orbit_state(&cam_orbit, &mut transform, &mut projection);
+        if let Some(controls) = controls.as_mut() {
+            controls.follow_orbit(&cam_orbit);
+        }
     }
 }

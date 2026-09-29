@@ -362,3 +362,53 @@ fn refused_semantic_intent_is_visible_in_preview_and_has_no_effects() {
     assert!(!entity_exists(&world, ElementId(1)));
     assert_eq!(world.resource::<History>().undo_stack_len(), 0);
 }
+
+#[test]
+fn downgrade_preview_exposes_kernel_loss_manifest_with_planner_context() {
+    use crate::semantics::{
+        components::ConceptAssignment,
+        test_fixtures::{roof_edge_fixture, RAKE_EDGE, ROOF_SYSTEM},
+        ConceptId, PlanIntent,
+    };
+    let mut world = world();
+    world.insert_resource(SemanticGraph(roof_edge_fixture()));
+    let entity = world
+        .spawn((ElementId(388), ConceptAssignment::new(ROOF_SYSTEM)))
+        .id();
+    let base = world.resource::<History>().revision_token();
+    let plan = AuthoredEditPlan::capture(
+        &world,
+        None,
+        base.clone(),
+        PlanContext {
+            assumptions: vec!["Reference geometry remains unchanged".into()],
+            unresolved_decisions: vec!["Replacement semantic classification".into()],
+            ..Default::default()
+        },
+        vec![],
+        vec![],
+        SemanticPlan::none().with(PlanIntent::RemoveConcept {
+            entity: ElementId(388),
+            concept: ConceptId::new(ROOF_SYSTEM),
+        }),
+    )
+    .unwrap();
+    assert!(plan.can_commit());
+    let plan = publish(&mut world, plan);
+    let inspection = plan.content();
+    let losses = inspection["context"]["obligations"].as_array().unwrap();
+    assert_eq!(losses.len(), 1);
+    assert!(losses[0].as_str().unwrap().contains(RAKE_EDGE));
+    assert!(losses[0].as_str().unwrap().contains("invalidated"));
+    assert_eq!(
+        inspection["context"]["assumptions"][0],
+        "Reference geometry remains unchanged"
+    );
+    assert_eq!(
+        inspection["context"]["unresolved_decisions"][0],
+        "Replacement semantic classification"
+    );
+    assert!(world.get::<ConceptAssignment>(entity).is_some());
+    assert_eq!(world.resource::<History>().revision_token(), base);
+    assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+}

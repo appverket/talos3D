@@ -68,8 +68,8 @@ use crate::plugins::transform::{prepare_transform_edit, TransformMode, Transform
 #[cfg(feature = "model-api")]
 use crate::plugins::{
     camera::{
-        apply_orbit_state, focus_orbit_camera_on_bounds,
-        perspective_distance_to_orthographic_scale, CameraProjectionMode, OrbitCamera,
+        focus_orbit_camera_on_bounds, perspective_distance_to_orthographic_scale,
+        restore_live_camera, CameraProjectionMode, OrbitCamera,
     },
     commands::{
         find_entity_by_element_id, queue_command_events, ApplyEntityChangesCommand,
@@ -1154,12 +1154,7 @@ fn handle_view_restore(world: &mut World, name: String) -> Result<NamedViewInfo,
         (view.to_orbit(), named_view_info_from_view(view))
     };
 
-    // Apply directly to the camera entity — borrow released above.
-    let mut q = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
-    if let Some((mut orbit, mut transform, mut projection)) = q.iter_mut(world).next() {
-        *orbit = orbit_state;
-        apply_orbit_state(&orbit, &mut transform, &mut projection);
-    }
+    restore_live_camera(world, orbit_state)?;
 
     Ok(view_info)
 }
@@ -3227,14 +3222,7 @@ fn handle_get_camera(world: &World) -> CameraStateInfo {
 #[cfg(feature = "model-api")]
 fn handle_set_camera(world: &mut World, params: CameraParams) -> Result<CameraStateInfo, String> {
     let orbit = orbit_from_camera_params(world, Some(&params))?;
-    {
-        let mut q = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
-        let Some((mut live_orbit, mut transform, mut projection)) = q.iter_mut(world).next() else {
-            return Err("No orbit camera is available".to_string());
-        };
-        *live_orbit = orbit;
-        apply_orbit_state(&live_orbit, &mut transform, &mut projection);
-    }
+    restore_live_camera(world, orbit)?;
     crate::plugins::drafting::workspace::apply_active_draft_camera(world);
     Ok(camera_state_info_from_live(&live_camera_snapshot(world)))
 }

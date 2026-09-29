@@ -845,6 +845,7 @@ fn init_model_api_test_world() -> World {
     );
     world.insert_resource(crate::plugins::definition_authoring::DefinitionDraftRegistry::default());
     world.insert_resource(crate::plugins::modeling::occurrence::ChangedDefinitions::default());
+    world.insert_resource(crate::plugins::camera::CameraControlsState::default());
     world.insert_resource(RenderSettings::default());
     world.insert_resource(SceneLightingSettings::default());
     world.insert_resource(crate::plugins::drawing_export::ViewportExportState::default());
@@ -1203,6 +1204,10 @@ fn agent_workflow_create_box_dimension_camera_and_screenshot_is_supported() {
     assert_eq!(camera.focus, [0.0, 1.0, 0.0]);
     assert_eq!(camera.projection, "orthographic");
     assert_eq!(camera.orthographic_scale, 3.0);
+    let controls = world.resource::<crate::plugins::camera::CameraControlsState>();
+    assert_eq!(controls.projection_mode, CameraProjectionMode::Isometric);
+    assert_eq!(controls.focal_length_mm, 35.0);
+    assert!(controls.pending_view_preset.is_none());
     assert!(camera.view_position.is_some());
     assert!(camera.view_forward.is_some());
     assert!(camera.view_up.is_some());

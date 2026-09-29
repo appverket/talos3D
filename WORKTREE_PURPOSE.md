@@ -6,4 +6,4 @@
 - task-id: TALOS-rchjbvoa
 - target base: main d696804
 - summary: Exact candidate preview/apply through shared semantic plans and MCP
-- status: awaiting-merge
+- status: active

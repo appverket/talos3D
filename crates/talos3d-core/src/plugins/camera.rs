@@ -246,6 +246,35 @@ impl Default for CameraControlsState {
     }
 }
 
+impl CameraControlsState {
+    /// An explicit camera restore supersedes pending chrome controls.
+    pub(crate) fn follow_orbit(&mut self, orbit: &OrbitCamera) {
+        self.projection_mode = orbit.projection_mode;
+        self.focal_length_mm = orbit.focal_length_mm;
+        self.pending_view_preset = None;
+    }
+}
+
+/// Restore both the rendered camera and its UI control state. Updating only
+/// OrbitCamera lets the next control frame silently undo projection/lens edits.
+#[cfg(any(feature = "model-api", test))]
+pub(crate) fn restore_live_camera(world: &mut World, state: OrbitCamera) -> Result<(), String> {
+    let mut controls = CameraControlsState::default();
+    controls.follow_orbit(&state);
+    {
+        let mut query = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
+        let Some((mut orbit, mut transform, mut projection)) = query.iter_mut(world).next() else {
+            return Err("No orbit camera is available".to_string());
+        };
+        *orbit = state;
+        apply_orbit_state(&orbit, &mut transform, &mut projection);
+    }
+    if let Some(mut live_controls) = world.get_resource_mut::<CameraControlsState>() {
+        *live_controls = controls;
+    }
+    Ok(())
+}
+
 /// Orbit camera state stored as a component.
 #[derive(Component)]
 pub struct OrbitCamera {
@@ -963,6 +992,58 @@ fn update_camera_viewport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restored_camera_survives_subsequent_control_frames() {
+        let mut app = App::new();
+        app.insert_resource(CameraControlsState {
+            pending_view_preset: Some(CameraViewPreset::Top),
+            ..Default::default()
+        });
+        app.add_systems(Update, apply_camera_controls);
+        let camera = app
+            .world_mut()
+            .spawn((
+                OrbitCamera::default(),
+                Transform::default(),
+                Projection::Perspective(PerspectiveProjection::default()),
+            ))
+            .id();
+        restore_live_camera(
+            app.world_mut(),
+            OrbitCamera {
+                focus: Vec3::new(1., 2., 3.),
+                radius: 8.,
+                orthographic_scale: 3.,
+                yaw: 0.75,
+                pitch: -0.4,
+                projection_mode: CameraProjectionMode::Isometric,
+                focal_length_mm: 35.,
+            },
+        )
+        .unwrap();
+        let restored_transform = *app.world().get::<Transform>(camera).unwrap();
+        for _ in 0..3 {
+            app.update();
+            let orbit = app.world().get::<OrbitCamera>(camera).unwrap();
+            assert_eq!(orbit.projection_mode, CameraProjectionMode::Isometric);
+            assert_eq!(orbit.orthographic_scale, 3.);
+            assert_eq!(orbit.focal_length_mm, 35.);
+            assert_eq!(
+                *app.world().get::<Transform>(camera).unwrap(),
+                restored_transform
+            );
+            assert!(matches!(
+                app.world().get::<Projection>(camera),
+                Some(Projection::Orthographic(_))
+            ));
+            assert!(app
+                .world()
+                .resource::<CameraControlsState>()
+                .pending_view_preset
+                .is_none());
+        }
+    }
 
     #[test]
     fn isometric_projection_uses_explicit_orthographic_scale() {
