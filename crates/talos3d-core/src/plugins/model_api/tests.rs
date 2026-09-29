@@ -14764,3 +14764,6 @@ fn inspector_control_actions_use_captured_occurrence_plan_and_refuse_stale_input
 
 #[cfg(feature = "model-api")]
 mod foreign_source;
+
+#[cfg(feature = "model-api")]
+mod native_recipe_history;

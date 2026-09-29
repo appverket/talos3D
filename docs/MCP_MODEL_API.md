@@ -661,8 +661,18 @@ history item, including placement, group metadata and `ViaRecipe` provenance
 on the locator, generated members and group. One undo removes the complete
 result; redo restores the same IDs and captured metadata without rerunning the
 recipe. A failed attempt preserves prior history, its redo branch and the
-next element ID. This creation guarantee does not extend to arbitrary later
-`promote_refinement` calls.
+next element ID.
+
+Later `promote_refinement` calls also group command-backed recipe effects,
+root refinement metadata and resolved setting-out reservations into one history
+item. Undo/redo replays captured changes; a hard execution failure rolls them
+back and preserves prior history and the ID allocator. Native capability
+generators must enqueue every authored member, Definition, relation and assembly
+change through commands; `commands::flush_queued_commands` provides synchronous
+visibility through the normal admission/history pipeline. Direct writes to
+arbitrary resources or unrelated entities are not made transactional by this
+wrapper. The root's existing refinement metadata is captured explicitly.
+Declared native recipe refinement limits are enforced before generation.
 
 Session recipe drafts are still **not executable by `instantiate_recipe`**.
 Installed drafts can be appended to `list_recipe_families` and `select_recipe`

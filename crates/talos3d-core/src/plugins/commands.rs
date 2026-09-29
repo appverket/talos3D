@@ -524,7 +524,14 @@ pub(crate) fn has_pending_command_events(world: &World) -> bool {
     )
 }
 
-#[cfg(feature = "model-api")]
+/// Flush the existing command/history pipeline for synchronous capability recipes.
+/// Recipes enqueue ordinary commands; this uses the same admissibility gate as
+/// interactive and MCP edits. Call within the owning authoring transaction.
+pub fn flush_queued_commands(world: &mut World) {
+    queue_command_events(world);
+    super::history::apply_pending_history_commands(world);
+}
+
 pub(crate) fn queue_command_events(world: &mut World) {
     queue_begin_command_groups(world);
     queue_create_entity_commands(world);

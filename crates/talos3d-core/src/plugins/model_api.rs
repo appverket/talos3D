@@ -3,6 +3,8 @@ pub mod concept_tools;
 #[cfg(feature = "model-api")]
 mod recipe_history;
 
+#[cfg(test)]
+use crate::plugins::history::apply_pending_history_commands;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[cfg(feature = "model-api")]
@@ -74,14 +76,13 @@ use crate::plugins::{
         restore_live_camera, CameraProjectionMode, OrbitCamera,
     },
     commands::{
-        find_entity_by_element_id, queue_command_events, ApplyEntityChangesCommand,
-        BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup,
-        ResolvedDeleteEntitiesCommand,
+        find_entity_by_element_id, ApplyEntityChangesCommand, BeginCommandGroup,
+        CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup, ResolvedDeleteEntitiesCommand,
     },
     dimension_line::constrained_box_edge_dimension_line_point,
     document_properties::DocumentProperties,
     document_state::DocumentState,
-    history::{apply_pending_history_commands, History},
+    history::History,
     import::{import_file_now, ImportRegistry, ImporterDescriptor},
     layers::{LayerAssignment, LayerRegistry, LayerState},
     lighting::{
@@ -10096,8 +10097,7 @@ fn build_mirror_plane(
 
 #[cfg(feature = "model-api")]
 pub(crate) fn flush_model_api_write_pipeline(world: &mut World) {
-    queue_command_events(world);
-    apply_pending_history_commands(world);
+    crate::plugins::commands::flush_queued_commands(world);
 }
 
 /// `SessionStepExecutor` that routes committed Semantic Procedural Session
@@ -12426,6 +12426,38 @@ fn promote_refinement_structured(
     recipe_id: Option<String>,
     overrides: serde_json::Value,
 ) -> Result<PromoteRefinementResult, crate::plugins::refinement::PromoteError> {
+    use crate::plugins::refinement::PromoteError;
+    if crate::plugins::commands::has_pending_command_events(world) {
+        return Err(PromoteError::Other(
+            "Pending user command events must finish before promotion".into(),
+        ));
+    }
+    let transaction =
+        crate::plugins::history::HistoryTransaction::begin(world).map_err(PromoteError::Other)?;
+    let result = promote_refinement_in_transaction(
+        world,
+        element_id,
+        target_state_str,
+        recipe_id,
+        overrides,
+    );
+    flush_model_api_write_pipeline(world);
+    // An obligation block deliberately retains discoverable obligations and any
+    // explicitly reported partial result. Other failures roll back all effects.
+    let retain =
+        result.is_ok() || matches!(&result, Err(PromoteError::ObligationsUnsatisfied { .. }));
+    transaction.finish_named(world, retain, "Promote refinement");
+    result
+}
+
+#[cfg(feature = "model-api")]
+fn promote_refinement_in_transaction(
+    world: &mut World,
+    element_id: u64,
+    target_state_str: String,
+    recipe_id: Option<String>,
+    overrides: serde_json::Value,
+) -> Result<PromoteRefinementResult, crate::plugins::refinement::PromoteError> {
     use crate::plugins::refinement::{
         apply_promote_refinement, ClaimPath, PromoteError, PromoteRefinementRequest, RecipeId,
         RefinementState, RefinementStateComponent,
@@ -12648,9 +12680,7 @@ fn promote_refinement_structured(
         created_element_ids.sort_unstable();
         if script_steps_run > 0 || !created_element_ids.is_empty() {
             if let Some(contract) = resolved_setting_out_contract.clone() {
-                if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
-                    world.entity_mut(entity).insert(contract);
-                }
+                apply_recipe_setting_out_contract(world, eid, contract)?;
             }
             return Ok(PromoteRefinementResult {
                 element_id,
@@ -12694,9 +12724,7 @@ fn promote_refinement_structured(
     match promote_result {
         Ok(new_state) => {
             if let Some(contract) = resolved_setting_out_contract.clone() {
-                if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
-                    world.entity_mut(entity).insert(contract);
-                }
+                apply_recipe_setting_out_contract(world, eid, contract)?;
             }
             Ok(PromoteRefinementResult {
                 element_id,
@@ -12712,9 +12740,7 @@ fn promote_refinement_structured(
             message,
         }) if script_steps_run > 0 || !created_element_ids.is_empty() => {
             if let Some(contract) = resolved_setting_out_contract {
-                if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
-                    world.entity_mut(entity).insert(contract);
-                }
+                apply_recipe_setting_out_contract(world, eid, contract)?;
             }
             Ok(PromoteRefinementResult {
                 element_id,
@@ -12739,6 +12765,34 @@ fn promote_refinement_structured(
         }
         Err(e) => Err(e),
     }
+}
+
+/// Recipe-resolved reservations participate in the same compound history entry.
+#[cfg(feature = "model-api")]
+fn apply_recipe_setting_out_contract(
+    world: &mut World,
+    id: ElementId,
+    contract: crate::plugins::refinement::SettingOutContract,
+) -> ApiResult<()> {
+    use crate::plugins::refinement::{SettingOutContract, SettingOutContractSnapshot};
+    let entity = find_entity_by_element_id_readonly(world, id)
+        .ok_or_else(|| format!("Entity {} not found", id.0))?;
+    if world.get::<SettingOutContract>(entity) == Some(&contract) {
+        return Ok(());
+    }
+    let before = SettingOutContractSnapshot::capture(world, entity, id);
+    world.entity_mut(entity).insert(contract);
+    let after = SettingOutContractSnapshot::capture(world, entity, id);
+    send_event(
+        world,
+        ApplyEntityChangesCommand {
+            label: "Resolve recipe setting-out",
+            before: vec![before.into()],
+            after: vec![after.into()],
+        },
+    );
+    flush_model_api_write_pipeline(world);
+    Ok(())
 }
 
 /// `instantiate_recipe`: one-call path from a discovered recipe family to placed

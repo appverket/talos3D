@@ -1945,6 +1945,32 @@ pub fn apply_promote_refinement(
     world: &mut World,
     request: PromoteRefinementRequest,
 ) -> Result<RefinementState, PromoteError> {
+    let id = ElementId(request.entity_element_id);
+    let entity = find_entity_by_element_id_readonly(world, id)
+        .ok_or_else(|| format!("Entity {} not found", id.0))?;
+    let state = world
+        .get::<RefinementStateComponent>(entity)
+        .map(|s| s.state)
+        .unwrap_or_default();
+    let before = RefinementStateSnapshot::capture(world, id, state);
+    let result = apply_promote_refinement_inner(world, request);
+    let entity = find_entity_by_element_id_readonly(world, id)
+        .ok_or_else(|| format!("Recipe removed refinement root {}", id.0))?;
+    let state = world
+        .get::<RefinementStateComponent>(entity)
+        .map(|s| s.state)
+        .unwrap_or_default();
+    let after = RefinementStateSnapshot::capture(world, id, state);
+    if before != after {
+        send_refinement_change_command(world, "Promote Refinement", before, after);
+    }
+    result
+}
+
+fn apply_promote_refinement_inner(
+    world: &mut World,
+    request: PromoteRefinementRequest,
+) -> Result<RefinementState, PromoteError> {
     use crate::capability_registry::{
         effective_obligations, effective_promotion_critical_paths, ElementClassAssignment,
         GenerateInput, RecipeFamilyId,
@@ -1975,9 +2001,7 @@ pub fn apply_promote_refinement(
         )));
     }
 
-    let before_state = current_state;
     let target_state = request.target_state;
-    let before_snapshot = RefinementStateSnapshot::capture(world, eid, before_state);
 
     // Anti-bluff gate (ADR-042): if this entity is a SemanticAssembly whose
     // type declares member-composition obligations, the promotion target must
@@ -2034,6 +2058,22 @@ pub fn apply_promote_refinement(
                 .and_then(|a| a.active_recipe.clone())
         });
 
+    if let Some(recipe) = effective_recipe_id.as_ref().and_then(|id| {
+        world
+            .get_resource::<crate::capability_registry::CapabilityRegistry>()
+            .and_then(|registry| registry.recipe_family_descriptor(id))
+    }) {
+        if !recipe.supported_refinement_levels.is_empty()
+            && !recipe.supported_refinement_levels.contains(&target_state)
+        {
+            return Err(PromoteError::Other(format!(
+                "Recipe '{}' does not support {}",
+                recipe.id.0,
+                target_state.as_str()
+            )));
+        }
+    }
+
     let requested_recipe_id = effective_recipe_id
         .as_ref()
         .map(|recipe_id| RecipeId(recipe_id.0.clone()));
@@ -2046,12 +2086,6 @@ pub fn apply_promote_refinement(
         &request.overrides,
     )? {
         set_refinement_state(world, entity, target_state);
-        send_refinement_change_command(
-            world,
-            "Promote Refinement",
-            before_snapshot,
-            RefinementStateSnapshot::capture(world, eid, target_state),
-        );
         return Ok(target_state);
     }
 
@@ -2353,11 +2387,6 @@ pub fn apply_promote_refinement(
 
     set_refinement_state(world, entity, target_state);
 
-    // Queue a history entry so the promotion is undoable.
-    let after_snapshot = RefinementStateSnapshot::capture(world, eid, target_state);
-
-    send_refinement_change_command(world, "Promote Refinement", before_snapshot, after_snapshot);
-
     Ok(target_state)
 }
 
@@ -2423,7 +2452,7 @@ fn set_refinement_state(world: &mut World, entity: Entity, state: RefinementStat
 // Internal: lightweight undo/redo snapshot for refinement state changes
 // ---------------------------------------------------------------------------
 
-/// A minimal snapshot that records just the refinement state of an entity.
+/// Refinement state, branch status and existing authored metadata captured together.
 /// Used as the before/after pair in `ApplyEntityChangesCommand`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RefinementStateSnapshot {
@@ -2431,12 +2460,68 @@ struct RefinementStateSnapshot {
     state: RefinementState,
     #[serde(default)]
     branch_statuses: Vec<RefinementBranchStatusSnapshot>,
+    #[serde(default)]
+    metadata: Option<RefinementMetadataSnapshot>,
+}
+
+/// Existing refinement authorities captured together; no persisted parallel graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RefinementMetadataSnapshot {
+    state: Option<RefinementStateComponent>,
+    class: Option<crate::capability_registry::ElementClassAssignment>,
+    obligations: Option<ObligationSet>,
+    grounding: Option<ClaimGrounding>,
+    provenance: Option<AuthoringProvenance>,
+    intent: Option<SemanticIntent>,
+    setting_out: Option<SettingOutContract>,
+}
+impl RefinementMetadataSnapshot {
+    fn capture(world: &World, id: ElementId) -> Option<Self> {
+        let entity = find_entity_by_element_id_readonly(world, id)?;
+        Some(Self {
+            state: world.get::<RefinementStateComponent>(entity).cloned(),
+            class: world
+                .get::<crate::capability_registry::ElementClassAssignment>(entity)
+                .cloned(),
+            obligations: world.get::<ObligationSet>(entity).cloned(),
+            grounding: world.get::<ClaimGrounding>(entity).cloned(),
+            provenance: world.get::<AuthoringProvenance>(entity).cloned(),
+            intent: world.get::<SemanticIntent>(entity).cloned(),
+            setting_out: world.get::<SettingOutContract>(entity).cloned(),
+        })
+    }
+    fn apply(&self, world: &mut World, entity: Entity) {
+        let mut entity = world.entity_mut(entity);
+        entity.remove::<(
+            RefinementStateComponent,
+            crate::capability_registry::ElementClassAssignment,
+            ObligationSet,
+            ClaimGrounding,
+            AuthoringProvenance,
+            SemanticIntent,
+            SettingOutContract,
+        )>();
+        macro_rules! restore { ($($field:ident),+ $(,)?) => { $(
+            if let Some(value) = &self.$field { entity.insert(value.clone()); }
+        )+ }; }
+        restore!(
+            state,
+            class,
+            obligations,
+            grounding,
+            provenance,
+            intent,
+            setting_out
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct RefinementBranchStatusSnapshot {
     child_element_id: ElementId,
     status: RefinementBranchStatus,
+    #[serde(default)]
+    branch: Option<RefinementBranch>,
 }
 
 impl RefinementStateSnapshot {
@@ -2454,6 +2539,7 @@ impl RefinementStateSnapshot {
                             .then_some(RefinementBranchStatusSnapshot {
                                 child_element_id: relation.target,
                                 status: branch.status,
+                                branch: Some(branch.clone()),
                             })
                     })
                     .collect::<Vec<_>>()
@@ -2464,6 +2550,7 @@ impl RefinementStateSnapshot {
             element_id: parent_element_id,
             state,
             branch_statuses,
+            metadata: RefinementMetadataSnapshot::capture(world, parent_element_id),
         }
     }
 }
@@ -2539,7 +2626,9 @@ impl AuthoredEntity for RefinementStateSnapshot {
                 .map(|(entity, _)| entity)
         };
         if let Some(entity) = entity {
-            if let Some(mut comp) = world.get_mut::<RefinementStateComponent>(entity) {
+            if let Some(metadata) = &self.metadata {
+                metadata.apply(world, entity);
+            } else if let Some(mut comp) = world.get_mut::<RefinementStateComponent>(entity) {
                 comp.state = self.state;
             } else {
                 world
@@ -2548,6 +2637,23 @@ impl AuthoredEntity for RefinementStateSnapshot {
             }
         }
         for branch in &self.branch_statuses {
+            if let Some(metadata) = &branch.branch {
+                let relations: Vec<Entity> = world
+                    .query::<(Entity, &SemanticRelation)>()
+                    .iter(world)
+                    .filter_map(|(entity, relation)| {
+                        relation_matches_refinement_pair(
+                            relation,
+                            self.element_id,
+                            branch.child_element_id,
+                        )
+                        .then_some(entity)
+                    })
+                    .collect();
+                for entity in relations {
+                    world.entity_mut(entity).insert(metadata.clone());
+                }
+            }
             set_refinement_branch_status(
                 world,
                 self.element_id,
