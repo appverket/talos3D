@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-09-29T09:38:00Z
-- branch: codex/design-explanation
-- task-id: TALOS-yxmfpvll
-- target base: main d590029
-- summary: Bounded selected-element explanation shared by inspector and MCP
-- status: awaiting-merge
+- created: 2026-09-29
+- branch: codex/explicit-project-reload
+- task-id: TALOS-bwfgtfaz
+- target base: main, stacked on explanation PR52 8067398
+- summary: Explicit project reload must replace document state even when dirty tracking misses a mutation
+- status: active
