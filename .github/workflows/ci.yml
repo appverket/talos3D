@@ -56,6 +56,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test generic MCP baseline assertions
+        run: python3 -m unittest discover -s scripts/evaluation -p 'test_*.py'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

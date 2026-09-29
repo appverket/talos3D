@@ -6,4 +6,4 @@
 - task-id: TALOS-nvrbbgpy
 - target base: main 7bee0a8
 - summary: Generic MCP evaluation assertions and per-gate baseline reports
-- status: active
+- status: awaiting-merge
