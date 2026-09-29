@@ -51,35 +51,41 @@ pub fn draw(
         return;
     };
     egui::CollapsingHeader::new("Edit occurrence controls").show(ui, |ui| {
-        for row in explanation
-            .sections
-            .iter()
-            .flat_map(|s| &s.rows)
-            .filter(|r| {
-                r.details["authority"] == "definition_parameter" && r.details["editable"] == true
-            })
-        {
-            let Some(parameter) = row.details["parameter"].as_str() else {
-                continue;
-            };
-            ui.horizontal(|ui| {
-                ui.label(format!("{}: {}", row.label, row.text));
-                if ui.small_button("Edit").clicked() {
-                    editor.session = Some(ControlSession {
-                        element_id: explanation.element_id,
-                        parameter: parameter.into(),
-                        buffer: row.details["value"]
-                            .as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| row.details["value"].to_string()),
-                        original_value: row.details["value"].clone(),
-                        base_revision: revision.clone(),
-                        plan: None,
-                        feedback: String::new(),
+        egui::ScrollArea::vertical()
+            .id_salt("occurrence_control_list")
+            .max_height(210.0)
+            .show(ui, |ui| {
+                for row in explanation
+                    .sections
+                    .iter()
+                    .flat_map(|s| &s.rows)
+                    .filter(|r| {
+                        r.details["authority"] == "definition_parameter"
+                            && r.details["editable"] == true
+                    })
+                {
+                    let Some(parameter) = row.details["parameter"].as_str() else {
+                        continue;
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}: {}", row.label, row.text));
+                        if ui.small_button("Edit").clicked() {
+                            editor.session = Some(ControlSession {
+                                element_id: explanation.element_id,
+                                parameter: parameter.into(),
+                                buffer: row.details["value"]
+                                    .as_str()
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| row.details["value"].to_string()),
+                                original_value: row.details["value"].clone(),
+                                base_revision: revision.clone(),
+                                plan: None,
+                                feedback: String::new(),
+                            });
+                        }
                     });
                 }
             });
-        }
         if let Some(session) = editor.session.as_mut() {
             ui.separator();
             ui.label(session.parameter.replace('_', " "));
