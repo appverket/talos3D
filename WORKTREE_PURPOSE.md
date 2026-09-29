@@ -2,8 +2,8 @@
 
 - agent: codex
 - created: 2026-09-29
-- branch: codex/native-parametric-definition
-- task-id: TALOS-maayislm
+- branch: codex/foreign-candidate-boundary
+- task-id: TALOS-sjiymwsl
 - target base: main (217b8fe)
-- summary: Preserve bounded parametric intent in canonical Definition/Occurrence bodies and shared edits; no persisted parallel instance store.
-- status: awaiting-merge
+- summary: Retained local foreign source and bounded reference/native mapping acceptance through the existing authored edit plan; no foreign semantic kernel.
+- status: active
