@@ -993,3 +993,29 @@ when it is the current path and the dirty flag is false. This discards unsaved
 state and invalidates old document revision tokens and transient parametric
 instances. A missing or invalid file reports an error before replacing the scene.
 Use `get_instance_info` to inspect the current document without reloading it.
+
+### Native drag evidence
+
+`ux_drag { start, end, steps, trace: true }` opts into a bounded input trace.
+`ux_observe.drag_trace` retains the most recent traced gesture (at most 128
+rows; a drag admits at most 123 input steps). Each row identifies the captured
+native candidate, affected IDs, model revision, and preview refusal if any.
+The release row independently compares the committed authored snapshots with
+the exact candidate retained before release and requires one revision advance.
+Untraced gestures incur no snapshot-comparison or trace-row work.
+
+Timing begins when the harness injects an input edge into Bevy, excluding MCP
+transport/queue latency. `main_frame_ms` ends after the main schedule;
+`release_to_commit_ms` is emitted only for an exact successful commit.
+`present_ms` ends after Bevy submits the same extracted frame's primary-window
+swapchain for presentation. It does not measure physical display scanout. A
+missing acquired/presented surface leaves this field null; headless CPU work
+must never be counted as a rendered-frame pass. The hook uses Bevy's render
+schedule directly, without a renderer fork or synchronous GPU readback.
+
+Input injection precedes cursor projection, snapping, and modal preview/confirm
+consumers. Use rendered inspection alongside traces: a submitted frame proves
+neither geometric correctness nor that an intended grip was selected. A release
+without a captured candidate has no commit verdict and cannot pass the gesture
+gate. Exported viewport images intentionally suppress manipulator overlays;
+`include_ui: true` requires a capturable native window.

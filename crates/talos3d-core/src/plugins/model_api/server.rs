@@ -7439,7 +7439,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "ux_press_key",
-        description = "Queue a key press and release through the live Bevy input path. Supports letters, KeyG-style names, Escape, Delete, Backspace, Enter, ShiftLeft, and ShiftRight."
+        description = "Queue a key press and release through the live Bevy input path. Supports letters, digits, KeyG/Digit1-style names, period, minus, Tab, Escape, Delete, Backspace, Enter, ShiftLeft, and ShiftRight."
     )]
     pub(super) async fn ux_press_key_tool(
         &self,
@@ -7748,7 +7748,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "load_project",
-        description = "Open a Talos3D project from a specific path and return the resolved file path. This call is idempotent when the same clean document is already open; inspect Agent Welcome / get_instance_info.current_document_path and document_dirty before requesting a redundant reload."
+        description = "Explicitly reload a Talos3D project from disk, even when the same clean document is already open, and return its resolved path. Replaces unsaved state and invalidates old edit proposals. Inspect get_instance_info to read the current path without reloading."
     )]
     pub(super) async fn load_project_tool(
         &self,

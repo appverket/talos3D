@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
 
+mod trace;
+pub use trace::{UxDragTrace, UxDragTraceSample};
+
 use bevy::{
     ecs::{message::Messages, world::EntityRef},
     input::{
@@ -33,10 +36,12 @@ pub struct UxHarnessPlugin;
 
 impl Plugin for UxHarnessPlugin {
     fn build(&self, app: &mut App) {
+        trace::install(app);
         app.init_resource::<UxHarnessState>().add_systems(
             Update,
             process_ux_harness_step
                 .after(InputPhase::SyncOwnership)
+                .before(crate::plugins::cursor::CursorSystems::UpdateWorldPosition)
                 // Pointer/button/key edges are valid for one frame. Inject them
                 // before the earliest modal/viewport consumer so transform
                 // confirmation, handle hover/press, selection, and tools all
@@ -123,6 +128,10 @@ pub struct UxDragRequest {
     pub button: Option<String>,
     #[serde(default)]
     pub steps: Option<u32>,
+    /// Record a bounded per-input candidate and render-present trace, returned
+    /// by ux_observe. Timing starts at Bevy input injection, excluding HTTP.
+    #[serde(default)]
+    pub trace: bool,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -173,6 +182,8 @@ pub struct UxHarnessSnapshot {
     pub active_edit_plan: Option<UxActiveEditPlan>,
     #[serde(default)]
     pub preview_error: Option<String>,
+    #[serde(default)]
+    pub drag_trace: Option<UxDragTrace>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -322,7 +333,11 @@ pub fn enqueue_drag(world: &mut World, request: UxDragRequest) -> Result<UxInput
         button,
         state: ButtonState::Released,
     });
-    enqueue_steps(world, actions)
+    let result = enqueue_steps(world, actions)?;
+    if request.trace {
+        trace::begin(world, result.sequence);
+    }
+    Ok(result)
 }
 
 pub fn enqueue_press_key(
@@ -434,6 +449,7 @@ pub fn observe_ux(world: &mut World) -> Result<UxHarnessSnapshot, String> {
         preview_error: world
             .get_resource::<crate::plugins::transform::ActiveTransformPreview>()
             .and_then(|active| active.refusal.clone()),
+        drag_trace: trace::observe(world),
     })
 }
 
@@ -459,6 +475,7 @@ fn process_ux_harness_step(world: &mut World) {
     let Some(step) = pop_next_step(world) else {
         return;
     };
+    trace::input(world, &step);
     let result = apply_step(world, &step.action);
     let mut state = world.resource_mut::<UxHarnessState>();
     state.completed_sequence = step.sequence;

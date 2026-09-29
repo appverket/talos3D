@@ -46,7 +46,9 @@ impl Plugin for SnapPlugin {
             .configure_sets(
                 Update,
                 (
-                    SnapSystems::Resolve.after(CursorSystems::UpdateWorldPosition),
+                    SnapSystems::Resolve
+                        .after(CursorSystems::UpdateWorldPosition)
+                        .before(crate::plugins::input_ownership::InputPhase::ModalInput),
                     SnapSystems::Draw,
                 )
                     .chain(),
