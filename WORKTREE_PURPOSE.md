@@ -1,9 +1,11 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-09-25
-- branch: codex/veranda-selection-tape
-- task-id: TALOS-hyqlckwm
+- created: 2026-09-29T07:33:51.730804+00:00
+- branch: codex/co-creative-mcp-contract
+- task-id: TALOS-ciapifae, TALOS-pfjtebsn, TALOS-ionklwss, TALOS-hoyjafuj
 - target base: main
-- summary: Align the live veranda and repair tape, cursor and selection usability.
-- status: verified; ready for integration
+- summary: Implement the co-creative design plan with verified MCP contracts and continued-development evidence.
+- status: active
+
+Live assignment and handoff authority: Fiberplane.
