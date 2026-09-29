@@ -205,6 +205,45 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
     }
     if let Some(concept) = entity.get::<crate::semantics::ConceptAssignment>() {
         source.add("Design concept", concept.concept.as_str(), encoded(concept));
+        if let Some(graph) = world.get_resource::<crate::semantics::SemanticGraph>() {
+            // Re-evaluate the existing claim, without mutating or storing a
+            // second obligation graph. This also exposes withdrawn host anchors
+            // and legacy role identities after loading a newer concept pack.
+            use crate::semantics::{
+                evaluate, PlanIntent, SemanticPlan, Verdict, WorldSemanticContext,
+            };
+            let claim = SemanticPlan::none().with(PlanIntent::AssignConcept {
+                entity: ElementId(element_id),
+                concept: concept.concept.clone(),
+            });
+            match evaluate(graph, &WorldSemanticContext::new(world), &claim) {
+                Verdict::Refuse(refusals) => {
+                    for refusal in refusals {
+                        unresolved.add("Semantic contradiction", refusal.summary(), json!({
+                            "proposition":refusal.violated,"observed":refusal.observed,"repair":refusal.repair
+                        }));
+                    }
+                }
+                Verdict::AdmitWithObligation(obligations) => {
+                    for obligation in obligations {
+                        unresolved.add(
+                            "Semantic obligation",
+                            &obligation.summary,
+                            json!({
+                                "proposition":obligation.proposition,"due_by":obligation.due_by
+                            }),
+                        );
+                    }
+                }
+                Verdict::Admit => {}
+            }
+        } else {
+            unresolved.add(
+                "Semantic coverage",
+                "The recorded concept cannot be evaluated without its concept graph.",
+                Value::Null,
+            );
+        }
     }
     if let Some(anchors) = entity.get::<crate::semantics::PublishedAnchors>() {
         controls.add(

@@ -281,6 +281,7 @@ fn semantic_anchor_request_refuses_wrong_host_and_persists_exact_history() {
     ));
     handle_save_project(&mut world, path.to_str().unwrap()).unwrap();
     let mut reloaded = init_model_api_test_world();
+    register_model_api_edit_requests(&mut reloaded);
     reloaded.insert_resource(SemanticGraph(roof_edge_fixture()));
     handle_load_project(&mut reloaded, path.to_str().unwrap()).unwrap();
     assert_eq!(
@@ -295,6 +296,23 @@ fn semantic_anchor_request_refuses_wrong_host_and_persists_exact_history() {
             .unwrap()
             .published_anchors
     );
+    // A withdrawn host anchor is not silently reported as a resolved design.
+    let withdrawn = prepare(
+        &mut reloaded,
+        json!([
+            {"PublishAnchors":{"entity":roof,"anchors":[]}}
+        ]),
+    );
+    call(
+        &mut reloaded,
+        "apply",
+        json!({"plan_id":withdrawn["plan_id"]}),
+    )
+    .unwrap();
+    let explanation = crate::plugins::design_explanation::explain_design(&reloaded, trim).unwrap();
+    assert!(serde_json::to_string(&explanation)
+        .unwrap()
+        .contains("Semantic contradiction"));
     std::fs::remove_file(path).unwrap();
 }
 

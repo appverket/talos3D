@@ -10928,7 +10928,10 @@ fn apply_captured_plan_and_flush(
 }
 
 #[cfg(feature = "model-api")]
-fn register_model_api_edit_requests(world: &mut World) {
+/// Register the built-in edit request planners without starting a transport.
+/// Headless domain integrations must also install commands, history and their
+/// authored entity factories. Call once per app composition.
+pub fn register_model_api_edit_requests(world: &mut World) {
     world.init_resource::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>();
     world.resource_mut::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>()
         .register(crate::plugins::authored_edit_plan::requests::EditRequestDescriptor::new(
