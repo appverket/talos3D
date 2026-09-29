@@ -43,7 +43,8 @@ use crate::{
         property_edit::PropertyEditState,
         recipe_drafts::{RecipeDraftArtifact, RecipeDraftRegistry},
         refinement::{
-            AuthoringProvenance, RefinementStateComponent, SemanticIntent, SettingOutContract,
+            AuthoringProvenance, ClaimGrounding, ObligationSet, RefinementBranch,
+            RefinementStateComponent, SemanticIntent, SettingOutContract,
         },
         selection::Selected,
         storage::Storage,
@@ -213,6 +214,14 @@ pub struct PersistedSemanticSidecars {
     pub element_class: Option<ElementClassAssignment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refinement_state: Option<RefinementStateComponent>,
+    /// Refinement authorities apply to every authored type, including groups
+    /// and relation records; individual geometry factories cannot own them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligations: Option<ObligationSet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_grounding: Option<ClaimGrounding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement_branch: Option<RefinementBranch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_intent: Option<SemanticIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,6 +323,9 @@ fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSema
     let sidecars = PersistedSemanticSidecars {
         element_class: entity_ref.get::<ElementClassAssignment>().cloned(),
         refinement_state: entity_ref.get::<RefinementStateComponent>().cloned(),
+        obligations: entity_ref.get::<ObligationSet>().cloned(),
+        claim_grounding: entity_ref.get::<ClaimGrounding>().cloned(),
+        refinement_branch: entity_ref.get::<RefinementBranch>().cloned(),
         semantic_intent: entity_ref.get::<SemanticIntent>().cloned(),
         authoring_provenance: entity_ref.get::<AuthoringProvenance>().cloned(),
         concept: entity_ref.get::<ConceptAssignment>().cloned(),
@@ -323,6 +335,9 @@ fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSema
     };
     (sidecars.element_class.is_some()
         || sidecars.refinement_state.is_some()
+        || sidecars.obligations.is_some()
+        || sidecars.claim_grounding.is_some()
+        || sidecars.refinement_branch.is_some()
         || sidecars.semantic_intent.is_some()
         || sidecars.authoring_provenance.is_some()
         || sidecars.concept.is_some()
@@ -345,6 +360,15 @@ fn apply_semantic_sidecars(
         entity_mut.insert(component.clone());
     }
     if let Some(component) = &sidecars.refinement_state {
+        entity_mut.insert(component.clone());
+    }
+    if let Some(component) = &sidecars.obligations {
+        entity_mut.insert(component.clone());
+    }
+    if let Some(component) = &sidecars.claim_grounding {
+        entity_mut.insert(component.clone());
+    }
+    if let Some(component) = &sidecars.refinement_branch {
         entity_mut.insert(component.clone());
     }
     if let Some(component) = &sidecars.semantic_intent {
@@ -3039,6 +3063,117 @@ mod tests {
         assert_eq!(restored.2, &obligations);
         assert_eq!(restored.3, &claim_grounding);
         assert_eq!(restored.4, &authoring_provenance);
+    }
+
+    #[test]
+    fn group_obligations_grounding_and_relation_branch_survive_real_json_reload() {
+        use crate::plugins::modeling::{
+            assembly::RelationFactory,
+            group::{GroupFactory, GroupMembers},
+        };
+        use crate::plugins::refinement::{create_refinement_relation_pair, query_refined_into};
+        fn world() -> World {
+            let mut world = World::new();
+            let mut registry = CapabilityRegistry::default();
+            registry.register_factory(GroupFactory);
+            registry.register_factory(AssemblyFactory);
+            registry.register_factory(RelationFactory);
+            world.insert_resource(registry);
+            world.init_resource::<DocumentProperties>();
+            world.init_resource::<LayerRegistry>();
+            world.init_resource::<MaterialRegistry>();
+            world.init_resource::<TextureRegistry>();
+            world.init_resource::<DefinitionRegistry>();
+            world.init_resource::<DefinitionLibraryRegistry>();
+            world.init_resource::<NamedViewRegistry>();
+            world.init_resource::<ElementIdAllocator>();
+            world.init_resource::<OpaquePersistedEntities>();
+            world.init_resource::<Assets<Mesh>>();
+            world.init_resource::<History>();
+            world.init_resource::<PendingCommandQueue>();
+            world.init_resource::<PropertyEditState>();
+            world.init_resource::<TransformState>();
+            world.insert_resource(State::new(ActiveTool::Select));
+            world.init_resource::<NextState<ActiveTool>>();
+            world
+        }
+        let mut source = world();
+        let obligations = ObligationSet {
+            entries: vec![Obligation {
+                id: ObligationId("resolved_member".into()),
+                role: SemanticRole("part".into()),
+                required_by_state: RefinementState::Schematic,
+                status: ObligationStatus::SatisfiedBy(2),
+            }],
+        };
+        let grounding = ClaimGrounding {
+            claims: std::collections::HashMap::from([(
+                ClaimPath("dimension".into()),
+                ClaimRecord {
+                    grounding: Grounding::ExplicitRule(RuleId("fixture_rule".into())),
+                    set_at: 1,
+                    set_by: None,
+                },
+            )]),
+        };
+        let intent = SemanticIntent {
+            parameters: serde_json::json!({
+                "dimension":0.14499999582767487_f64, "cut_length":1.2899999618530273_f64,
+            }),
+            ..Default::default()
+        };
+        source.spawn((
+            ElementId(1),
+            GroupMembers {
+                name: "Coarse group".into(),
+                member_ids: vec![],
+                frame: Default::default(),
+                linked_model: None,
+            },
+            obligations.clone(),
+            grounding.clone(),
+            intent.clone(),
+        ));
+        source.spawn((
+            ElementId(2),
+            SemanticAssembly {
+                assembly_type: "fixture".into(),
+                label: "Resolved part".into(),
+                members: vec![],
+                parameters: Value::Null,
+                metadata: Value::Null,
+            },
+        ));
+        source.resource_mut::<ElementIdAllocator>().set_next(3);
+        let pair = create_refinement_relation_pair(
+            &mut source,
+            ElementId(1),
+            ElementId(2),
+            RefinementState::Conceptual,
+            RefinementState::Schematic,
+        );
+        let relation = entity_for_element_id(&source, pair.0).unwrap();
+        let branch = source.get::<RefinementBranch>(relation).unwrap().clone();
+        let project = build_project_file(&mut source).unwrap();
+        let encoded = serde_json::to_string(&project).unwrap();
+        // Exercise the actual byte parser, not Value-to-Value deserialization.
+        let decoded: ProjectFile = serde_json::from_str(&encoded).unwrap();
+        let mut target = world();
+        load_project(&mut target, decoded).unwrap();
+        let root = entity_for_element_id(&target, ElementId(1)).unwrap();
+        assert_eq!(target.get::<ObligationSet>(root), Some(&obligations));
+        assert_eq!(target.get::<ClaimGrounding>(root), Some(&grounding));
+        assert_eq!(target.get::<SemanticIntent>(root), Some(&intent));
+        for id in [pair.0, pair.1] {
+            assert_eq!(
+                target.get::<RefinementBranch>(entity_for_element_id(&target, id).unwrap()),
+                Some(&branch)
+            );
+        }
+        assert_eq!(
+            query_refined_into(&target, ElementId(1)),
+            vec![ElementId(2)]
+        );
     }
 
     #[test]

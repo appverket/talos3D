@@ -674,6 +674,13 @@ arbitrary resources or unrelated entities are not made transactional by this
 wrapper. The root's existing refinement metadata is captured explicitly.
 Declared native recipe refinement limits are enforced before generation.
 
+Saved projects retain obligations, claim grounding and refinement-branch
+metadata as generic semantic sidecars, including on groups and relations.
+JSON numeric controls use the dependency's `float_roundtrip` parser feature so
+save/reload does not alter their values or fingerprint inputs. Older files
+without these sidecars remain readable; missing historical decisions are not
+invented during load.
+
 Session recipe drafts are still **not executable by `instantiate_recipe`**.
 Installed drafts can be appended to `list_recipe_families` and `select_recipe`
 when the caller opts in, but `select_recipe` marks them `executable: false`
