@@ -1091,3 +1091,8 @@ placements and stable occurrence/slot identities. Domain validation and semantic
 projection remain the domain pack's responsibility. This is a draft native body,
 not a released package, inferred reverse engineering, or a serialized parallel
 parametric instance store.
+
+Domain capabilities can register bounded, read-only `DesignExplanationProviders`
+to project source context, evidence and unresolved limits from their existing
+registries. These notes feed the same inspector/MCP explanation; they do not
+promote instance refinement, manufacture obligations, or persist another graph.

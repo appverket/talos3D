@@ -67,6 +67,35 @@ pub struct DesignExplanation {
     pub validation_sweep: Option<u64>,
     pub limits: Vec<String>,
 }
+
+/// Domain-owned, read-only context from existing authorities. These notes do
+/// not create instance claims, obligations or a persisted explanation graph.
+pub enum ExplanationNote {
+    Source(ExplanationRow),
+    Evidence(ExplanationRow),
+    Unresolved(ExplanationRow),
+}
+
+type ExplanationProvider = fn(&World, Entity) -> Vec<ExplanationNote>;
+
+#[derive(Resource, Default)]
+pub struct DesignExplanationProviders {
+    entries: std::collections::BTreeMap<String, ExplanationProvider>,
+}
+impl DesignExplanationProviders {
+    pub fn register(
+        &mut self,
+        id: impl Into<String>,
+        provider: ExplanationProvider,
+    ) -> Result<(), String> {
+        let id = id.into();
+        if self.entries.contains_key(&id) || self.entries.len() >= 16 {
+            return Err("Duplicate explanation provider or provider budget exceeded".into());
+        }
+        self.entries.insert(id, provider);
+        Ok(())
+    }
+}
 fn clip(text: &str) -> String {
     let mut out: String = text.chars().take(MAX_TEXT).collect();
     if text.chars().count() > MAX_TEXT {
@@ -457,6 +486,18 @@ pub fn explain_design(world: &World, element_id: u64) -> Result<DesignExplanatio
             }
         }
     }
+    if let Some(providers) = world.get_resource::<DesignExplanationProviders>() {
+        for provider in providers.entries.values() {
+            for note in provider(world, entity.id()) {
+                let (section, row) = match note {
+                    ExplanationNote::Source(row) => (&mut source, row),
+                    ExplanationNote::Evidence(row) => (&mut evidence, row),
+                    ExplanationNote::Unresolved(row) => (&mut unresolved, row),
+                };
+                section.add(row.label, row.text, row.details);
+            }
+        }
+    }
     if unresolved.rows.is_empty() {
         unresolved.add("Recorded state", "No unresolved choices are recorded. This does not establish that all design requirements are resolved.", json!({"unresolved_records_present":false}));
     }
@@ -537,6 +578,42 @@ mod tests {
             ShapeRotation::default(),
         ));
         world
+    }
+    #[test]
+    fn domain_notes_are_bounded_and_do_not_create_instance_claims() {
+        let mut world = world();
+        let revision = world.resource::<History>().revision_token();
+        let mut providers = DesignExplanationProviders::default();
+        let provider = |_: &World, _: Entity| {
+            (0..30)
+                .map(|i| {
+                    ExplanationNote::Unresolved(ExplanationRow {
+                        label: format!("Source limit {i}"),
+                        text: "x".repeat(1000),
+                        details: json!({"untrusted_size":"y".repeat(4000)}),
+                    })
+                })
+                .collect()
+        };
+        providers.register("fixture", provider).unwrap();
+        assert!(providers.register("fixture", provider).is_err());
+        world.insert_resource(providers);
+        let result = explain_design(&world, 1).unwrap();
+        assert_eq!(result.sections[4].rows.len(), MAX_ROWS);
+        assert_eq!(result.sections[4].omitted, 6);
+        assert!(result.sections[4]
+            .rows
+            .iter()
+            .all(|r| r.text.chars().count() < 540));
+        assert_eq!(world.resource::<History>().revision_token(), revision);
+        assert_eq!(
+            world
+                .query::<&RefinementStateComponent>()
+                .iter(&world)
+                .count(),
+            0
+        );
+        assert_eq!(world.query::<&ObligationSet>().iter(&world).count(), 0);
     }
     #[test]
     fn missing_provenance_is_not_freeform_and_context_is_not_grounding() {
