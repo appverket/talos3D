@@ -1,11 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-09-29
-- branch: codex/co-creative-session-safety
-- task-id: TALOS-rvwsswvw; TALOS-uynfsnun follows
-- target base: main (stacked on core MCP contract PR46)
-- summary: Fence procedural commits and make admitted effects atomic and truthfully validated.
-- status: awaiting-merge
-
-Live assignment and handoff authority: Fiberplane.
+- created: 2026-09-29T08:16:00Z
+- branch: codex/co-creative-atomic-commit
+- task-id: TALOS-uynfsnun
+- target base: main (stacked on freshness PR47 at 8bf66e5)
+- summary: Atomic procedural commit, live validation and grouped undo
+- status: active
