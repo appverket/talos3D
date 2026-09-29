@@ -922,7 +922,13 @@ pub fn despawn_by_element_id(world: &mut World, element_id: ElementId) {
     };
 
     let mesh_asset_id = world.get::<Mesh3d>(entity).map(|mesh| mesh.id());
-    if let Some(mesh_asset_id) = mesh_asset_id {
+    // Cached meshes are shared by other occurrences and retained by the LRU.
+    // Removing one authored root must not invalidate every owner of its mesh.
+    if let Some(mesh_asset_id) = mesh_asset_id.filter(|_| {
+        world
+            .get::<crate::plugins::modeling::occurrence::MeshCacheKey>(entity)
+            .is_none()
+    }) {
         world.resource_mut::<Assets<Mesh>>().remove(mesh_asset_id);
     }
 

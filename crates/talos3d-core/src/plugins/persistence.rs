@@ -1699,6 +1699,14 @@ fn clear_scene(world: &mut World) {
     // deferred buffers belong to their schedules; API replacement runs in First.
     world.flush();
 
+    // Scene replacement explicitly removes mesh assets below. Do not let a
+    // same-key occurrence in the loaded document reuse their dead handles.
+    if let Some(mut cache) =
+        world.get_resource_mut::<crate::plugins::modeling::occurrence::RepresentationCache>()
+    {
+        cache.clear();
+    }
+
     // Edit scopes refer to the old document even when a replacement happens to
     // reuse the same stable IDs. Reopening must start at the document root.
     if let Some(mut context) =
@@ -1821,6 +1829,31 @@ mod tests {
         tools::ActiveTool,
         transform::TransformState,
     };
+
+    #[test]
+    fn project_replacement_clears_cache_entries_for_removed_mesh_assets() {
+        use crate::plugins::modeling::definition::{GeometryParamsHash, RepresentationKind};
+        use crate::plugins::modeling::occurrence::{MeshCacheKey, RepresentationCache};
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<RepresentationCache>();
+        let mesh = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0)));
+        let key = MeshCacheKey::new(
+            DefinitionId("fixture.cached".into()),
+            1,
+            GeometryParamsHash("fixture".into()),
+            RepresentationKind::PrimaryGeometry,
+        );
+        world
+            .resource_mut::<RepresentationCache>()
+            .insert(key.clone(), mesh.clone());
+        world.spawn((ElementId(1), Mesh3d(mesh.clone()), key));
+        clear_scene(&mut world);
+        assert!(!world.resource::<Assets<Mesh>>().contains(mesh.id()));
+        assert!(world.resource::<RepresentationCache>().is_empty());
+    }
 
     #[test]
     fn clear_scene_resets_document_edit_scopes() {

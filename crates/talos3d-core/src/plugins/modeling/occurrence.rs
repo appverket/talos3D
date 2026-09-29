@@ -2856,6 +2856,17 @@ mod pp_098_occurrence_cache_tests {
                 cached_handle.id()
             );
         }
+        // Deletion/undo of one owner must leave the other eleven renderable.
+        OccurrenceSnapshot::new(ElementId(100), identity.clone(), "cached").remove_from(&mut world);
+        assert!(world
+            .resource::<Assets<Mesh>>()
+            .contains(cached_handle.id()));
+        world.insert_resource(registry);
+        OccurrenceSnapshot::new(ElementId(100), identity, "cached").apply_to(&mut world);
+        assert!(world
+            .resource::<Assets<Mesh>>()
+            .contains(cached_handle.id()));
+        assert_eq!(world.resource::<RepresentationCache>().len(), 1);
     }
 
     #[test]
