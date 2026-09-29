@@ -14140,6 +14140,10 @@ mod capability_profiles {
             "list_entities",
             "get_world_aabb",
             "take_screenshot",
+            "explain_design",
+            "definition.explain",
+            "occurrence.resolve",
+            "lookup_source_passage",
             "get_authoring_provenance",
             "get_claim_grounding",
         ] {

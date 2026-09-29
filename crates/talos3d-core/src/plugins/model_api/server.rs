@@ -302,6 +302,17 @@ impl ModelApiServer {
         .await
     }
 
+    async fn request_explain_design(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<crate::plugins::design_explanation::DesignExplanation> {
+        self.round_trip(|response| ModelApiRequest::ExplainDesign {
+            element_id,
+            response,
+        })
+        .await?
+    }
+
     async fn request_get_entity_details(
         &self,
         element_id: u64,
@@ -5594,6 +5605,21 @@ impl ModelApiServer {
                 McpError::invalid_params(format!("entity {} not found", params.element_id), None)
             })?;
         json_tool_result(snapshot)
+    }
+
+    #[tool(
+        name = "explain_design",
+        description = "Explain one element's controls, recorded creation, direct dependencies, evidence and unresolved choices. Same bounded read projection as the property inspector; includes model revision, omitted counts and last validation sweep. Evidence presence is not proof of applicability. Refresh after changes; does not perform edits or validation."
+    )]
+    pub(super) async fn explain_design_tool(
+        &self,
+        Parameters(params): Parameters<GetEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_explain_design(params.element_id)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
     }
 
     #[tool(

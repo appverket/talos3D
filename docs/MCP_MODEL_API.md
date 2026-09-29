@@ -913,3 +913,29 @@ in the retry identity and accepted script export. Relation
 postconditions inspect real endpoints; claim grounding must match on an
 unambiguous target; obligation satisfaction must refer to the actual output
 entity of the specified step. Missing or ambiguous evidence fails closed.
+
+## Design explanation
+
+`explain_design { element_id }` returns the same read projection shown in the
+property inspector's **Design explanation** section: recorded creation and
+assembly context, Definition controls and hosting, direct dependencies, grounding
+and source references, unresolved decisions/obligations, and last-sweep validator
+coverage. It includes the document/model revision and explicit omission counts.
+
+The projection is transient. Missing direct provenance is reported as missing,
+not inferred to be Freeform; assembly membership is context, not inherited proof.
+A source reference can be present, missing, or unresolved by this projection.
+Presence does not establish applicability. Validation is a recorded sweep, not a
+fresh run or an assertion that absent findings prove completeness. Dependencies
+include recorded inactive alternatives and do not replace an exact edit plan.
+
+Limits are 24 rows per section, 512 characters per text field, 2 KiB per structured
+row detail, and a 48 KiB retained-row budget (complete responses below 64 KiB).
+Use the named detail tools for omitted content. `definition.explain`,
+`occurrence.resolve`, and `lookup_source_passage` are available in inspection
+alongside `explain_design`; these are read-only operations.
+
+The inspector refreshes on selection, revision, Definition registry, relevant
+source-component or dependency-graph changes. It clears while a transform is
+active and offers an explicit Refresh action for a new validation observation.
+No dependency scan is performed per frame for an unchanged selection.

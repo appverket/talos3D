@@ -158,3 +158,11 @@ frame-time or drag latency.
 Talos3D is a platform first. Features arrive through capabilities. Setups bundle
 those capabilities for a domain. The public codebase should make that layering
 obvious.
+
+### Selected-element explanation
+
+`plugins::design_explanation::explain_design` composes a bounded read projection
+from existing authored components, Definition parameter resolution, recorded
+dependencies and validation. The property inspector and MCP consume this one
+projection. It is never persisted as another source graph, does not infer missing
+provenance, and cannot execute edits from explanation prose.

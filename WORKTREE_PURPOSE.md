@@ -6,4 +6,4 @@
 - task-id: TALOS-yxmfpvll
 - target base: main d590029
 - summary: Bounded selected-element explanation shared by inspector and MCP
-- status: active
+- status: awaiting-merge

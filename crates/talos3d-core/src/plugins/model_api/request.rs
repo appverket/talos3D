@@ -12,6 +12,10 @@ pub(super) enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<Option<serde_json::Value>>,
     },
+    ExplainDesign {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<crate::plugins::design_explanation::DesignExplanation>>,
+    },
     GetEntityDetails {
         element_id: u64,
         response: oneshot::Sender<Option<EntityDetails>>,
@@ -1237,6 +1241,14 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             response,
         } => {
             let _ = response.send(get_entity_snapshot(world, ElementId(element_id)));
+        }
+        ModelApiRequest::ExplainDesign {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(crate::plugins::design_explanation::explain_design(
+                world, element_id,
+            ));
         }
         ModelApiRequest::GetEntityDetails {
             element_id,

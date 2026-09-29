@@ -20,6 +20,7 @@ pub mod definition_authoring;
 pub mod definition_browser;
 pub mod definition_preview_scene;
 pub mod dependency_panel;
+pub mod design_explanation;
 pub mod dimension_line;
 pub mod document_properties;
 pub mod document_state;

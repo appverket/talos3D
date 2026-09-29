@@ -1743,7 +1743,7 @@ struct ChromeData<'w, 's> {
     >,
     property_edit_state: ResMut<'w, PropertyEditState>,
     property_panel_state: ResMut<'w, PropertyPanelState>,
-    property_panel_data: Res<'w, PropertyPanelData>,
+    property_panel_data: ResMut<'w, PropertyPanelData>,
     palette_state: ResMut<'w, PaletteState>,
     transform_state: Res<'w, TransformState>,
     keys: Res<'w, ButtonInput<KeyCode>>,
@@ -2485,6 +2485,27 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
         }
         if let Some(action) = pending_action {
             apply_property_panel_action(data, &fields, action);
+        }
+
+        if let Some(explanation) = &data.property_panel_data.explanation {
+            let mut refresh = false;
+            egui::CollapsingHeader::new("Design explanation")
+                .show(ui, |ui| {
+                    refresh = ui.small_button("Refresh explanation").clicked();
+                    egui::ScrollArea::vertical().max_height(300.0).id_salt("design_explanation_scroll").show(ui, |ui| {
+                        for section in &explanation.sections {
+                            ui.strong(&section.title);
+                            if section.rows.is_empty() { ui.weak("None recorded."); }
+                            for row in &section.rows {
+                                ui.label(format!("{}: {}", row.label, row.text));
+                            }
+                            if section.omitted > 0 { ui.weak(format!("{} additional entries omitted.",section.omitted)); }
+                            ui.add_space(6.0);
+                        }
+                        ui.weak("Evidence presence does not establish correctness. Validation reflects the last recorded sweep.");
+                    });
+                });
+            if refresh { data.property_panel_data.explanation_refresh = true; }
         }
 
         // PP-DBUX6: Promote-to-Definition-Default section.
