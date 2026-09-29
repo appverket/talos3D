@@ -3589,12 +3589,13 @@ fn reactivate_parked_refinement_branch(
                 .map(|mismatch| format!("{}: {}", mismatch.field, mismatch.reason))
                 .collect::<Vec<_>>()
                 .join("; ");
+            let actions = compatibility.available_actions.join(", ");
             return Err(PromoteError::StaleRefinementBranch {
                 child_element_id: child.0,
                 compatibility,
                 message: format!(
-                    "Parked refinement branch {} -> {} is stale and was not reactivated: {}. Inspect the branch, then explicitly regenerate or perform a three-way rebase; authored overrides will not be discarded silently.",
-                    parent_eid.0, child.0, reasons
+                    "Parked refinement branch {} -> {} is stale and was not reactivated: {}. Inspect the branch and retained authored choices before recovery. Available recovery actions: {}.",
+                    parent_eid.0, child.0, reasons, actions
                 ),
             });
         }

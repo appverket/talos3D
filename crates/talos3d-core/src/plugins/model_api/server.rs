@@ -8200,7 +8200,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "regenerate_refinement_branch",
-        description = "Explicitly replace a PARKED stale refinement branch with current generator output. This permanently discards the parked subtree before regenerating, so confirm_discard_parked_branch must be true. Use rebase_refinement_branch instead when authored overrides must be carried forward."
+        description = "Explicitly replace a PARKED stale refinement branch with current generator output. This permanently discards the parked subtree before regenerating, so confirm_discard_parked_branch must be true. Inspect available_actions first; parameter-only rebase is available only when native inputs and dimensional contracts remain compatible. Preserve required authored choices explicitly before discarding."
     )]
     pub(super) async fn regenerate_refinement_branch_tool(
         &self,
