@@ -1346,6 +1346,12 @@ pub(crate) fn render_occurrence(
         }
     }
     let root_entity = ensure_occurrence_root_entity(world, element_id, identity, transform, label);
+    let selected_parts: std::collections::HashSet<_> = world
+        .query_filtered::<&GeneratedOccurrencePart, With<crate::plugins::selection::Selected>>()
+        .iter(world)
+        .filter(|part| part.owner == element_id)
+        .map(|part| (part.slot_path.clone(), part.definition_id.clone()))
+        .collect();
     cleanup_generated_occurrence_parts(world, element_id);
 
     if definition.body.compound.is_none()
@@ -1385,6 +1391,10 @@ pub(crate) fn render_occurrence(
     }
 
     for part in parts {
+        let selected = selected_parts.contains(&(
+            part.identity.slot_path.clone(),
+            part.identity.definition_id.clone(),
+        ));
         let mut entity = world.spawn((
             part.extrusion,
             ShapeRotation(part.rotation),
@@ -1394,6 +1404,9 @@ pub(crate) fn render_occurrence(
             part.cache_key,
         ));
         apply_spawned_material_assignment(&mut entity, &part.definition);
+        if selected {
+            entity.insert(crate::plugins::selection::Selected);
+        }
     }
 
     if let Ok(mut entity_mut) = world.get_entity_mut(root_entity) {
@@ -2685,6 +2698,49 @@ mod pp_098_occurrence_cache_tests {
     fn needs_mesh_count(world: &mut World) -> usize {
         let mut query = world.query_filtered::<Entity, With<NeedsMesh>>();
         query.iter(world).count()
+    }
+
+    #[test]
+    fn regenerated_occurrence_preserves_selected_slot_without_authored_part_ids() {
+        use crate::plugins::selection::Selected;
+        let leaf = rectangular_definition();
+        let compound = compound_definition(leaf.id.clone());
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(leaf);
+        registry.insert(compound.clone());
+        let identity = OccurrenceIdentity::new(compound.id.clone(), compound.definition_version);
+        let mut world = world_with_cache();
+        render_occurrence(
+            &mut world,
+            &registry,
+            ElementId(10),
+            &identity,
+            Transform::IDENTITY,
+            None,
+        )
+        .unwrap();
+        let old = generated_part_entity(&mut world, ElementId(10), "left");
+        world.entity_mut(old).insert(Selected);
+        render_occurrence(
+            &mut world,
+            &registry,
+            ElementId(10),
+            &identity,
+            Transform::from_xyz(1.0, 0.0, 0.0),
+            None,
+        )
+        .unwrap();
+        let new = generated_part_entity(&mut world, ElementId(10), "left");
+        assert_ne!(old, new);
+        assert!(world.get::<Selected>(new).is_some());
+        assert!(world.get::<ElementId>(new).is_none());
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<Selected>>()
+                .iter(&world)
+                .count(),
+            1
+        );
     }
 
     #[test]

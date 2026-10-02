@@ -2283,7 +2283,12 @@ fn publish_chrome_input_capture(
 fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
     data.property_panel_state.interacting = false;
 
-    if data.property_panel_data.snapshots.is_empty() {
+    if data.property_panel_data.snapshots.is_empty()
+        && !matches!(
+            data.property_panel_data.semantic_kind,
+            SelectionSemanticKind::GeneratedPart { .. }
+        )
+    {
         data.property_panel_state.visible = false;
         return;
     }
@@ -2330,9 +2335,6 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
             return;
         }
 
-        let Some(first) = data.property_panel_data.snapshots.first() else {
-            return;
-        };
         // PP-DBUX1: semantic header — distinguish Opening vs Occurrence vs
         // GeneratedPart with stable wording, an "affects N occurrences" cue
         // for occurrences, and an inline "Open Definition" entry per
@@ -2344,6 +2346,7 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
             &data.definition_registry,
             &data.material_registry,
         );
+        let Some(first) = data.property_panel_data.snapshots.first() else { return; };
         let fields = first.property_fields();
         let sections = property_panel_sections(&fields);
         let mut pending_action = None;

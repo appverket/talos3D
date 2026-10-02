@@ -73,6 +73,7 @@ type BoxSelectEntityQueryItem = (
     Has<OpeningContext>,
 );
 type BoxSelectGeneratedOccurrenceQueryItem = (
+    Entity,
     &'static GeneratedOccurrencePart,
     &'static GlobalTransform,
     Option<&'static Visibility>,
@@ -307,6 +308,15 @@ pub fn retain_selected_entity(world: &World, entity: Entity) -> Option<Entity> {
         return None;
     }
 
+    if let Some(part) = world.get::<GeneratedOccurrencePart>(entity) {
+        return resolve_generated_part_for_selection(world, entity, part);
+    }
+    if world
+        .get_resource::<OccurrenceEditContext>()
+        .is_some_and(|context| !context.is_root())
+    {
+        return None;
+    }
     let element_id = world.get::<ElementId>(entity).copied()?;
     if world.get::<DirectSelection>(entity).is_some() {
         return Some(entity);
@@ -548,16 +558,26 @@ fn complete_selection_click(
     handle_completed_double_click(world, hit_entity, now);
 }
 
-fn redirect_generated_occurrence_part_to_owner(world: &mut World, entity: Entity) -> Entity {
-    let Some(generated) = world.get::<GeneratedOccurrencePart>(entity) else {
-        return entity;
-    };
-    let owner = generated.owner;
-    let mut query = world.query::<(Entity, &ElementId)>();
-    query
-        .iter(world)
-        .find_map(|(candidate, element_id)| (*element_id == owner).then_some(candidate))
-        .unwrap_or(entity)
+fn resolve_generated_part_for_selection(
+    world: &World,
+    entity: Entity,
+    part: &GeneratedOccurrencePart,
+) -> Option<Entity> {
+    let owner = find_entity_by_element_id_readonly(world, part.owner)?;
+    if crate::plugins::layers::entity_document_hidden(world, owner)
+        || world
+            .get_resource::<LayerRegistry>()
+            .is_some_and(|_| crate::plugins::layers::entity_on_locked_layer(world, owner))
+    {
+        return None;
+    }
+    if let Some(active) = world
+        .get_resource::<OccurrenceEditContext>()
+        .and_then(|context| context.current_occurrence())
+    {
+        return (active == part.owner).then_some(entity);
+    }
+    resolve_entity_for_selection(world, owner)
 }
 
 pub fn resolve_entity_for_selection(world: &World, entity: Entity) -> Option<Entity> {
@@ -573,6 +593,15 @@ pub fn resolve_entity_for_selection(world: &World, entity: Entity) -> Option<Ent
         return None;
     }
 
+    if let Some(part) = world.get::<GeneratedOccurrencePart>(entity) {
+        return resolve_generated_part_for_selection(world, entity, part);
+    }
+    if world
+        .get_resource::<OccurrenceEditContext>()
+        .is_some_and(|context| !context.is_root())
+    {
+        return None;
+    }
     let element_id = world.get::<ElementId>(entity).copied()?;
     if world.get::<DirectSelection>(entity).is_some() {
         return Some(entity);
@@ -641,8 +670,21 @@ fn resolve_selection_click_target(
     let Some(hit_entity) = hit_entity else {
         return SelectionClickTarget::default();
     };
-    let mut entity = redirect_generated_occurrence_part_to_owner(world, hit_entity);
-    entity = redirect_selection_proxy_to_target(world, entity);
+    // In an entered occurrence the render part is the selectable subject.
+    // Outside it, the stable authored owner still participates in group descent.
+    if world
+        .get_resource::<OccurrenceEditContext>()
+        .is_some_and(|context| !context.is_root())
+    {
+        return SelectionClickTarget {
+            entity: resolve_entity_for_selection(world, hit_entity),
+        };
+    }
+    let entity = world
+        .get::<GeneratedOccurrencePart>(hit_entity)
+        .and_then(|part| find_entity_by_element_id_readonly(world, part.owner))
+        .unwrap_or(hit_entity);
+    let entity = redirect_selection_proxy_to_target(world, entity);
     let Some(element_id) = world.get::<ElementId>(entity).copied() else {
         return SelectionClickTarget::default();
     };
@@ -823,9 +865,7 @@ pub(crate) fn enter_edit_context_for_entity(
         let mut occurrence_context = world.resource::<OccurrenceEditContext>().clone();
         occurrence_context.enter(element_id);
         world.insert_resource(occurrence_context);
-        let mut group_context = world.resource::<GroupEditContext>().clone();
-        group_context.reset();
-        world.insert_resource(group_context);
+        // Keep the containing group stack so Escape returns to that group.
         "occurrence"
     } else {
         let entity_ref = world.get_entity(entity).ok()?;
@@ -1606,6 +1646,7 @@ struct BoxSelectContext<'w, 's> {
     occurrence_owner_query:
         Query<'w, 's, BoxSelectOccurrenceOwnerQueryItem, With<OccurrenceIdentity>>,
     edit_context: Res<'w, GroupEditContext>,
+    occurrence_context: Res<'w, OccurrenceEditContext>,
     group_query: Query<'w, 's, GroupMembershipQueryItem>,
 }
 
@@ -1728,7 +1769,7 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                     continue;
                 }
 
-                if has_group_members {
+                if has_group_members || !cx.occurrence_context.is_root() {
                     continue;
                 }
 
@@ -1756,7 +1797,9 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                 }
             }
 
-            for (generated, global_transform, visibility, aabb) in &cx.generated_occurrence_query {
+            for (part_entity, generated, global_transform, visibility, aabb) in
+                &cx.generated_occurrence_query
+            {
                 if visibility.copied() == Some(Visibility::Hidden) {
                     continue;
                 }
@@ -1768,7 +1811,12 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                 else {
                     continue;
                 };
-                if owner_muted {
+                if owner_muted
+                    || cx
+                        .occurrence_context
+                        .current_occurrence()
+                        .is_some_and(|active| active != generated.owner)
+                {
                     continue;
                 }
                 let layer_name = layer_assignment
@@ -1789,12 +1837,17 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                     rect_max,
                     is_window_select,
                 ) {
-                    let target = redirect_to_group_query(
-                        owner_entity,
-                        owner_element_id,
-                        &cx.edit_context,
-                        &cx.group_query,
-                    );
+                    let target =
+                        if cx.occurrence_context.current_occurrence() == Some(generated.owner) {
+                            part_entity
+                        } else {
+                            redirect_to_group_query(
+                                owner_entity,
+                                owner_element_id,
+                                &cx.edit_context,
+                                &cx.group_query,
+                            )
+                        };
                     cx.commands.entity(target).insert(Selected);
                 }
             }
@@ -2414,6 +2467,95 @@ mod tests {
         world.insert_resource(LayerRegistry::default());
         let entity = world.spawn((ElementId(1), Visibility::Hidden)).id();
         assert!(!entity_is_visible(&world, entity));
+    }
+
+    #[test]
+    fn occurrence_descent_selects_parts_and_escape_restores_containing_group() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(GroupEditContext::default());
+        world.insert_resource(OccurrenceEditContext::default());
+        world.insert_resource(FaceEditContext::default());
+        world.insert_resource(DoubleClickTracker::default());
+        let occurrence = world
+            .spawn((
+                ElementId(20),
+                OccurrenceIdentity::new(DefinitionId("compound".into()), 1),
+            ))
+            .id();
+        let group = world
+            .spawn((
+                ElementId(30),
+                GroupMembers {
+                    name: "Assembly".into(),
+                    member_ids: vec![ElementId(20)],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        let part = world
+            .spawn(GeneratedOccurrencePart {
+                owner: ElementId(20),
+                slot_path: "member".into(),
+                definition_id: DefinitionId("piece".into()),
+            })
+            .id();
+        let unrelated = world
+            .spawn((
+                ElementId(40),
+                OccurrenceIdentity::new(DefinitionId("compound".into()), 1),
+            ))
+            .id();
+        let foreign_part = world
+            .spawn(GeneratedOccurrencePart {
+                owner: ElementId(40),
+                slot_path: "member".into(),
+                definition_id: DefinitionId("piece".into()),
+            })
+            .id();
+        for time in [1.0, 1.1, 1.2, 1.3, 1.4] {
+            let target = resolve_selection_click_target(&mut world, Some(part)).entity;
+            complete_selection_click(&mut world, target, false, time);
+        }
+        assert!(world.get::<Selected>(part).is_some());
+        assert!(world.get::<Selected>(occurrence).is_none());
+        assert!(world.get::<Selected>(group).is_none());
+        assert_eq!(
+            world.resource::<GroupEditContext>().stack,
+            vec![ElementId(30)]
+        );
+        assert_eq!(
+            world.resource::<OccurrenceEditContext>().stack,
+            vec![ElementId(20)]
+        );
+        assert_eq!(resolve_entity_for_selection(&world, part), Some(part));
+        assert_eq!(retain_selected_entity(&world, part), Some(part));
+        assert!(edit_entity_is_active(
+            None,
+            world.get::<GeneratedOccurrencePart>(part),
+            Some(ElementId(30)),
+            Some(ElementId(20)),
+            &[ElementId(20), ElementId(40)]
+        ));
+        assert!(!edit_entity_is_active(
+            Some(&ElementId(40)),
+            None,
+            Some(ElementId(30)),
+            Some(ElementId(20)),
+            &[ElementId(20), ElementId(40)]
+        ));
+        assert_eq!(resolve_entity_for_selection(&world, foreign_part), None);
+        assert_eq!(resolve_entity_for_selection(&world, unrelated), None);
+        let target = resolve_selection_click_target(&mut world, Some(part)).entity;
+        complete_selection_click(&mut world, target, false, 1.5);
+        assert!(!world.resource::<FaceEditContext>().is_active());
+        assert_eq!(exit_edit_context(&mut world), "occurrence");
+        assert_eq!(
+            world.resource::<GroupEditContext>().stack,
+            vec![ElementId(30)]
+        );
+        assert_eq!(resolve_entity_for_selection(&world, part), Some(occurrence));
     }
 
     #[test]
@@ -3643,24 +3785,15 @@ fn edit_entity_is_active(
     active_occurrence_id: Option<ElementId>,
     active_group_members: &[ElementId],
 ) -> bool {
+    if let Some(occurrence_id) = active_occurrence_id {
+        return element_id.copied() == Some(occurrence_id)
+            || generated_part.is_some_and(|part| part.owner == occurrence_id);
+    }
     if let Some(group_id) = active_group_id {
         if let Some(element_id) = element_id {
-            if *element_id == group_id || active_group_members.contains(element_id) {
-                return true;
-            }
+            return *element_id == group_id || active_group_members.contains(element_id);
         }
-    }
-
-    if let Some(occurrence_id) = active_occurrence_id {
-        if element_id.copied() == Some(occurrence_id) {
-            return true;
-        }
-        if generated_part
-            .map(|part| part.owner == occurrence_id)
-            .unwrap_or(false)
-        {
-            return true;
-        }
+        return generated_part.is_some_and(|part| active_group_members.contains(&part.owner));
     }
 
     false

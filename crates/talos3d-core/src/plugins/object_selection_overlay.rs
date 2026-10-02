@@ -43,6 +43,14 @@ fn sync_object_selection_overlay(world: &mut World) {
         || world
             .get_resource::<ViewportExportState>()
             .is_some_and(|s| s.ui_suppressed());
+    let selected: HashSet<Entity> = if suppressed {
+        HashSet::new()
+    } else {
+        world
+            .query_filtered::<Entity, With<Selected>>()
+            .iter(world)
+            .collect()
+    };
     let mut ids: HashSet<ElementId> = if suppressed {
         HashSet::new()
     } else {
@@ -71,7 +79,7 @@ fn sync_object_selection_overlay(world: &mut World) {
             }
         }
     }
-    let desired: HashMap<Entity, (Handle<Mesh>, RenderLayers)> = if ids.is_empty() {
+    let desired: HashMap<Entity, (Handle<Mesh>, RenderLayers)> = if selected.is_empty() {
         HashMap::new()
     } else {
         world
@@ -83,8 +91,9 @@ fn sync_object_selection_overlay(world: &mut World) {
                 Option<&RenderLayers>,
             ), Without<SelectedObjectOverlay>>()
             .iter(world)
-            .filter(|(_, _, id, generated, _)| {
-                id.is_some_and(|id| ids.contains(id))
+            .filter(|(entity, _, id, generated, _)| {
+                selected.contains(entity)
+                    || id.is_some_and(|id| ids.contains(id))
                     || generated.is_some_and(|g| ids.contains(&g.owner))
             })
             .map(|(entity, mesh, _, _, layers)| {
@@ -159,6 +168,62 @@ fn sync_object_selection_overlay(world: &mut World) {
 mod tests {
     use super::*;
     use bevy::asset::uuid_handle;
+
+    #[test]
+    fn generated_member_selection_highlights_only_that_mesh() {
+        let mut world = World::new();
+        world.init_resource::<ObjectSelectionOverlayState>();
+        world.init_resource::<Assets<FaceStippleMaterial>>();
+        let mesh = uuid_handle!("1d1b983f-9ccf-4c91-9d87-7cb96977d603");
+        let mut parts = Vec::new();
+        for slot in ["left", "right"] {
+            parts.push(
+                world
+                    .spawn((
+                        Mesh3d(mesh.clone()),
+                        Transform::default(),
+                        Visibility::Visible,
+                        GeneratedOccurrencePart {
+                            owner: ElementId(10),
+                            slot_path: slot.into(),
+                            definition_id: crate::plugins::modeling::definition::DefinitionId(
+                                "piece".into(),
+                            ),
+                        },
+                    ))
+                    .id(),
+            );
+        }
+        world.entity_mut(parts[0]).insert(Selected);
+        sync_object_selection_overlay(&mut world);
+        let sources: Vec<_> = world
+            .query::<&SelectedObjectOverlay>()
+            .iter(&world)
+            .map(|o| o.0)
+            .collect();
+        assert_eq!(sources, vec![parts[0]]);
+        let overlay = world
+            .query_filtered::<Entity, With<SelectedObjectOverlay>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(world.get::<Mesh3d>(overlay).unwrap().0, mesh);
+        sync_object_selection_overlay(&mut world);
+        assert!(
+            world.get_entity(overlay).is_ok(),
+            "idle frames reuse the overlay"
+        );
+        world.entity_mut(parts[0]).remove::<Selected>();
+        world.entity_mut(parts[1]).insert(Selected);
+        sync_object_selection_overlay(&mut world);
+        assert_eq!(
+            world
+                .query::<&SelectedObjectOverlay>()
+                .single(&world)
+                .unwrap()
+                .0,
+            parts[1]
+        );
+    }
 
     #[test]
     fn nested_selection_reuses_mesh_and_tracks_preview_visibility_and_replacement() {

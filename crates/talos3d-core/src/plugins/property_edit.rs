@@ -122,7 +122,12 @@ fn sync_property_panel_data(world: &mut World) {
     };
     let entity_type = selected_snapshots_type(&snapshots);
     let mixed_selection = !snapshots.is_empty() && entity_type.is_none();
-    let semantic_kind = if snapshots.len() == 1 && !mixed_selection {
+    let single_selection = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .count()
+        == 1;
+    let semantic_kind = if single_selection && !mixed_selection {
         compute_selection_semantic_kind(world)
     } else {
         SelectionSemanticKind::Generic
@@ -205,7 +210,12 @@ fn sync_property_panel_data(world: &mut World) {
 
     let data = world.resource::<PropertyPanelData>();
     let selection_signature = property_panel_selection_signature(data);
-    let visible = !data.snapshots.is_empty() && !world.resource::<PropertyEditState>().is_active();
+    let visible = (!data.snapshots.is_empty()
+        || matches!(
+            data.semantic_kind,
+            SelectionSemanticKind::GeneratedPart { .. }
+        ))
+        && !world.resource::<PropertyEditState>().is_active();
     let mut panel_state = world.resource_mut::<PropertyPanelState>();
     let hidden_for_current_selection =
         panel_state.hidden_for_selection.as_ref() == Some(&selection_signature);
@@ -731,6 +741,33 @@ mod tests {
             Selected,
         ));
         world
+    }
+
+    #[test]
+    fn generated_part_panel_exposes_controlling_definition_without_fake_snapshot() {
+        let mut world = property_world();
+        let old = world
+            .query_filtered::<Entity, With<Selected>>()
+            .single(&world)
+            .unwrap();
+        world.entity_mut(old).remove::<Selected>();
+        world.init_resource::<DefinitionRegistry>();
+        world.spawn((
+            Selected,
+            GeneratedOccurrencePart {
+                owner: ElementId(10),
+                slot_path: "piece".into(),
+                definition_id: DefinitionId("child".into()),
+            },
+        ));
+        sync_property_panel_data(&mut world);
+        assert!(world.resource::<PropertyPanelState>().visible);
+        let data = world.resource::<PropertyPanelData>();
+        assert!(data.snapshots.is_empty());
+        assert!(
+            matches!(&data.semantic_kind, SelectionSemanticKind::GeneratedPart {
+            controlling_definition_id, .. } if controlling_definition_id == "child")
+        );
     }
 
     #[test]

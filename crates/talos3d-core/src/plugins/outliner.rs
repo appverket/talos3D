@@ -41,7 +41,7 @@ use crate::plugins::{
         group::{semantic_assembly_physical_group_links, GroupEditContext, GroupMembers},
         occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
     },
-    selection::Selected,
+    selection::{OccurrenceEditContext, Selected},
     ui::StatusBarData,
 };
 
@@ -67,8 +67,7 @@ pub struct OutlinerNode {
     /// Stable id used to key the per-row collapse state across frames.
     pub node_id: u64,
     /// Entity to (de)select when this row is clicked. Group members select their
-    /// own row entity instead of redirecting to the parent group; generated part
-    /// rows still select the owning occurrence because they are transient rows.
+    /// own row entity, including generated parts inside an occurrence.
     pub select_entity: Option<Entity>,
     pub label: String,
     pub kind: OutlinerKind,
@@ -201,7 +200,7 @@ pub struct OutlineEntry {
     pub node_id: u64,
     /// `ElementId` of the entity, or `None` for a transient generated part.
     pub element_id: Option<u64>,
-    /// Entity to select when this row is activated (the owner, for parts).
+    /// Entity to select when this row is activated, including transient parts.
     pub entity: Entity,
     pub label: String,
     pub kind: OutlinerKind,
@@ -265,13 +264,17 @@ fn link_parents(nodes: &mut [OutlinerNode]) {
 /// double-clicking in the viewport is a navigation act, and the tree is where
 /// that position should be legible.
 fn mark_edit_context(world: &World, nodes: &mut [OutlinerNode]) {
-    let Some(context) = world.get_resource::<GroupEditContext>() else {
+    let mut stack = world
+        .get_resource::<GroupEditContext>()
+        .map(|context| context.stack.clone())
+        .unwrap_or_default();
+    if let Some(context) = world.get_resource::<OccurrenceEditContext>() {
+        stack.extend(&context.stack);
+    }
+    let Some(active) = stack.last() else {
         return;
     };
-    let Some(active) = context.current_group() else {
-        return;
-    };
-    let ancestors: HashSet<u64> = context.stack.iter().map(|id| id.0).collect();
+    let ancestors: HashSet<u64> = stack.iter().map(|id| id.0).collect();
     for node in nodes.iter_mut() {
         node.edit_context = if node.node_id == active.0 {
             OutlinerEditContext::Active
@@ -354,7 +357,15 @@ fn flatten_entry(world: &World, entry: &OutlineEntry, nodes: &mut Vec<OutlinerNo
             .get_resource::<crate::plugins::layers::LayerRegistry>()
             .is_some_and(|_| entity_on_locked_layer(world, entry.entity)))
         .then_some(entry.entity),
-        label: entry.label.clone(),
+        label: world
+            .get::<GeneratedOccurrencePart>(entry.entity)
+            .and_then(|part| {
+                world
+                    .get_resource::<crate::plugins::modeling::definition::DefinitionRegistry>()
+                    .and_then(|registry| registry.get(&part.definition_id))
+            })
+            .map(|definition| definition.name.clone())
+            .unwrap_or_else(|| entry.label.clone()),
         kind: entry.kind,
         is_linked_model: matches!(entry.kind, OutlinerKind::Group)
             && world
@@ -435,25 +446,17 @@ pub fn collect_outline_forest(world: &mut World) -> Vec<OutlineEntry> {
 
     let mut parts_by_owner: HashMap<u64, Vec<(Entity, String)>> = HashMap::new();
     {
-        let mut query = world.query::<&GeneratedOccurrencePart>();
-        // Collect owner -> label only; the part's own entity isn't needed since
-        // clicking a part selects the owner.
-        let mut tmp: Vec<(u64, String)> = Vec::new();
-        for part in query.iter(world) {
-            let label = if part.slot_path.is_empty() {
-                part.definition_id.to_string()
-            } else {
-                part.slot_path.clone()
-            };
-            tmp.push((part.owner.0, label));
-        }
-        for (owner, label) in tmp {
-            if let Some(&owner_entity) = entity_by_eid.get(&owner) {
+        let mut query = world.query::<(Entity, &GeneratedOccurrencePart)>();
+        for (entity, part) in query.iter(world) {
+            if entity_by_eid.contains_key(&part.owner.0) {
                 parts_by_owner
-                    .entry(owner)
+                    .entry(part.owner.0)
                     .or_default()
-                    .push((owner_entity, label));
+                    .push((entity, part.slot_path.clone()));
             }
+        }
+        for parts in parts_by_owner.values_mut() {
+            parts.sort_by(|a, b| a.1.cmp(&b.1));
         }
     }
 
@@ -551,11 +554,11 @@ fn build_entry(ctx: &BuildContext, eid: u64, visited: &mut HashSet<u64>) -> Outl
     }
 
     if let Some(parts) = ctx.parts_by_owner.get(&eid) {
-        for (owner_entity, label) in parts {
+        for (part_entity, label) in parts {
             children.push(OutlineEntry {
                 node_id: part_node_id(eid, label),
                 element_id: None,
-                entity: *owner_entity,
+                entity: *part_entity,
                 label: label.clone(),
                 kind: OutlinerKind::Part,
                 children: Vec::new(),
@@ -922,6 +925,22 @@ pub fn apply_outliner_selection(
     action: OutlinerSelectAction,
 ) {
     let OutlinerSelectAction { target, additive } = action;
+    commands.queue(move |world: &mut World| {
+        if let Some(part) = world.get::<GeneratedOccurrencePart>(target).cloned() {
+            let already_entered = world
+                .get_resource::<OccurrenceEditContext>()
+                .is_some_and(|context| context.stack.last() == Some(&part.owner));
+            if !already_entered {
+                if let Some(owner) =
+                    crate::plugins::commands::find_entity_by_element_id(world, part.owner)
+                {
+                    world.init_resource::<GroupEditContext>();
+                    world.init_resource::<OccurrenceEditContext>();
+                    crate::plugins::selection::enter_edit_context_for_entity(world, owner);
+                }
+            }
+        }
+    });
     if additive {
         if current.contains(&target) {
             commands.entity(target).remove::<Selected>();
@@ -1015,17 +1034,19 @@ mod tests {
     #[test]
     fn occurrences_aggregate_generated_parts() {
         let mut world = World::new();
-        let occ = world
+        let _occ = world
             .spawn((
                 ElementId(10),
                 OccurrenceIdentity::new(DefinitionId("window".to_string()), 1),
             ))
             .id();
-        world.spawn(GeneratedOccurrencePart {
-            owner: ElementId(10),
-            slot_path: "glazing".to_string(),
-            definition_id: DefinitionId("pane".to_string()),
-        });
+        let generated = world
+            .spawn(GeneratedOccurrencePart {
+                owner: ElementId(10),
+                slot_path: "glazing".to_string(),
+                definition_id: DefinitionId("pane".to_string()),
+            })
+            .id();
 
         let tree = build(&mut world);
 
@@ -1035,8 +1056,22 @@ mod tests {
         let part = &tree.nodes[occurrence.children[0]];
         assert_eq!(part.kind, OutlinerKind::Part);
         assert_eq!(part.label, "glazing");
-        // Clicking a generated part selects the owning occurrence.
-        assert_eq!(part.select_entity, Some(occ));
+        assert_eq!(part.select_entity, Some(generated));
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        apply_outliner_selection(
+            &mut Commands::new(&mut queue, &world),
+            &HashSet::new(),
+            OutlinerSelectAction {
+                target: generated,
+                additive: false,
+            },
+        );
+        queue.apply(&mut world);
+        assert!(world.get::<Selected>(generated).is_some());
+        assert_eq!(
+            world.resource::<OccurrenceEditContext>().stack,
+            vec![ElementId(10)]
+        );
     }
 
     #[test]

@@ -1174,3 +1174,13 @@ preserve its context. Subset export includes referenced artifacts; it omits
 unrelated project inputs. Plans that reuse an existing source capture an unchanged
 before/after resource condition, so legacy writers cannot silently change their
 source context between preview and apply.
+
+### Selecting compound occurrence members
+
+Double-click a compound occurrence to enter it, then click a constituent member.
+The Outliner also selects each member directly and names it from its controlling
+Definition. Escape leaves the occurrence and restores its containing group
+context. Generated members retain stable owner/slot identity through regeneration;
+they do not become independently persisted primitives. Their property inspector
+routes changes to the controlling Definition, and the GPU selection overlay
+highlights only the selected member.
