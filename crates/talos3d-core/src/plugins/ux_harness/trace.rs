@@ -11,11 +11,9 @@ use bevy::render::{
     renderer::render_system, view::ExtractedWindows, Extract, ExtractSchedule, Render, RenderApp,
     RenderSystems,
 };
-use std::{
-    sync::{Arc, Mutex},
-    time::Instant,
-};
+use std::sync::{Arc, Mutex};
 
+use crate::time::Instant;
 const MAX_SAMPLES: usize = 128; // ux_drag admits at most 123 input steps.
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]

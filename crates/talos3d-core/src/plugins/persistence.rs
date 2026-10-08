@@ -1,8 +1,8 @@
+use crate::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bevy::prelude::*;
@@ -335,8 +335,13 @@ fn current_project_created_by() -> ProjectCreatedBy {
 
 fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSemanticSidecars> {
     let sidecars = PersistedSemanticSidecars {
-        quantities: entity_ref.get::<crate::plugins::modeling::quantity_set::QuantitySet>().cloned(),
-        extensions: entity_ref.get::<SemanticExtensions>().map(|e| e.0.clone()).unwrap_or_default(),
+        quantities: entity_ref
+            .get::<crate::plugins::modeling::quantity_set::QuantitySet>()
+            .cloned(),
+        extensions: entity_ref
+            .get::<SemanticExtensions>()
+            .map(|e| e.0.clone())
+            .unwrap_or_default(),
         element_class: entity_ref.get::<ElementClassAssignment>().cloned(),
         refinement_state: entity_ref.get::<RefinementStateComponent>().cloned(),
         obligations: entity_ref.get::<ObligationSet>().cloned(),
@@ -687,7 +692,9 @@ pub fn open_project_bytes(world: &mut World, bytes: &[u8]) -> Result<(), String>
 
 /// A delayed local write cannot mark a newer edit clean.
 pub fn acknowledge_project_bytes(world: &mut World, bytes: &[u8]) -> Result<bool, String> {
-    if capture_project_bytes(world)? != bytes { return Ok(false); }
+    if capture_project_bytes(world)? != bytes {
+        return Ok(false);
+    }
     world.resource_mut::<History>().mark_save_point();
     world.resource_mut::<DocumentState>().dirty = false;
     Ok(true)
@@ -696,13 +703,26 @@ pub fn acknowledge_project_bytes(world: &mut World, bytes: &[u8]) -> Result<bool
 /// Install a pinned library through the same undoable command used by both shells.
 /// Existing material IDs cannot change implicitly: users must give conflicting
 /// materials distinct IDs before publishing a replacement library.
-pub fn install_project_library(world: &mut World, bytes: &[u8], revision: &str) -> Result<String, String> {
-    use crate::plugins::modeling::definition::{DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope};
-    if revision.is_empty() || revision.len() > 128 || !revision.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+pub fn install_project_library(
+    world: &mut World,
+    bytes: &[u8],
+    revision: &str,
+) -> Result<String, String> {
+    use crate::plugins::modeling::definition::{
+        DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope,
+    };
+    if revision.is_empty()
+        || revision.len() > 128
+        || !revision
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return Err("Invalid library revision".into());
     }
     let project: ProjectFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-    if project.version != PROJECT_FILE_VERSION { return Err("Unsupported project version".into()); }
+    if project.version != PROJECT_FILE_VERSION {
+        return Err("Unsupported project version".into());
+    }
     let before = LibrarySnapshot::capture(world);
     let mut after = before.clone();
     for material in project.materials.unwrap_or_default().all() {
@@ -710,14 +730,18 @@ pub fn install_project_library(world: &mut World, bytes: &[u8], revision: &str) 
             if serde_json::to_value(existing).unwrap() != serde_json::to_value(material).unwrap() {
                 return Err(format!("Material {} differs from this project's pinned version; assign a new material ID before importing", material.id));
             }
-        } else { after.materials.upsert(material.clone()); }
+        } else {
+            after.materials.upsert(material.clone());
+        }
     }
     for texture in project.textures.unwrap_or_default().all() {
         if let Some(existing) = after.textures.get(&texture.id) {
             if serde_json::to_value(existing).unwrap() != serde_json::to_value(texture).unwrap() {
                 return Err("Texture ID conflicts with an installed version".into());
             }
-        } else { after.textures.insert(texture.clone()); }
+        } else {
+            after.textures.insert(texture.clone());
+        }
     }
     let id = DefinitionLibraryId(format!("project-revision-{revision}"));
     let mut definitions = std::collections::HashMap::new();
@@ -727,18 +751,33 @@ pub fn install_project_library(world: &mut World, bytes: &[u8], revision: &str) 
     for library in project.definition_libraries.unwrap_or_default().list() {
         for (key, definition) in &library.definitions {
             if let Some(existing) = definitions.get(key) {
-                if serde_json::to_value(existing).unwrap() != serde_json::to_value(definition).unwrap() {
+                if serde_json::to_value(existing).unwrap()
+                    != serde_json::to_value(definition).unwrap()
+                {
                     return Err("Library contains conflicting Definition IDs".into());
                 }
             }
             definitions.insert(key.clone(), definition.clone());
         }
     }
-    after.libraries.insert(DefinitionLibrary { id: id.clone(), name: format!("Synced library · {revision}"), scope: DefinitionLibraryScope::WorkspaceLibrary, source_path: None, tags: vec!["revision-pinned".into()], definitions, draft_status: Default::default() });
+    after.libraries.insert(DefinitionLibrary {
+        id: id.clone(),
+        name: format!("Synced library · {revision}"),
+        scope: DefinitionLibraryScope::WorkspaceLibrary,
+        source_path: None,
+        tags: vec!["revision-pinned".into()],
+        definitions,
+        draft_status: Default::default(),
+    });
     // Retain opaque BIM/plugin metadata with the pinned library. It never replaces
     // the document's own sidecars or changes already placed occurrences.
-    after.extensions.0.insert(format!("library_payload_{revision}"), serde_json::from_slice(bytes).map_err(|e| e.to_string())?);
-    world.resource_mut::<PendingCommandQueue>().push_command(Box::new(InstallLibrary { before, after }));
+    after.extensions.0.insert(
+        format!("library_payload_{revision}"),
+        serde_json::from_slice(bytes).map_err(|e| e.to_string())?,
+    );
+    world
+        .resource_mut::<PendingCommandQueue>()
+        .push_command(Box::new(InstallLibrary { before, after }));
     crate::plugins::history::apply_pending_history_commands(world);
     Ok(id.0)
 }
@@ -752,17 +791,40 @@ struct LibrarySnapshot {
 }
 impl LibrarySnapshot {
     fn capture(world: &World) -> Self {
-        Self { libraries: world.resource::<DefinitionLibraryRegistry>().clone(), materials: world.resource::<MaterialRegistry>().clone(), textures: world.get_resource::<TextureRegistry>().cloned().unwrap_or_default(), extensions: world.get_resource::<ProjectExtensions>().cloned().unwrap_or_default() }
+        Self {
+            libraries: world.resource::<DefinitionLibraryRegistry>().clone(),
+            materials: world.resource::<MaterialRegistry>().clone(),
+            textures: world
+                .get_resource::<TextureRegistry>()
+                .cloned()
+                .unwrap_or_default(),
+            extensions: world
+                .get_resource::<ProjectExtensions>()
+                .cloned()
+                .unwrap_or_default(),
+        }
     }
     fn apply(&self, world: &mut World) {
-        world.insert_resource(self.libraries.clone()); world.insert_resource(self.materials.clone()); world.insert_resource(self.textures.clone()); world.insert_resource(self.extensions.clone());
+        world.insert_resource(self.libraries.clone());
+        world.insert_resource(self.materials.clone());
+        world.insert_resource(self.textures.clone());
+        world.insert_resource(self.extensions.clone());
     }
 }
-struct InstallLibrary { before: LibrarySnapshot, after: LibrarySnapshot }
+struct InstallLibrary {
+    before: LibrarySnapshot,
+    after: LibrarySnapshot,
+}
 impl crate::plugins::history::EditorCommand for InstallLibrary {
-    fn label(&self) -> &'static str { "Install synced library" }
-    fn apply(&mut self, world: &mut World) { self.after.apply(world); }
-    fn undo(&mut self, world: &mut World) { self.before.apply(world); }
+    fn label(&self) -> &'static str {
+        "Install synced library"
+    }
+    fn apply(&mut self, world: &mut World) {
+        self.after.apply(world);
+    }
+    fn undo(&mut self, world: &mut World) {
+        self.before.apply(world);
+    }
 }
 
 fn save_to_path(world: &mut World, path: &Path) -> Result<(), String> {
@@ -887,7 +949,7 @@ fn recovery_record_from_disk(recovery_path: &Path) -> Option<RecoveryFile> {
         .metadata()
         .ok()
         .and_then(|metadata| metadata.modified().ok())
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
     Some(RecoveryFile {
@@ -1209,7 +1271,10 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     });
 
     Ok(ProjectFile {
-        extensions: world.get_resource::<ProjectExtensions>().map(|e| e.0.clone()).unwrap_or_default(),
+        extensions: world
+            .get_resource::<ProjectExtensions>()
+            .map(|e| e.0.clone())
+            .unwrap_or_default(),
         foreign_sources: world
             .get_resource::<crate::plugins::foreign_source::SourceArtifacts>()
             .filter(|a| !a.0.is_empty())
@@ -1954,6 +2019,78 @@ mod tests {
         tools::ActiveTool,
         transform::TransformState,
     };
+
+    fn shell_world() -> World {
+        let mut w = World::new();
+        w.insert_resource(CapabilityRegistry::default());
+        w.insert_resource(DocumentProperties::default());
+        w.insert_resource(LayerRegistry::default());
+        w.insert_resource(MaterialRegistry::default());
+        w.insert_resource(TextureRegistry::default());
+        w.insert_resource(DefinitionRegistry::default());
+        w.insert_resource(DefinitionLibraryRegistry::default());
+        w.insert_resource(NamedViewRegistry::default());
+        w.insert_resource(ElementIdAllocator::default());
+        w.insert_resource(OpaquePersistedEntities::default());
+        w.insert_resource(History::default());
+        w.insert_resource(PendingCommandQueue::default());
+        w.insert_resource(DocumentState::default());
+        w
+    }
+    #[test]
+    fn delayed_shell_save_does_not_acknowledge_newer_bim_edits() {
+        let mut world = shell_world();
+        let old = capture_project_bytes(&mut world).unwrap();
+        world.insert_resource(ProjectExtensions(
+            serde_json::json!({"bim":{"estimate":1200}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ));
+        world.resource_mut::<DocumentState>().dirty = true;
+        assert!(!acknowledge_project_bytes(&mut world, &old).unwrap());
+        assert!(world.resource::<DocumentState>().dirty);
+        let current = capture_project_bytes(&mut world).unwrap();
+        assert!(acknowledge_project_bytes(&mut world, &current).unwrap());
+        assert!(!world.resource::<DocumentState>().dirty);
+    }
+    #[test]
+    fn shell_library_install_is_pinned_undoable_and_keeps_document_bim() {
+        let mut world = shell_world();
+        let bytes = capture_project_bytes(&mut world).unwrap();
+        world.insert_resource(ProjectExtensions(
+            serde_json::json!({"bim":{"estimate":1200}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ));
+        let original = serde_json::to_value(world.resource::<DefinitionRegistry>()).unwrap();
+        let id = install_project_library(&mut world, &bytes, "revision-1").unwrap();
+        assert_eq!(id, "project-revision-revision-1");
+        assert_eq!(
+            world.resource::<DefinitionLibraryRegistry>().list().len(),
+            1
+        );
+        assert_eq!(
+            serde_json::to_value(world.resource::<DefinitionRegistry>()).unwrap(),
+            original
+        );
+        assert_eq!(
+            world.resource::<ProjectExtensions>().0["bim"]["estimate"],
+            1200
+        );
+        assert_eq!(world.resource::<History>().undo_stack_len(), 1);
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        crate::plugins::history::apply_pending_history_commands(&mut world);
+        assert!(world
+            .resource::<DefinitionLibraryRegistry>()
+            .list()
+            .is_empty());
+        assert_eq!(
+            world.resource::<ProjectExtensions>().0["bim"]["estimate"],
+            1200
+        );
+    }
 
     #[test]
     fn project_replacement_clears_cache_entries_for_removed_mesh_assets() {
@@ -3386,7 +3523,21 @@ mod tests {
             source_ref: Some("traguiden.se.wall-table-2.195.v1".into()),
         };
 
+        use crate::plugins::modeling::quantity_set::{QuantitySet, QuantityValue};
+        let quantities = QuantitySet {
+            length_m: Some(QuantityValue::from_parameter(6.0, "length_m")),
+            ..Default::default()
+        };
+        let extension = serde_json::json!({"cost":{"SEK":1280,"vat":true},"future_plugin":[1,2]});
+        source.insert_resource(ProjectExtensions(
+            serde_json::json!({"bim":{"material_only":true,"future_field":42}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ));
         source.spawn((
+            quantities.clone(),
+            SemanticExtensions(extension.as_object().unwrap().clone()),
             ElementId(42),
             BoxPrimitive {
                 centre: Vec3::ZERO,
@@ -3429,7 +3580,22 @@ mod tests {
         target.insert_resource(State::new(ActiveTool::Select));
         target.insert_resource(NextState::<ActiveTool>::default());
 
-        load_project(&mut target, project).expect("project should load");
+        // Exercise the actual wire serialization, not only a Rust struct move.
+        let encoded = serde_json::to_vec(&project).unwrap();
+        load_project(&mut target, serde_json::from_slice(&encoded).unwrap())
+            .expect("project should load");
+        let entity = entity_for_element_id(&mut target, ElementId(42)).unwrap();
+        assert_eq!(target.get::<QuantitySet>(entity), Some(&quantities));
+        assert_eq!(
+            &target.get::<SemanticExtensions>(entity).unwrap().0,
+            extension.as_object().unwrap()
+        );
+        assert_eq!(
+            target.resource::<ProjectExtensions>().0["bim"]["future_field"],
+            42
+        );
+        let reserialized = serde_json::to_value(build_project_file(&mut target).unwrap()).unwrap();
+        assert_eq!(reserialized["bim"]["material_only"], true);
 
         let mut query = target.query::<(
             &ElementId,

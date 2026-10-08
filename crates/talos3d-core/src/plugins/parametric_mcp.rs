@@ -366,8 +366,8 @@ fn synthesize_parametric_geometry(
     // annotation (lowest claim, requires no obligation resolution).
     let default_refinement_state = RefinementState::Conceptual;
 
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now_secs = crate::time::SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 

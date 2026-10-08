@@ -960,7 +960,7 @@ mod tests {
         }
         let mut samples = vec![];
         for _ in 0..100 {
-            let start = std::time::Instant::now();
+            let start = crate::time::Instant::now();
             std::hint::black_box(explain_design(&world, 1).unwrap());
             samples.push(start.elapsed());
         }

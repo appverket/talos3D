@@ -5892,7 +5892,7 @@ mod tests {
         let libraries = crate::plugins::modeling::definition::DefinitionLibraryRegistry::default();
         let frames = 1000;
 
-        let start = std::time::Instant::now();
+        let start = crate::time::Instant::now();
         for _ in 0..frames {
             std::hint::black_box(build_definition_list_entries(
                 &registry, &libraries, None, false, "",
@@ -5901,7 +5901,7 @@ mod tests {
         let rebuild = start.elapsed();
 
         let mut cache = DefinitionListCache::default();
-        let start = std::time::Instant::now();
+        let start = crate::time::Instant::now();
         for _ in 0..frames {
             std::hint::black_box(cache.entries(&registry, &libraries, None, false, ""));
         }

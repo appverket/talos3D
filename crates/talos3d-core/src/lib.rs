@@ -10,3 +10,6 @@ pub mod plugins;
 pub mod relational;
 pub mod semantics;
 pub mod storage;
+
+/// Portable wall and monotonic clocks (native std, browser Performance/Date).
+pub use web_time as time;

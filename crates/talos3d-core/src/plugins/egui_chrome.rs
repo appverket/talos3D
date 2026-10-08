@@ -1991,7 +1991,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         let selected_now: std::collections::HashSet<Entity> =
             data.selected_entities.iter().collect();
         #[cfg(feature = "perf-stats")]
-        let perf_start = std::time::Instant::now();
+        let perf_start = crate::time::Instant::now();
         let outliner_action = crate::plugins::outliner::draw_outliner_window(
             &ctx,
             &mut data.outliner_window_state,
@@ -2030,7 +2030,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         let selected_now: std::collections::HashSet<Entity> =
             data.selected_entities.iter().collect();
         #[cfg(feature = "perf-stats")]
-        let perf_start = std::time::Instant::now();
+        let perf_start = crate::time::Instant::now();
         let actions = crate::plugins::layers_panel::draw_layers_window(
             &ctx,
             &mut data.layers_panel_state,

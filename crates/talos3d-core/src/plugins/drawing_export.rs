@@ -1335,8 +1335,8 @@ mod tests {
     fn screenshot_quality_flags_all_black_file() {
         let path = std::env::temp_dir().join(format!(
             "talos3d-black-screenshot-{}.png",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            crate::time::SystemTime::now()
+                .duration_since(crate::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));

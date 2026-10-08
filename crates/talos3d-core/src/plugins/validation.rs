@@ -409,8 +409,8 @@ fn run_refinement_goal_progress(subject: Entity, world: &World) -> Vec<Finding> 
     let Some(registry) = world.get_resource::<RefinementGoalRegistry>() else {
         return Vec::new();
     };
-    let emitted_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let emitted_at = crate::time::SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0);
     let mut findings = Vec::new();
@@ -456,8 +456,8 @@ fn run_refinement_goal_progress(subject: Entity, world: &World) -> Vec<Finding> 
 fn run_declared_state_obligations(subject: Entity, world: &World) -> Vec<Finding> {
     use crate::capability_registry::Severity;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = crate::time::SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
@@ -632,8 +632,8 @@ fn run_occurrence_geometry_non_degenerate(subject: Entity, world: &World) -> Vec
         return Vec::new();
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = crate::time::SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 

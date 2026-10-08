@@ -7,10 +7,10 @@
 //! and common performance properties, while staying small enough for
 //! early pack/bootstrap workflows.
 
+use crate::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bevy::prelude::*;

@@ -1,3 +1,4 @@
+use crate::time::{SystemTime, UNIX_EPOCH};
 /// Material browser and editor panel.
 ///
 /// Follows the same floating-window pattern as `definition_browser`.
@@ -6,7 +7,6 @@ use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bevy::{

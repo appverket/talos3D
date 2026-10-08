@@ -384,8 +384,8 @@ fn run_interference(subject: Entity, world: &World) -> Vec<Finding> {
         return Vec::new();
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = crate::time::SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let subject_aabb = subject_obb.aabb();

@@ -572,8 +572,8 @@ mod diag_tests {
     fn loader_parses_rule_array_from_disk() {
         let base = std::env::temp_dir().join(format!(
             "t3d_if_diag_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            crate::time::SystemTime::now()
+                .duration_since(crate::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));

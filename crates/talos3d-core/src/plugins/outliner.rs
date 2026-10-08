@@ -17,9 +17,9 @@
 //! path so any authored entity contributes its own `label()`/`type_name()`
 //! without the outliner knowing about concrete entity kinds.
 
-use std::collections::{HashMap, HashSet};
 #[cfg(feature = "perf-stats")]
-use std::time::Instant;
+use crate::time::Instant;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::world::EntityRef, prelude::*};
 use bevy_egui::egui;

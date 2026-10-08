@@ -40,8 +40,8 @@
 //!   (a follow-on PP; v1 carries minimal in-session obligation tracking)
 //! - real-world rmcp wiring of the five MCP tools (see PP-SPS-3 plugin)
 
+use crate::time::{Duration, Instant};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};

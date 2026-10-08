@@ -1,3 +1,4 @@
+use crate::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "model-api")]
 pub mod concept_tools;
 #[cfg(feature = "model-api")]
@@ -107,7 +108,6 @@ use std::{
     path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "model-api")]
@@ -18286,7 +18286,7 @@ pub fn handle_request_corpus_expansion(
 ) -> ApiResult<CorpusGapInfo> {
     use crate::curation::AssetKindId;
     use crate::plugins::corpus_gap::{CorpusGap, CorpusGapId, CorpusGapQueue};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::time::{SystemTime, UNIX_EPOCH};
 
     // Defect 1 (vocabulary surfaces must agree): a recognised native modeling
     // term (e.g. `door`/`window`, authored as `opening` entities) is not a
@@ -18897,8 +18897,8 @@ pub fn handle_materialize_learned_asset(
     }
 
     let response = crate::plugins::parametric_mcp::world_create(world, parametric_request)?;
-    let last_verified = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let last_verified = crate::time::SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0);
 

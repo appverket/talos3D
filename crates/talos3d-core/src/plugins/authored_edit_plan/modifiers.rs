@@ -224,7 +224,7 @@ mod tests {
             generic_snapshot::PrimitiveSnapshot,
             primitives::{BoxPrimitive, ShapeRotation},
         };
-        use std::time::Instant;
+        use crate::time::Instant;
         let mut world = World::new();
         let mut registry = EditPlanModifiers::default();
         for index in 0..20 {

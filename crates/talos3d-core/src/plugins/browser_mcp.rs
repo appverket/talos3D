@@ -380,24 +380,41 @@ fn vec3_json(value: Vec3) -> Value {
 fn dispatch_tool(world: &mut World, tool_name: &str, args: Value) -> Result<Value, String> {
     match tool_name {
         "project_library_install" => {
-            let bytes=args.get("json").and_then(Value::as_str).ok_or("native project JSON required")?.as_bytes();
-            let revision=args.get("revision").and_then(Value::as_str).ok_or("revision required")?;
-            Ok(json!({"library_id":crate::plugins::persistence::install_project_library(world,bytes,revision)?}))
-        },
-        "project_status" => Ok(json!({"dirty":world.resource::<crate::plugins::document_state::DocumentState>().dirty,"revision":world.resource::<crate::plugins::history::History>().revision_token()})),
+            let bytes = args
+                .get("json")
+                .and_then(Value::as_str)
+                .ok_or("native project JSON required")?
+                .as_bytes();
+            let revision = args
+                .get("revision")
+                .and_then(Value::as_str)
+                .ok_or("revision required")?;
+            Ok(
+                json!({"library_id":crate::plugins::persistence::install_project_library(world,bytes,revision)?}),
+            )
+        }
+        "project_status" => Ok(
+            json!({"dirty":world.resource::<crate::plugins::document_state::DocumentState>().dirty,"revision":world.resource::<crate::plugins::history::History>().revision_token()}),
+        ),
         "project_capture" => {
-            let bytes=crate::plugins::persistence::capture_project_bytes(world)?;
+            let bytes = crate::plugins::persistence::capture_project_bytes(world)?;
             Ok(json!({"json":String::from_utf8(bytes).map_err(|e|e.to_string())?}))
-        },
+        }
         "project_open" | "project_saved" => {
-            let bytes=args.get("json").and_then(Value::as_str).ok_or("native project JSON required")?.as_bytes();
-            if tool_name=="project_open" {
-                crate::plugins::persistence::open_project_bytes(world,bytes)?;
+            let bytes = args
+                .get("json")
+                .and_then(Value::as_str)
+                .ok_or("native project JSON required")?
+                .as_bytes();
+            if tool_name == "project_open" {
+                crate::plugins::persistence::open_project_bytes(world, bytes)?;
                 Ok(json!({"opened":true}))
             } else {
-                Ok(json!({"saved":crate::plugins::persistence::acknowledge_project_bytes(world,bytes)?}))
+                Ok(
+                    json!({"saved":crate::plugins::persistence::acknowledge_project_bytes(world,bytes)?}),
+                )
             }
-        },
+        }
         "browser_session_info" => Ok(browser_session_info(world)),
         "list_entity_types" => Ok(list_entity_types(world)),
         "list_entities" => Ok(list_entities(world)),

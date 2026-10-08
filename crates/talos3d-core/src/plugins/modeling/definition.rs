@@ -4,11 +4,11 @@
 //! A `DefinitionRegistry` holds all live definitions and can resolve parameter
 //! values for a given set of occurrence overrides.
 
+use crate::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fmt,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bevy::prelude::*;

@@ -1,10 +1,10 @@
+use crate::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     thread,
-    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bevy::prelude::*;

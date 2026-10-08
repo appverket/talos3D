@@ -241,8 +241,8 @@ impl Plugin for RecipeDraftPlugin {
 }
 
 fn unix_timestamp_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    crate::time::SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
 }

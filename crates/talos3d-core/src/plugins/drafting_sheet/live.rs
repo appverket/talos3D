@@ -6,10 +6,8 @@
 //! through Bevy's batched gizmo renderer. Idle frames never inspect meshes or
 //! reclassify edges.
 
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use crate::time::{Duration, Instant};
+use std::collections::HashMap;
 
 use bevy::{
     asset::{AssetEvent, AssetId},

@@ -2016,7 +2016,7 @@ fn revert_removed_material_assignments(
 // ─── UUID helper ─────────────────────────────────────────────────────────────
 
 fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos())

@@ -1,8 +1,8 @@
+#[cfg(feature = "perf-stats")]
+use crate::time::Instant;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 use std::sync::Arc;
-#[cfg(feature = "perf-stats")]
-use std::time::Instant;
 
 use bevy::{
     ecs::{system::SystemParam, world::EntityRef},
