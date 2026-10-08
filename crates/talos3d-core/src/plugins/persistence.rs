@@ -676,7 +676,12 @@ pub fn new_document(world: &mut World) {
 /// and its pending operation durably, then call `acknowledge_project_bytes`.
 pub fn capture_project_bytes(world: &mut World) -> Result<Vec<u8>, String> {
     let project = build_project_file(world)?;
-    serde_json::to_vec_pretty(&project).map_err(|e| e.to_string())
+    // Registries contain HashMaps whose iteration order can change even when
+    // authored content is unchanged. Stable bytes are essential both for blob
+    // hashes and for acknowledging a delayed local save without an autosave loop.
+    let mut value = serde_json::to_value(&project).map_err(|e| e.to_string())?;
+    value.sort_all_objects();
+    serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())
 }
 
 pub fn open_project_bytes(world: &mut World, bytes: &[u8]) -> Result<(), String> {
@@ -2052,6 +2057,31 @@ mod tests {
         let current = capture_project_bytes(&mut world).unwrap();
         assert!(acknowledge_project_bytes(&mut world, &current).unwrap());
         assert!(!world.resource::<DocumentState>().dirty);
+    }
+    #[test]
+    fn populated_library_snapshots_are_stable_across_registry_reconstruction() {
+        let mut world = shell_world();
+        let mut first = None;
+        for _ in 0..16 {
+            let mut libraries = DefinitionLibraryRegistry::default();
+            for i in 0..12 {
+                libraries.insert(DefinitionLibrary {
+                    id: DefinitionLibraryId(format!("library-{i}")),
+                    name: format!("Library {i}"),
+                    scope: DefinitionLibraryScope::WorkspaceLibrary,
+                    source_path: None,
+                    tags: vec![],
+                    definitions: Default::default(),
+                    draft_status: Default::default(),
+                });
+            }
+            world.insert_resource(libraries);
+            world.resource_mut::<DocumentState>().dirty = true;
+            let bytes = capture_project_bytes(&mut world).unwrap();
+            assert_eq!(first.get_or_insert_with(|| bytes.clone()), &bytes);
+            assert!(acknowledge_project_bytes(&mut world, &bytes).unwrap());
+            assert!(!world.resource::<DocumentState>().dirty);
+        }
     }
     #[test]
     fn shell_library_install_is_pinned_undoable_and_keeps_document_bim() {
