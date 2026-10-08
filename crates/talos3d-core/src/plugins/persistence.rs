@@ -748,17 +748,16 @@ pub fn install_project_library(
     for definition in project.definitions.unwrap_or_default().list() {
         definitions.insert(definition.id.clone(), definition.clone());
     }
-    for library in project.definition_libraries.unwrap_or_default().list() {
-        for (key, definition) in &library.definitions {
-            if let Some(existing) = definitions.get(key) {
-                if serde_json::to_value(existing).unwrap()
-                    != serde_json::to_value(definition).unwrap()
-                {
-                    return Err("Library contains conflicting Definition IDs".into());
-                }
-            }
-            definitions.insert(key.clone(), definition.clone());
-        }
+    // Project Definitions may intentionally differ from the version in a
+    // bundled/workspace library. Preserve each namespace instead of flattening
+    // IDs and rejecting a valid project containing older pinned versions.
+    for source in project.definition_libraries.unwrap_or_default().list() {
+        let mut library = source.clone();
+        library.id = DefinitionLibraryId(format!("{}-{}", id.0, source.id.0));
+        library.scope = DefinitionLibraryScope::WorkspaceLibrary;
+        library.source_path = None;
+        library.tags.push("revision-pinned".into());
+        after.libraries.insert(library);
     }
     after.libraries.insert(DefinitionLibrary {
         id: id.clone(),
@@ -2090,6 +2089,69 @@ mod tests {
             world.resource::<ProjectExtensions>().0["bim"]["estimate"],
             1200
         );
+    }
+
+    #[test]
+    fn synced_library_keeps_project_and_older_library_definition_versions_separate() {
+        use crate::plugins::modeling::definition::{
+            DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope,
+        };
+        let mut source = shell_world();
+        let definition = Definition {
+            id: DefinitionId("same-design".into()),
+            base_definition_id: None,
+            name: "Current project version".into(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 2,
+            interface: Default::default(),
+            body: Default::default(),
+            material_assignment: None,
+            visibility: Default::default(),
+            domain_data: Default::default(),
+        };
+        source
+            .resource_mut::<DefinitionRegistry>()
+            .insert(definition.clone());
+        let mut older = definition.clone();
+        older.definition_version = 1;
+        older.name = "Earlier library version".into();
+        source
+            .resource_mut::<DefinitionLibraryRegistry>()
+            .insert(DefinitionLibrary {
+                id: DefinitionLibraryId("source-library".into()),
+                name: "Source".into(),
+                scope: DefinitionLibraryScope::WorkspaceLibrary,
+                source_path: None,
+                tags: vec![],
+                definitions: [(older.id.clone(), older)].into_iter().collect(),
+                draft_status: Default::default(),
+            });
+        let bytes = capture_project_bytes(&mut source).unwrap();
+        let mut target = shell_world();
+        let id = install_project_library(&mut target, &bytes, "rev").unwrap();
+        let libraries = target.resource::<DefinitionLibraryRegistry>();
+        assert_eq!(
+            libraries
+                .get(&DefinitionLibraryId(id.clone()))
+                .unwrap()
+                .get(&definition.id)
+                .unwrap()
+                .definition_version,
+            2
+        );
+        assert_eq!(
+            libraries
+                .get(&DefinitionLibraryId(format!("{id}-source-library")))
+                .unwrap()
+                .get(&definition.id)
+                .unwrap()
+                .definition_version,
+            1
+        );
+        assert!(target
+            .resource::<DefinitionRegistry>()
+            .get(&definition.id)
+            .is_none());
     }
 
     #[test]
