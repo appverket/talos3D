@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-10-02
-- branch: codex/native-gable-selection-ridge
-- task-id: TALOS-fpvcnmng
+- created: 2026-10-08
+- branch: codex/private-project-sync
+- task-id: TALOS-gflkztcy
 - target base: origin/main
-- summary: Restore native gable constituent selection and ridge closure
+- summary: Provider-neutral project capture/apply and persistence hooks for durable browser/desktop storage, including BIM quantity sidecars.
 - status: active

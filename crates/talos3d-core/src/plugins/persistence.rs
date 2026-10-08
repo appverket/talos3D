@@ -71,6 +71,7 @@ pub struct PersistencePlugin;
 impl Plugin for PersistencePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<OpaquePersistedEntities>()
+            .init_resource::<ProjectExtensions>()
             .insert_resource(RecentFiles::load())
             .insert_resource(RecoveryFiles::load())
             .init_resource::<RecoveryAutosaveState>()
@@ -211,6 +212,10 @@ pub struct PersistedEntityRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistedSemanticSidecars {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantities: Option<crate::plugins::modeling::quantity_set::QuantitySet>,
+    #[serde(flatten)]
+    pub extensions: serde_json::Map<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub element_class: Option<ElementClassAssignment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refinement_state: Option<RefinementStateComponent>,
@@ -249,8 +254,17 @@ pub struct PersistedSemanticSidecars {
 #[derive(Resource, Debug, Default, Clone, PartialEq)]
 pub struct OpaquePersistedEntities(pub Vec<PersistedEntityRecord>);
 
+/// Opaque project-level BIM/plugin data round-trips between shells, even when
+/// the receiving shell cannot interpret a particular extension.
+#[derive(Resource, Debug, Default, Clone, PartialEq)]
+pub struct ProjectExtensions(pub serde_json::Map<String, Value>);
+#[derive(Component, Debug, Default, Clone, PartialEq)]
+pub struct SemanticExtensions(pub serde_json::Map<String, Value>);
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ProjectFile {
+    #[serde(flatten)]
+    extensions: serde_json::Map<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     foreign_sources: Option<crate::plugins::foreign_source::SourceArtifacts>,
     version: u32,
@@ -321,6 +335,8 @@ fn current_project_created_by() -> ProjectCreatedBy {
 
 fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSemanticSidecars> {
     let sidecars = PersistedSemanticSidecars {
+        quantities: entity_ref.get::<crate::plugins::modeling::quantity_set::QuantitySet>().cloned(),
+        extensions: entity_ref.get::<SemanticExtensions>().map(|e| e.0.clone()).unwrap_or_default(),
         element_class: entity_ref.get::<ElementClassAssignment>().cloned(),
         refinement_state: entity_ref.get::<RefinementStateComponent>().cloned(),
         obligations: entity_ref.get::<ObligationSet>().cloned(),
@@ -333,7 +349,9 @@ fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSema
         semantic_bindings: entity_ref.get::<SemanticBindings>().cloned(),
         setting_out_contract: entity_ref.get::<SettingOutContract>().cloned(),
     };
-    (sidecars.element_class.is_some()
+    (sidecars.quantities.is_some()
+        || !sidecars.extensions.is_empty()
+        || sidecars.element_class.is_some()
         || sidecars.refinement_state.is_some()
         || sidecars.obligations.is_some()
         || sidecars.claim_grounding.is_some()
@@ -356,6 +374,10 @@ fn apply_semantic_sidecars(
         return;
     };
     let mut entity_mut = world.entity_mut(entity);
+    if let Some(quantities) = &sidecars.quantities {
+        entity_mut.insert(quantities.clone());
+    }
+    entity_mut.insert(SemanticExtensions(sidecars.extensions.clone()));
     if let Some(component) = &sidecars.element_class {
         entity_mut.insert(component.clone());
     }
@@ -571,6 +593,7 @@ pub fn open_project_dialog(world: &mut World) -> Result<Option<()>, String> {
 
 /// Create a new empty document.
 pub fn new_document(world: &mut World) {
+    world.insert_resource(ProjectExtensions::default());
     clear_scene(world);
 
     let mut props = DocumentProperties::default();
@@ -643,11 +666,109 @@ pub fn new_document(world: &mut World) {
 
 // --- Internal ---
 
-fn save_to_path(world: &mut World, path: &Path) -> Result<(), String> {
+/// The same complete authored snapshot is used by file saves and shell stores.
+/// Capturing is not a save acknowledgement: the shell must first commit bytes
+/// and its pending operation durably, then call `acknowledge_project_bytes`.
+pub fn capture_project_bytes(world: &mut World) -> Result<Vec<u8>, String> {
     let project = build_project_file(world)?;
-    let json = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
+    serde_json::to_vec_pretty(&project).map_err(|e| e.to_string())
+}
+
+pub fn open_project_bytes(world: &mut World, bytes: &[u8]) -> Result<(), String> {
+    let project: ProjectFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    load_project(world, project)?;
+    world.resource_mut::<DocumentState>().reset();
+    crate::plugins::command_registry::frame_camera_on_document_open(world);
+    if let Some(mut autosave) = world.get_resource_mut::<RecoveryAutosaveState>() {
+        autosave.rotate_document();
+    }
+    Ok(())
+}
+
+/// A delayed local write cannot mark a newer edit clean.
+pub fn acknowledge_project_bytes(world: &mut World, bytes: &[u8]) -> Result<bool, String> {
+    if capture_project_bytes(world)? != bytes { return Ok(false); }
+    world.resource_mut::<History>().mark_save_point();
+    world.resource_mut::<DocumentState>().dirty = false;
+    Ok(true)
+}
+
+/// Install a pinned library through the same undoable command used by both shells.
+/// Existing material IDs cannot change implicitly: users must give conflicting
+/// materials distinct IDs before publishing a replacement library.
+pub fn install_project_library(world: &mut World, bytes: &[u8], revision: &str) -> Result<String, String> {
+    use crate::plugins::modeling::definition::{DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope};
+    if revision.is_empty() || revision.len() > 128 || !revision.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Invalid library revision".into());
+    }
+    let project: ProjectFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if project.version != PROJECT_FILE_VERSION { return Err("Unsupported project version".into()); }
+    let before = LibrarySnapshot::capture(world);
+    let mut after = before.clone();
+    for material in project.materials.unwrap_or_default().all() {
+        if let Some(existing) = after.materials.get(&material.id) {
+            if serde_json::to_value(existing).unwrap() != serde_json::to_value(material).unwrap() {
+                return Err(format!("Material {} differs from this project's pinned version; assign a new material ID before importing", material.id));
+            }
+        } else { after.materials.upsert(material.clone()); }
+    }
+    for texture in project.textures.unwrap_or_default().all() {
+        if let Some(existing) = after.textures.get(&texture.id) {
+            if serde_json::to_value(existing).unwrap() != serde_json::to_value(texture).unwrap() {
+                return Err("Texture ID conflicts with an installed version".into());
+            }
+        } else { after.textures.insert(texture.clone()); }
+    }
+    let id = DefinitionLibraryId(format!("project-revision-{revision}"));
+    let mut definitions = std::collections::HashMap::new();
+    for definition in project.definitions.unwrap_or_default().list() {
+        definitions.insert(definition.id.clone(), definition.clone());
+    }
+    for library in project.definition_libraries.unwrap_or_default().list() {
+        for (key, definition) in &library.definitions {
+            if let Some(existing) = definitions.get(key) {
+                if serde_json::to_value(existing).unwrap() != serde_json::to_value(definition).unwrap() {
+                    return Err("Library contains conflicting Definition IDs".into());
+                }
+            }
+            definitions.insert(key.clone(), definition.clone());
+        }
+    }
+    after.libraries.insert(DefinitionLibrary { id: id.clone(), name: format!("Synced library · {revision}"), scope: DefinitionLibraryScope::WorkspaceLibrary, source_path: None, tags: vec!["revision-pinned".into()], definitions, draft_status: Default::default() });
+    // Retain opaque BIM/plugin metadata with the pinned library. It never replaces
+    // the document's own sidecars or changes already placed occurrences.
+    after.extensions.0.insert(format!("library_payload_{revision}"), serde_json::from_slice(bytes).map_err(|e| e.to_string())?);
+    world.resource_mut::<PendingCommandQueue>().push_command(Box::new(InstallLibrary { before, after }));
+    crate::plugins::history::apply_pending_history_commands(world);
+    Ok(id.0)
+}
+
+#[derive(Clone)]
+struct LibrarySnapshot {
+    libraries: DefinitionLibraryRegistry,
+    materials: MaterialRegistry,
+    textures: TextureRegistry,
+    extensions: ProjectExtensions,
+}
+impl LibrarySnapshot {
+    fn capture(world: &World) -> Self {
+        Self { libraries: world.resource::<DefinitionLibraryRegistry>().clone(), materials: world.resource::<MaterialRegistry>().clone(), textures: world.get_resource::<TextureRegistry>().cloned().unwrap_or_default(), extensions: world.get_resource::<ProjectExtensions>().cloned().unwrap_or_default() }
+    }
+    fn apply(&self, world: &mut World) {
+        world.insert_resource(self.libraries.clone()); world.insert_resource(self.materials.clone()); world.insert_resource(self.textures.clone()); world.insert_resource(self.extensions.clone());
+    }
+}
+struct InstallLibrary { before: LibrarySnapshot, after: LibrarySnapshot }
+impl crate::plugins::history::EditorCommand for InstallLibrary {
+    fn label(&self) -> &'static str { "Install synced library" }
+    fn apply(&mut self, world: &mut World) { self.after.apply(world); }
+    fn undo(&mut self, world: &mut World) { self.before.apply(world); }
+}
+
+fn save_to_path(world: &mut World, path: &Path) -> Result<(), String> {
+    let bytes = capture_project_bytes(world)?;
     let key = path.to_string_lossy().into_owned();
-    world.resource::<Storage>().0.save(json.as_bytes(), &key)?;
+    world.resource::<Storage>().0.save(&bytes, &key)?;
 
     world.resource_mut::<History>().mark_save_point();
     world
@@ -1088,6 +1209,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     });
 
     Ok(ProjectFile {
+        extensions: world.get_resource::<ProjectExtensions>().map(|e| e.0.clone()).unwrap_or_default(),
         foreign_sources: world
             .get_resource::<crate::plugins::foreign_source::SourceArtifacts>()
             .filter(|a| !a.0.is_empty())
@@ -1158,6 +1280,7 @@ pub(crate) fn serialize_entity_records_as_project(
         .filter(|a| !a.0.is_empty());
     let project = ProjectFile {
         foreign_sources,
+        extensions: Default::default(),
         version: PROJECT_FILE_VERSION,
         created_by: Some(current_project_created_by()),
         next_element_id,
@@ -1340,6 +1463,7 @@ pub(crate) fn deserialize_project_entity_records_with_assets(
 
 fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     let ProjectFile {
+        extensions,
         foreign_sources,
         version,
         created_by,
@@ -1408,6 +1532,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
 
     clear_scene(world);
+    world.insert_resource(ProjectExtensions(extensions));
     world.insert_resource(foreign_sources);
 
     let doc_props = match document_properties {
@@ -1971,6 +2096,7 @@ mod tests {
         let recovery_path = temp.path().join("autosave-session.talos3d");
         let original_path = temp.path().join("original.talos3d");
         let project = ProjectFile {
+            extensions: Default::default(),
             foreign_sources: None,
             version: PROJECT_FILE_VERSION,
             created_by: Some(current_project_created_by()),
@@ -2130,6 +2256,7 @@ mod tests {
         load_project(
             &mut world,
             ProjectFile {
+                extensions: Default::default(),
                 foreign_sources: None,
                 version: PROJECT_FILE_VERSION,
                 created_by: Some(current_project_created_by()),
@@ -2581,6 +2708,7 @@ mod tests {
         let error = load_project(
             &mut world,
             ProjectFile {
+                extensions: Default::default(),
                 foreign_sources: None,
                 version: 1,
                 created_by: None,
@@ -2615,6 +2743,7 @@ mod tests {
         let error = load_project(
             &mut world,
             ProjectFile {
+                extensions: Default::default(),
                 foreign_sources: None,
                 version: PROJECT_FILE_VERSION,
                 created_by: None,
@@ -2649,6 +2778,7 @@ mod tests {
         let error = load_project(
             &mut world,
             ProjectFile {
+                extensions: Default::default(),
                 foreign_sources: None,
                 version: PROJECT_FILE_VERSION,
                 created_by: Some(ProjectCreatedBy {
@@ -2703,6 +2833,7 @@ mod tests {
             semantic: None,
         };
         let project = ProjectFile {
+            extensions: Default::default(),
             foreign_sources: None,
             version: PROJECT_FILE_VERSION,
             created_by: Some(current_project_created_by()),
@@ -2759,6 +2890,7 @@ mod tests {
 
         let model_center = Vec3::new(20.0, 5.0, -7.0);
         let project = ProjectFile {
+            extensions: Default::default(),
             foreign_sources: None,
             version: PROJECT_FILE_VERSION,
             created_by: Some(current_project_created_by()),
@@ -3527,6 +3659,7 @@ mod tests {
         world.insert_resource(NextState::<ActiveTool>::default());
 
         let project = ProjectFile {
+            extensions: Default::default(),
             foreign_sources: None,
             version: PROJECT_FILE_VERSION,
             created_by: Some(current_project_created_by()),
