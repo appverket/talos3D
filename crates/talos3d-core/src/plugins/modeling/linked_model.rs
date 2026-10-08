@@ -705,6 +705,9 @@ pub fn execute_place_linked_model(
     if world.get_resource::<PendingCommandQueue>().is_none() {
         return Err("Linked-model placement requires the command history plugin".to_string());
     }
+    if params.get("path").is_none() {
+        return request_linked_model_file(world, params);
+    }
     let Some(path) = place_linked_model_path(world, params)? else {
         return Ok(CommandResult::empty());
     };
@@ -1010,24 +1013,24 @@ fn linked_model_path(
     Ok(base.join("linked-models").join(file_name))
 }
 
-fn place_linked_model_path(world: &World, params: &Value) -> Result<Option<PathBuf>, String> {
+fn place_linked_model_path(_world: &World, params: &Value) -> Result<Option<PathBuf>, String> {
     if let Some(path) = params.get("path").and_then(Value::as_str) {
         if path.trim().is_empty() {
             return Err("path must not be empty".into());
         }
         return Ok(Some(PathBuf::from(path)));
     }
-    pick_linked_model_file(world)
+    Err("path must be provided".into())
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pick_linked_model_file(_world: &World) -> Result<Option<PathBuf>, String> {
-    Err("Native open dialogs are not available in the browser shell".to_string())
+fn request_linked_model_file(_: &mut World, _: &Value) -> Result<CommandResult, String> {
+    Err("Native open dialogs are not available in the browser shell".into())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn pick_linked_model_file(world: &World) -> Result<Option<PathBuf>, String> {
-    let mut dialog = rfd::FileDialog::new().add_filter("Talos3D Project", &["talos3d"]);
+fn request_linked_model_file(world: &mut World, params: &Value) -> Result<CommandResult, String> {
+    let mut dialog = rfd::AsyncFileDialog::new().add_filter("Talos3D Project", &["talos3d"]);
     if let Some(parent) = world
         .get_resource::<DocumentState>()
         .and_then(|state| state.current_path.as_ref())
@@ -1035,7 +1038,29 @@ fn pick_linked_model_file(world: &World) -> Result<Option<PathBuf>, String> {
     {
         dialog = dialog.set_directory(parent);
     }
-    Ok(dialog.pick_file())
+    let mut params = params.clone();
+    crate::plugins::native_dialog::request(
+        world,
+        async move {
+            dialog
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        },
+        move |world, path| {
+            if let Some(path) = path {
+                params["path"] = Value::String(path.to_string_lossy().into_owned());
+                if let Err(error) = execute_place_linked_model(world, &params) {
+                    if let Some(mut status) =
+                        world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
+                    {
+                        status.set_feedback(format!("Linked model failed: {error}"), 5.0);
+                    }
+                }
+            }
+        },
+    )?;
+    Ok(CommandResult::empty())
 }
 
 fn build_linked_model_file(

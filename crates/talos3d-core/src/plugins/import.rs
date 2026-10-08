@@ -291,11 +291,34 @@ struct ImportJobResult {
     requests: Result<Vec<Value>, String>,
 }
 
+#[cfg(target_arch = "wasm32")]
+fn execute_import_dialog(_: &mut World, _: &Value) -> Result<CommandResult, String> {
+    Err("Native import dialogs are not available in the browser shell".into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn execute_import_dialog(world: &mut World, _: &Value) -> Result<CommandResult, String> {
-    let Some(path) = open_import_file_dialog(world.resource::<ImportRegistry>().importers()) else {
-        return Ok(CommandResult::empty());
-    };
-    start_import_job(world, path, None)
+    let mut dialog = rfd::AsyncFileDialog::new();
+    for importer in world.resource::<ImportRegistry>().importers() {
+        dialog = dialog.add_filter(importer.format_name(), importer.extensions());
+    }
+    crate::plugins::native_dialog::request(
+        world,
+        async move {
+            dialog
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        },
+        |world, path| {
+            if let Some(path) = path {
+                if let Err(error) = start_import_job(world, path, None) {
+                    set_import_feedback(world, format!("Import failed: {error}"));
+                }
+            }
+        },
+    )?;
+    Ok(CommandResult::empty())
 }
 
 pub fn start_import_job(
@@ -889,20 +912,6 @@ fn sync_imported_layer_visibility_to_registry(
     }
     // Clear the import layer state so it doesn't keep overriding
     layer_state.entries.clear();
-}
-
-#[cfg(target_arch = "wasm32")]
-fn open_import_file_dialog(_importers: &[Arc<dyn FormatImporter>]) -> Option<PathBuf> {
-    None
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn open_import_file_dialog(importers: &[Arc<dyn FormatImporter>]) -> Option<PathBuf> {
-    let mut dialog = rfd::FileDialog::new();
-    for importer in importers {
-        dialog = dialog.add_filter(importer.format_name(), importer.extensions());
-    }
-    dialog.pick_file()
 }
 
 fn set_import_feedback(world: &mut World, message: String) {

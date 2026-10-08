@@ -70,6 +70,8 @@ pub struct PersistencePlugin;
 
 impl Plugin for PersistencePlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_systems(Update, crate::plugins::native_dialog::poll_native_dialog);
         app.init_resource::<OpaquePersistedEntities>()
             .init_resource::<ProjectExtensions>()
             .insert_resource(RecentFiles::load())
@@ -556,7 +558,7 @@ pub fn save_as_now(_world: &mut World) -> Result<Option<()>, String> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_as_now(world: &mut World) -> Result<Option<()>, String> {
     let current_path = world.resource::<DocumentState>().current_path.clone();
-    let mut dialog = rfd::FileDialog::new()
+    let mut dialog = rfd::AsyncFileDialog::new()
         .add_filter("Talos3D Project", &[FILE_EXTENSION])
         .set_file_name("project.talos3d");
     if let Some(ref path) = current_path {
@@ -567,14 +569,25 @@ pub fn save_as_now(world: &mut World) -> Result<Option<()>, String> {
             dialog = dialog.set_file_name(name.to_string_lossy().to_string());
         }
     }
-    match dialog.save_file() {
-        Some(path) => {
-            let path = ensure_extension(path);
-            save_to_path(world, &path)?;
-            Ok(Some(()))
-        }
-        None => Ok(None),
-    }
+    crate::plugins::native_dialog::request(
+        world,
+        async move {
+            dialog
+                .save_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        },
+        |world, path| {
+            if let Some(path) = path {
+                let result = save_to_path(world, &ensure_extension(path));
+                match result {
+                    Ok(()) => set_feedback(world, "Project saved".into()),
+                    Err(error) => set_feedback(world, format!("Save failed: {error}")),
+                }
+            }
+        },
+    )?;
+    Ok(None) // completion is applied by poll_native_dialog
 }
 
 /// Open a file dialog and load the chosen project.
@@ -586,14 +599,25 @@ pub fn open_project_dialog(_world: &mut World) -> Result<Option<()>, String> {
 /// Open a file dialog and load the chosen project.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_project_dialog(world: &mut World) -> Result<Option<()>, String> {
-    let dialog = rfd::FileDialog::new().add_filter("Talos3D Project", &[FILE_EXTENSION]);
-    match dialog.pick_file() {
-        Some(path) => {
-            load_from_path(world, &path)?;
-            Ok(Some(()))
-        }
-        None => Ok(None),
-    }
+    let dialog = rfd::AsyncFileDialog::new().add_filter("Talos3D Project", &[FILE_EXTENSION]);
+    crate::plugins::native_dialog::request(
+        world,
+        async move {
+            dialog
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        },
+        |world, path| {
+            if let Some(path) = path {
+                match load_from_path(world, &path) {
+                    Ok(()) => set_feedback(world, "Project loaded".into()),
+                    Err(error) => set_feedback(world, format!("Load failed: {error}")),
+                }
+            }
+        },
+    )?;
+    Ok(None)
 }
 
 /// Create a new empty document.

@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-10-08T15:07:16.340257+00:00
-- branch: codex/about-build-number
-- task-id: TALOS-yqmfnhuj
-- target base: origin/main
-- summary: Display application build number in About; shared UI/build stamping
-- status: awaiting-merge
+- created: 2026-10-08
+- branch: codex/macos-dialog-crash
+- task-id: TALOS-pmaofptl
+- target base: main
+- summary: Repair native dialog reentrancy crash
+- status: active

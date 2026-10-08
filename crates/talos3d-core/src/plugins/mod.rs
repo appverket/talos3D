@@ -104,3 +104,6 @@ pub mod ux_harness;
 pub mod validation;
 pub mod vector_drawing;
 pub mod workspace_library_root;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod native_dialog;

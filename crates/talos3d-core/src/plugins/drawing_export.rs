@@ -408,7 +408,7 @@ pub(crate) fn export_drawing_now_with_format(
     }
 
     let current_path = world.resource::<DocumentState>().current_path.clone();
-    let mut dialog = rfd::FileDialog::new();
+    let mut dialog = rfd::AsyncFileDialog::new();
     dialog = match preferred_format {
         Some(ViewportExportFormat::Raster(image::ImageFormat::Png)) => dialog
             .add_filter("PNG Image", &["png"])
@@ -461,13 +461,29 @@ pub(crate) fn export_drawing_now_with_format(
         }
     }
 
-    match dialog.save_file() {
-        Some(path) => {
-            let path = export_drawing_to_path(world, path)?;
-            Ok(Some(path))
-        }
-        None => Ok(None),
-    }
+    crate::plugins::native_dialog::request(
+        world,
+        async move {
+            dialog
+                .save_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        },
+        |world, path| {
+            if let Some(path) = path {
+                let message = match export_drawing_to_path(world, path) {
+                    Ok(path) => format!("Exported {}", path.display()),
+                    Err(error) => format!("Export failed: {error}"),
+                };
+                if let Some(mut status) =
+                    world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
+                {
+                    status.set_feedback(message, 5.0);
+                }
+            }
+        },
+    )?;
+    Ok(None)
 }
 
 pub fn export_drawing_to_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
