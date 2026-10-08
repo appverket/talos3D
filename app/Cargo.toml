@@ -4,6 +4,7 @@
 name = "talos3d"
 version = "0.1.0"
 edition = "2021"
+build = "../build-support/app_build.rs"
 
 [features]
 default = ["native", "terrain"]

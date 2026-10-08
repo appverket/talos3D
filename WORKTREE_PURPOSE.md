@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-10-08
-- branch: codex/private-project-sync
-- task-id: TALOS-gflkztcy
+- created: 2026-10-08T15:07:16.340257+00:00
+- branch: codex/about-build-number
+- task-id: TALOS-yqmfnhuj
 - target base: origin/main
-- summary: Provider-neutral project capture/apply and persistence hooks for durable browser/desktop storage, including BIM quantity sidecars.
-- status: active
+- summary: Display application build number in About; shared UI/build stamping
+- status: awaiting-merge

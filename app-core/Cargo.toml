@@ -4,6 +4,7 @@
 name = "talos3d-core-app"
 version = "0.1.0"
 edition = "2021"
+build = "../build-support/app_build.rs"
 publish = false
 
 [features]

@@ -508,6 +508,7 @@ impl Plugin for EguiChromePlugin {
         .add_plugins(crate::plugins::outliner::OutlinerPlugin)
         .add_plugins(crate::plugins::dependency_panel::DependencyPanelPlugin)
         .add_plugins(crate::plugins::layers_panel::LayersPanelPlugin)
+        .init_resource::<ApplicationBuildInfo>()
         .init_resource::<MenuBarState>()
         .init_resource::<ChromeInputCapture>()
         .init_resource::<ToolbarDragState>()
@@ -1437,11 +1438,33 @@ fn draw_project_settings_menu_button(
     }
 }
 
-fn draw_about_menu(ui: &mut egui::Ui) {
+/// Identity of the application artifact, supplied by its binary composition.
+/// Custom compositions without build stamping are explicitly development builds.
+#[derive(Resource, Clone, Debug)]
+pub struct ApplicationBuildInfo {
+    pub version: &'static str,
+    pub build_number: &'static str,
+}
+
+impl Default for ApplicationBuildInfo {
+    fn default() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            build_number: "development",
+        }
+    }
+}
+
+fn draw_about_menu(ui: &mut egui::Ui, build: &ApplicationBuildInfo) {
     ui.set_min_width(260.0);
     ui.label(egui::RichText::new("Talos3D").strong());
     ui.label(
-        egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+        egui::RichText::new(format!("Version {}", build.version))
+            .small()
+            .color(CHROME_MUTED),
+    );
+    ui.label(
+        egui::RichText::new(format!("Build {}", build.build_number))
             .small()
             .color(CHROME_MUTED),
     );
@@ -1749,6 +1772,7 @@ struct ChromeData<'w, 's> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
     window_query: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    build_info: Res<'w, ApplicationBuildInfo>,
     menu_bar_state: ResMut<'w, MenuBarState>,
     viewport_export_state: Res<'w, ViewportExportState>,
     viewport_ui_inset: ResMut<'w, ViewportUiInset>,
@@ -1847,7 +1871,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                         );
                     });
                 }
-                ui.menu_button("About", draw_about_menu);
+                ui.menu_button("About", |ui| draw_about_menu(ui, &data.build_info));
             });
         });
     }

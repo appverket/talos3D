@@ -68,6 +68,10 @@ fn main() {
     configure_model_api_launch_from_args();
 
     let mut app = App::new();
+    app.insert_resource(talos3d_core::plugins::egui_chrome::ApplicationBuildInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        build_number: env!("TALOS3D_BUILD_NUMBER"),
+    });
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "Talos3D Core".into(),

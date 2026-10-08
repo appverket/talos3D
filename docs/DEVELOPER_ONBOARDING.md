@@ -92,6 +92,24 @@ cargo run --manifest-path app-core/Cargo.toml --features model-api
 is a product composition for the full Appverket workspace and may depend on
 sibling domain-pack repositories.
 
+## Application build numbers
+
+About displays the application version and build number on desktop and web.
+The application packages use `build-support/app_build.rs` and insert
+`ApplicationBuildInfo` into the shared chrome. Stamp the application binary,
+not the cached core library, so product-only changes get a new identity.
+
+For a release, set `TALOS3D_BUILD_NUMBER` to the numeric release/build identifier
+before invoking Cargo. Use the same value for the desktop bundle version and
+all browser backends belonging to that release. `SOURCE_DATE_EPOCH` is the
+fallback for reproducible builds. With neither set, each Cargo invocation
+stamps the leaf application with the current Unix time in milliseconds; this
+intentionally rebuilds the application entrypoint even when only a dependency
+changed. It does not force a rebuild of the platform dependencies.
+
+Custom compositions can insert `ApplicationBuildInfo` before or after adding
+`EguiChromePlugin`; otherwise About explicitly shows `Build development`.
+
 ## Engine Dependency Work
 
 If your task touches:
