@@ -11,7 +11,7 @@ use bevy::{
         ButtonState,
     },
     prelude::*,
-    window::{CursorMoved, PrimaryWindow},
+    window::{CursorMoved, PrimaryWindow, WindowEvent},
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,17 +37,19 @@ pub struct UxHarnessPlugin;
 impl Plugin for UxHarnessPlugin {
     fn build(&self, app: &mut App) {
         trace::install(app);
-        app.init_resource::<UxHarnessState>().add_systems(
-            Update,
-            process_ux_harness_step
-                .after(InputPhase::SyncOwnership)
-                .before(crate::plugins::cursor::CursorSystems::UpdateWorldPosition)
-                // Pointer/button/key edges are valid for one frame. Inject them
-                // before the earliest modal/viewport consumer so transform
-                // confirmation, handle hover/press, selection, and tools all
-                // see the same input.
-                .before(InputPhase::ModalInput),
-        );
+        app.add_message::<WindowEvent>()
+            .init_resource::<UxHarnessState>()
+            .add_systems(
+                Update,
+                process_ux_harness_step
+                    .after(InputPhase::SyncOwnership)
+                    .before(crate::plugins::cursor::CursorSystems::UpdateWorldPosition)
+                    // Pointer/button/key edges are valid for one frame. Inject them
+                    // before the earliest modal/viewport consumer so transform
+                    // confirmation, handle hover/press, selection, and tools all
+                    // see the same input.
+                    .before(InputPhase::ModalInput),
+            );
     }
 }
 
@@ -526,13 +528,17 @@ fn apply_step(world: &mut World, action: &UxStepAction) -> Result<(), String> {
         } => {
             move_pointer(world, *position)?;
             let window = primary_window_entity(world)?;
+            let event = MouseButtonInput {
+                button: *button,
+                state: *state,
+                window,
+            };
             world
                 .resource_mut::<Messages<MouseButtonInput>>()
-                .write(MouseButtonInput {
-                    button: *button,
-                    state: *state,
-                    window,
-                });
+                .write(event);
+            world
+                .resource_mut::<Messages<WindowEvent>>()
+                .write(WindowEvent::MouseButtonInput(event));
             let mut buttons = world.resource_mut::<ButtonInput<MouseButton>>();
             match state {
                 ButtonState::Pressed => buttons.press(*button),
@@ -579,13 +585,17 @@ fn move_pointer(world: &mut World, position: Vec2) -> Result<(), String> {
         window.set_cursor_position(Some(position));
         (window_entity, previous)
     };
+    let event = CursorMoved {
+        window: window_entity,
+        position,
+        delta: previous.map(|prev| position - prev),
+    };
     world
         .resource_mut::<Messages<CursorMoved>>()
-        .write(CursorMoved {
-            window: window_entity,
-            position,
-            delta: previous.map(|prev| position - prev),
-        });
+        .write(event.clone());
+    world
+        .resource_mut::<Messages<WindowEvent>>()
+        .write(WindowEvent::CursorMoved(event));
     if let Some(previous) = previous {
         world
             .resource_mut::<Messages<MouseMotion>>()

@@ -1,9 +1,10 @@
 use crate::plugins::commands::find_entity_by_element_id_readonly;
 use bevy::{
     ecs::{system::SystemParam, world::EntityRef},
+    input::{mouse::MouseButtonInput, ButtonState},
     picking::prelude::*,
     prelude::*,
-    window::PrimaryWindow,
+    window::{PrimaryWindow, WindowEvent},
 };
 use bevy_egui::{egui, EguiContexts};
 
@@ -95,6 +96,7 @@ impl Plugin for SelectionPlugin {
             .init_resource::<DoubleClickSettings>()
             .init_resource::<BoxSelectState>()
             .init_resource::<SelectionPressCapture>()
+            .init_resource::<SelectionPointerEvents>()
             .init_resource::<PreviousGroupEditContext>()
             .init_resource::<GroupEditFocusSettings>()
             .init_resource::<OccurrenceEditContext>()
@@ -183,6 +185,10 @@ impl Plugin for SelectionPlugin {
                         .chain()
                         .in_set(InputPhase::ToolInput)
                         .run_if(in_state(ActiveTool::Select)),
+                    collect_selection_pointer_events
+                        .in_set(InputPhase::ToolInput)
+                        .before(handle_box_select)
+                        .before(handle_selection_click),
                     handle_group_escape
                         .in_set(InputPhase::ToolInput)
                         .run_if(in_state(ActiveTool::Select)),
@@ -403,21 +409,82 @@ struct SelectionHitTest<'w, 's> {
     face_profile_feature_query: Query<'w, 's, (), With<FaceProfileFeature>>,
 }
 
+/// Native WindowEvent retains pointer positions and button ordering even when
+/// several clicks arrive between renders. MouseButtonInput is also consumed:
+/// legacy injected input may emit that message without a WindowEvent.
+/// Drain every frame, including when Select is inactive, so returning to Select
+/// cannot replay events that belonged to another tool.
+#[derive(Resource, Default)]
+struct SelectionPointerEvents {
+    edges: Vec<(ButtonState, Vec2)>,
+    last_position: Option<Vec2>,
+}
+
+fn collect_selection_pointer_events(
+    mut windows: MessageReader<WindowEvent>,
+    mut buttons: MessageReader<MouseButtonInput>,
+    primary: Query<(Entity, &Window), With<PrimaryWindow>>,
+    mut pointer: ResMut<SelectionPointerEvents>,
+    active_tool: Option<Res<State<ActiveTool>>>,
+    mut capture: ResMut<SelectionPressCapture>,
+    mut tracker: ResMut<DoubleClickTracker>,
+) {
+    pointer.edges.clear();
+    let Ok((window_id, window)) = primary.single() else {
+        windows.clear();
+        buttons.clear();
+        return;
+    };
+    let fallback_position = cursor_window_position(window);
+    let mut position = pointer.last_position.or(fallback_position);
+    for event in windows.read() {
+        match event {
+            WindowEvent::CursorMoved(event) if event.window == window_id => {
+                position = Some(event.position);
+            }
+            WindowEvent::MouseButtonInput(event)
+                if event.window == window_id && event.button == MouseButton::Left =>
+            {
+                if let Some(position) = position {
+                    pointer.edges.push((event.state, position));
+                }
+            }
+            _ => {}
+        }
+    }
+    let native_edges = !pointer.edges.is_empty();
+    for event in buttons.read() {
+        if !native_edges && event.window == window_id && event.button == MouseButton::Left {
+            if let Some(position) = fallback_position {
+                pointer.edges.push((event.state, position));
+            }
+        }
+    }
+    pointer.last_position = if native_edges {
+        position
+    } else {
+        fallback_position.or(position)
+    };
+    if active_tool.is_some_and(|tool| *tool.get() != ActiveTool::Select) {
+        pointer.edges.clear();
+        *capture = SelectionPressCapture::default();
+        tracker.last_click_entity = None;
+    }
+}
+
+fn cancel_selection_click(world: &mut World) {
+    *world.resource_mut::<SelectionPressCapture>() = SelectionPressCapture::default();
+    world.resource_mut::<DoubleClickTracker>().last_click_entity = None;
+}
+
 fn handle_selection_click(world: &mut World) {
-    let ownership = world.resource::<InputOwnership>().clone();
+    let edges = std::mem::take(&mut world.resource_mut::<SelectionPointerEvents>().edges);
+    let ownership = world.resource::<InputOwnership>();
     let handle_is_busy = world.resource::<HandleInteractionState>().is_busy();
     let box_dragging = world.resource::<BoxSelectState>().is_dragging;
     let box_just_completed = world.resource::<BoxSelectState>().just_completed;
-    let just_pressed = world
-        .resource::<ButtonInput<MouseButton>>()
-        .just_pressed(MouseButton::Left);
-    let just_released = world
-        .resource::<ButtonInput<MouseButton>>()
-        .just_released(MouseButton::Left);
     let face_editing = world.resource::<FaceEditContext>().is_active();
     let keys = world.resource::<ButtonInput<KeyCode>>();
-    // Camera-navigation modifiers (Alt orbit, Space pan) suppress click-select so
-    // the drag drives the camera instead.
     let nav_held = orbit_modifier_pressed(keys) || pan_modifier_pressed(keys);
 
     if !ownership.is_idle()
@@ -427,56 +494,47 @@ fn handle_selection_click(world: &mut World) {
         || face_editing
         || nav_held
     {
+        cancel_selection_click(world);
         return;
     }
-
-    if !just_pressed && !just_released {
-        return;
-    }
-
-    let cursor_position = {
-        let mut window_query = world.query_filtered::<&Window, With<PrimaryWindow>>();
-        let Ok(window) = window_query.single(world) else {
-            return;
-        };
-
-        let Some(cursor_position) = cursor_window_position(window) else {
-            return;
-        };
-        cursor_position
-    };
-
-    let click_ray = if just_pressed {
-        let mut camera_query =
-            world.query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>();
-        let Some((camera, camera_transform)) = camera_query.iter(world).next() else {
-            return;
-        };
-        let Some(ray) =
-            crate::plugins::scene_ray::pick_ray_at(camera, camera_transform, cursor_position)
-        else {
-            return;
-        };
-        Some(ray)
-    } else {
-        None
-    };
-
-    if let Some(ray) = click_ray {
-        let raw_hit_entity = selection_hit_entity(world, ray, cursor_position);
-        let additive_pressed = {
-            let keys = world.resource::<ButtonInput<KeyCode>>();
-            keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
-        };
-        capture_selection_press(world, raw_hit_entity, cursor_position, additive_pressed);
-    }
-
-    if !just_released {
-        return;
-    }
-
+    let additive = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let now = world.resource::<Time<Real>>().elapsed_secs_f64();
-    complete_selection_release(world, cursor_position, now);
+    // Reuse the physical hit for stationary multi-clicks. Only semantic target
+    // resolution repeats after descent; no new per-frame picking path is added.
+    let mut cached_hit: Option<(Vec2, Option<Entity>)> = None;
+    for (state, position) in edges {
+        if world.resource::<FaceEditContext>().is_active() {
+            cancel_selection_click(world);
+            break;
+        }
+        match state {
+            ButtonState::Pressed => {
+                let raw_hit = if let Some((_, hit)) = cached_hit.filter(|(p, _)| *p == position) {
+                    hit
+                } else {
+                    let ray = {
+                        let mut camera_query = world
+                            .query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>();
+                        camera_query
+                            .iter(world)
+                            .next()
+                            .and_then(|(camera, transform)| {
+                                crate::plugins::scene_ray::pick_ray_at(camera, transform, position)
+                            })
+                    };
+                    let Some(ray) = ray else {
+                        cancel_selection_click(world);
+                        continue;
+                    };
+                    let hit = selection_hit_entity(world, ray, position);
+                    cached_hit = Some((position, hit));
+                    hit
+                };
+                capture_selection_press(world, raw_hit, position, additive);
+            }
+            ButtonState::Released => complete_selection_release(world, position, now),
+        }
+    }
 }
 
 fn capture_selection_press(
@@ -485,6 +543,14 @@ fn capture_selection_press(
     cursor_position: Vec2,
     additive: bool,
 ) -> Option<Entity> {
+    if let Some(mut tracker) = world.get_resource_mut::<DoubleClickTracker>() {
+        if tracker
+            .last_click_position
+            .is_some_and(|last| last.distance(cursor_position) > SELECTION_CLICK_SLOP_PX)
+        {
+            tracker.last_click_entity = None;
+        }
+    }
     let target = resolve_selection_click_target(world, raw_hit_entity).entity;
     let mut press_capture = world.resource_mut::<SelectionPressCapture>();
     press_capture.entity = target;
@@ -496,6 +562,10 @@ fn capture_selection_press(
 fn complete_selection_release(world: &mut World, cursor_position: Vec2, now: f64) {
     let mut press_capture = world.resource_mut::<SelectionPressCapture>();
 
+    // An unmatched release (UI/modal capture or another window) is not a click.
+    if press_capture.cursor_screen.is_none() {
+        return;
+    }
     let moved_too_far = press_capture
         .cursor_screen
         .map(|press| press.distance(cursor_position) > SELECTION_CLICK_SLOP_PX)
@@ -506,8 +576,12 @@ fn complete_selection_release(world: &mut World, cursor_position: Vec2, now: f64
     press_capture.additive = false;
 
     if moved_too_far {
+        world.resource_mut::<DoubleClickTracker>().last_click_entity = None;
         return;
     }
+    world
+        .resource_mut::<DoubleClickTracker>()
+        .last_click_position = Some(cursor_position);
 
     complete_selection_click(world, hit_entity, additive_selection, now);
 }
@@ -772,6 +846,7 @@ fn selected_group_containing(world: &World, hit_element_id: ElementId) -> Option
 struct DoubleClickTracker {
     last_click_time: f64,
     last_click_entity: Option<Entity>,
+    last_click_position: Option<Vec2>,
 }
 
 pub const DEFAULT_DOUBLE_CLICK_THRESHOLD_SECONDS: f64 = 0.4;
@@ -2556,6 +2631,255 @@ mod tests {
             vec![ElementId(30)]
         );
         assert_eq!(resolve_entity_for_selection(&world, part), Some(occurrence));
+    }
+
+    // Exercise the real viewport consumer after Bevy has folded native events
+    // into ButtonInput. A transaction-only test cannot detect lost input edges.
+    fn native_selection_app() -> (App, Entity) {
+        use crate::plugins::modeling::{
+            generic_factory::PrimitiveFactory, primitives::BoxPrimitive,
+        };
+        use bevy::camera::{ComputedCameraValues, RenderTargetInfo};
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::input::InputPlugin))
+            .init_resource::<LayerRegistry>()
+            .init_resource::<GroupEditContext>()
+            .init_resource::<OccurrenceEditContext>()
+            .init_resource::<FaceEditContext>()
+            .init_resource::<DoubleClickTracker>()
+            .init_resource::<SelectionPressCapture>()
+            .init_resource::<BoxSelectState>()
+            .init_resource::<InputOwnership>()
+            .init_resource::<HandleInteractionState>()
+            .init_resource::<PivotPoint>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Messages<WindowEvent>>()
+            .init_resource::<SelectionPointerEvents>()
+            .configure_sets(
+                Update,
+                (InputPhase::ModalInput, InputPhase::ToolInput).chain(),
+            )
+            .add_systems(
+                Update,
+                (collect_selection_pointer_events, handle_selection_click)
+                    .chain()
+                    .in_set(InputPhase::ToolInput),
+            );
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        app.insert_resource(registry);
+        let mut window = Window::default();
+        window.resolution.set(800.0, 600.0);
+        window.set_cursor_position(Some(Vec2::new(400.0, 300.0)));
+        let window = app.world_mut().spawn((window, PrimaryWindow)).id();
+        app.world_mut().spawn((
+            Camera {
+                computed: ComputedCameraValues {
+                    clip_from_view: Mat4::perspective_infinite_reverse_rh(1.0, 800.0 / 600.0, 0.1),
+                    target_info: Some(RenderTargetInfo {
+                        physical_size: UVec2::new(800, 600),
+                        scale_factor: 1.0,
+                    }),
+                    ..default()
+                },
+                ..default()
+            },
+            GlobalTransform::from_translation(Vec3::new(0.0, 0.0, 5.0)),
+            OrbitCamera::default(),
+        ));
+        app.world_mut().spawn((
+            ElementId(10),
+            BoxPrimitive {
+                centre: Vec3::ZERO,
+                half_extents: Vec3::splat(0.5),
+            },
+        ));
+        for (id, name, member) in [(20, "Roof", 10), (30, "House", 20)] {
+            app.world_mut().spawn((
+                ElementId(id),
+                GroupMembers {
+                    name: name.into(),
+                    member_ids: vec![ElementId(member)],
+                    frame: default(),
+                    linked_model: None,
+                },
+            ));
+        }
+        app.update();
+        (app, window)
+    }
+
+    fn queue_native_edges(app: &mut App, window: Entity, states: &[bevy::input::ButtonState]) {
+        use bevy::input::mouse::MouseButtonInput;
+        for state in states {
+            let event = MouseButtonInput {
+                button: MouseButton::Left,
+                state: *state,
+                window,
+            };
+            app.world_mut()
+                .resource_mut::<Messages<MouseButtonInput>>()
+                .write(event);
+            app.world_mut()
+                .resource_mut::<Messages<WindowEvent>>()
+                .write(WindowEvent::MouseButtonInput(event));
+        }
+    }
+
+    #[test]
+    fn native_same_frame_double_click_enters_exactly_one_group() {
+        use bevy::input::ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        queue_native_edges(&mut app, window, &[Pressed, Released, Pressed, Released]);
+        app.update();
+        assert_eq!(
+            app.world().resource::<GroupEditContext>().stack,
+            vec![ElementId(30)]
+        );
+        // Do not replay retained Bevy messages on the next frame.
+        app.update();
+        assert_eq!(
+            app.world().resource::<GroupEditContext>().stack,
+            vec![ElementId(30)]
+        );
+        queue_native_edges(&mut app, window, &[Pressed, Released, Pressed, Released]);
+        app.update();
+        assert_eq!(
+            app.world().resource::<GroupEditContext>().stack,
+            vec![ElementId(30), ElementId(20)]
+        );
+    }
+
+    #[test]
+    fn public_ux_double_click_uses_the_native_ordered_pointer_path() {
+        use crate::plugins::ux_harness::{
+            enqueue_multi_click, UxHarnessPlugin, UxMultiClickRequest,
+        };
+        let (mut app, _) = native_selection_app();
+        app.init_resource::<Messages<bevy::window::CursorMoved>>()
+            .init_resource::<Messages<bevy::input::mouse::MouseMotion>>()
+            .add_plugins(UxHarnessPlugin);
+        enqueue_multi_click(
+            app.world_mut(),
+            UxMultiClickRequest {
+                x: 400.0,
+                y: 300.0,
+                button: None,
+                count: None,
+                pairing_window_seconds: None,
+            },
+        )
+        .unwrap();
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<GroupEditContext>().stack,
+            vec![ElementId(30)]
+        );
+    }
+
+    #[test]
+    fn native_split_frame_and_triple_clicks_preserve_button_order() {
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        queue_native_edges(&mut app, window, &[Pressed]);
+        app.update();
+        queue_native_edges(&mut app, window, &[Released, Pressed]);
+        app.update();
+        assert!(app.world().resource::<GroupEditContext>().is_root());
+        queue_native_edges(&mut app, window, &[Released, Pressed, Released]);
+        app.update();
+        assert_eq!(
+            app.world().resource::<GroupEditContext>().stack,
+            vec![ElementId(30)]
+        );
+        let roof = find_entity_by_element_id_readonly(app.world(), ElementId(20)).unwrap();
+        assert!(
+            app.world().get::<Selected>(roof).is_some(),
+            "a third click selects the child; it does not consume another pair"
+        );
+    }
+
+    #[test]
+    fn native_ui_capture_cancels_pending_press_and_does_not_replay() {
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        queue_native_edges(&mut app, window, &[Pressed]);
+        app.update();
+        app.insert_resource(InputOwnership::UiCapture);
+        queue_native_edges(&mut app, window, &[Released, Pressed, Released]);
+        app.update();
+        app.insert_resource(InputOwnership::Idle);
+        queue_native_edges(&mut app, window, &[Released]);
+        app.update();
+        assert!(app.world().resource::<GroupEditContext>().is_root());
+        assert!(app
+            .world_mut()
+            .query_filtered::<Entity, With<Selected>>()
+            .iter(app.world())
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn native_pointer_positions_reject_coalesced_drags_and_distant_click_pairs() {
+        use bevy::window::CursorMoved;
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        let move_to = |app: &mut App, position| {
+            app.world_mut()
+                .resource_mut::<Messages<WindowEvent>>()
+                .write(WindowEvent::CursorMoved(CursorMoved {
+                    window,
+                    position,
+                    delta: None,
+                }));
+        };
+        move_to(&mut app, Vec2::new(400.0, 300.0));
+        queue_native_edges(&mut app, window, &[Pressed]);
+        move_to(&mut app, Vec2::new(415.0, 300.0));
+        queue_native_edges(&mut app, window, &[Released]);
+        app.update();
+        assert!(app
+            .world_mut()
+            .query_filtered::<Entity, With<Selected>>()
+            .iter(app.world())
+            .next()
+            .is_none());
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        move_to(&mut app, Vec2::new(400.0, 300.0));
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        app.update();
+        assert!(
+            app.world().resource::<GroupEditContext>().is_root(),
+            "distant clicks on the same aggregate are not a double-click"
+        );
+    }
+
+    #[test]
+    fn injected_button_messages_and_foreign_window_events_are_not_confused() {
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        let foreign = app.world_mut().spawn(Window::default()).id();
+        queue_native_edges(&mut app, foreign, &[Pressed, Released, Pressed, Released]);
+        app.update();
+        assert!(app.world().resource::<GroupEditContext>().is_root());
+        for state in [Pressed, Released, Pressed, Released] {
+            // The public UX harness emits typed messages, not WindowEvent.
+            app.world_mut()
+                .resource_mut::<Messages<MouseButtonInput>>()
+                .write(MouseButtonInput {
+                    button: MouseButton::Left,
+                    state,
+                    window,
+                });
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<GroupEditContext>().stack,
+            vec![ElementId(30)]
+        );
     }
 
     #[test]
