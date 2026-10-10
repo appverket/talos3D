@@ -156,7 +156,7 @@ impl Profile2d {
             return 0;
         }
         let last_endpoint = self.segments.last().unwrap().endpoint();
-        if (last_endpoint - self.start).length_squared() < 1e-6 {
+        if last_endpoint == self.start {
             n
         } else {
             n + 1 // implicit closing line
@@ -183,7 +183,10 @@ impl Profile2d {
             return self.clone();
         }
 
-        let explicitly_closed = (current - self.start).length_squared() < 1e-6;
+        // Explicit closure is authored endpoint identity, not proximity. A
+        // 1 mm proximity test erased the closing edge of 0.6 mm folded sheets
+        // and made winding reversal drop their final contour vertex.
+        let explicitly_closed = current == self.start;
         let new_start = if explicitly_closed {
             self.start
         } else {
@@ -1781,6 +1784,75 @@ fn extract_indices(mesh: &Mesh) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submillimetre_closing_edge_survives_winding_and_native_meshes() {
+        // A folded sheet with a genuinely distinct 0.6 mm closing edge.
+        // This is a generic profile test; dimensions and world placement
+        // exercise the render and evaluated-body paths used by real models.
+        let angle = 22.0_f32.to_radians();
+        let thickness = 0.0006;
+        let tip_x = 0.22 * angle.cos();
+        let tip_y = 1.2 - 0.22 * angle.sin();
+        let points = [
+            Vec2::new(-tip_x, tip_y),
+            Vec2::new(0.0, 1.2),
+            Vec2::new(tip_x, tip_y),
+            Vec2::new(
+                tip_x - thickness * angle.sin(),
+                tip_y - thickness * angle.cos(),
+            ),
+            Vec2::new(0.0, 1.2 - thickness / angle.cos()),
+            Vec2::new(
+                -tip_x + thickness * angle.sin(),
+                tip_y - thickness * angle.cos(),
+            ),
+        ];
+        let profile = Profile2d {
+            start: points[0],
+            segments: points[1..]
+                .iter()
+                .map(|p| ProfileSegment::LineTo { to: *p })
+                .collect(),
+        };
+        assert!(!profile.is_ccw());
+        assert_eq!(
+            profile.segment_count(),
+            6,
+            "the short closing edge is a real edge"
+        );
+        let reversed = profile.reversed();
+        assert_eq!(reversed.start, points[5]);
+        let reversed_points = reversed.tessellate(32);
+        assert_eq!(reversed_points.len(), points.len());
+        assert!(points.iter().all(|p| reversed_points.contains(p)));
+        assert_eq!(reversed.reversed(), profile);
+
+        let extrusion = ProfileExtrusion {
+            centre: Vec3::new(0.0, 2.58, 0.0),
+            profile,
+            height: 6.5,
+        };
+        let render_mesh = build_extrusion_bevy_mesh(&extrusion);
+        assert_eq!(
+            render_mesh.indices().unwrap().len(),
+            60,
+            "six sides and both complete caps"
+        );
+        let editable = build_extrusion_editable_mesh(
+            &extrusion,
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        );
+        let triangles = super::super::bsp_csg::triangles_from_editable_mesh(&editable);
+        let summary = super::super::semantics::body_summary_from_triangles(&triangles);
+        assert_eq!(summary.triangle_count, 20);
+        assert_eq!(summary.connected_components, 1);
+        assert!(
+            summary.is_closed_manifold,
+            "thin profiles must retain their complete contour"
+        );
+        assert!(summary.volume.unwrap() > 0.0);
+    }
 
     #[test]
     fn rectangle_profile_tessellation() {

@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-10-09T15:45:00Z
-- branch: codex/cottage-double-click
-- task-id: TALOS-lthmbrry
+- created: 2026-10-10T09:00:00Z
+- branch: codex/cottage-ridge-profile
+- task-id: TALOS-jtpcbzdd
 - target base: main
-- summary: Repair unreliable native double-click descent and verify the installed Architecture app.
-- status: awaiting-merge
+- summary: Preserve distinct submillimetre profile endpoints when reversing winding and counting closing edges.
+- status: active
