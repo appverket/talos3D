@@ -26,7 +26,10 @@ use crate::{
         hosting_contracts::{HostedInteractionKind, HostingContractKindId},
         identity::ElementId,
         layers::LayerAssignment,
-        materials::{material_assignment_from_value, MaterialAssignment},
+        materials::{
+            material_assignment_from_value, material_assignment_option_from_value,
+            MaterialAssignment,
+        },
         modeling::{
             definition::{
                 AxisRef, BodyExpr, ChildSlotDef, ConstraintSeverity, Definition, DefinitionId,
@@ -606,9 +609,25 @@ impl AuthoredEntity for OccurrenceSnapshot {
     }
 
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        if matches!(property_name, "material" | "material_assignment") {
+            return self.set_material_assignment(material_assignment_option_from_value(value)?);
+        }
         let mut next = self.clone();
         next.identity.overrides.set(property_name, value.clone());
         Ok(BoxedEntity(Box::new(next)))
+    }
+
+    fn material_assignment(&self) -> Option<MaterialAssignment> {
+        self.identity.material_override.clone()
+    }
+
+    fn set_material_assignment(
+        &self,
+        assignment: Option<MaterialAssignment>,
+    ) -> Result<BoxedEntity, String> {
+        let mut next = self.clone();
+        next.identity.material_override = assignment;
+        Ok(next.into())
     }
 
     fn handles(&self) -> Vec<HandleInfo> {
@@ -680,6 +699,7 @@ impl AuthoredEntity for OccurrenceSnapshot {
 
         let registry = world.resource::<DefinitionRegistry>().clone();
         let dirty = classify_occurrence_snapshot_change(&registry, self, previous);
+        let material_dirty = dirty.material_dirty;
 
         if dirty.mesh_dirty || dirty.transform_dirty {
             self.apply_to(world);
@@ -694,6 +714,14 @@ impl AuthoredEntity for OccurrenceSnapshot {
                 }
             } else {
                 entity_mut.insert(dirty);
+            }
+        }
+        if material_dirty {
+            if let (Some(entity), Ok(definition)) = (
+                crate::plugins::commands::find_entity_by_element_id(world, self.element_id),
+                registry.effective_definition(&self.identity.definition_id),
+            ) {
+                apply_occurrence_material_assignment(world, entity, &definition, &self.identity);
             }
         }
         self.apply_layer(world);
@@ -820,7 +848,16 @@ impl AuthoredEntityFactory for OccurrenceFactory {
         world: &World,
     ) -> Option<BoxedEntity> {
         let element_id = *entity_ref.get::<ElementId>()?;
-        let identity = entity_ref.get::<OccurrenceIdentity>()?.clone();
+        let mut identity = entity_ref.get::<OccurrenceIdentity>()?.clone();
+        let live = entity_ref.get::<MaterialAssignment>().cloned();
+        let inherited = world
+            .get_resource::<DefinitionRegistry>()
+            .and_then(|r| r.effective_definition(&identity.definition_id).ok())
+            .and_then(|d| definition_material_assignment(&d));
+        let expected = identity.material_override.clone().or(inherited.clone());
+        if live != expected {
+            identity.material_override = if live == inherited { None } else { live };
+        }
         let label = entity_ref
             .get::<Name>()
             .map(|name| name.as_str().to_string())
@@ -1357,7 +1394,7 @@ pub(crate) fn render_occurrence(
     if definition.body.compound.is_none()
         && apply_cached_occurrence_mesh(world, root_entity, &cache_key, transform)
     {
-        apply_occurrence_material_assignment(world, root_entity, &definition);
+        apply_occurrence_material_assignment(world, root_entity, &definition, identity);
         if let Ok(mut entity_mut) = world.get_entity_mut(root_entity) {
             entity_mut.insert((
                 identity.clone(),
@@ -1383,11 +1420,11 @@ pub(crate) fn render_occurrence(
             );
             world.entity_mut(root_entity).insert(cache_key);
         }
-        apply_occurrence_material_assignment(world, root_entity, &definition);
+        apply_occurrence_material_assignment(world, root_entity, &definition, identity);
     } else {
         clear_occurrence_root_geometry(world, root_entity);
         world.entity_mut(root_entity).insert(transform);
-        clear_occurrence_material_assignment(world, root_entity);
+        apply_occurrence_material_assignment(world, root_entity, &definition, identity);
     }
 
     for part in parts {
@@ -2154,15 +2191,19 @@ fn apply_occurrence_material_assignment(
     world: &mut World,
     entity: Entity,
     definition: &Definition,
+    identity: &OccurrenceIdentity,
 ) {
     if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
-        apply_spawned_material_assignment(&mut entity_mut, definition);
-    }
-}
-
-fn clear_occurrence_material_assignment(world: &mut World, entity: Entity) {
-    if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
-        entity_mut.remove::<MaterialAssignment>();
+        let assignment =
+            resolve_occurrence_material_assignment(definition, identity.material_override.as_ref());
+        match assignment {
+            Some(assignment) => {
+                entity_mut.insert(assignment);
+            }
+            None => {
+                entity_mut.remove::<MaterialAssignment>();
+            }
+        }
     }
 }
 
@@ -2172,6 +2213,15 @@ fn apply_spawned_material_assignment(entity: &mut EntityWorldMut<'_>, definition
     } else {
         entity.remove::<MaterialAssignment>();
     }
+}
+
+pub(crate) fn resolve_occurrence_material_assignment(
+    definition: &Definition,
+    occurrence_override: Option<&MaterialAssignment>,
+) -> Option<MaterialAssignment> {
+    occurrence_override
+        .cloned()
+        .or_else(|| definition_material_assignment(definition))
 }
 
 fn definition_material_assignment(definition: &Definition) -> Option<MaterialAssignment> {
@@ -2922,6 +2972,156 @@ mod pp_098_occurrence_cache_tests {
         assert!(world
             .resource::<Assets<Mesh>>()
             .contains(cached_handle.id()));
+        assert_eq!(world.resource::<RepresentationCache>().len(), 1);
+    }
+
+    #[test]
+    fn occurrence_material_assignment_survives_capture_reload_and_cached_transform() {
+        let inherited = MaterialAssignment::new("family_default");
+        let assignment = material_assignment_from_value(&json!({
+            "type": "single", "spec": "material_spec.v1/test-grade",
+            "render": "material_def.v1/selected_finish"
+        }))
+        .unwrap();
+        let mut definition = rectangular_definition();
+        definition.material_assignment = Some(inherited.clone());
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition.clone());
+        let identity = OccurrenceIdentity::new(definition.id.clone(), 1);
+        let snapshot = OccurrenceSnapshot::new(ElementId(701), identity, "assigned");
+        let mut world = world_with_cache();
+        world.insert_resource(registry.clone());
+        snapshot.apply_to(&mut world);
+        let entity =
+            crate::plugins::commands::find_entity_by_element_id(&mut world, ElementId(701))
+                .unwrap();
+        crate::plugins::materials::set_authored_material_assignment(
+            &mut world,
+            entity,
+            Some(assignment.clone()),
+        );
+        let factory = OccurrenceFactory;
+        let captured = factory
+            .capture_snapshot(&world.entity(entity), &world)
+            .unwrap();
+        assert_eq!(captured.material_assignment(), Some(assignment.clone()));
+        let json = captured.to_json();
+        assert!(json["identity"]["material_override"].is_object());
+        let loaded = factory.from_persisted_json(&json).unwrap();
+        let mut reopened = world_with_cache();
+        reopened.insert_resource(registry);
+        loaded.apply_to(&mut reopened);
+        let entity =
+            crate::plugins::commands::find_entity_by_element_id(&mut reopened, ElementId(701))
+                .unwrap();
+        assert_eq!(
+            reopened.get::<MaterialAssignment>(entity),
+            Some(&assignment)
+        );
+        // Native transforms consume the same snapshot and retain the grade/render binding.
+        let moved = loaded.translate_by(Vec3::new(1., 2., 3.));
+        moved.apply_with_previous(&mut reopened, Some(&loaded));
+        assert_eq!(
+            reopened.get::<MaterialAssignment>(entity),
+            Some(&assignment)
+        );
+        let changed = moved
+            .set_material_assignment(Some(inherited.clone()))
+            .unwrap();
+        changed.apply_with_previous(&mut reopened, Some(&moved));
+        assert_eq!(reopened.get::<MaterialAssignment>(entity), Some(&inherited));
+        // Undo/redo snapshot application restores authored material, without changing design geometry.
+        moved.apply_with_previous(&mut reopened, Some(&changed));
+        assert_eq!(
+            reopened.get::<MaterialAssignment>(entity),
+            Some(&assignment)
+        );
+        changed.apply_with_previous(&mut reopened, Some(&moved));
+        assert_eq!(reopened.get::<MaterialAssignment>(entity), Some(&inherited));
+    }
+
+    #[test]
+    fn occurrence_material_capture_preserves_inheritance_and_legacy_component_edits() {
+        let mut definition = rectangular_definition();
+        let inherited = MaterialAssignment::new("default");
+        let selected = MaterialAssignment::new("selected");
+        definition.material_assignment = Some(inherited.clone());
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition.clone());
+        let mut world = world_with_cache();
+        world.insert_resource(registry);
+        OccurrenceSnapshot::new(
+            ElementId(702),
+            OccurrenceIdentity::new(definition.id.clone(), 1),
+            "inherit",
+        )
+        .apply_to(&mut world);
+        let entity =
+            crate::plugins::commands::find_entity_by_element_id(&mut world, ElementId(702))
+                .unwrap();
+        let factory = OccurrenceFactory;
+        let capture = |world: &World| {
+            factory
+                .capture_snapshot(&world.entity(entity), world)
+                .unwrap()
+        };
+        assert!(capture(&world).to_json()["identity"]
+            .get("material_override")
+            .is_none());
+        // Compatibility with existing plugin paths that wrote only the live component.
+        world.entity_mut(entity).insert(selected.clone());
+        let captured = capture(&world);
+        assert_eq!(captured.material_assignment(), Some(selected.clone()));
+        let loaded = factory.from_persisted_json(&captured.to_json()).unwrap();
+        loaded.apply_to(&mut world);
+        assert_eq!(world.get::<MaterialAssignment>(entity), Some(&selected));
+        crate::plugins::materials::set_authored_material_assignment(&mut world, entity, None);
+        assert_eq!(world.get::<MaterialAssignment>(entity), Some(&inherited));
+        assert!(capture(&world).to_json()["identity"]
+            .get("material_override")
+            .is_none());
+        // Old documents without the override remain readable and inherit their family.
+        let old = factory
+            .from_persisted_json(&capture(&world).to_json())
+            .unwrap();
+        old.apply_to(&mut world);
+        assert_eq!(world.get::<MaterialAssignment>(entity), Some(&inherited));
+    }
+
+    #[test]
+    fn occurrence_material_only_snapshot_change_keeps_cached_mesh_handle() {
+        let definition = rectangular_definition();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition.clone());
+        let identity = OccurrenceIdentity::new(definition.id.clone(), 1);
+        let params = registry
+            .resolve_params_checked(&definition.id, &identity.overrides)
+            .unwrap();
+        let key = mesh_cache_key_for_definition(&definition, &resolved_param_values(&params));
+        let mut world = world_with_cache();
+        world.insert_resource(registry);
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        ));
+        world
+            .resource_mut::<RepresentationCache>()
+            .insert(key, mesh.clone());
+        let previous = OccurrenceSnapshot::new(ElementId(703), identity, "cached");
+        previous.apply_to(&mut world);
+        let assignment = MaterialAssignment::new("new_finish");
+        let next = previous
+            .set_property_json(
+                "material_assignment",
+                &serde_json::to_value(&assignment).unwrap(),
+            )
+            .unwrap();
+        next.0.apply_with_previous(&mut world, Some(&previous));
+        let entity =
+            crate::plugins::commands::find_entity_by_element_id(&mut world, ElementId(703))
+                .unwrap();
+        assert_eq!(world.get::<Mesh3d>(entity).unwrap().id(), mesh.id());
+        assert_eq!(world.get::<MaterialAssignment>(entity), Some(&assignment));
         assert_eq!(world.resource::<RepresentationCache>().len(), 1);
     }
 

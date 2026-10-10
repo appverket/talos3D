@@ -1355,6 +1355,50 @@ pub fn material_assignment_display_id(assignment: Option<&MaterialAssignment>) -
     assignment.and_then(|assignment| assignment.render_material_id(None))
 }
 
+/// Keep an occurrence's authored binding and its derived ECS material together.
+/// Clearing an occurrence override restores its Definition's inherited material.
+/// Other authored entity types retain their existing component capture behavior.
+pub(crate) fn set_authored_material_assignment(
+    world: &mut World,
+    entity: Entity,
+    assignment: Option<MaterialAssignment>,
+) {
+    use crate::plugins::modeling::{
+        definition::DefinitionRegistry, occurrence::OccurrenceIdentity,
+    };
+    let inherited = world
+        .get::<OccurrenceIdentity>(entity)
+        .and_then(|identity| {
+            world
+                .get_resource::<DefinitionRegistry>()
+                .and_then(|r| r.effective_definition(&identity.definition_id).ok())
+                .and_then(|d| {
+                    crate::plugins::modeling::occurrence::resolve_occurrence_material_assignment(
+                        &d, None,
+                    )
+                })
+        });
+    let is_occurrence = if let Some(mut identity) = world.get_mut::<OccurrenceIdentity>(entity) {
+        identity.material_override = assignment.clone();
+        true
+    } else {
+        false
+    };
+    let effective = if is_occurrence {
+        assignment.or(inherited)
+    } else {
+        assignment
+    };
+    match effective {
+        Some(assignment) => {
+            world.entity_mut(entity).insert(assignment);
+        }
+        None => {
+            world.entity_mut(entity).remove::<MaterialAssignment>();
+        }
+    }
+}
+
 // ─── Bevy material handles cache ─────────────────────────────────────────────
 
 /// Maps `material_id + effective texture mapping → Handle<StandardMaterial>`.
@@ -1727,9 +1771,11 @@ fn execute_apply_material_to_selection(
     };
     let count = selected_entities.len();
     for entity in selected_entities {
-        world
-            .entity_mut(entity)
-            .insert(MaterialAssignment::new(material_id.clone()));
+        set_authored_material_assignment(
+            world,
+            entity,
+            Some(MaterialAssignment::new(material_id.clone())),
+        );
     }
     Ok(crate::plugins::command_registry::CommandResult {
         output: Some(serde_json::json!({ "applied_to": count })),
@@ -1753,7 +1799,7 @@ fn execute_set_material_assignment_to_selection(
     };
     let count = selected_entities.len();
     for entity in selected_entities {
-        world.entity_mut(entity).insert(assignment.clone());
+        set_authored_material_assignment(world, entity, Some(assignment.clone()));
     }
     Ok(crate::plugins::command_registry::CommandResult {
         output: Some(serde_json::json!({ "applied_to": count })),
@@ -1771,7 +1817,7 @@ fn execute_clear_material_assignment_on_selection(
     };
     let count = selected_entities.len();
     for entity in selected_entities {
-        world.entity_mut(entity).remove::<MaterialAssignment>();
+        set_authored_material_assignment(world, entity, None);
     }
     Ok(crate::plugins::command_registry::CommandResult {
         output: Some(serde_json::json!({ "cleared": count })),
@@ -2029,6 +2075,60 @@ fn uuid_v4() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_material_commands_update_authored_occurrence_binding() {
+        use crate::plugins::{
+            identity::ElementId,
+            modeling::{definition::DefinitionId, occurrence::OccurrenceIdentity},
+            selection::Selected,
+        };
+        let mut world = World::new();
+        let mut registry = MaterialRegistry::default();
+        registry.upsert(MaterialDef {
+            id: "finish".to_string(),
+            ..Default::default()
+        });
+        world.insert_resource(registry);
+        let entity = world
+            .spawn((
+                ElementId(801),
+                OccurrenceIdentity::new(DefinitionId("family".to_string()), 1),
+                Selected,
+            ))
+            .id();
+        let assignment = MaterialAssignment::new("finish");
+        execute_set_material_assignment_to_selection(
+            &mut world,
+            &serde_json::json!({"assignment": assignment}),
+        )
+        .unwrap();
+        assert_eq!(
+            world
+                .get::<OccurrenceIdentity>(entity)
+                .unwrap()
+                .material_override,
+            Some(assignment.clone())
+        );
+        execute_clear_material_assignment_on_selection(&mut world, &Value::Null).unwrap();
+        assert!(world
+            .get::<OccurrenceIdentity>(entity)
+            .unwrap()
+            .material_override
+            .is_none());
+        execute_apply_material_to_selection(
+            &mut world,
+            &serde_json::json!({"material_id": "finish"}),
+        )
+        .unwrap();
+        assert_eq!(
+            world
+                .get::<OccurrenceIdentity>(entity)
+                .unwrap()
+                .material_override,
+            Some(assignment)
+        );
+    }
 
     #[test]
     fn builtin_materials_are_seeded_with_stable_ids() {

@@ -1184,3 +1184,20 @@ context. Generated members retain stable owner/slot identity through regeneratio
 they do not become independently persisted primitives. Their property inspector
 routes changes to the controlling Definition, and the GPU selection overlay
 highlights only the selected member.
+
+
+## Occurrence material overrides
+
+Typed material assignment on a reusable occurrence is authored state: the
+`OccurrenceIdentity.material_override` binding retains both MaterialSpec and
+render references across save/reload, transforms and snapshot history. UI
+selection commands, MCP material assignment and texture mapping edits use the
+same setter. The rendered root resolves the occurrence override before its
+effective Definition material. Clearing an occurrence assignment removes its
+override and restores the inherited Definition material; it does not erase the
+family default. Older occurrences without an override continue to inherit.
+
+For material-bearing model work, verify `get_material_assignment` after saving
+and reopening, including individual overrides that differ from family defaults.
+A successful assignment response or a matching wood colour alone is insufficient
+evidence that a structural grade has been preserved.

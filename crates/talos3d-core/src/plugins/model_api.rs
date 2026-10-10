@@ -1426,12 +1426,7 @@ fn handle_delete_material(world: &mut World, id: &str) -> Result<String, String>
             .collect()
     };
     for (entity, assignment) in assignment_updates {
-        let mut entity_mut = world.entity_mut(entity);
-        if let Some(assignment) = assignment {
-            entity_mut.insert(assignment);
-        } else {
-            entity_mut.remove::<MaterialAssignment>();
-        }
+        crate::plugins::materials::set_authored_material_assignment(world, entity, assignment);
     }
     world
         .resource_mut::<MaterialRegistry>()
@@ -1452,9 +1447,11 @@ fn handle_apply_material(world: &mut World, req: ApplyMaterialRequest) -> Result
     for &eid in &req.element_ids {
         let entity = find_entity_by_element_id(world, ElementId(eid))
             .ok_or_else(|| format!("Entity {eid} not found"))?;
-        world
-            .entity_mut(entity)
-            .insert(MaterialAssignment::new(req.material_id.clone()));
+        crate::plugins::materials::set_authored_material_assignment(
+            world,
+            entity,
+            Some(MaterialAssignment::new(req.material_id.clone())),
+        );
         applied.push(eid);
     }
     Ok(applied)
@@ -1603,7 +1600,7 @@ fn handle_remove_material(world: &mut World, element_ids: Vec<u64>) -> Result<Ve
     for eid in element_ids {
         let entity = find_entity_by_element_id(world, ElementId(eid))
             .ok_or_else(|| format!("Entity {eid} not found"))?;
-        world.entity_mut(entity).remove::<MaterialAssignment>();
+        crate::plugins::materials::set_authored_material_assignment(world, entity, None);
         removed.push(eid);
     }
     Ok(removed)
@@ -1633,7 +1630,11 @@ fn handle_set_material_assignment(
     for element_id in request.element_ids {
         let entity = find_entity_by_element_id(world, ElementId(element_id))
             .ok_or_else(|| format!("Entity {element_id} not found"))?;
-        world.entity_mut(entity).insert(request.assignment.clone());
+        crate::plugins::materials::set_authored_material_assignment(
+            world,
+            entity,
+            Some(request.assignment.clone()),
+        );
         updated.push(EntityMaterialAssignmentInfo {
             element_id,
             assignment: Some(request.assignment.clone()),
@@ -1683,7 +1684,11 @@ fn handle_update_texture_mapping(
                 .ok_or_else(|| format!("Entity {element_id} has no material assignment"))?;
             assignment.set_texture_mapping_override(mapping)?;
             crate::plugins::materials::validate_material_assignment(world, &assignment)?;
-            world.entity_mut(entity).insert(assignment);
+            crate::plugins::materials::set_authored_material_assignment(
+                world,
+                entity,
+                Some(assignment),
+            );
             element_texture_mapping_info(world, element_id)
         }
     }
@@ -1712,7 +1717,11 @@ fn handle_reset_texture_mapping(
                 .cloned()
                 .ok_or_else(|| format!("Entity {element_id} has no material assignment"))?;
             assignment.clear_texture_mapping_override();
-            world.entity_mut(entity).insert(assignment);
+            crate::plugins::materials::set_authored_material_assignment(
+                world,
+                entity,
+                Some(assignment),
+            );
             element_texture_mapping_info(world, element_id)
         }
     }

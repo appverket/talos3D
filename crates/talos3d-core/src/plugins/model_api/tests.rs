@@ -14767,3 +14767,46 @@ mod foreign_source;
 
 #[cfg(feature = "model-api")]
 mod native_recipe_history;
+
+#[cfg(feature = "model-api")]
+#[test]
+fn mcp_material_assignment_updates_persisted_occurrence_binding() {
+    use crate::capability_registry::AuthoredEntityFactory;
+    use crate::plugins::modeling::{
+        definition::DefinitionId,
+        occurrence::{OccurrenceFactory, OccurrenceIdentity},
+    };
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<MaterialRegistry>()
+        .upsert(MaterialDef {
+            id: "selected".to_string(),
+            ..Default::default()
+        });
+    let entity = world
+        .spawn((
+            ElementId(802),
+            OccurrenceIdentity::new(DefinitionId("family".to_string()), 1),
+        ))
+        .id();
+    let assignment = MaterialAssignment::new("selected");
+    handle_set_material_assignment(
+        &mut world,
+        SetMaterialAssignmentRequest {
+            element_ids: vec![802],
+            assignment: assignment.clone(),
+        },
+    )
+    .unwrap();
+    let factory = OccurrenceFactory;
+    let captured = factory
+        .capture_snapshot(&world.entity(entity), &world)
+        .unwrap();
+    let reloaded = factory.from_persisted_json(&captured.to_json()).unwrap();
+    assert_eq!(reloaded.material_assignment(), Some(assignment));
+    handle_remove_material(&mut world, vec![802]).unwrap();
+    let cleared = factory
+        .capture_snapshot(&world.entity(entity), &world)
+        .unwrap();
+    assert!(cleared.material_assignment().is_none());
+}
