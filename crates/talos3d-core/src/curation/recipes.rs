@@ -213,6 +213,53 @@ impl RecipeArtifactRegistry {
         asset_id
     }
 
+    pub fn insert_private(&mut self, artifact: RecipeArtifact) -> Result<AssetId, String> {
+        if !matches!(
+            artifact.meta.scope,
+            super::Scope::Session | super::Scope::Project
+        ) {
+            return Err("Private recipe import requires Session/Project scope".into());
+        }
+        let id = &artifact.meta.id;
+        if self
+            .get(id)
+            .is_some_and(|a| a.meta.scope == super::Scope::Shipped)
+        {
+            return Err("Private recipe cannot overwrite shipped knowledge".into());
+        }
+        let family = artifact
+            .family_id()
+            .cloned()
+            .or_else(|| family_id_from_asset_id(id));
+        if family
+            .as_ref()
+            .and_then(|f| self.get_by_family(f))
+            .is_some_and(|a| a.meta.scope == super::Scope::Shipped)
+        {
+            return Err(
+                "Private recipe cannot shadow a shipped family; use a distinct family id".into(),
+            );
+        }
+        Ok(self.insert(artifact))
+    }
+    pub fn project_artifacts(&self) -> Vec<RecipeArtifact> {
+        self.iter()
+            .filter(|a| a.meta.scope == super::Scope::Project)
+            .cloned()
+            .collect()
+    }
+    pub fn clear_project_artifacts(&mut self) {
+        let retained: Vec<_> = self
+            .iter()
+            .filter(|a| matches!(a.meta.scope, super::Scope::Shipped | super::Scope::Org))
+            .cloned()
+            .collect();
+        *self = Self::default();
+        for a in retained {
+            self.insert(a);
+        }
+    }
+
     pub fn get(&self, id: &AssetId) -> Option<&RecipeArtifact> {
         self.entries.get(id)
     }

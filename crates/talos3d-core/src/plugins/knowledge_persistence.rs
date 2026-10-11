@@ -116,7 +116,12 @@ pub fn load_persisted_recipes(registry: &mut RecipeArtifactRegistry) {
         };
         match serde_json::from_slice::<RecipeArtifact>(&bytes) {
             Ok(artifact) => {
-                registry.insert(artifact);
+                if let Err(error) = registry.insert_private(artifact) {
+                    warn!(
+                        "knowledge_persistence: refused private recipe {:?}: {error}",
+                        path
+                    );
+                }
             }
             Err(e) => {
                 warn!(
@@ -146,6 +151,9 @@ pub fn persist_recipe(artifact: &RecipeArtifact) -> Result<PathBuf, String> {
 /// Wire format for persisted corpus passages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedPassage {
+    /// Missing legacy metadata is private Project/Draft, never shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<crate::curation::CurationMeta>,
     pub passage_ref: String,
     pub text: String,
     pub citation: String,
@@ -185,13 +193,9 @@ pub fn load_persisted_passages(registry: &mut CorpusPassageRegistry) {
         };
         match serde_json::from_slice::<PersistedPassage>(&bytes) {
             Ok(p) => {
-                let provenance = build_provenance_for_passage(&p);
-                registry.register_with_guidance(
-                    crate::capability_registry::PassageRef(p.passage_ref),
-                    p.text,
-                    provenance,
-                    p.proactive_guidance,
-                );
+                if let Err(error) = registry.register_private(p) {
+                    warn!("knowledge_persistence: refused passage {:?}: {error}", path);
+                }
             }
             Err(e) => {
                 warn!(
@@ -231,11 +235,19 @@ pub fn load_persisted_interference_rules(
         };
         // Accept either a bare rule or an array of rules.
         if let Ok(rule) = serde_json::from_slice::<InterferenceRule>(&bytes) {
-            policy.rules.push(rule);
+            if let Err(error) = policy.insert_private(rule) {
+                warn!("Refused private interference rule: {error}");
+            }
             continue;
         }
         match serde_json::from_slice::<Vec<InterferenceRule>>(&bytes) {
-            Ok(rules) => policy.rules.extend(rules),
+            Ok(rules) => {
+                for rule in rules {
+                    if let Err(error) = policy.insert_private(rule) {
+                        warn!("Refused private interference rule: {error}");
+                    }
+                }
+            }
             Err(e) => {
                 warn!(
                     "knowledge_persistence: skipping malformed interference rules {:?}: {e}",
@@ -268,6 +280,7 @@ pub fn build_provenance_for_passage(p: &PersistedPassage) -> CorpusProvenance {
         "boverket_public" => LicenseTag::BoverketPublic,
         "icc_cite_only" => LicenseTag::IccCiteOnly,
         "standards_body_citation_only" => LicenseTag::StandardsBodyCitationOnly,
+        s if s.starts_with("vendor_eula:") => LicenseTag::VendorEula(s[12..].into()),
         _ => LicenseTag::PublicRecord,
     };
     CorpusProvenance {

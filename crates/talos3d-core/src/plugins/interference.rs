@@ -143,6 +143,9 @@ fn default_tolerance_m() -> f32 {
 /// A single data-driven interference rule.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InterferenceRule {
+    /// Unscoped legacy rules are private project context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<crate::curation::CurationMeta>,
     /// Stable machine-readable id; used to build deterministic finding ids.
     pub id: String,
     /// Short human-readable label.
@@ -180,6 +183,51 @@ pub struct InterferencePolicy {
 }
 
 impl InterferencePolicy {
+    pub fn project_rules(&self) -> Vec<InterferenceRule> {
+        self.rules
+            .iter()
+            .filter(|r| {
+                r.meta
+                    .as_ref()
+                    .map_or(crate::curation::Scope::Project, |m| m.scope)
+                    == crate::curation::Scope::Project
+            })
+            .cloned()
+            .collect()
+    }
+    pub fn clear_project_rules(&mut self) {
+        self.rules.retain(|r| {
+            r.meta.as_ref().is_some_and(|m| {
+                matches!(
+                    m.scope,
+                    crate::curation::Scope::Shipped | crate::curation::Scope::Org
+                )
+            })
+        });
+    }
+    pub fn insert_private(&mut self, rule: InterferenceRule) -> Result<(), String> {
+        let scope = rule
+            .meta
+            .as_ref()
+            .map_or(crate::curation::Scope::Project, |m| m.scope);
+        if !matches!(
+            scope,
+            crate::curation::Scope::Project | crate::curation::Scope::Session
+        ) {
+            return Err("Private interference rules cannot publish or widen scope".into());
+        }
+        if self.rules.iter().any(|r| {
+            r.id == rule.id
+                && r.meta
+                    .as_ref()
+                    .is_some_and(|m| m.scope == crate::curation::Scope::Shipped)
+        }) {
+            return Err("Private rule cannot shadow shipped rule".into());
+        }
+        self.rules.retain(|r| r.id != rule.id);
+        self.rules.push(rule);
+        Ok(())
+    }
     pub fn with_rules(rules: Vec<InterferenceRule>) -> Self {
         Self { rules }
     }
@@ -562,6 +610,7 @@ mod tests {
 
     fn framing_through_covering_rule() -> InterferenceRule {
         InterferenceRule {
+            meta: None,
             id: "framing_not_through_covering".into(),
             label: "framing must not protrude through covering".into(),
             subject: EntitySelector {

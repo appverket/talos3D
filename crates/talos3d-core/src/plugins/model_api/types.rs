@@ -71,10 +71,7 @@ impl ModelApiAuthentication {
     }
 
     pub(super) fn redeem_pairing_code(&self, provided: &str) -> Option<&str> {
-        if !super::runtime_transport::constant_time_bytes_equal(
-            provided.as_bytes(),
-            self.pairing_code.as_bytes(),
-        ) {
+        if !super::constant_time_bytes_equal(provided.as_bytes(), self.pairing_code.as_bytes()) {
             return None;
         }
         self.paired
@@ -90,7 +87,7 @@ impl ModelApiAuthentication {
 
     pub(super) fn authorization_header_matches(&self, provided: &str) -> bool {
         self.paired.load(std::sync::atomic::Ordering::Acquire)
-            && super::runtime_transport::constant_time_bytes_equal(
+            && super::constant_time_bytes_equal(
                 provided.as_bytes(),
                 format!("Bearer {}", self.access_token).as_bytes(),
             )
@@ -230,6 +227,9 @@ pub struct ToolbarDetails {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InstanceInfo {
+    /// Reviewed shared release identities; private project assets are separate.
+    #[serde(default)]
+    pub shared_corpus_releases: Vec<crate::curation::corpus_release::CorpusReleaseInfo>,
     pub instance_id: String,
     pub app_name: String,
     pub pid: u32,
@@ -271,6 +271,7 @@ pub struct InstanceInfo {
 impl From<&ModelApiRuntimeInfo> for InstanceInfo {
     fn from(value: &ModelApiRuntimeInfo) -> Self {
         Self {
+            shared_corpus_releases: Vec::new(),
             instance_id: value.instance_id.clone(),
             app_name: value.app_name.clone(),
             pid: value.pid,

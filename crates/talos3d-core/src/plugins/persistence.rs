@@ -622,6 +622,22 @@ pub fn open_project_dialog(world: &mut World) -> Result<Option<()>, String> {
 
 /// Create a new empty document.
 pub fn new_document(world: &mut World) {
+    if let Some(mut policy) =
+        world.get_resource_mut::<crate::plugins::interference::InterferencePolicy>()
+    {
+        policy.clear_project_rules();
+    }
+
+    if let Some(mut registry) = world.get_resource_mut::<crate::curation::RecipeArtifactRegistry>()
+    {
+        registry.clear_project_artifacts();
+    }
+
+    if let Some(mut registry) =
+        world.get_resource_mut::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
+    {
+        registry.clear_project_passages();
+    }
     world.insert_resource(ProjectExtensions::default());
     clear_scene(world);
 
@@ -752,6 +768,27 @@ pub fn install_project_library(
     }
     let before = LibrarySnapshot::capture(world);
     let mut after = before.clone();
+    if let Some(value) = project.extensions.get("core.project_knowledge_passages.v1") {
+        let passages: Vec<crate::plugins::knowledge_persistence::PersistedPassage> =
+            serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        for passage in passages {
+            after.passages.register_private(passage)?;
+        }
+    }
+    if let Some(value) = project.extensions.get("core.project_recipe_artifacts.v1") {
+        let artifacts: Vec<crate::curation::RecipeArtifact> =
+            serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        for artifact in artifacts {
+            after.recipes.insert_private(artifact)?;
+        }
+    }
+    if let Some(value) = project.extensions.get("core.project_interference_rules.v1") {
+        let rules: Vec<crate::plugins::interference::InterferenceRule> =
+            serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        for rule in rules {
+            after.interference.insert_private(rule)?;
+        }
+    }
     for material in project.materials.unwrap_or_default().all() {
         if let Some(existing) = after.materials.get(&material.id) {
             if serde_json::to_value(existing).unwrap() != serde_json::to_value(material).unwrap() {
@@ -810,6 +847,9 @@ pub fn install_project_library(
 
 #[derive(Clone)]
 struct LibrarySnapshot {
+    interference: crate::plugins::interference::InterferencePolicy,
+    recipes: crate::curation::RecipeArtifactRegistry,
+    passages: crate::plugins::corpus_gap::CorpusPassageRegistry,
     libraries: DefinitionLibraryRegistry,
     materials: MaterialRegistry,
     textures: TextureRegistry,
@@ -818,6 +858,18 @@ struct LibrarySnapshot {
 impl LibrarySnapshot {
     fn capture(world: &World) -> Self {
         Self {
+            interference: world
+                .get_resource::<crate::plugins::interference::InterferencePolicy>()
+                .cloned()
+                .unwrap_or_default(),
+            recipes: world
+                .get_resource::<crate::curation::RecipeArtifactRegistry>()
+                .cloned()
+                .unwrap_or_default(),
+            passages: world
+                .get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
+                .cloned()
+                .unwrap_or_default(),
             libraries: world.resource::<DefinitionLibraryRegistry>().clone(),
             materials: world.resource::<MaterialRegistry>().clone(),
             textures: world
@@ -831,6 +883,9 @@ impl LibrarySnapshot {
         }
     }
     fn apply(&self, world: &mut World) {
+        world.insert_resource(self.interference.clone());
+        world.insert_resource(self.recipes.clone());
+        world.insert_resource(self.passages.clone());
         world.insert_resource(self.libraries.clone());
         world.insert_resource(self.materials.clone());
         world.insert_resource(self.textures.clone());
@@ -1296,11 +1351,44 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         }
     });
 
+    let mut extensions = world
+        .get_resource::<ProjectExtensions>()
+        .map(|e| e.0.clone())
+        .unwrap_or_default();
+    extensions.remove("core.project_knowledge_passages.v1");
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
+    {
+        let passages = registry.project_passages();
+        if !passages.is_empty() {
+            extensions.insert(
+                "core.project_knowledge_passages.v1".into(),
+                serde_json::to_value(passages).map_err(|e| e.to_string())?,
+            );
+        }
+    }
+    extensions.remove("core.project_recipe_artifacts.v1");
+    if let Some(registry) = world.get_resource::<crate::curation::RecipeArtifactRegistry>() {
+        let artifacts = registry.project_artifacts();
+        if !artifacts.is_empty() {
+            extensions.insert(
+                "core.project_recipe_artifacts.v1".into(),
+                serde_json::to_value(artifacts).map_err(|e| e.to_string())?,
+            );
+        }
+    }
+    extensions.remove("core.project_interference_rules.v1");
+    if let Some(policy) = world.get_resource::<crate::plugins::interference::InterferencePolicy>() {
+        let rules = policy.project_rules();
+        if !rules.is_empty() {
+            extensions.insert(
+                "core.project_interference_rules.v1".into(),
+                serde_json::to_value(rules).map_err(|e| e.to_string())?,
+            );
+        }
+    }
     Ok(ProjectFile {
-        extensions: world
-            .get_resource::<ProjectExtensions>()
-            .map(|e| e.0.clone())
-            .unwrap_or_default(),
+        extensions,
         foreign_sources: world
             .get_resource::<crate::plugins::foreign_source::SourceArtifacts>()
             .filter(|a| !a.0.is_empty())
@@ -1622,8 +1710,52 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         }
     }
 
+    // Validate into a cloned registry before replacing the document. Opening
+    // another project drops private passages while keeping shipped pack content.
+    let mut passage_registry = world
+        .get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    passage_registry.clear_project_passages();
+    let project_passages: Vec<crate::plugins::knowledge_persistence::PersistedPassage> = extensions
+        .get("core.project_knowledge_passages.v1")
+        .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or_default();
+    for passage in project_passages {
+        passage_registry.register_private(passage)?;
+    }
+    let mut recipe_registry = world
+        .get_resource::<crate::curation::RecipeArtifactRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    recipe_registry.clear_project_artifacts();
+    let private_recipes: Vec<crate::curation::RecipeArtifact> = extensions
+        .get("core.project_recipe_artifacts.v1")
+        .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or_default();
+    for artifact in private_recipes {
+        recipe_registry.insert_private(artifact)?;
+    }
+    let mut interference_policy = world
+        .get_resource::<crate::plugins::interference::InterferencePolicy>()
+        .cloned()
+        .unwrap_or_default();
+    interference_policy.clear_project_rules();
+    let private_rules: Vec<crate::plugins::interference::InterferenceRule> = extensions
+        .get("core.project_interference_rules.v1")
+        .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or_default();
+    for rule in private_rules {
+        interference_policy.insert_private(rule)?;
+    }
     clear_scene(world);
     world.insert_resource(ProjectExtensions(extensions));
+    world.insert_resource(passage_registry);
+    world.insert_resource(recipe_registry);
+    world.insert_resource(interference_policy);
     world.insert_resource(foreign_sources);
 
     let doc_props = match document_properties {
@@ -2049,6 +2181,79 @@ mod tests {
         w.insert_resource(PendingCommandQueue::default());
         w.insert_resource(DocumentState::default());
         w
+    }
+
+    fn private_passage(ref_id: &str) -> crate::plugins::knowledge_persistence::PersistedPassage {
+        serde_json::from_value(serde_json::json!({"passage_ref":ref_id,"text":"Private design preference", "citation":"Owner brief", "license":"vendor_eula:private","proactive_guidance":{"title":"Private","summary":"Private","task_tags":["authoring"]}})).unwrap()
+    }
+    #[test]
+    fn private_passages_transfer_with_project_and_do_not_leak_to_next_document() {
+        use crate::plugins::corpus_gap::CorpusPassageRegistry;
+        let mut source = shell_world();
+        let mut passages = CorpusPassageRegistry::default();
+        passages
+            .register_private(private_passage("private-A"))
+            .unwrap();
+        source.insert_resource(passages);
+        let bytes = capture_project_bytes(&mut source).unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("private-A"));
+        let mut target = shell_world();
+        target.init_resource::<PropertyEditState>();
+        target.init_resource::<TransformState>();
+        target.init_resource::<NextState<ActiveTool>>();
+        open_project_bytes(&mut target, &bytes).unwrap();
+        assert_eq!(
+            target
+                .resource::<CorpusPassageRegistry>()
+                .project_passages()
+                .len(),
+            1
+        );
+        assert!(target
+            .resource::<CorpusPassageRegistry>()
+            .globally_proactive_passages()
+            .is_empty());
+        let clean = capture_project_bytes(&mut shell_world()).unwrap();
+        open_project_bytes(&mut target, &clean).unwrap();
+        assert!(target
+            .resource::<CorpusPassageRegistry>()
+            .project_passages()
+            .is_empty());
+    }
+    #[test]
+    fn private_library_passages_use_normal_undo_redo_and_cannot_publish() {
+        use crate::plugins::corpus_gap::CorpusPassageRegistry;
+        let mut source = shell_world();
+        let mut passages = CorpusPassageRegistry::default();
+        passages
+            .register_private(private_passage("library-private"))
+            .unwrap();
+        source.insert_resource(passages);
+        let bytes = capture_project_bytes(&mut source).unwrap();
+        let mut target = shell_world();
+        install_project_library(&mut target, &bytes, "revision1").unwrap();
+        assert_eq!(
+            target
+                .resource::<CorpusPassageRegistry>()
+                .project_passages()
+                .len(),
+            1
+        );
+        target.resource_mut::<PendingCommandQueue>().queue_undo();
+        crate::plugins::history::apply_pending_history_commands(&mut target);
+        assert!(target
+            .resource::<CorpusPassageRegistry>()
+            .project_passages()
+            .is_empty());
+        target.resource_mut::<PendingCommandQueue>().queue_redo();
+        crate::plugins::history::apply_pending_history_commands(&mut target);
+        assert_eq!(
+            target
+                .resource::<CorpusPassageRegistry>()
+                .project_passages()
+                .len(),
+            1
+        );
     }
     #[test]
     fn delayed_shell_save_does_not_acknowledge_newer_bim_edits() {

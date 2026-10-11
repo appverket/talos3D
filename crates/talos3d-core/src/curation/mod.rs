@@ -16,6 +16,7 @@ pub mod assembly_pattern_v2;
 pub mod authoring_script;
 pub mod compat_shim;
 pub mod compatibility;
+pub mod corpus_release;
 pub mod dependencies;
 pub mod entitlement;
 pub mod identity;

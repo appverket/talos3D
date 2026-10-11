@@ -16,6 +16,10 @@ pub(super) enum ModelApiRequest {
         response: oneshot::Sender<ApiResult<Value>>,
     },
     GetInstanceInfo(oneshot::Sender<InstanceInfo>),
+    ListProjectKnowledge {
+        request: ProjectKnowledgeIndexRequest,
+        response: oneshot::Sender<Value>,
+    },
     ListEntities(oneshot::Sender<Vec<EntityEntry>>),
     GetEntity {
         element_id: u64,
@@ -1257,6 +1261,9 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         } => {
             let _ = response.send(handle_edit_plan_request(world, &action, parameters));
         }
+        ModelApiRequest::ListProjectKnowledge { request, response } => {
+            let _ = response.send(handle_list_project_knowledge(world, request));
+        }
         ModelApiRequest::GetInstanceInfo(response) => {
             let _ = response.send(handle_get_instance_info(world));
         }
@@ -1764,7 +1771,17 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             include_ui,
             response,
         } => {
-            let _ = response.send(handle_take_screenshot(world, &path, include_ui));
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = path;
+                crate::plugins::drawing_export::queue_memory_screenshot(
+                    world, include_ui, response,
+                );
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let _ = response.send(handle_take_screenshot(world, &path, include_ui));
+            }
         }
         ModelApiRequest::ExportDrawing { path, response } => {
             let _ = response.send(handle_export_drawing(world, &path));
@@ -2629,6 +2646,9 @@ fn handle_install_recipe_from_session_export(
     };
 
     let scope_str = request.scope.as_deref().unwrap_or("Project");
+    if scope_str.eq_ignore_ascii_case("shipped") {
+        return Err("Shipped recipes require a reviewed corpus release".into());
+    }
     let scope = if scope_str == "Session" {
         Scope::Session
     } else {
@@ -2668,8 +2688,14 @@ fn handle_install_recipe_from_session_export(
         tests: Vec::new(),
     };
 
+    let before = world
+        .get_resource::<crate::curation::RecipeArtifactRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    let mut after = before.clone();
+    after.insert_private(artifact.clone())?;
     // Persist to disk if scope != Session.
-    let persisted_path = if scope != Scope::Session {
+    let persisted_path = if scope != Scope::Session && !cfg!(target_arch = "wasm32") {
         let path = crate::plugins::knowledge_persistence::persist_recipe(&artifact)?;
         Some(path.display().to_string())
     } else {
@@ -2677,9 +2703,12 @@ fn handle_install_recipe_from_session_export(
     };
 
     // Insert into the in-memory registry.
-    world
-        .resource_mut::<RecipeArtifactRegistry>()
-        .insert(artifact);
+    crate::plugins::knowledge_assets::apply_knowledge_update(
+        world,
+        before,
+        after,
+        "Install private learned recipe",
+    );
 
     Ok(InstallRecipeResult {
         family_id: request.family_id,
@@ -2735,11 +2764,11 @@ fn handle_acquire_corpus_passage(
     world: &mut World,
     request: AcquireCorpusPassageRequest,
 ) -> Result<AcquireCorpusPassageResult, String> {
-    use crate::capability_registry::PassageRef;
     use crate::plugins::corpus_gap::CorpusPassageRegistry;
     use crate::plugins::knowledge_persistence::{persist_passage, PersistedPassage};
 
     let persisted = PersistedPassage {
+        meta: None,
         passage_ref: request.passage_ref.clone(),
         text: request.text.clone(),
         citation: request.citation.clone(),
@@ -2752,22 +2781,26 @@ fn handle_acquire_corpus_passage(
         proactive_guidance: None,
     };
 
-    let persisted_path = if request.persist {
+    let before = world
+        .get_resource::<CorpusPassageRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    let mut after = before.clone();
+    after.register_private(persisted.clone())?;
+    let registry_size = after.len();
+    let persisted_path = if request.persist && !cfg!(target_arch = "wasm32") {
         let path = persist_passage(&persisted)?;
         Some(path.display().to_string())
     } else {
         None
     };
 
-    let provenance =
-        crate::plugins::knowledge_persistence::build_provenance_for_passage(&persisted);
-    let passage_ref = PassageRef(request.passage_ref.clone());
-
-    let registry_size = {
-        let mut registry = world.resource_mut::<CorpusPassageRegistry>();
-        registry.register(passage_ref, request.text, provenance);
-        registry.len()
-    };
+    crate::plugins::knowledge_assets::apply_knowledge_update(
+        world,
+        before,
+        after,
+        "Acquire private source passage",
+    );
 
     Ok(AcquireCorpusPassageResult {
         passage_ref: request.passage_ref,

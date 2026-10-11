@@ -254,19 +254,6 @@ impl LocalAccessGuard {
 }
 
 #[cfg(feature = "model-api")]
-pub(super) fn constant_time_bytes_equal(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
-}
-
-#[cfg(feature = "model-api")]
 fn bearer_authentication_allowed(
     headers: &axum::http::HeaderMap,
     authentication: &ModelApiAuthentication,

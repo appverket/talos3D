@@ -500,6 +500,7 @@ fn proactive_passage_surfaces_as_must_read_skill_card() {
 
     let prov = |passage_ref: &str, jurisdiction: Option<&str>| {
         build_provenance_for_passage(&PersistedPassage {
+            meta: None,
             passage_ref: passage_ref.into(),
             text: String::new(),
             citation: "test".into(),
@@ -13966,6 +13967,7 @@ mod capability_profiles {
             ..Default::default()
         };
         let instance = InstanceInfo {
+            shared_corpus_releases: Vec::new(),
             instance_id: "talos3d-test-42".to_string(),
             app_name: "talos3d-test".to_string(),
             pid: 42,
@@ -14760,4 +14762,22 @@ fn mcp_material_assignment_updates_persisted_occurrence_binding() {
         .capture_snapshot(&world.entity(entity), &world)
         .unwrap();
     assert!(cleared.material_assignment().is_none());
+}
+
+#[test]
+fn browser_invocation_adapter_has_every_native_tool() {
+    let catalog = super::server::profile_tool_catalog();
+    let native: std::collections::BTreeSet<_> = catalog
+        .tools_for(CapabilityProfile::Full)
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    let browser: std::collections::BTreeSet<_> = super::server::without_peer_tool_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        native, browser,
+        "New native tools must automatically reach the browser adapter"
+    );
 }

@@ -2,7 +2,7 @@ use super::*;
 
 #[cfg(feature = "model-api")]
 #[derive(Debug, Clone)]
-pub(super) struct ModelApiServer {
+pub(crate) struct ModelApiServer {
     pub(super) sender: ModelApiRequestSender,
     pub(super) tool_router: ToolRouter<Self>,
     /// Active capability profile gating which tools this session advertises
@@ -18,12 +18,20 @@ pub(super) struct ModelApiServer {
 pub(super) enum ModelApiTransportSecurity {
     LocalStdio,
     InstanceBearerHttp,
+    BrowserAttachedRelay,
 }
 
 #[cfg(feature = "model-api")]
 impl ModelApiTransportSecurity {
     pub(super) fn session_info(self, loopback: bool) -> SessionSecurityInfo {
         match self {
+            Self::BrowserAttachedRelay => SessionSecurityInfo {
+                transport_scope: "browser_attached_relay".into(),
+                authentication_assurance: "authenticated_host_and_session_bound_relay_bearer".into(),
+                authorization_assurance: "attached_browser_session_only".into(),
+                delegated_identity: false, capability_profile_is_authorization: false,
+                note: "Browser executor inherits access from the hosted application and session-bound relay. Profiles filter tools; they do not grant access to another user's project.".into(),
+            },
             Self::LocalStdio => SessionSecurityInfo {
                 transport_scope: "local_stdio_process_channel".to_string(),
                 authentication_assurance: "inherited_parent_process_channel".to_string(),
@@ -178,6 +186,12 @@ tokio::task_local! { static REQUIRES_AUTHORED_BASE: bool; }
 
 #[cfg(feature = "model-api")]
 impl ModelApiServer {
+    pub(super) fn for_browser(sender: ModelApiRequestSender) -> Self {
+        let mut server = Self::new(sender);
+        server.transport_security = ModelApiTransportSecurity::BrowserAttachedRelay;
+        server
+    }
+
     pub(super) fn new(sender: ModelApiRequestSender) -> Self {
         Self {
             sender,
@@ -274,6 +288,11 @@ impl ModelApiServer {
     }
 
     async fn receive_with_wake<T>(&self, mut receiver: oneshot::Receiver<T>) -> Result<T, String> {
+        #[cfg(target_arch = "wasm32")]
+        return receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string());
+        #[cfg(not(target_arch = "wasm32"))]
         loop {
             tokio::select! {
                 result = &mut receiver => {
@@ -1250,15 +1269,24 @@ impl ModelApiServer {
             })
             .await??;
 
-        wait_for_written_file(&saved_path, &self.sender).await?;
-        if let Some(warning) = crate::plugins::drawing_export::screenshot_quality_warning_for_path(
-            std::path::Path::new(&saved_path),
-        )? {
-            return Err(format!(
-                "Screenshot '{saved_path}' is not valid visual evidence: {warning}"
-            ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(saved_path)
         }
-        Ok(saved_path)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            wait_for_written_file(&saved_path, &self.sender).await?;
+            if let Some(warning) =
+                crate::plugins::drawing_export::screenshot_quality_warning_for_path(
+                    std::path::Path::new(&saved_path),
+                )?
+            {
+                return Err(format!(
+                    "Screenshot '{saved_path}' is not valid visual evidence: {warning}"
+                ));
+            }
+            Ok(saved_path)
+        }
     }
 
     async fn request_export_drawing(&self, path: String) -> ApiResult<String> {
@@ -2658,6 +2686,14 @@ fn json_tool_result<T: Serialize>(value: T) -> Result<CallToolResult, McpError> 
 pub(super) fn screenshot_tool_result(path: String) -> Result<CallToolResult, McpError> {
     use base64::Engine as _;
 
+    if let Some(encoded) = path.strip_prefix("data:image/png;base64,") {
+        return Ok(CallToolResult::success(vec![
+            Content::json(
+                serde_json::json!({"transport":"browser_memory","mime_type":"image/png"}),
+            )?,
+            Content::image(encoded.to_string(), "image/png"),
+        ]));
+    }
     let mime_type = std::path::Path::new(&path)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -2690,6 +2726,25 @@ pub(super) fn screenshot_tool_result(path: String) -> Result<CallToolResult, Mcp
     Ok(CallToolResult::success(content))
 }
 
+#[cfg(feature = "model-api")]
+fn tool_requires_authored_base(name: &str) -> bool {
+    use super::profiles::{tool_category, ToolCategory};
+    // Guard in the app world, in the same dispatch as the request. A
+    // separate precheck RPC could race a new native gesture.
+    let guarded = !matches!(
+        tool_category(name),
+        ToolCategory::SessionContract
+            | ToolCategory::Capture
+            | ToolCategory::Discovery
+            | ToolCategory::UxAutomation
+            | ToolCategory::Presentation
+    );
+    guarded && !matches!(name, "list_edit_requests" | "inspect_edit_plan")
+}
+
+#[cfg(feature = "model-api")]
+include!(concat!(env!("OUT_DIR"), "/mcp_without_peer.rs"));
+
 // Hand-written (instead of `#[tool_handler]`) so tools/list and tools/call are
 // gated by the session's active capability profile.
 #[cfg(feature = "model-api")]
@@ -2720,22 +2775,7 @@ impl ServerHandler for ModelApiServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         self.tool_call_allowed(request.name.as_ref())?;
-        use super::profiles::{tool_category, ToolCategory};
-        // Guard in the app world, in the same dispatch as the request. A
-        // separate precheck RPC could race a new native gesture.
-        let guarded = !matches!(
-            tool_category(request.name.as_ref()),
-            ToolCategory::SessionContract
-                | ToolCategory::Capture
-                | ToolCategory::Discovery
-                | ToolCategory::UxAutomation
-                | ToolCategory::Presentation
-        );
-        let guarded = guarded
-            && !matches!(
-                request.name.as_ref(),
-                "list_edit_requests" | "inspect_edit_plan"
-            );
+        let guarded = tool_requires_authored_base(request.name.as_ref());
         let tcc = ToolCallContext::new(self, request, context);
         REQUIRES_AUTHORED_BASE
             .scope(guarded, self.tool_router.call(tcc))
@@ -4314,6 +4354,8 @@ pub struct CorpusGapInfo {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PassageLookupInfo {
+    pub scope: String,
+    pub trust: String,
     pub passage_ref: String,
     pub text: String,
     pub source: String,
@@ -5479,6 +5521,21 @@ pub(super) struct MirrorEntityRequest {
 #[tool_router(router = tool_router)]
 impl ModelApiServer {
     #[tool(
+        name = "list_project_knowledge",
+        description = "List private project/session passages and learned recipes separately from shipped corpus (curation/full profile). Bounded index only; use returned next tools for content. This does not publish or share anything."
+    )]
+    pub(super) async fn list_project_knowledge_tool(
+        &self,
+        Parameters(request): Parameters<ProjectKnowledgeIndexRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let index = self
+            .round_trip(|response| ModelApiRequest::ListProjectKnowledge { request, response })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        json_tool_result(index)
+    }
+
+    #[tool(
         name = "get_instance_info",
         description = "Get runtime identification for this Talos3D instance, including instance_id, MCP HTTP port, URL, registry manifest path, and pid."
     )]
@@ -5536,6 +5593,26 @@ impl ModelApiServer {
         Parameters(params): Parameters<SetSessionProfileRequest>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let before = self.profile_state.get();
+        let result = self.set_session_profile_without_peer(params).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if before != self.profile_state.get()
+            && context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .is_none()
+        {
+            let _ = context.peer.notify_tool_list_changed().await;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (context, before);
+        Ok(result)
+    }
+
+    async fn set_session_profile_without_peer(
+        &self,
+        params: SetSessionProfileRequest,
+    ) -> Result<CallToolResult, McpError> {
         let mut changed = false;
         if let Some(requested) = params.profile.as_deref() {
             let profile = CapabilityProfile::from_name(requested).ok_or_else(|| {
@@ -5552,13 +5629,6 @@ impl ModelApiServer {
             changed = self.profile_state.set(profile);
             // HTTP callers re-fetch tools/list from the explicit changed result.
             // This also supports clients without a standalone SSE listener.
-            let over_http = context
-                .extensions
-                .get::<axum::http::request::Parts>()
-                .is_some();
-            if changed && !over_http {
-                let _ = context.peer.notify_tool_list_changed().await;
-            }
         }
         let catalog = profile_tool_catalog();
         let active = self.profile_state.get();
@@ -9861,4 +9931,18 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .map_err(|e| McpError::invalid_params(e, None))?;
         json_tool_result(result)
     }
+}
+
+#[cfg(test)]
+pub(super) fn without_peer_tool_names() -> &'static [&'static str] {
+    WITHOUT_PEER_TOOL_NAMES
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub(super) struct ProjectKnowledgeIndexRequest {
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }

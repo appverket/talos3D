@@ -4914,7 +4914,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2231b2c085b371c01bc90c0e6c1cab8834711b6394533375bdbf870b0166d419"
 dependencies = [
  "async-trait",
- "base64",
  "bytes",
  "chrono",
  "futures",
@@ -5533,6 +5532,7 @@ dependencies = [
  "hex",
  "image",
  "js-sys",
+ "quote",
  "reqwest",
  "rfd",
  "rmcp",
@@ -5541,6 +5541,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "syn",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

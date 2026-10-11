@@ -122,7 +122,7 @@ use rmcp::{
     tool, tool_router, transport, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
 };
 
-#[cfg(feature = "model-api")]
+#[cfg(all(feature = "model-api", not(target_arch = "wasm32")))]
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -149,73 +149,111 @@ const CMD_MODEL_API_SET_ENTITY_PROPERTY: &str = "core.set_entity_property";
 #[cfg(feature = "model-api")]
 impl Plugin for ModelApiPlugin {
     fn build(&self, app: &mut App) {
-        let (runtime_info, authentication, http_listener) = match resolve_model_api_runtime() {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("failed to configure model API runtime: {error}");
-                return;
-            }
-        };
-        let (sender, receiver) = mpsc::channel();
-        let request_sender = ModelApiRequestSender::new(sender);
-        configure_model_api_update_mode(app);
-        app.insert_resource(ModelApiReceiver(Mutex::new(receiver)));
-        app.insert_resource(ModelApiWakeHandle(request_sender.clone()));
-        app.insert_resource(runtime_info.clone());
-        app.insert_resource(authentication.clone());
-        app.insert_resource(ModelApiDiscoveryCleanup::new(&runtime_info));
-        // Ensure the Semantic Procedural Session substrate (ADR-051) is
-        // installed so `procedural_session.*` tools have resources to
-        // operate on. Idempotent — `ProceduralSessionMcpPlugin` adds
-        // `ProceduralSessionPlugin` only if not already present.
-        app.add_plugins(crate::plugins::procedural_session_mcp::ProceduralSessionMcpPlugin);
-        // Ensure the parametric component substrate (ParametricRegistry +
-        // ParametricStore) exists so the `parametric.*` tools have resources
-        // to operate on. Idempotent — domain plugins populate the registry.
-        app.add_plugins(crate::plugins::parametric_mcp::ParametricMcpPlugin);
-        // Live UX automation enters through Bevy's input messages, not model
-        // mutation APIs, so agents can verify the same viewport paths users
-        // exercise with pointer and keyboard input.
-        app.add_plugins(crate::plugins::ux_harness::UxHarnessPlugin);
-        // Register agent-grade direct mutation primitives as hidden commands.
-        // The public low-level MCP mutation tools call these commands and
-        // return CommandResult; normal UI surfaces stay on interactive commands.
-        register_model_api_primitive_commands(app);
-        register_model_api_edit_requests(app.world_mut());
-        // Register the Model API tools a session may commit, so `eval`
-        // accepts them and commit can route them to real geometry.
+        #[cfg(target_arch = "wasm32")]
         {
-            let mut session_tools =
-                app.world_mut()
-                    .resource_mut::<crate::curation::procedural_session::SessionToolRegistry>();
-            register_model_api_session_tools(&mut session_tools);
+            install_browser_model_api(app);
         }
-        // Requests can replace the document. Run at the frame boundary before
-        // Update systems queue presentation work for the current entities;
-        // World::flush cannot drain other systems' deferred command buffers.
-        app.add_systems(First, poll_model_api_requests);
-        app.add_systems(
-            Startup,
-            (
-                install_model_api_wake_proxy,
-                annotate_window_title_with_model_api_instance,
-            )
-                .chain(),
-        );
-        // Load user-installed recipes and passages from disk into their
-        // in-memory registries (Change-3 / Change-7). Runs after all
-        // domain plugins have populated shipped content so installed assets
-        // layer on top.
-        app.add_systems(
-            Startup,
-            (
-                crate::plugins::knowledge_persistence::load_knowledge_on_startup,
-                load_session_recovery_on_startup_system,
-            )
-                .chain(),
-        );
-        spawn_model_api_server(request_sender, runtime_info, authentication, http_listener);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (runtime_info, authentication, http_listener) = match resolve_model_api_runtime() {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("failed to configure model API runtime: {error}");
+                    return;
+                }
+            };
+            let (sender, receiver) = mpsc::channel();
+            let request_sender = ModelApiRequestSender::new(sender);
+            configure_model_api_update_mode(app);
+            app.insert_resource(ModelApiReceiver(Mutex::new(receiver)));
+            app.insert_resource(ModelApiWakeHandle(request_sender.clone()));
+            app.insert_resource(runtime_info.clone());
+            app.insert_resource(authentication.clone());
+            app.insert_resource(ModelApiDiscoveryCleanup::new(&runtime_info));
+            register_shared_model_api_harness(app);
+            // Requests can replace the document. Run at the frame boundary before
+            // Update systems queue presentation work for the current entities;
+            // World::flush cannot drain other systems' deferred command buffers.
+            app.add_systems(First, poll_model_api_requests);
+            app.add_systems(
+                Startup,
+                (
+                    install_model_api_wake_proxy,
+                    annotate_window_title_with_model_api_instance,
+                )
+                    .chain(),
+            );
+            // Load user-installed recipes and passages from disk into their
+            // in-memory registries (Change-3 / Change-7). Runs after all
+            // domain plugins have populated shipped content so installed assets
+            // layer on top.
+            app.add_systems(
+                Startup,
+                (
+                    crate::plugins::knowledge_persistence::load_knowledge_on_startup,
+                    load_session_recovery_on_startup_system,
+                )
+                    .chain(),
+            );
+            spawn_model_api_server(request_sender, runtime_info, authentication, http_listener);
+        }
     }
+}
+
+#[cfg(feature = "model-api")]
+fn register_shared_model_api_harness(app: &mut App) {
+    // Ensure the Semantic Procedural Session substrate (ADR-051) is
+    // installed so `procedural_session.*` tools have resources to
+    // operate on. Idempotent — `ProceduralSessionMcpPlugin` adds
+    // `ProceduralSessionPlugin` only if not already present.
+    app.add_plugins(crate::plugins::procedural_session_mcp::ProceduralSessionMcpPlugin);
+    // Ensure the parametric component substrate (ParametricRegistry +
+    // ParametricStore) exists so the `parametric.*` tools have resources
+    // to operate on. Idempotent — domain plugins populate the registry.
+    app.add_plugins(crate::plugins::parametric_mcp::ParametricMcpPlugin);
+    // Live UX automation enters through Bevy's input messages, not model
+    // mutation APIs, so agents can verify the same viewport paths users
+    // exercise with pointer and keyboard input.
+    app.add_plugins(crate::plugins::ux_harness::UxHarnessPlugin);
+    // Register agent-grade direct mutation primitives as hidden commands.
+    // The public low-level MCP mutation tools call these commands and
+    // return CommandResult; normal UI surfaces stay on interactive commands.
+    register_model_api_primitive_commands(app);
+    register_model_api_edit_requests(app.world_mut());
+    // Register the Model API tools a session may commit, so `eval`
+    // accepts them and commit can route them to real geometry.
+    {
+        let mut session_tools =
+            app.world_mut()
+                .resource_mut::<crate::curation::procedural_session::SessionToolRegistry>();
+        register_model_api_session_tools(&mut session_tools);
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Resource, Clone)]
+pub(crate) struct BrowserModelApi(pub(crate) server::ModelApiServer);
+
+#[cfg(all(feature = "model-api", target_arch = "wasm32"))]
+fn install_browser_model_api(app: &mut App) {
+    let (sender, receiver) = mpsc::channel();
+    let sender = ModelApiRequestSender::new(sender);
+    let server = server::ModelApiServer::for_browser(sender);
+    app.insert_resource(ModelApiReceiver(Mutex::new(receiver)))
+        .insert_resource(BrowserModelApi(server))
+        .insert_resource(ModelApiRuntimeInfo {
+            instance_id: format!("browser-{}", js_sys::Date::now() as u64),
+            app_name: "Talos3D".into(),
+            pid: 0,
+            http_host: "browser".into(),
+            http_port: 0,
+            http_url: "browser://attached-runtime".into(),
+            registry_path: String::new(),
+            started_at_unix_ms: js_sys::Date::now() as u128,
+            requested_port: None,
+        });
+    register_shared_model_api_harness(app);
+    app.add_systems(First, poll_model_api_requests);
 }
 
 #[cfg(feature = "model-api")]
@@ -738,10 +776,10 @@ use request::{
     ResolveObligationRequest, ResolveObligationResult,
 };
 
-#[cfg(feature = "model-api")]
+#[cfg(all(feature = "model-api", not(target_arch = "wasm32")))]
 #[path = "model_api/transport.rs"]
 mod runtime_transport;
-#[cfg(feature = "model-api")]
+#[cfg(all(feature = "model-api", not(target_arch = "wasm32")))]
 use runtime_transport::{
     annotate_window_title_with_model_api_instance, resolve_model_api_runtime,
     spawn_model_api_server, ModelApiDiscoveryCleanup,
@@ -3335,6 +3373,21 @@ fn parse_alpha_mode(s: &str) -> crate::plugins::materials::MaterialAlphaMode {
 #[cfg(feature = "model-api")]
 fn handle_get_instance_info(world: &World) -> InstanceInfo {
     let mut info = InstanceInfo::from(world.resource::<ModelApiRuntimeInfo>());
+    #[cfg(target_arch = "wasm32")]
+    if let Some(title) = world
+        .iter_entities()
+        .filter_map(|e| e.get::<Window>())
+        .next()
+        .map(|w| w.title.clone())
+    {
+        info.app_name = title;
+    }
+
+    if let Some(releases) =
+        world.get_resource::<crate::curation::corpus_release::InstalledCorpusReleases>()
+    {
+        info.shared_corpus_releases = releases.0.values().cloned().collect();
+    }
     if let Some(document) = world.get_resource::<DocumentState>() {
         info.current_document_path = document
             .current_path
@@ -18087,6 +18140,8 @@ pub fn handle_lookup_source_passage(
         .ok_or_else(|| format!("passage '{passage_ref}' not found in CorpusPassageRegistry"))?;
 
     Ok(PassageLookupInfo {
+        scope: crate::plugins::knowledge_assets::scope_as_str(entry.scope).into(),
+        trust: format!("{:?}", entry.trust).to_ascii_lowercase(),
         passage_ref,
         text: entry.text.clone(),
         source: entry.provenance.source.clone(),
@@ -18233,7 +18288,7 @@ pub fn handle_save_recipe_draft(
     request: SaveRecipeDraftRequest,
 ) -> ApiResult<RecipeDraftInfo> {
     use crate::plugins::corpus_gap::{CorpusGapQueue, CorpusPassageRegistry};
-    use crate::plugins::knowledge_assets::{parse_scope, KnowledgeResidency};
+    use crate::plugins::knowledge_assets::KnowledgeResidency;
     use crate::plugins::recipe_drafts::{
         recipe_draft_meta_for, RecipeDraftArtifact, RecipeDraftParameter, RecipeDraftRegistry,
         RecipeDraftStatus,
@@ -18280,7 +18335,7 @@ pub fn handle_save_recipe_draft(
             })
             .unwrap_or(RecipeDraftStatus::Drafted),
     };
-    let scope = parse_scope(request.scope.as_deref())?;
+    let scope = crate::plugins::knowledge_assets::parse_draft_scope(request.scope.as_deref())?;
 
     world.init_resource::<RecipeDraftRegistry>();
     let saved = world
@@ -18409,7 +18464,7 @@ pub fn handle_save_assembly_pattern_draft(
         AssemblyPatternDraftRegistry, AssemblyPatternDraftStatus,
     };
     use crate::plugins::corpus_gap::{CorpusGapQueue, CorpusPassageRegistry};
-    use crate::plugins::knowledge_assets::{parse_scope, KnowledgeResidency};
+    use crate::plugins::knowledge_assets::KnowledgeResidency;
 
     if let Some(ref gap_id) = request.gap_id {
         let Some(queue) = world.get_resource::<CorpusGapQueue>() else {
@@ -18456,7 +18511,7 @@ pub fn handle_save_assembly_pattern_draft(
             })
             .unwrap_or(AssemblyPatternDraftStatus::Drafted),
     };
-    let scope = parse_scope(request.scope.as_deref())?;
+    let scope = crate::plugins::knowledge_assets::parse_draft_scope(request.scope.as_deref())?;
 
     world.init_resource::<AssemblyPatternDraftRegistry>();
     let saved =
@@ -19234,4 +19289,66 @@ fn setting_out_policy_applies(world: &World, entity: Entity, class: &str) -> boo
         || world
             .get_resource::<crate::plugins::refinement::SettingOutPolicies>()
             .is_some_and(|registry| registry.for_class(class).is_some())
+}
+
+#[cfg(feature = "model-api")]
+pub(crate) fn browser_tool_definitions(server: &server::ModelApiServer) -> Vec<Value> {
+    server::profile_tool_catalog()
+        .tools_for(server.profile_state.get())
+        .iter()
+        .map(|tool| serde_json::to_value(tool).expect("MCP tool schema is serializable"))
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+pub(super) fn constant_time_bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+#[cfg(feature = "model-api")]
+fn handle_list_project_knowledge(world: &World, request: ProjectKnowledgeIndexRequest) -> Value {
+    let mut rows = Vec::new();
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
+    {
+        for (id, p) in registry.iter().filter(|(_, p)| {
+            matches!(
+                p.scope,
+                crate::curation::Scope::Session | crate::curation::Scope::Project
+            )
+        }) {
+            rows.push(json!({"kind":"passage","id":id,"scope":crate::plugins::knowledge_assets::scope_as_str(p.scope),"trust":format!("{:?}",p.trust).to_ascii_lowercase(),"next_tool":"lookup_source_passage","arguments":{"passage_ref":id}}));
+        }
+    }
+    if let Some(registry) = world.get_resource::<crate::curation::RecipeArtifactRegistry>() {
+        for p in registry.iter().filter(|p| {
+            matches!(
+                p.meta.scope,
+                crate::curation::Scope::Session | crate::curation::Scope::Project
+            )
+        }) {
+            rows.push(json!({"kind":"recipe","id":p.meta.id.0,"scope":crate::plugins::knowledge_assets::scope_as_str(p.meta.scope),"trust":format!("{:?}",p.meta.trust).to_ascii_lowercase(),"target_class":p.target_class,"next_tool":"discover_curated_paths","arguments":{"element_class":p.target_class,"path_kind":"recipe"}}));
+        }
+    }
+    rows.sort_by(|a, b| {
+        a["kind"]
+            .as_str()
+            .cmp(&b["kind"].as_str())
+            .then(a["id"].as_str().cmp(&b["id"].as_str()))
+    });
+    let total = rows.len();
+    let limit = request.limit.unwrap_or(40).clamp(1, 100);
+    let offset = request.offset.min(total);
+    let page: Vec<_> = rows.into_iter().skip(offset).take(limit).collect();
+    let end = offset + page.len();
+    json!({"layer":"private_project_context","items":page,"total":total,"next_offset":if end<total {Some(end)} else {None},"publication":"none; shared releases require separate confidentiality, rights and evidence review"})
+
 }
