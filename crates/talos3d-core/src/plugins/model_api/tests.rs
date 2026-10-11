@@ -14764,6 +14764,7 @@ fn mcp_material_assignment_updates_persisted_occurrence_binding() {
     assert!(cleared.material_assignment().is_none());
 }
 
+#[cfg(feature = "model-api")]
 #[test]
 fn browser_invocation_adapter_has_every_native_tool() {
     let catalog = super::server::profile_tool_catalog();
