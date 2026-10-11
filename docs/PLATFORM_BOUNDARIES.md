@@ -67,6 +67,10 @@ Likewise, `SurfacePlacementVocabulary` lets the terrain capability place generic
 support systems while Architecture contributes house/building/foundation roles.
 Legacy command ids and saved Architecture vocabulary remain compatible.
 
+Orthographic profile analysis also remains generic: default peak filtering scales
+with the object. Architecture contributes its former building-scale prominence
+and neighbourhood distances through `ElevationAnalysisPolicy`.
+
 ## Capability material defaults
 
 `BuiltinMaterialDefaults` retains capability-supplied appearance presets across

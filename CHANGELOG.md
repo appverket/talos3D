@@ -15,6 +15,8 @@
   orientation share Core helpers. Legacy `host_mode: wall` remains an alias.
   Core no longer inspects serialized Wall payloads or dispatches on building
   element classes. Architecture retains its model identifiers and command ids.
+- Orthographic peak analysis scales with generic objects; Architecture supplies
+  its existing building-scale analysis thresholds through a policy resource.
 - Manufacturer-specific cedar appearance assets move to Architecture. Generic
   material defaults support capability presets across document replacement.
 - Public setup documentation, package metadata, issue/PR templates, repository
