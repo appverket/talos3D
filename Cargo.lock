@@ -5555,6 +5555,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "talos3d-core-app"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "talos3d-core",
+ "talos3d-terrain",
+]
+
+[[package]]
 name = "talos3d-terrain"
 version = "0.1.0"
 dependencies = [

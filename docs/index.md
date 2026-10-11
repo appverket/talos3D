@@ -5,8 +5,8 @@ inspection, and capability-driven extensibility.
 
 Talos3D is also a time-permits open source project. The code is public and
 reusable, but there is no default support or roadmap commitment from the
-maintainer. Read [../GOVERNANCE.md](../GOVERNANCE.md) and
-[../SUPPORT.md](../SUPPORT.md) alongside the technical docs.
+maintainer. Read [../GOVERNANCE.md](https://github.com/appverket/talos3D/blob/main/GOVERNANCE.md) and
+[../SUPPORT.md](https://github.com/appverket/talos3D/blob/main/SUPPORT.md) alongside the technical docs.
 
 The platform is designed so that:
 
@@ -70,8 +70,8 @@ The architecture supports:
 - private enterprise capability packs
 - commercial add-ons built against the same registries and contracts
 
-The architectural capability in this repository is the canonical example of how
-a domain extension can compose on top of the shared platform.
+Talos3D Architecture is a separate edition that composes building-domain
+capabilities on the shared public platform.
 
 That public positioning should be read as an ecosystem model, not a promise
 that Appverket LLC will build or support every part of that ecosystem itself.

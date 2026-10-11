@@ -279,9 +279,18 @@ pub enum EntityScope {
 pub trait AuthoredEntity: Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
     fn type_name(&self) -> &'static str;
+    fn creation_label(&self) -> Option<&'static str> {
+        None
+    }
     fn element_id(&self) -> ElementId;
     fn label(&self) -> String;
     fn center(&self) -> Vec3;
+    /// Restore hosts before dependents. Capabilities may override this stage.
+    /// Core stages: ordinary entities 2, derived bodies 3, assemblies 4, relations 5.
+    fn dependency_order(&self) -> u8 {
+        crate::plugins::commands::snapshot_dependency_order_by_name(self.type_name())
+    }
+
     fn scope(&self) -> EntityScope {
         EntityScope::AuthoredModel
     }
@@ -321,6 +330,15 @@ pub trait AuthoredEntity: Send + Sync + 'static {
     }
 
     fn transform_parent(&self) -> Option<ElementId> {
+        None
+    }
+
+    /// Domain-owned direction of the host's authored reference axis.
+    fn hosted_axis(&self) -> Option<Vec3> {
+        None
+    }
+    /// Parametric coordinate along the host for a world-space point.
+    fn position_along_host(&self, _point: Vec3) -> Option<f64> {
         None
     }
 
@@ -415,6 +433,17 @@ impl fmt::Debug for BoxedEntity {
 }
 
 impl BoxedEntity {
+    pub fn hosted_axis(&self) -> Option<Vec3> {
+        self.0.hosted_axis()
+    }
+    pub fn position_along_host(&self, point: Vec3) -> Option<f64> {
+        self.0.position_along_host(point)
+    }
+
+    pub fn dependency_order(&self) -> u8 {
+        self.0.dependency_order()
+    }
+
     pub fn type_name(&self) -> &'static str {
         self.0.type_name()
     }

@@ -2,6 +2,13 @@
 name = "talos3d-terrain"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/appverket/talos3D"
+
+description = "Terrain modeling and surface operations for Talos3D."
+
+[features]
+model-api = ["talos3d-core/model-api"]
 
 [dependencies]
 bevy = { version = "0.19.1", default-features = false, features = [

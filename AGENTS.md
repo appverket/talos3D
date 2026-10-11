@@ -59,9 +59,9 @@ workspace root `AGENTS.md` before this file.
 
 If you are integrating an external agent:
 
-- enable the model API with `cargo run --features model-api`
+- enable the model API with `cargo run -p talos3d-core-app --features model-api`
 - when running multiple Talos3D instances, pass a unique instance id and port:
-  `cargo run --features model-api -- --instance-id claude --model-api-port 24901`
+  `cargo run -p talos3d-core-app --features model-api -- --instance-id claude --model-api-port 24901`
 - prefer structured MCP tools over scraping UI state
 - inspect first, then invoke commands or property updates
 - expect the MCP surface to reflect authored entities and command metadata

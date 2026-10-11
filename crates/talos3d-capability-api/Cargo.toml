@@ -2,6 +2,10 @@
 name = "talos3d-capability-api"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/appverket/talos3D"
+
+description = "Public Rust extension facade for Talos3D capabilities."
 
 [dependencies]
 talos3d-core = { path = "../talos3d-core" }

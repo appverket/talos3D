@@ -2,6 +2,7 @@ pub mod commands;
 pub mod components;
 pub mod conforming;
 pub mod cut_fill;
+mod discovery_guidance;
 pub mod fairing;
 pub mod generation;
 pub mod heightfield;
@@ -176,6 +177,7 @@ pub struct TerrainWorkbench;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
+        discovery_guidance::register_guidance(app);
         app.init_resource::<TerrainWorkbench>()
             .register_workbench(
                 WorkbenchDescriptor::new("terrain", "Terrain")

@@ -268,10 +268,10 @@ fn capability_snapshot_reports_registry_counts_and_no_curated_paths() {
         .guidance_overrides
         .iter()
         .all(|fact| fact.classification == "guidance_override"));
-    assert!(snapshot
+    assert!(!snapshot
         .must_read_guidance_card_ids
         .contains(&"dkg.visual_morphology".to_string()));
-    assert!(snapshot
+    assert!(!snapshot
         .must_read_guidance_card_ids
         .contains(&"dkg.building_skeleton".to_string()));
     assert!(snapshot
@@ -748,6 +748,20 @@ fn get_entities_details_returns_bulk_details_and_missing_ids() {
 #[cfg(feature = "model-api")]
 fn init_model_api_test_world() -> World {
     let mut world = World::new();
+    let mut policies = crate::plugins::refinement::SettingOutPolicies::default();
+    policies.register(crate::plugins::refinement::SettingOutPolicy {
+        element_class: "wall_assembly".into(),
+        thickness_aliases: vec!["wall_thickness_mm".into(), "wall/thickness_mm".into()],
+        layer_aliases: vec!["wall_layers".into()],
+        system_aliases: vec![
+            "construction_system".into(),
+            "construction_system_id".into(),
+            "top_level_construction_system".into(),
+            "wall_system".into(),
+            "structural_system".into(),
+        ],
+    });
+    world.insert_resource(policies);
     world.insert_resource(Messages::<CreateBoxCommand>::default());
     world.insert_resource(Messages::<CreateCylinderCommand>::default());
     world.insert_resource(Messages::<CreateSphereCommand>::default());
@@ -4293,6 +4307,20 @@ fn definition_library_workflow_exports_imports_and_instantiates() {
 
 #[cfg(feature = "model-api")]
 fn register_hosted_on_relation(world: &mut World) {
+    use crate::plugins::hosting_contracts::{HostedGeometryPolicies, HostedGeometryPolicy};
+    let mut policies = HostedGeometryPolicies::default();
+    policies.default_relation_type = Some("hosted_on".into());
+    policies.register(HostedGeometryPolicy {
+        relation_type: "hosted_on".into(),
+        contract_kind: "fixture::host_aperture".into(),
+        minimum_remaining_host: 0.05,
+        geometry_tolerance: 0.01,
+        placement_tolerance: 0.02,
+        flush_minimum_axis: Some("y".into()),
+        thickness_parameter: Some("wall_thickness".into()),
+        position_parameter: Some("position_along_wall".into()),
+    });
+    world.insert_resource(policies);
     // The real ModelingPlugin installs this factory. Captured edit plans must
     // be able to recapture dependent relations for before-state guards.
     world
@@ -4775,7 +4803,7 @@ fn hosted_definition_instantiation_requires_remaining_wall_around_opening() {
     )
     .expect_err("edge-to-edge opening should be rejected");
 
-    assert!(err.contains("Remaining Wall X"), "{err}");
+    assert!(err.contains("Remaining Host X"), "{err}");
 }
 
 #[cfg(feature = "model-api")]
@@ -4838,7 +4866,7 @@ fn hosted_definition_instantiation_allows_opening_flush_with_host_bottom() {
 
 #[cfg(feature = "model-api")]
 #[test]
-fn occurrence_validate_host_fit_uses_core_wall_opening_fallback() {
+fn occurrence_validate_host_fit_uses_capability_geometry_policy() {
     let mut world = init_model_api_test_world();
     register_hosted_on_relation(&mut world);
 
@@ -4884,7 +4912,7 @@ fn occurrence_validate_host_fit_uses_core_wall_opening_fallback() {
     let result = handle_occurrence_validate_host_fit(
         &world,
         ValidateHostFitRequest {
-            contract_kind: WALL_OPENING_HOSTING_CONTRACT_KIND.to_string(),
+            contract_kind: "fixture::host_aperture".to_string(),
             host_element_id: host_id,
             hosted_element_id: instantiated.element_id,
             contract_parameters: json!({
@@ -5874,91 +5902,14 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(design_body.contains("positive invariants"));
     assert!(design_body.contains("The agent may add to the harness"));
     assert!(design_body.contains("not a brute-force"));
-    assert!(discovery
-        .guidance_card_ids
-        .contains(&"dkg.building_skeleton".to_string()));
-    let skeleton_card = handle_get_guidance_card(&world, "dkg.building_skeleton".into())
-        .expect("card should fetch");
-    assert!(skeleton_card
-        .summary
-        .contains("foundation -> wall frame/top plate"));
-    assert!(skeleton_card.summary.contains("CorpusGaps"));
-    assert!(skeleton_card.summary.contains("marker boxes"));
-    assert!(skeleton_card.json_examples.iter().any(|example| example
-        .to_string()
-        .contains("group_element_id")
-        && example.to_string().contains("created_element_ids")
-        && example.to_string().contains("house_assembly_membership")));
-    assert!(skeleton_card
-        .referenced_tool_ids
-        .contains(&"acquire_corpus_passage".to_string()));
-    let visual_card = handle_list_guidance_cards(&world, Some("house".into()))
-        .iter()
-        .find(|card| card.id == "dkg.visual_morphology")
-        .cloned()
-        .expect("visual morphology card should list for house tasks");
-    assert!(visual_card.title.contains("Houses"));
-    assert!(visual_card
-        .summary
-        .contains("positive morphology checklist"));
-    assert!(visual_card
-        .referenced_tool_ids
-        .contains(&"take_screenshot".to_string()));
-    let visual_body = visual_card
-        .body_markdown
-        .as_deref()
-        .expect("visual morphology card should include resource-oriented body");
-    assert!(visual_body.contains("not a blacklist"));
-    assert!(visual_body.contains("positive invariants"));
-    assert!(visual_body.contains("save it as a prior"));
-    assert!(visual_body.contains("color alone"));
-    assert!(visual_body.contains("mostly shows terrain"));
-    let terrain_card = handle_get_guidance_card(&world, "dkg.terrain_foundation".into())
-        .expect("terrain foundation card should fetch");
-    assert!(terrain_card
-        .summary
-        .contains("one local-coordinate building assembly"));
-    assert!(terrain_card.summary.contains("terrain.plant_structure"));
-    assert!(terrain_card.summary.contains("terrain.plant_on_surface"));
-    assert!(terrain_card.summary.contains("invoke_command"));
-    assert!(terrain_card.summary.contains("command_id"));
-    assert!(terrain_card.summary.contains("semantic `structure`"));
-    assert!(terrain_card
-        .summary
-        .contains("semantic `foundation_system`"));
-    assert!(terrain_card
-        .summary
-        .contains("terrain.release_planted_structure"));
-    assert!(terrain_card
-        .summary
-        .contains("terrain.demote_conforming_foundation"));
-    assert!(terrain_card.summary.contains("world Y=0"));
-    assert!(terrain_card
-        .referenced_tool_ids
-        .contains(&"elevation_at".to_string()));
-    assert!(terrain_card
-        .referenced_tool_ids
-        .contains(&"get_world_aabb".to_string()));
-    let terrain_body = terrain_card
-        .body_markdown
-        .as_deref()
-        .expect("terrain foundation card should include behavior body");
-    assert!(terrain_body.contains("select the visible"));
-    assert!(terrain_body.contains("terrain.plant_structure"));
-    assert!(terrain_body.contains("invoke_command"));
-    assert!(terrain_body.contains("command_id"));
-    assert!(terrain_body.contains("nested semantic `foundation_system`"));
-    assert!(terrain_body.contains("snapshot"));
-    assert!(terrain_body.contains("max_height_box"));
-    let terrain_body = terrain_card
-        .body_markdown
-        .as_deref()
-        .expect("terrain card should explain assembly-wide placement");
-    assert!(terrain_body.contains("assembly-wide"));
-    assert!(terrain_body.contains("prompt target"));
-    assert!(terrain_body.contains("re-seat the house"));
-    assert!(terrain_body.contains("check_floating"));
-    assert!(terrain_body.contains("not sufficient for terrain-seated buildings"));
+    for id in [
+        "dkg.building_skeleton",
+        "dkg.visual_morphology",
+        "dkg.terrain_foundation",
+    ] {
+        assert!(handle_get_guidance_card(&world, id.into()).is_err());
+        assert!(!discovery.guidance_card_ids.contains(&id.to_string()));
+    }
 
     let known_tools = std::collections::BTreeSet::from([
         "get_instance_info",

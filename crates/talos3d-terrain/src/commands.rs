@@ -1268,10 +1268,6 @@ fn execute_delete_elevation_curve(
     })
 }
 
-fn required_element_id(parameters: &Value, key: &str) -> Result<ElementId, String> {
-    optional_element_id(parameters, key)?.ok_or_else(|| format!("Missing required parameter {key}"))
-}
-
 fn required_scalar(parameters: &Value, key: &str) -> Result<f32, String> {
     parameters
         .get(key)

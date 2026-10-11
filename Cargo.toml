@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "app-core",
     "crates/cadio-ir",
     "crates/cadio-dwg",
     "crates/cadio-tools",
@@ -7,7 +8,6 @@ members = [
     "crates/talos3d-core",
     "crates/talos3d-terrain",
 ]
-exclude = ["app"]
 resolver = "2"
 
 [profile.release]
@@ -18,7 +18,5 @@ codegen-units = 1
 [profile.release.package."*"]
 opt-level = 3
 
-# The `talos3d` binary lives in `app/` and is its own workspace. It composes
-# the public platform with optional domain extensions from sibling repos, so it
-# is validated downstream. CI here checks only the self-contained public
-# platform crates listed above.
+# All members build from a standalone public checkout. Specialized app
+# compositions and domain integration tests live in their owning repositories.

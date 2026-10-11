@@ -17,17 +17,18 @@ is organized so that:
 - capabilities deliver feature sets
 - setups bundle capabilities into workflows
 
-The architectural package in this repository is a reference extension that
-demonstrates the public platform model.
+Talos3D Architecture is a separate domain edition. Its building entities and
+knowledge consume the public Core contracts. Read
+[Platform Boundaries](./PLATFORM_BOUNDARIES.md) before cross-domain work.
 
 ## Read In This Order
 
-1. [README.md](../README.md)
-2. [AGENTS.md](../AGENTS.md)
+1. [README.md](https://github.com/appverket/talos3D/blob/main/README.md)
+2. [AGENTS.md](https://github.com/appverket/talos3D/blob/main/AGENTS.md)
 3. [Engine Fork Workflow](./ENGINE_FORK_WORKFLOW.md)
 4. [MCP Model API](./MCP_MODEL_API.md)
-5. [Governance](../GOVERNANCE.md)
-6. [Support](../SUPPORT.md)
+5. [Governance](https://github.com/appverket/talos3D/blob/main/GOVERNANCE.md)
+6. [Support](https://github.com/appverket/talos3D/blob/main/SUPPORT.md)
 7. [Core Principles](./CORE_PRINCIPLES.md)
 8. [Platform Architecture](./PLATFORM_ARCHITECTURE.md)
 9. [Extension Architecture](./EXTENSION_ARCHITECTURE.md)
@@ -48,9 +49,14 @@ crates/talos3d-core/
 crates/talos3d-terrain/
   terrain/site reference capability pack
 
-app/
-  optional downstream binary workspace that composes core with domain
-  extensions from sibling repos
+app-core/
+  public desktop app; member of this Cargo workspace
+
+crates/talos3d-capability-api/
+  public extension facade
+
+crates/cadio-*/
+  drawing interchange, DWG decoding and test utilities
 ```
 
 ## Core Mental Model
@@ -81,16 +87,15 @@ primitive/profile/feature workflows.
 ## Development Commands
 
 ```bash
-cargo check
-cargo clippy -- -W clippy::all
-cargo test
+cargo check --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -W clippy::all
+cargo test --locked --workspace
 cargo run --manifest-path app-core/Cargo.toml
 cargo run --manifest-path app-core/Cargo.toml --features model-api
 ```
 
-`app-core/` is the public core-only desktop app. The separate `app/` manifest
-is a product composition for the full Appverket workspace and may depend on
-sibling domain-pack repositories.
+`app-core/` is the public Core desktop app. Specialized app compositions and
+their domain integration tests are maintained in their owning repositories.
 
 ## Application build numbers
 

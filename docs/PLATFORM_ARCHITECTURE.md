@@ -90,8 +90,8 @@ Talos3D should be open-source as a platform. The architecture should support:
 - private enterprise capability packs
 - premium first-party or third-party add-ons
 
-The architectural capability currently in-tree is the reference example of a
-domain extension, not a special architectural tier.
+Talos3D Architecture lives outside this repository and uses the same public
+extension contracts as other specialized editions.
 
 The platform is publishable as a source-level Rust extension system before
 dynamic plugin loading exists. The practical bar is a stable SDK crate,

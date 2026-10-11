@@ -473,3 +473,38 @@ mod hosted_occurrence_contract_tests {
         );
     }
 }
+
+/// Geometry admission controls supplied by the domain owning a hosting relation.
+/// Distances are in world metres. Core supplies the aperture checks, not thresholds.
+#[derive(Debug, Clone)]
+pub struct HostedGeometryPolicy {
+    pub relation_type: String,
+    pub contract_kind: String,
+    pub minimum_remaining_host: f32,
+    pub geometry_tolerance: f32,
+    pub placement_tolerance: f32,
+    /// Optional axis whose minimum edge may be exactly flush rather than inset.
+    pub flush_minimum_axis: Option<String>,
+    pub thickness_parameter: Option<String>,
+    pub position_parameter: Option<String>,
+}
+
+#[derive(bevy::prelude::Resource, Debug, Default)]
+pub struct HostedGeometryPolicies {
+    policies: std::collections::BTreeMap<String, HostedGeometryPolicy>,
+    pub default_relation_type: Option<String>,
+}
+
+impl HostedGeometryPolicies {
+    pub fn register(&mut self, policy: HostedGeometryPolicy) {
+        self.policies.insert(policy.relation_type.clone(), policy);
+    }
+    pub fn for_relation(&self, relation: &str) -> Option<&HostedGeometryPolicy> {
+        self.policies.get(relation)
+    }
+    pub fn for_contract(&self, contract: &str) -> Option<&HostedGeometryPolicy> {
+        self.policies
+            .values()
+            .find(|policy| policy.contract_kind == contract)
+    }
+}

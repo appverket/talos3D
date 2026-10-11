@@ -145,9 +145,10 @@ struct CreateEntityHistoryCommand {
 
 impl EditorCommand for CreateEntityHistoryCommand {
     fn label(&self) -> &'static str {
+        if let Some(label) = self.snapshot.0.creation_label() {
+            return label;
+        }
         match self.snapshot.type_name() {
-            "wall" => "Create wall",
-            "opening" => "Create opening",
             "box" => "Create box",
             "cylinder" => "Create cylinder",
             "sphere" => "Create sphere",
@@ -866,13 +867,11 @@ pub(crate) fn enqueue_apply_void_placement(world: &mut World, outcome: VoidPlace
 }
 
 pub(crate) fn snapshot_dependency_order(snapshot: &BoxedEntity) -> u8 {
-    snapshot_dependency_order_by_name(snapshot.type_name())
+    snapshot.dependency_order()
 }
 
 pub fn snapshot_dependency_order_by_name(type_name: &str) -> u8 {
     match type_name {
-        "wall" => 0,
-        "opening" => 1,
         "face_profile_feature" | "csg" => 3,
         "semantic_assembly" => 4,
         "semantic_relation" => 5,

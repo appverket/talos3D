@@ -4949,64 +4949,7 @@ pub(super) struct GetAgentSkillRequest {
     pub(super) skill_id: String,
 }
 
-#[cfg_attr(feature = "model-api", derive(JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GuidanceCardInfo {
-    pub id: String,
-    pub title: String,
-    pub task_tags: Vec<String>,
-    pub summary: String,
-    pub referenced_tool_ids: Vec<String>,
-    pub next_card_ids: Vec<String>,
-    pub json_examples: Vec<serde_json::Value>,
-    /// Full chapter markdown. Present on chapter cards; `None` on summary-only
-    /// cards. Clients that only need the summary may ignore this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body_markdown: Option<String>,
-    /// SDLC phase this card primarily supports (`requirements`, `design`,
-    /// `implementation`, `qa`, `review`, `maintenance`) when useful.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    /// Tool calls that should appear in a well-formed agent trajectory before
-    /// the card's claim is considered satisfied.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_trajectory_tool_ids: Vec<String>,
-    /// Output/evidence rubric for this card. These are agent-facing eval
-    /// criteria, not deterministic validators by themselves.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub success_criteria: Vec<String>,
-    /// Conditions where the agent should stop, record a gap, or ask the user
-    /// instead of improvising.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stop_conditions: Vec<String>,
-    /// Evidence that should be visible in the agent run trace or final report.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub observability_events: Vec<String>,
-    /// Recommended capability profile for the card's task shape.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_profile: Option<String>,
-}
-
-impl Default for GuidanceCardInfo {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            title: String::new(),
-            task_tags: Vec::new(),
-            summary: String::new(),
-            referenced_tool_ids: Vec::new(),
-            next_card_ids: Vec::new(),
-            json_examples: Vec::new(),
-            body_markdown: None,
-            phase: None,
-            required_trajectory_tool_ids: Vec::new(),
-            success_criteria: Vec::new(),
-            stop_conditions: Vec::new(),
-            observability_events: Vec::new(),
-            recommended_profile: None,
-        }
-    }
-}
+pub use crate::plugins::authoring_guidance::GuidanceCardInfo;
 
 // --- PP74 request parameter structs ---
 

@@ -32,8 +32,8 @@ use crate::{
         layers::{DocumentVisibility, LayerRegistry, ObjectVisibility, DEFAULT_LAYER_NAME},
         lighting::{ensure_default_lighting_scene, SceneLightingSettings},
         materials::{
-            ensure_builtin_materials, is_builtin_material_id, material_texture_asset_ids,
-            normalize_material_textures, MaterialRegistry, TextureRegistry,
+            is_builtin_material_id, material_texture_asset_ids, normalize_material_textures,
+            reseed_builtin_materials, MaterialRegistry, TextureRegistry,
         },
         modeling::{
             definition::{DefinitionLibraryRegistry, DefinitionRegistry},
@@ -637,9 +637,7 @@ pub fn new_document(world: &mut World) {
     world.insert_resource(DocumentVisibility::default());
     world.insert_resource(MaterialRegistry::default());
     world.insert_resource(TextureRegistry::default());
-    if let Some(mut materials) = world.get_resource_mut::<MaterialRegistry>() {
-        ensure_builtin_materials(&mut materials);
-    }
+    reseed_builtin_materials(world);
     world.insert_resource(DefinitionRegistry::default());
     world.insert_resource(DefinitionLibraryRegistry::default());
     if let Err(error) = apply_registered_bundled_definition_libraries(world) {
@@ -1668,9 +1666,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     textures.rebuild_fingerprint_index();
     world.insert_resource(textures);
     world.insert_resource(materials.unwrap_or_default());
-    if let Some(mut materials) = world.get_resource_mut::<MaterialRegistry>() {
-        ensure_builtin_materials(&mut materials);
-    }
+    reseed_builtin_materials(world);
     let mut normalized_materials = {
         let materials = world.resource::<MaterialRegistry>();
         materials.all().cloned().collect::<Vec<_>>()
@@ -1846,7 +1842,7 @@ fn combined_snapshot_bounds(snapshots: &[BoxedEntity]) -> Option<EntityBounds> {
 }
 
 fn entity_record_sort_key(record: &PersistedEntityRecord) -> (u8, u64) {
-    let type_order = snapshot_dependency_order_by_name(&record.type_name);
+    let type_order = crate::plugins::commands::snapshot_dependency_order_by_name(&record.type_name);
     let element_id = record
         .data
         .get("element_id")
@@ -1899,17 +1895,6 @@ fn is_legacy_primitive_record_type(type_name: &str) -> bool {
             | "profile_sweep"
             | "profile_revolve"
     )
-}
-
-fn snapshot_dependency_order_by_name(type_name: &str) -> u8 {
-    match type_name {
-        "wall" => 0,
-        "opening" => 1,
-        "face_profile_feature" | "csg" => 3,
-        "semantic_assembly" => 4,
-        "semantic_relation" => 5,
-        _ => 2,
-    }
 }
 
 fn clear_scene(world: &mut World) {
@@ -2022,7 +2007,7 @@ mod tests {
         materials::{
             ensure_builtin_materials, normalize_material_textures, MaterialDef,
             TextureChannelIntent, TextureColorSpace, TextureRef, TextureRegistry,
-            BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80, BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO,
+            BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80,
         },
         modeling::{
             assembly::{AssemblyFactory, SemanticAssembly},
@@ -3754,9 +3739,6 @@ mod tests {
         let project = build_project_file(&mut world).expect("project should serialize");
         let materials = project.materials.expect("project material should persist");
         assert_eq!(materials.count(), 1);
-        assert!(materials
-            .get(BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO)
-            .is_none());
         assert!(materials
             .get(BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80)
             .is_none());

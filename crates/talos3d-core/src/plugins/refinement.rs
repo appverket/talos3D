@@ -3011,14 +3011,15 @@ fn setting_out_basis(
 fn construction_system_basis(
     controls: &BTreeMap<String, serde_json::Value>,
 ) -> Option<RefinementBasisIdentity> {
-    let id = [
-        "construction_system",
-        "wall_system",
-        "roof_system",
-        "structural_system",
-    ]
-    .iter()
-    .find_map(|key| controls.get(*key))?;
+    let id = controls
+        .get("construction_system")
+        .or_else(|| controls.get("system"))
+        .or_else(|| {
+            controls
+                .iter()
+                .find(|(key, _)| key.ends_with("_system"))
+                .map(|(_, value)| value)
+        })?;
     let id = id
         .as_str()
         .map(str::to_owned)
@@ -5441,5 +5442,25 @@ mod tests {
         assert_eq!(coverage[0].status, RefinementGoalCoverageStatus::Achieved);
         assert_eq!(coverage[1].status, RefinementGoalCoverageStatus::Lower);
         assert!(coverage.iter().all(|entry| entry.element_id != 3));
+    }
+}
+
+/// Capability vocabulary for envelope reservation and thickness resolution.
+#[derive(Debug, Clone, Default)]
+pub struct SettingOutPolicy {
+    pub element_class: String,
+    pub thickness_aliases: Vec<String>,
+    pub layer_aliases: Vec<String>,
+    pub system_aliases: Vec<String>,
+}
+
+#[derive(Resource, Debug, Default)]
+pub struct SettingOutPolicies(std::collections::BTreeMap<String, SettingOutPolicy>);
+impl SettingOutPolicies {
+    pub fn register(&mut self, policy: SettingOutPolicy) {
+        self.0.insert(policy.element_class.clone(), policy);
+    }
+    pub fn for_class(&self, class: &str) -> Option<&SettingOutPolicy> {
+        self.0.get(class)
     }
 }

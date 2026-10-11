@@ -1,200 +1,136 @@
 <h1><img src="./docs/assets/talos3d-logo.svg" alt="Talos3D logo" width="36" /> Talos3D Core</h1>
 
 [![CI](https://github.com/appverket/talos3D/actions/workflows/ci.yml/badge.svg)](https://github.com/appverket/talos3D/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
 
-Talos3D is a 3D platform for authored geometry, AI-assisted design workflows,
-and capability-based extensibility.
+Talos3D Core is an open-source 3D design platform built with Rust and Bevy.
+Humans, AI agents and specialized editions work on the same authored model,
+through the same commands and undo history.
 
-The project is being prepared as an open-source platform rather than a single
-closed application. The core editing substrate, AI/model API, geometry
-semantics, and capability registries are intended to be reusable by community
-extensions, first-party domain packs, and private add-ons.
+Core provides geometry, editing, persistence and the public capability
+contracts. **Talos3D Architecture** is a separate edition: its building
+entities, construction knowledge, jurisdiction rules and product composition
+live outside this repository. Community and private editions can use the same
+platform contracts for other disciplines.
 
-Recent work adds first steps toward a semantic assembly layer in the authored
-model. That includes authored assemblies, typed semantic relations, capability
-registered vocabulary, and MCP tools for inspecting and creating higher-order
-structures such as rooms, storeys, and houses.
+## Status
 
-## Project Status
+This is an actively evolving project, built and run from source. APIs and file
+formats can change; preserve project backups when upgrading. Capabilities are
+Rust plugins composed at build time; dynamic binary plugin loading is not
+provided. Appverket LLC maintains the project as time permits. See
+[Governance](./GOVERNANCE.md) and [Support](./SUPPORT.md) for expectations.
 
-Talos3D is maintained on a time-permits basis by Appverket LLC. See
-[GOVERNANCE.md](./GOVERNANCE.md) and [SUPPORT.md](./SUPPORT.md) for operating
-boundaries and expectations.
+## Run Core
 
-The intended operating model is:
+Install a current stable [Rust toolchain](https://rustup.rs/) and Git. A native
+window system and GPU supported by Bevy are required for the desktop app.
+On Debian/Ubuntu, install the native development libraries first:
 
-- a public platform core
-- reference domain packs in this repository
-- room for community, private, and commercial extensions outside it
-
-Built-in definition catalogs are now bundled into the app and auto-loaded at
-startup. That keeps reusable authored content available in native and browser
-deployments without depending on a local filesystem convention. Project save
-and load still persist user-authored materials, definitions, and entities, but
-the storage boundary is intentionally abstract so backend-owned project storage
-can replace local files later.
-
-Scene lighting is now handled the same way: the default daylight rig is seeded
-through authored light entities, ambient lighting is explicit scene state, and
-the same lighting contract is available to both UI workflows and MCP clients.
-
-## Featured: MCP Model API
-
-Talos3D includes a structured Model Context Protocol surface for AI agents and
-automation clients.
-
-- Run the public core app with
-  `cargo run --manifest-path app-core/Cargo.toml --features model-api`
-- Connect over HTTP at `http://127.0.0.1:<port>/mcp`
-- For parallel agent sessions, launch with a unique instance id and port:
-  `cargo run --manifest-path app-core/Cargo.toml --features model-api -- --instance-id codex --model-api-port 24842`
-- Use the same command surface the UI uses for inspection and edits
-- Discover capability vocabulary and inspect or create semantic assemblies and
-  relations through the same public interface
-- On startup the app writes local, untracked `.mcp.json` files for detected
-  Talos3D checkout roots so fresh MCP clients can find the running HTTP
-  endpoint from repository-scoped config
-
-Start with [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md).
-
-## What Makes It Different
-
-- AI-first authored model: AI reads and edits authored entities, definition
-  graphs, and semantic geometry, not just render meshes.
-- Capability platform: features are delivered as capabilities and bundled into
-  setups. The architectural functionality in this repository is an example of a
-  capability bundle, not a privileged special case.
-- Extensible geometry stack: simple primitives, profile-based solids, authored
-  features, evaluated bodies, and future DAG-based parameterized geometry can
-  coexist under one model.
-- Authored edge features: fillet and chamfer are first-class authored nodes,
-  so the rounded/bevelled result stays editable through commands and MCP rather
-  than becoming an opaque mesh.
-- One command surface: keyboard, toolbar, menu, command palette, automation,
-  and MCP all converge on the same command substrate.
-- Browser-safe content catalogs: built-in reusable definitions load from
-  bundled app data, while project-local materials and authored data remain
-  serializable for future backend-backed deployments.
-
-## Current Scope
-
-Talos3D already includes:
-
-- a Rust + Bevy core platform
-- a modeling capability with primitives, transforms, groups, face editing, and
-  profile-based solids
-- authored fillet and chamfer features with command and MCP-driven editing
-- authored scene lighting with persistent ambient state, recoverable default
-  rig, and MCP light-management tools
-- desktop project recovery autosaves plus a persistent ten-project Open Recent
-  list in the File menu
-- an embedded assistant chat lane that uses the MCP surface for model work and
-  supports managed relay or direct OpenAI/Anthropic provider connections
-- an architectural capability with walls, openings, BIM metadata, and
-  wall-opening rules
-- an MCP-backed model API
-- first steps toward higher-order semantic structure through authored
-  assemblies, typed relations, vocabulary descriptors, and model API tools
-- semantic geometry summaries for AI inspection, including evaluated body facts
-  such as connectedness and volume where supported
-
-## Architecture In One View
-
-```text
-Core Platform
-  -> shared ECS runtime, command/history, viewport, UI chrome, AI/model API
-
-Capability Modules
-  -> modeling, architecture, terrain, analysis, import/export, future domains
-
-Workbenches
-  -> curated workflows built from capabilities
+```sh
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 ```
 
-The important boundary is capability, not workbench. A capability can be:
-
-- open-source and community maintained
-- a first-party reference extension
-- a paid or private add-on distributed separately
-
-The architectural capability in this repository should be read as a reference
-extension that demonstrates how a domain package composes on top of the public
-platform.
-
-## Quick Start
-
-Run the open-source core desktop app from the repository root:
-
-```bash
-cargo run --manifest-path app-core/Cargo.toml
+```sh
+git clone https://github.com/appverket/talos3D.git talos3d-core
+cd talos3d-core
+cargo run --locked -p talos3d-core-app
 ```
 
-Run with the model API / MCP server enabled:
+The app includes modeling and the optional open-source terrain capability.
+It builds from this checkout alone, without private repositories, accounts or
+hosted services. To run without terrain:
 
-```bash
-cargo run --manifest-path app-core/Cargo.toml --features model-api
+```sh
+cargo run --locked -p talos3d-core-app --no-default-features --features native
 ```
 
-Run with an explicit MCP instance id and port:
+On macOS, Cargo builds require the Xcode Command Line Tools. On Windows, use
+the Rust MSVC toolchain with the Visual Studio C++ build tools. First builds
+compile Bevy and can take several minutes.
 
-```bash
-cargo run --manifest-path app-core/Cargo.toml --features model-api -- --instance-id core --model-api-port 24842
+## Connect an AI agent
+
+Enable the Model Context Protocol (MCP) server:
+
+```sh
+cargo run --locked -p talos3d-core-app --features model-api -- --instance-id core --model-api-port 24842
 ```
 
-The `app-core/` target is the public base application: it uses the platform
-plugins from `crates/talos3d-core` and the optional open-source terrain crate.
-It does not depend on private domain packs.
+The app exposes streamable HTTP at `http://127.0.0.1:24842/mcp`. Use the app's
+pairing flow to obtain instance-bound credentials. Each running instance writes
+a discovery manifest; use a distinct instance id and port for each process.
+Start with `get_instance_info`, `get_authoring_guidance` and
+`get_capability_snapshot` to discover the loaded capabilities before editing.
 
-This repository also contains `app/`, a multi-repo product composition used by
-the Appverket workspace. That target intentionally depends on sibling
-architecture crates and is not the public core-only app:
+Read [MCP Model API](./docs/MCP_MODEL_API.md) for pairing, discovery, profiles
+and examples. Guidance and knowledge are contributed by loaded capabilities;
+Core alone does not supply Architecture's construction expertise.
 
-```bash
-cargo run --manifest-path app/Cargo.toml --features model-api
+## What Core provides
+
+- Authored primitives, profiles, reusable Definitions and occurrences, evaluated
+  bodies, editable geometry features and semantic assemblies/relations.
+- Shared selection, transforms, drafting, materials, lighting and viewport UI.
+- Commands, captured edit plans and history shared by interactive and API edits.
+- Local project persistence, recovery and reusable content libraries.
+- Capability registries for entities, tools, commands, vocabulary, validators,
+  recipes, catalogs, priors, guidance and provenance.
+- MCP inspection and editing, plus an assistant that uses the same model API.
+- A public terrain capability and CAD drawing import infrastructure.
+
+Availability depends on the app's loaded capabilities and feature flags.
+Discover executable paths at runtime; a registered descriptor or draft does
+not by itself mean geometry can be generated.
+
+## Repository map
+
+| Path | Responsibility |
+| --- | --- |
+| `app-core/` | Public desktop app composing Core and optional terrain |
+| `crates/talos3d-core/` | Authored model, editor runtime, commands, registries and MCP |
+| `crates/talos3d-capability-api/` | Public Rust extension facade |
+| `crates/talos3d-terrain/` | Open-source terrain capability |
+| `crates/cadio-ir/`, `crates/cadio-dwg/` | Drawing interchange and DWG decoding |
+| `crates/cadio-tools/` | Drawing test/oracle utilities |
+| `assets/` | Bundled public appearance and content assets |
+| `build-support/` | Shared application build identity |
+| `docs/` | User and developer documentation |
+| `scripts/` | Repository and MCP verification tools |
+
+The root Cargo workspace includes every public crate and the public app. One
+lockfile pins the workspace. Specialized app compositions and their domain
+integration tests belong in their own repositories.
+
+## Develop and contribute
+
+```sh
+cargo fmt --all -- --check
+cargo check --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -W clippy::all
+cargo test --locked --workspace
+cargo test --locked --workspace --features talos3d-core/model-api,talos3d-terrain/model-api
+python3 scripts/check_repository.py
 ```
 
-## Documentation
+Start with [Developer Onboarding](./docs/DEVELOPER_ONBOARDING.md),
+[Contributing](./CONTRIBUTING.md) and [Platform Boundaries](./docs/PLATFORM_BOUNDARIES.md).
+For extension work, read [Capability Plugin API](./docs/CAPABILITY_PLUGIN_API.md)
+and [Extension Architecture](./docs/EXTENSION_ARCHITECTURE.md).
 
-Start here:
+[Documentation home](./docs/index.md) · [User manual](./docs/USER_MANUAL.md) ·
+[Architecture](./docs/PLATFORM_ARCHITECTURE.md) · [Agent notes](./AGENTS.md)
 
-- [Docs Home](./docs/index.md)
-- [MCP Model API](./docs/MCP_MODEL_API.md)
-- [MCP Authentication Security Review](./docs/MCP_AUTH_SECURITY_REVIEW.md)
-- [Developer Onboarding](./docs/DEVELOPER_ONBOARDING.md)
-- [Engine Fork Workflow](./docs/ENGINE_FORK_WORKFLOW.md)
-- [Product Overview](./docs/PRODUCT.md)
-- [Platform Architecture](./docs/PLATFORM_ARCHITECTURE.md)
-- [Extension Architecture](./docs/EXTENSION_ARCHITECTURE.md)
-- [Capability Plugin API](./docs/CAPABILITY_PLUGIN_API.md)
-- [System Architecture](./docs/SYSTEM_ARCHITECTURE.md)
-- [Domain Model](./docs/DOMAIN_MODEL.md)
-- [AGENTS.md](./AGENTS.md)
+To preview the documentation site:
 
-## Documentation Site
-
-The public website/docs are intended to be generated directly from the Markdown
-documents in this repository.
-
-An MkDocs configuration is included:
-
-```bash
+```sh
+python3 -m pip install -r docs/requirements.txt
 mkdocs serve
 ```
 
-## Contributing
+## License and security
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). If you are considering a large
-change, read [GOVERNANCE.md](./GOVERNANCE.md) first so expectations are clear
-before you invest time.
-
-## License
-
-Talos3D is licensed under the [Apache License 2.0](./LICENSE).
-
-See [NOTICE](./NOTICE) for attribution notices and
-[TRADEMARKS.md](./TRADEMARKS.md) for name and logo usage. The Apache License
-does not grant rights to Talos3D trademarks.
-
-## Security
-
-See [SECURITY.md](./SECURITY.md) for vulnerability reporting expectations.
+Core is licensed under [Apache 2.0](./LICENSE). See [NOTICE](./NOTICE) for
+attribution, [asset provenance](./assets/README.md) and [Trademarks](./TRADEMARKS.md) for name and logo usage.
+Report vulnerabilities using [Security](./SECURITY.md).

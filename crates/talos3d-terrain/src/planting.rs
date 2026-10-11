@@ -437,8 +437,16 @@ fn semantic_assembly_by_id(world: &mut World, element_id: ElementId) -> Option<S
     world.get::<SemanticAssembly>(entity).cloned()
 }
 
-fn is_structure_assembly_type(assembly_type: &str) -> bool {
-    matches!(assembly_type, "structure" | "house" | "building")
+fn is_structure_assembly_type(world: &World, assembly_type: &str) -> bool {
+    world
+        .get_resource::<talos3d_core::plugins::surface_placement::SurfacePlacementVocabulary>()
+        .map(|vocabulary| {
+            vocabulary
+                .structure_assembly_types
+                .iter()
+                .any(|kind| kind == assembly_type)
+        })
+        .unwrap_or(assembly_type == "structure")
 }
 
 fn is_foundation_body(world: &mut World, element_id: ElementId) -> bool {
@@ -455,7 +463,7 @@ fn structure_ids_referencing_target(world: &mut World, target_id: ElementId) -> 
     query
         .iter(world)
         .filter(|(_, assembly)| {
-            is_structure_assembly_type(&assembly.assembly_type)
+            is_structure_assembly_type(world, &assembly.assembly_type)
                 && assembly
                     .members
                     .iter()
@@ -469,7 +477,7 @@ fn selected_structure_candidates(world: &mut World, selected_ids: &[ElementId]) 
     let mut candidates = Vec::new();
     for selected_id in selected_ids {
         if semantic_assembly_by_id(world, *selected_id)
-            .is_some_and(|assembly| is_structure_assembly_type(&assembly.assembly_type))
+            .is_some_and(|assembly| is_structure_assembly_type(world, &assembly.assembly_type))
         {
             candidates.push(*selected_id);
             continue;
@@ -528,7 +536,7 @@ fn resolve_plant_structure_args(
             }
         })?;
     if semantic_assembly_by_id(world, structure_id)
-        .is_none_or(|assembly| !is_structure_assembly_type(&assembly.assembly_type))
+        .is_none_or(|assembly| !is_structure_assembly_type(world, &assembly.assembly_type))
     {
         return Err(format!(
             "Plant Structure: structure_id {} is not a semantic structure/house/building assembly.",
@@ -1150,11 +1158,12 @@ fn create_foundation_structure_assembly(
     foundation_id: ElementId,
     surface_id: ElementId,
 ) -> ElementId {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let foundation_structure_id = world.resource::<ElementIdAllocator>().next_id();
     AssemblySnapshot {
         element_id: foundation_structure_id,
         assembly: SemanticAssembly {
-            assembly_type: "foundation_system".to_string(),
+            assembly_type: vocabulary.support_assembly_type.clone(),
             label: "Terrain-conforming foundation system".to_string(),
             members: vec![AssemblyMemberRef {
                 target: foundation_id,
@@ -1166,7 +1175,7 @@ fn create_foundation_structure_assembly(
                 "adaptive": true,
             }),
             metadata: json!({
-                "kind": "foundation_system",
+                "kind": vocabulary.support_assembly_type,
                 "placement_kind": "terrain_conforming_foundation",
                 "body_id": foundation_id.0,
             }),
@@ -1191,8 +1200,9 @@ fn foundation_body_from_system(
     world: &mut World,
     foundation_structure_id: ElementId,
 ) -> Option<ElementId> {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let assembly = semantic_assembly_by_id(world, foundation_structure_id)?;
-    if assembly.assembly_type != "foundation_system" {
+    if assembly.assembly_type != vocabulary.support_assembly_type {
         return None;
     }
     assembly
@@ -1275,13 +1285,14 @@ fn direct_foundation_body_from_structure(
     structure: &SemanticAssembly,
     explicit_foundation_id: Option<ElementId>,
 ) -> Option<ElementId> {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     if explicit_foundation_id.is_some_and(|id| is_foundation_body(world, id)) {
         return explicit_foundation_id;
     }
     structure
         .members
         .iter()
-        .filter(|member| member.role.contains("foundation"))
+        .filter(|member| member.role.contains(&vocabulary.support_member_role))
         .find(|member| is_foundation_body(world, member.target))
         .map(|member| member.target)
 }
@@ -1290,9 +1301,10 @@ fn foundation_system_from_structure(
     world: &mut World,
     structure: &SemanticAssembly,
 ) -> Option<ElementId> {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     structure.members.iter().find_map(|member| {
         let assembly = semantic_assembly_by_id(world, member.target)?;
-        (assembly.assembly_type == "foundation_system").then_some(member.target)
+        (assembly.assembly_type == vocabulary.support_assembly_type).then_some(member.target)
     })
 }
 
@@ -1352,6 +1364,7 @@ fn ensure_structure_has_foundation_system_member(
     foundation_body_id: ElementId,
     surface_id: ElementId,
 ) {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let Some(entity) = find_entity_by_element_id(world, structure_id) else {
         return;
     };
@@ -1365,7 +1378,7 @@ fn ensure_structure_has_foundation_system_member(
     {
         assembly.members.push(AssemblyMemberRef {
             target: foundation_structure_id,
-            role: "foundation".to_string(),
+            role: vocabulary.support_member_role.clone(),
         });
     }
     if !assembly
@@ -1395,6 +1408,7 @@ fn update_foundation_system_as_adaptive(
     foundation_body_id: ElementId,
     surface_id: ElementId,
 ) {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let Some(entity) = find_entity_by_element_id(world, foundation_structure_id) else {
         return;
     };
@@ -1419,7 +1433,7 @@ fn update_foundation_system_as_adaptive(
         "adaptive": true,
     });
     assembly.metadata = json!({
-        "kind": "foundation_system",
+        "kind": vocabulary.support_assembly_type,
         "placement_kind": "terrain_conforming_foundation",
         "body_id": foundation_body_id.0,
     });
@@ -1434,7 +1448,7 @@ fn resolve_structure_plant_target(
 ) -> Result<StructurePlantTarget, String> {
     let structure = semantic_assembly_by_id(world, structure_id)
         .ok_or_else(|| format!("Structure {} was not found.", structure_id.0))?;
-    if !is_structure_assembly_type(&structure.assembly_type) {
+    if !is_structure_assembly_type(world, &structure.assembly_type) {
         return Err(format!(
             "Plant Structure: {} is a '{}' assembly, not a structure/house/building.",
             structure_id.0, structure.assembly_type
@@ -1480,6 +1494,7 @@ fn create_structure_assembly(
     hidden_foundation: Option<ElementId>,
     label: String,
 ) -> ElementId {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let structure_id = world.resource::<ElementIdAllocator>().next_id();
     AssemblySnapshot {
         element_id: structure_id,
@@ -1493,7 +1508,7 @@ fn create_structure_assembly(
                 },
                 AssemblyMemberRef {
                     target: foundation_structure_id,
-                    role: "foundation".to_string(),
+                    role: vocabulary.support_member_role.clone(),
                 },
                 AssemblyMemberRef {
                     target: foundation_id,
@@ -1522,11 +1537,12 @@ fn create_structure_assembly(
 }
 
 fn find_foundation_structure_for_body(world: &mut World, body_id: ElementId) -> Option<ElementId> {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let mut query = world.query::<(&ElementId, &SemanticAssembly)>();
     query
         .iter(world)
         .find(|(_, assembly)| {
-            assembly.assembly_type == "foundation_system"
+            assembly.assembly_type == vocabulary.support_assembly_type
                 && assembly
                     .members
                     .iter()
@@ -1542,8 +1558,8 @@ struct PersistedPlantedStructure {
     planted_on_surface: PlantedOnSurface,
 }
 
-fn is_persisted_planted_structure(assembly: &SemanticAssembly) -> bool {
-    if !is_structure_assembly_type(&assembly.assembly_type) {
+fn is_persisted_planted_structure(world: &World, assembly: &SemanticAssembly) -> bool {
+    if !is_structure_assembly_type(world, &assembly.assembly_type) {
         return false;
     }
     if let Some(placement_kind) = assembly
@@ -1642,7 +1658,7 @@ fn persisted_planted_structures(world: &mut World) -> Vec<PersistedPlantedStruct
         let mut query = world.query::<(&ElementId, &SemanticAssembly)>();
         query
             .iter(world)
-            .filter(|(_, assembly)| is_persisted_planted_structure(assembly))
+            .filter(|(_, assembly)| is_persisted_planted_structure(world, assembly))
             .map(|(id, assembly)| (*id, assembly.clone()))
             .collect::<Vec<_>>()
     };
@@ -1736,6 +1752,7 @@ fn resolve_conforming_foundation_target(
     world: &mut World,
     target_id: ElementId,
 ) -> Result<(Option<ElementId>, ElementId), String> {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let target_entity = find_entity_by_element_id(world, target_id)
         .ok_or_else(|| "target not found".to_string())?;
     if world.get::<ConformingSolid>(target_entity).is_some() {
@@ -1752,7 +1769,7 @@ fn resolve_conforming_foundation_target(
                 .to_string()
         })?
         .clone();
-    if assembly.assembly_type != "foundation_system" {
+    if assembly.assembly_type != vocabulary.support_assembly_type {
         return Err("target semantic assembly is not a foundation_system".to_string());
     }
     for member in &assembly.members {
@@ -1787,6 +1804,7 @@ fn update_foundation_structure_after_demote(
     representation: &str,
     metrics: crate::conforming::ConformingMetrics,
 ) {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let Some(entity) = find_entity_by_element_id(world, foundation_structure_id) else {
         return;
     };
@@ -1811,7 +1829,7 @@ fn update_foundation_structure_after_demote(
         "max_thickness": metrics.max_thickness,
     });
     assembly.metadata = json!({
-        "kind": "foundation_system",
+        "kind": vocabulary.support_assembly_type,
         "placement_kind": "demoted_conforming_foundation",
         "body_id": body_id.0,
         "demoted_representation": representation,
@@ -2742,6 +2760,17 @@ mod tests {
 
     fn test_world() -> World {
         let mut world = World::new();
+        world.insert_resource(
+            talos3d_core::plugins::surface_placement::SurfacePlacementVocabulary {
+                support_assembly_type: "foundation_system".into(),
+                support_member_role: "foundation".into(),
+                structure_assembly_types: vec![
+                    "structure".into(),
+                    "house".into(),
+                    "building".into(),
+                ],
+            },
+        );
         let mut registry = CapabilityRegistry::default();
         registry.register_factory(GroupFactory);
         registry.register_factory(AssemblyFactory);

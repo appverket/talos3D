@@ -41,7 +41,6 @@ use talos3d_core::plugins::{
     layers::LayerPlugin,
     lighting::LightingPlugin,
     materials::MaterialPlugin,
-    surface_debug::SurfaceDebugPlugin,
     modeling::ModelingPlugin,
     named_views::NamedViewsPlugin,
     palette::PalettePlugin,
@@ -54,6 +53,7 @@ use talos3d_core::plugins::{
     shading::ShadingPlugin,
     snap::SnapPlugin,
     storage::{LocalFileBackend, Storage},
+    surface_debug::SurfaceDebugPlugin,
     tape_tool::TapeToolPlugin,
     toolbar::ToolbarPlugin,
     tools::ToolPlugin,
@@ -103,7 +103,7 @@ fn main() {
     .add_plugins(InputOwnershipPlugin)
     .add_plugins(LayerPlugin)
     .add_plugins(MaterialPlugin)
-            .add_plugins(SurfaceDebugPlugin)
+    .add_plugins(SurfaceDebugPlugin)
     .add_plugins(GuideLinePlugin)
     .add_plugins(DimensionLinePlugin)
     .add_plugins(DraftingPlugin)

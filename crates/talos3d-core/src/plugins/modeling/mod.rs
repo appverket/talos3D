@@ -91,6 +91,10 @@ pub struct ModelingWorkbench;
 
 impl Plugin for ModelingPlugin {
     fn build(&self, app: &mut App) {
+        use crate::plugins::component_structure_quality::ComponentStructureQualityPlugin;
+        if !app.is_plugin_added::<ComponentStructureQualityPlugin>() {
+            app.add_plugins(ComponentStructureQualityPlugin);
+        }
         // PP70: domain-neutral refinement-linkage relations are the core
         // vocabulary for cross-state identity; register them here so any
         // app that boots ModelingPlugin has the full relation discovery

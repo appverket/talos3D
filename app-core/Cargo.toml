@@ -1,16 +1,17 @@
-[workspace]
-
 [package]
 name = "talos3d-core-app"
 version = "0.1.0"
 edition = "2021"
 build = "../build-support/app_build.rs"
 publish = false
+license = "Apache-2.0"
+repository = "https://github.com/appverket/talos3D"
+description = "Public Talos3D Core desktop application."
 
 [features]
 default = ["native", "terrain"]
 native = ["bevy/x11"]
-model-api = ["talos3d-core/model-api"]
+model-api = ["talos3d-core/model-api", "talos3d-terrain?/model-api"]
 perf-stats = ["talos3d-core/perf-stats"]
 terrain = ["dep:talos3d-terrain"]
 
@@ -39,11 +40,3 @@ bevy = { version = "0.19.1", default-features = false, features = [
 ] }
 talos3d-core = { path = "../crates/talos3d-core" }
 talos3d-terrain = { path = "../crates/talos3d-terrain", optional = true }
-
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-
-[profile.release.package."*"]
-opt-level = 3

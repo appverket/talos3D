@@ -2,6 +2,10 @@
 name = "talos3d-core"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/appverket/talos3D"
+
+description = "Authored 3D model, editor runtime and capability contracts for Talos3D."
 
 [features]
 default = []
@@ -67,9 +71,8 @@ evalexpr = "11"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Native-only persistence substrate deps. `etcetera` provides the OS
 # cache-dir discovery for LocalFileArtifactStore. `tokio` is needed by
-# the substrate plugin's worker thread bookkeeping (the cloud-side
-# CloudArtifactStore lives in appverket-infra/services/products/talos3d/
-# talos3d-catalog-client and owns its own runtime there).
+# the substrate plugin's worker thread bookkeeping. Remote storage adapters
+# are supplied independently by app compositions.
 etcetera = "0.8"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 url = "2"

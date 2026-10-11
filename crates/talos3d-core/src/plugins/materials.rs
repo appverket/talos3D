@@ -18,8 +18,6 @@ use serde_json::Value;
 use crate::curation::{AssetId, ContentHash, EvidenceRef, MaterialSpecRegistry};
 use crate::plugins::registry_generation::RegistryGeneration;
 
-pub const BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO: &str =
-    "builtin.maibec.red_cedar_light_h2bo";
 pub const BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80: &str = "builtin.glass.blue_tint_glazing_80";
 pub const BUILTIN_MATERIAL_WINDOW_DARK_GASKET: &str = "builtin.window.dark_gasket";
 pub const BUILTIN_MATERIAL_WINDOW_WHITE_FRAME: &str = "builtin.window.white_frame";
@@ -1544,52 +1542,6 @@ impl Plugin for MaterialPlugin {
 
 pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
     registry.upsert(MaterialDef {
-        id: BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO.to_string(),
-        name: "Maibec Red Cedar Light H2BO".to_string(),
-        base_color: [0.72, 0.57, 0.44, 1.0],
-        perceptual_roughness: 0.92,
-        metallic: 0.0,
-        reflectance: 0.32,
-        specular_tint: [0.98, 0.96, 0.93],
-        emissive: [0.0, 0.0, 0.0],
-        emissive_exposure_weight: 1.0,
-        diffuse_transmission: 0.0,
-        specular_transmission: 0.0,
-        thickness: 0.0,
-        ior: 1.45,
-        attenuation_distance: f32::INFINITY,
-        attenuation_color: [1.0, 1.0, 1.0],
-        clearcoat: 0.08,
-        clearcoat_perceptual_roughness: 0.34,
-        anisotropy_strength: 0.0,
-        spec_ref: None,
-        alpha_mode: MaterialAlphaMode::Opaque,
-        alpha_cutoff: 0.5,
-        base_color_texture: Some(TextureRef::AssetPath {
-            path: "materials/maibec_red_cedar_light_h2bo/diffuse.png".to_string(),
-        }),
-        normal_map_texture: Some(TextureRef::AssetPath {
-            path: "materials/maibec_red_cedar_light_h2bo/normal_opengl.png".to_string(),
-        }),
-        metallic_roughness_texture: Some(TextureRef::AssetPath {
-            path: "materials/maibec_red_cedar_light_h2bo/roughness.png".to_string(),
-        }),
-        emissive_texture: None,
-        occlusion_texture: None,
-        uv_scale: [1.0, 1.0],
-        uv_offset: [0.0, 0.0],
-        uv_rotation: 0.0,
-        uv_flip: [false, false],
-        texture_projection: TextureProjection::Uv,
-        texture_blend_sharpness: default_mapping_blend_sharpness(),
-        anisotropy_rotation: 0.0,
-        double_sided: false,
-        unlit: false,
-        fog_enabled: true,
-        depth_bias: 0.0,
-    });
-
-    registry.upsert(MaterialDef {
         id: BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80.to_string(),
         name: "Blue Tint Glazing 80%".to_string(),
         base_color: [0.70, 0.84, 1.0, 0.8],
@@ -1902,8 +1854,14 @@ fn execute_toggle_materials_browser(
 
 // ─── Systems ─────────────────────────────────────────────────────────────────
 
-fn seed_builtin_materials(mut registry: ResMut<MaterialRegistry>) {
+fn seed_builtin_materials(
+    mut registry: ResMut<MaterialRegistry>,
+    defaults: Option<Res<BuiltinMaterialDefaults>>,
+) {
     ensure_builtin_materials(&mut registry);
+    if let Some(defaults) = defaults {
+        defaults.seed(&mut registry);
+    }
 }
 
 /// When the registry changes, invalidate cached handles so they are rebuilt.
@@ -2135,14 +2093,7 @@ mod tests {
         let mut registry = MaterialRegistry::default();
         ensure_builtin_materials(&mut registry);
 
-        assert!(registry.contains(BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO));
         assert!(registry.contains(BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80));
-
-        let cedar = registry
-            .get(BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO)
-            .expect("cedar builtin should exist");
-        assert_eq!(cedar.anisotropy_strength, 0.0);
-        assert_eq!(cedar.anisotropy_rotation, 0.0);
     }
 
     #[test]
@@ -2440,4 +2391,58 @@ fn materials_browser_shown(world: &World) -> bool {
     world
         .get_resource::<crate::plugins::material_browser::MaterialsWindowState>()
         .is_some_and(|state| state.visible)
+}
+
+/// Material presets supplied by loaded capabilities. Retained across documents.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct BuiltinMaterialDefaults(BTreeMap<String, MaterialDef>);
+
+impl BuiltinMaterialDefaults {
+    pub fn insert(&mut self, material: MaterialDef) {
+        self.0.insert(material.id.clone(), material);
+    }
+
+    pub fn seed(&self, registry: &mut MaterialRegistry) {
+        for material in self.0.values() {
+            registry.upsert(material.clone());
+        }
+    }
+}
+
+/// Restore public and capability-supplied material presets after document replacement.
+pub fn reseed_builtin_materials(world: &mut World) {
+    let defaults = world
+        .get_resource::<BuiltinMaterialDefaults>()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(mut registry) = world.get_resource_mut::<MaterialRegistry>() {
+        ensure_builtin_materials(&mut registry);
+        defaults.seed(&mut registry);
+    }
+}
+
+#[cfg(test)]
+mod capability_default_tests {
+    use super::*;
+    #[test]
+    fn capability_defaults_survive_document_registry_replacement() {
+        let mut world = World::new();
+        let mut material = MaterialDef::new("Mechanical coating");
+        material.id = "builtin.mechanical.coating".into();
+        let mut defaults = BuiltinMaterialDefaults::default();
+        defaults.insert(material.clone());
+        world.insert_resource(defaults);
+        for _ in 0..2 {
+            world.insert_resource(MaterialRegistry::default());
+            reseed_builtin_materials(&mut world);
+            assert_eq!(
+                world
+                    .resource::<MaterialRegistry>()
+                    .get(&material.id)
+                    .unwrap()
+                    .name,
+                material.name
+            );
+        }
+    }
 }

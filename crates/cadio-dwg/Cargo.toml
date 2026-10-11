@@ -2,6 +2,10 @@
 name = "cadio-dwg"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/appverket/talos3D"
+
+description = "DWG decoding into the cadio drawing interchange representation."
 
 [dependencies]
 cadio-ir = { path = "../cadio-ir" }

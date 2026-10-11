@@ -7874,39 +7874,15 @@ fn quat_value(rotation: Quat) -> Value {
 }
 
 #[cfg(feature = "model-api")]
-fn infer_wall_thickness_from_snapshot(snapshot: &BoxedEntity) -> Option<f32> {
+fn infer_host_thickness_from_snapshot(snapshot: &BoxedEntity) -> Option<f32> {
     let bounds = snapshot.bounds()?;
     let extents = bounds.max - bounds.min;
     Some(extents.x.min(extents.y).min(extents.z))
 }
 
 #[cfg(feature = "model-api")]
-fn extract_wall_axis_from_snapshot(snapshot: &BoxedEntity) -> Option<Vec3> {
-    if snapshot.type_name() != "wall" {
-        return None;
-    }
-
-    let json = snapshot.to_json();
-    let wall = json.get("Wall")?;
-    let start = value_vec3(
-        &serde_json::json!([
-            wall.get("wall")?.get("start")?.get(0)?.as_f64()? as f32,
-            0.0,
-            wall.get("wall")?.get("start")?.get(1)?.as_f64()? as f32
-        ]),
-        "wall.start",
-    )
-    .ok()?;
-    let end = value_vec3(
-        &serde_json::json!([
-            wall.get("wall")?.get("end")?.get(0)?.as_f64()? as f32,
-            0.0,
-            wall.get("wall")?.get("end")?.get(1)?.as_f64()? as f32
-        ]),
-        "wall.end",
-    )
-    .ok()?;
-    (end - start).try_normalize()
+fn extract_host_axis_from_snapshot(snapshot: &BoxedEntity) -> Option<Vec3> {
+    snapshot.hosted_axis()
 }
 
 #[cfg(feature = "model-api")]
@@ -7914,8 +7890,8 @@ fn infer_face_anchors(
     snapshot: &BoxedEntity,
     opening_center: Vec3,
 ) -> Option<(HostedAnchor, HostedAnchor, f32)> {
-    let thickness = infer_wall_thickness_from_snapshot(snapshot)?;
-    let axis = extract_wall_axis_from_snapshot(snapshot).unwrap_or_else(|| {
+    let thickness = infer_host_thickness_from_snapshot(snapshot)?;
+    let axis = extract_host_axis_from_snapshot(snapshot).unwrap_or_else(|| {
         let bounds = snapshot
             .bounds()
             .unwrap_or(crate::authored_entity::EntityBounds {
@@ -7951,44 +7927,17 @@ fn infer_face_anchors(
 }
 
 #[cfg(feature = "model-api")]
-fn infer_position_along_wall(snapshot: &BoxedEntity, point: Vec3) -> Option<f64> {
-    if snapshot.type_name() != "wall" {
-        return None;
-    }
-    let json = snapshot.to_json();
-    let wall = json.get("Wall")?.get("wall")?;
-    let start = Vec2::new(
-        wall.get("start")?.get(0)?.as_f64()? as f32,
-        wall.get("start")?.get(1)?.as_f64()? as f32,
-    );
-    let end = Vec2::new(
-        wall.get("end")?.get(0)?.as_f64()? as f32,
-        wall.get("end")?.get(1)?.as_f64()? as f32,
-    );
-    let direction = (end - start).try_normalize()?;
-    let length = start.distance(end);
-    if length <= f32::EPSILON {
-        return None;
-    }
-    Some(((point.xz() - start).dot(direction) / length).clamp(0.0, 1.0) as f64)
+fn infer_position_along_host(snapshot: &BoxedEntity, point: Vec3) -> Option<f64> {
+    snapshot.position_along_host(point)
 }
 
 #[cfg(feature = "model-api")]
-fn infer_wall_rotation(snapshot: &BoxedEntity) -> Option<Quat> {
-    let axis = extract_wall_axis_from_snapshot(snapshot)?;
+fn infer_host_rotation(snapshot: &BoxedEntity) -> Option<Quat> {
+    let axis = extract_host_axis_from_snapshot(snapshot)?;
     let planar = Vec2::new(axis.x, axis.z).try_normalize()?;
     let angle = planar.y.atan2(planar.x);
     Some(Quat::from_rotation_y(-angle))
 }
-
-#[cfg(feature = "model-api")]
-const WALL_OPENING_HOSTING_CONTRACT_KIND: &str = "architecture::wall_opening";
-#[cfg(feature = "model-api")]
-const HOSTED_OPENING_MIN_REMAINING_WALL: f32 = 0.05;
-#[cfg(feature = "model-api")]
-const HOSTED_OPENING_GEOMETRY_TOLERANCE: f32 = 0.01;
-#[cfg(feature = "model-api")]
-const HOSTED_OPENING_PLACEMENT_TOLERANCE: f32 = 0.02;
 
 #[cfg(feature = "model-api")]
 #[derive(Debug, Clone, Copy)]
@@ -8126,7 +8075,8 @@ fn hosted_occurrence_placement_center(world: &World, occurrence_id: ElementId) -
 }
 
 #[cfg(feature = "model-api")]
-fn wall_opening_validation_result(
+fn aperture_host_validation_result(
+    policy: &crate::plugins::hosting_contracts::HostedGeometryPolicy,
     contract_kind: HostingContractKindId,
     host_element_id: ElementId,
     hosted_element_id: ElementId,
@@ -8159,7 +8109,7 @@ fn wall_opening_validation_result(
             "opening.exists",
             "Opening Exists",
             HostingCheckStatus::Failed,
-            "Hosted wall openings require an explicit opening entity.",
+            "Hosted apertures require an explicit opening entity.",
             None,
             None,
             Some("opening"),
@@ -8180,7 +8130,7 @@ fn wall_opening_validation_result(
             "host.thickness_axis",
             "Host Thickness Axis",
             HostingCheckStatus::Failed,
-            "Host wall must have a measurable thickness axis.",
+            "Host must have a measurable thickness axis.",
             None,
             None,
             Some("host"),
@@ -8199,7 +8149,7 @@ fn wall_opening_validation_result(
     let opening_thickness = axis_extent(opening_bounds, axes.normal);
 
     let axis_alignment_status =
-        if (opening_thickness - host_thickness).abs() <= HOSTED_OPENING_GEOMETRY_TOLERANCE {
+        if (opening_thickness - host_thickness).abs() <= policy.geometry_tolerance {
             HostingCheckStatus::Passed
         } else {
             HostingCheckStatus::Failed
@@ -8215,7 +8165,7 @@ fn wall_opening_validation_result(
             )
         } else {
             format!(
-                "Opening must span the host wall thickness axis ({}) without rotating out of plane.",
+                "Opening must span the host thickness axis ({}) without rotating out of plane.",
                 axis_name(axes.normal)
             )
         },
@@ -8226,8 +8176,8 @@ fn wall_opening_validation_result(
 
     let normal_min_delta = opening_bounds.min_axis(axes.normal) - host_bounds.min_axis(axes.normal);
     let normal_max_delta = host_bounds.max_axis(axes.normal) - opening_bounds.max_axis(axes.normal);
-    let thickness_status = if normal_min_delta >= -HOSTED_OPENING_GEOMETRY_TOLERANCE
-        && normal_max_delta >= -HOSTED_OPENING_GEOMETRY_TOLERANCE
+    let thickness_status = if normal_min_delta >= -policy.geometry_tolerance
+        && normal_max_delta >= -policy.geometry_tolerance
     {
         HostingCheckStatus::Passed
     } else {
@@ -8238,9 +8188,9 @@ fn wall_opening_validation_result(
         "Opening Thickness Containment",
         thickness_status,
         if thickness_status == HostingCheckStatus::Passed {
-            "Opening depth is contained by the host wall thickness.".to_string()
+            "Opening depth is contained by the host thickness.".to_string()
         } else {
-            "Opening cannot extend outside the host wall thickness.".to_string()
+            "Opening cannot extend outside the host thickness.".to_string()
         },
         Some(validation_measured(opening_thickness as f64, "model_units")),
         Some(validation_measured(host_thickness as f64, "model_units")),
@@ -8250,58 +8200,46 @@ fn wall_opening_validation_result(
     for axis in axes.in_plane {
         let remaining_min = opening_bounds.min_axis(axis) - host_bounds.min_axis(axis);
         let remaining_max = host_bounds.max_axis(axis) - opening_bounds.max_axis(axis);
-        // A vertical (Y-axis) opening whose bottom is flush with the host's
-        // own bottom (remaining_min ~= 0 — a door with sill_height = 0
-        // reaching the floor) is a normal, universal architectural pattern,
-        // not a near-miss placement error. Exempt only that specific edge
-        // from the minimum-remaining-wall margin: the flushness itself
-        // (checked against the tight geometry tolerance, not the wider
-        // minimum-margin threshold) already tells apart "reaches the floor
-        // by design" from "left an ambiguous sliver of wall by mistake".
-        // Every other edge — the top of the same axis, and both sides of
-        // every other in-plane axis (e.g. left/right) — still requires the
-        // full margin, so an edge-to-edge opening on a non-vertical axis, or
-        // one that reaches only partway toward the bottom without actually
-        // being flush, is still rejected exactly as before.
-        let bottom_is_intentionally_flush =
-            axis == SpatialAxis::Y && remaining_min.abs() <= HOSTED_OPENING_GEOMETRY_TOLERANCE;
+        // Only the capability-selected edge can use the flush exception.
+        let bottom_is_intentionally_flush = policy.flush_minimum_axis.as_deref()
+            == Some(axis_name(axis))
+            && remaining_min.abs() <= policy.geometry_tolerance;
         let remaining = if bottom_is_intentionally_flush {
             remaining_max
         } else {
             remaining_min.min(remaining_max)
         };
-        let status =
-            if remaining + HOSTED_OPENING_GEOMETRY_TOLERANCE >= HOSTED_OPENING_MIN_REMAINING_WALL {
-                HostingCheckStatus::Passed
-            } else {
-                HostingCheckStatus::Failed
-            };
+        let status = if remaining + policy.geometry_tolerance >= policy.minimum_remaining_host {
+            HostingCheckStatus::Passed
+        } else {
+            HostingCheckStatus::Failed
+        };
         checks.push(hosted_opening_check(
             &format!("opening.remaining_wall.{}", axis_name(axis)),
-            &format!("Remaining Wall {}", axis_name(axis).to_uppercase()),
+            &format!("Remaining Host {}", axis_name(axis).to_uppercase()),
             status,
             if status == HostingCheckStatus::Passed {
                 if bottom_is_intentionally_flush {
                     format!(
-                        "Opening is flush with the host's bottom edge along {} (e.g. a door reaching the floor) and leaves wall material above.",
+                        "Opening is flush with the host's bottom edge along {} and leaves host material above.",
                         axis_name(axis)
                     )
                 } else {
                     format!(
-                        "Opening leaves wall material on both sides along {}.",
+                        "Opening leaves host material on both sides along {}.",
                         axis_name(axis)
                     )
                 }
             } else {
                 format!(
-                    "Opening must leave at least {:.2} model units of wall on both sides along {} (or be exactly flush with the bottom edge, e.g. a door).",
-                    HOSTED_OPENING_MIN_REMAINING_WALL,
+                    "Opening must leave at least {:.2} model units of host on both sides along {} (or be exactly flush with the bottom edge).",
+                    policy.minimum_remaining_host,
                     axis_name(axis)
                 )
             },
             Some(validation_measured(remaining as f64, "model_units")),
             Some(validation_measured(
-                HOSTED_OPENING_MIN_REMAINING_WALL as f64,
+                policy.minimum_remaining_host as f64,
                 "model_units",
             )),
             Some("host"),
@@ -8316,7 +8254,7 @@ fn wall_opening_validation_result(
         }
         let out_of_plane_delta =
             (axes.normal.component(hosted_center) - axes.normal.component(opening_center)).abs();
-        let in_plane_status = if worst_in_plane_delta <= HOSTED_OPENING_PLACEMENT_TOLERANCE {
+        let in_plane_status = if worst_in_plane_delta <= policy.placement_tolerance {
             HostingCheckStatus::Passed
         } else {
             HostingCheckStatus::Failed
@@ -8335,13 +8273,13 @@ fn wall_opening_validation_result(
                 "model_units",
             )),
             Some(validation_measured(
-                HOSTED_OPENING_PLACEMENT_TOLERANCE as f64,
+                policy.placement_tolerance as f64,
                 "model_units",
             )),
             Some("opening"),
         ));
 
-        let allowed_normal_offset = host_thickness * 0.5 + HOSTED_OPENING_PLACEMENT_TOLERANCE;
+        let allowed_normal_offset = host_thickness * 0.5 + policy.placement_tolerance;
         let normal_status = if out_of_plane_delta <= allowed_normal_offset {
             HostingCheckStatus::Passed
         } else {
@@ -8352,9 +8290,9 @@ fn wall_opening_validation_result(
             "Hosted Center On Wall Depth",
             normal_status,
             if normal_status == HostingCheckStatus::Passed {
-                "Hosted occurrence remains within the wall depth.".to_string()
+                "Hosted occurrence remains within the host depth.".to_string()
             } else {
-                "Hosted occurrence cannot be displaced clear of the wall depth.".to_string()
+                "Hosted occurrence cannot be displaced clear of the host depth.".to_string()
             },
             Some(validation_measured(
                 out_of_plane_delta as f64,
@@ -8395,11 +8333,19 @@ impl EntityBoundsAxisExt for crate::authored_entity::EntityBounds {
 }
 
 #[cfg(feature = "model-api")]
-fn validate_preflight_hosted_wall_opening(
+fn validate_preflight_hosted_aperture(
     world: &World,
     hosted_request: &Value,
     hosted_context: &crate::plugins::modeling::occurrence::HostedOccurrenceContext,
+    relation_type: Option<&str>,
 ) -> ApiResult<()> {
+    let Some(policy) = relation_type.and_then(|relation| {
+        world
+            .get_resource::<crate::plugins::hosting_contracts::HostedGeometryPolicies>()?
+            .for_relation(relation)
+    }) else {
+        return Ok(());
+    };
     let Some(host_id) = hosted_context.host_element_id else {
         return Ok(());
     };
@@ -8411,8 +8357,9 @@ fn validate_preflight_hosted_wall_opening(
         .get("offset")
         .and_then(|value| serde_json::from_value::<[f32; 3]>(value.clone()).ok())
         .map(|[x, y, z]| Vec3::new(x, y, z));
-    let result = wall_opening_validation_result(
-        HostingContractKindId(WALL_OPENING_HOSTING_CONTRACT_KIND.to_string()),
+    let result = aperture_host_validation_result(
+        policy,
+        HostingContractKindId(policy.contract_kind.clone()),
         host_id,
         ElementId(0),
         capture_entity_snapshot(world, host_id),
@@ -8429,7 +8376,7 @@ fn validate_preflight_hosted_wall_opening(
             .collect::<Vec<_>>()
             .join("; ");
         return Err(format!(
-            "Hosted wall opening failed building sanity checks: {failed}"
+            "Hosted wall opening failed host sanity checks: {failed}"
         ));
     }
 
@@ -8638,6 +8585,17 @@ fn prepare_hosted_occurrence_request(
 
     let host_element_id = parse_hosting_element_id(hosting, "host_element_id")?;
     let opening_element_id = parse_hosting_element_id(hosting, "opening_element_id")?;
+    let policies =
+        world.get_resource::<crate::plugins::hosting_contracts::HostedGeometryPolicies>();
+    let relation_type = hosting
+        .get("relation_type")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| host_element_id.and_then(|_| policies?.default_relation_type.clone()));
+    let policy = relation_type
+        .as_deref()
+        .and_then(|relation| policies?.for_relation(relation));
+    let thickness_parameter = policy.and_then(|policy| policy.thickness_parameter.as_deref());
 
     let mut anchors_by_id: HashMap<String, HostedAnchor> = HashMap::new();
     if let Some(anchor_object) = hosting.get("anchors").and_then(Value::as_object) {
@@ -8667,8 +8625,8 @@ fn prepare_hosted_occurrence_request(
             });
     }
 
-    let mut inferred_wall_thickness = hosting
-        .get("wall_thickness")
+    let mut inferred_host_thickness = thickness_parameter
+        .and_then(|parameter| hosting.get(parameter))
         .and_then(Value::as_f64)
         .map(|value| value as f32);
 
@@ -8684,8 +8642,8 @@ fn prepare_hosted_occurrence_request(
         {
             anchors_by_id.entry(exterior.id.clone()).or_insert(exterior);
             anchors_by_id.entry(interior.id.clone()).or_insert(interior);
-            if inferred_wall_thickness.is_none() {
-                inferred_wall_thickness = Some(thickness);
+            if inferred_host_thickness.is_none() {
+                inferred_host_thickness = Some(thickness);
             }
         }
     }
@@ -8722,11 +8680,16 @@ fn prepare_hosted_occurrence_request(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    if !overrides.contains_key("wall_thickness") {
-        if let Some(parameter) = definition.interface.parameters.get("wall_thickness") {
+    if let Some(thickness_parameter) =
+        thickness_parameter.filter(|parameter| !overrides.contains_key(*parameter))
+    {
+        if let Some(parameter) = definition.interface.parameters.get(thickness_parameter) {
             if parameter.override_policy != OverridePolicy::Locked {
-                if let Some(thickness) = inferred_wall_thickness {
-                    overrides.insert("wall_thickness".to_string(), Value::from(thickness as f64));
+                if let Some(thickness) = inferred_host_thickness {
+                    overrides.insert(
+                        thickness_parameter.to_string(),
+                        Value::from(thickness as f64),
+                    );
                 }
             }
         }
@@ -8735,7 +8698,7 @@ fn prepare_hosted_occurrence_request(
     let mut request_object = object.clone();
     if let Some(host_id) = host_element_id {
         if let Some(host_snapshot) = capture_entity_snapshot(world, host_id) {
-            if let Some(rotation) = infer_wall_rotation(&host_snapshot) {
+            if let Some(rotation) = infer_host_rotation(&host_snapshot) {
                 request_object
                     .entry("rotation".to_string())
                     .or_insert_with(|| quat_value(rotation));
@@ -8761,11 +8724,6 @@ fn prepare_hosted_occurrence_request(
         serde_json::to_value(&hosted_context).map_err(|error| error.to_string())?,
     );
 
-    let relation_type = hosting
-        .get("relation_type")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| host_element_id.map(|_| "hosted_on".to_string()));
     let mut relation_parameters = hosting
         .get("relation_parameters")
         .cloned()
@@ -8785,11 +8743,15 @@ fn prepare_hosted_occurrence_request(
         if let Some(host_snapshot) = capture_entity_snapshot(world, host_id) {
             if let Some(opening_center) = hosted_context.anchor_position("opening.center") {
                 if let Some(position_along_wall) =
-                    infer_position_along_wall(&host_snapshot, opening_center)
+                    infer_position_along_host(&host_snapshot, opening_center)
                 {
-                    object
-                        .entry("position_along_wall".to_string())
-                        .or_insert(Value::from(position_along_wall));
+                    if let Some(parameter) =
+                        policy.and_then(|policy| policy.position_parameter.as_ref())
+                    {
+                        object
+                            .entry(parameter.clone())
+                            .or_insert(Value::from(position_along_wall));
+                    }
                 }
             }
             validate_relation_descriptor(
@@ -8861,7 +8823,12 @@ pub fn handle_instantiate_hosted_definition(
             })?;
         }
     }
-    validate_preflight_hosted_wall_opening(world, &hosted_request, &hosted_context)?;
+    validate_preflight_hosted_aperture(
+        world,
+        &hosted_request,
+        &hosted_context,
+        relation_type.as_deref(),
+    )?;
     let (element_id, occurrence_snapshot) =
         build_occurrence_snapshot_for_place(world, hosted_request)?;
 
@@ -9476,12 +9443,16 @@ pub fn handle_occurrence_validate_host_fit(
         return Ok((descriptor.validator)(validation_request, world));
     }
 
-    if contract_kind.0 == WALL_OPENING_HOSTING_CONTRACT_KIND {
+    if let Some(policy) = world
+        .get_resource::<crate::plugins::hosting_contracts::HostedGeometryPolicies>()
+        .and_then(|policies| policies.for_contract(&contract_kind.0))
+    {
         let opening_id = opening_id_from_contract_parameters(
             &validation_request.contract_parameters,
         )
         .or_else(|| opening_id_from_occurrence(world, validation_request.hosted_element_id));
-        return Ok(wall_opening_validation_result(
+        return Ok(aperture_host_validation_result(
+            policy,
             validation_request.contract_kind,
             validation_request.host_element_id,
             validation_request.hosted_element_id,
@@ -12485,9 +12456,9 @@ fn promote_refinement_in_transaction(
         .ok_or_else(|| format!("Entity {element_id} not found"))?;
     let setting_out_evaluation = world
         .get::<crate::capability_registry::ElementClassAssignment>(entity)
-        .filter(|assignment| assignment.element_class.0 == "wall_assembly")
+        .filter(|assignment| setting_out_policy_applies(world, entity, &assignment.element_class.0))
         .map(|assignment| {
-            evaluate_wall_setting_out(world, entity, eid, &assignment.element_class.0, &overrides)
+            evaluate_setting_out(world, entity, eid, &assignment.element_class.0, &overrides)
         });
     if setting_out_evaluation.as_ref().is_some_and(|evaluation| {
         matches!(
@@ -12495,9 +12466,9 @@ fn promote_refinement_in_transaction(
             crate::plugins::refinement::SettingOutThicknessSource::CorpusGap
         )
     }) {
-        ensure_wall_thickness_corpus_gap(world, element_id)?;
+        ensure_setting_out_thickness_corpus_gap(world, element_id)?;
         return Err(crate::plugins::refinement::PromoteError::Other(
-            "Cannot promote under-specified wall: a durable CorpusGap was recorded because no explicit SettingOutContract, authored stack/physical thickness, or evidence-backed thickness prior exists".to_string(),
+            "Cannot promote under-specified element: a durable CorpusGap was recorded because no explicit SettingOutContract, authored stack/physical thickness, or evidence-backed thickness prior exists".to_string(),
         ));
     }
     if let Some(impact) = setting_out_evaluation
@@ -13335,31 +13306,26 @@ pub fn handle_run_validation(
     // contract. Catch datum/envelope drift before a later refinement silently
     // changes exterior dimensions or interior clearances.
     if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
-        let is_wall = world
-            .get::<crate::capability_registry::ElementClassAssignment>(entity)
-            .is_some_and(|assignment| assignment.element_class.0 == "wall_assembly");
-        if is_wall {
-            if let (Some(contract), Some(actual_thickness_mm)) = (
-                world.get::<crate::plugins::refinement::SettingOutContract>(entity),
-                authored_physical_thickness_mm(world, eid),
-            ) {
-                let reserved_thickness_mm = contract.reserved_thickness_mm();
-                let drift_mm = (actual_thickness_mm - reserved_thickness_mm).abs();
-                if drift_mm > contract.tolerance_mm {
-                    infos.push(ValidationFindingInfo {
+        if let (Some(contract), Some(actual_thickness_mm)) = (
+            world.get::<crate::plugins::refinement::SettingOutContract>(entity),
+            authored_physical_thickness_mm(world, eid),
+        ) {
+            let reserved_thickness_mm = contract.reserved_thickness_mm();
+            let drift_mm = (actual_thickness_mm - reserved_thickness_mm).abs();
+            if drift_mm > contract.tolerance_mm {
+                infos.push(ValidationFindingInfo {
                         finding_id: format!("setting_out_contract_drift:{element_id}"),
                         entity_element_id: element_id,
                         validator: "SettingOutContractDrift".to_string(),
                         severity: "Error".to_string(),
                         message: format!(
-                            "Wall thickness is {actual_thickness_mm:.1} mm but its setting-out contract reserves {reserved_thickness_mm:.1} mm (drift {drift_mm:.1} mm exceeds tolerance {:.1} mm)",
+                            "Element thickness is {actual_thickness_mm:.1} mm but its setting-out contract reserves {reserved_thickness_mm:.1} mm (drift {drift_mm:.1} mm exceeds tolerance {:.1} mm)",
                             contract.tolerance_mm
                         ),
                         rationale: "Refinement must preserve the governing datum and locked dimensions; conceptual geometry reserves the full future envelope rather than growing when layers or framing are resolved".to_string(),
                         obligation_id: None,
                         passage_ref: contract.source_ref.clone(),
                     });
-                }
             }
         }
     }
@@ -13747,8 +13713,11 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         })
         .unwrap_or_default();
     must_read_guidance_card_ids.extend(proactive_passage_card_ids.iter().cloned());
-    must_read_guidance_card_ids.push("dkg.building_skeleton".into());
-    must_read_guidance_card_ids.push("dkg.visual_morphology".into());
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::authoring_guidance::GuidanceCardRegistry>()
+    {
+        must_read_guidance_card_ids.extend(registry.cards().map(|card| card.id.clone()));
+    }
     if let Some(guidance) = world.get_resource::<AuthoringGuidance>() {
         if !guidance.is_empty() {
             let id = authoring_guidance_card_id(&guidance.guidance_id);
@@ -14739,7 +14708,8 @@ pub fn handle_discover_curated_paths(
             ElementClassResolution::NativeNonClass { .. }
         )
     });
-    let guidance_card_ids = guidance_card_ids_for_discovery(request.element_class.as_deref());
+    let guidance_card_ids =
+        guidance_card_ids_for_discovery(world, request.element_class.as_deref());
     let requested_jurisdiction = requested_jurisdiction(&request.context);
     let mut related_asset_ids = Vec::new();
     if let Some(registry) = world.get_resource::<RecipeDraftRegistry>() {
@@ -14777,6 +14747,7 @@ pub fn handle_discover_curated_paths(
     let mut parametric_types = Vec::new();
     let mut definition_assets = Vec::new();
     let mut curated_assets = discover_matching_curated_assets(
+        world,
         world
             .get_resource::<CuratedManifestRegistry>()
             .into_iter()
@@ -14909,7 +14880,7 @@ pub fn handle_discover_curated_paths(
         }
         "parametric" => {
             curated_assets.retain(|asset| {
-                curated_path_matches_request(asset, request.element_class.as_deref())
+                curated_path_matches_request(world, asset, request.element_class.as_deref())
                     && jurisdiction_matches_request(
                         asset.jurisdiction.as_deref(),
                         requested_jurisdiction.as_deref(),
@@ -14936,6 +14907,7 @@ pub fn handle_discover_curated_paths(
                             let definition_kind = format!("{:?}", definition.definition_kind);
                             if !request.element_class.as_deref().is_none_or(|needle| {
                                 curated_path_text_matches(
+            world,
                                     needle,
                                     &[
                                         library.id.0.as_str(),
@@ -15245,6 +15217,7 @@ fn query_specific_derivation_only_parametric_beats_paths(
 
 #[cfg(feature = "model-api")]
 fn discover_matching_curated_assets<'a>(
+    world: &World,
     manifests: impl Iterator<Item = &'a crate::curation::CuratedManifest>,
     element_class: Option<&str>,
     requested_jurisdiction: Option<&str>,
@@ -15264,6 +15237,7 @@ fn discover_matching_curated_assets<'a>(
             }
             element_class.is_none_or(|needle| {
                 curated_path_text_matches(
+            world,
                     needle,
                     &[
                         manifest.meta.id.as_str(),
@@ -15468,9 +15442,14 @@ fn curated_manifest_target_types(body: &Value) -> Vec<String> {
 }
 
 #[cfg(feature = "model-api")]
-fn curated_path_matches_request(asset: &CuratedAssetPathInfo, element_class: Option<&str>) -> bool {
+fn curated_path_matches_request(
+    world: &World,
+    asset: &CuratedAssetPathInfo,
+    element_class: Option<&str>,
+) -> bool {
     element_class.is_none_or(|needle| {
         curated_path_text_matches(
+            world,
             needle,
             &[
                 &asset.asset_id,
@@ -15483,8 +15462,8 @@ fn curated_path_matches_request(asset: &CuratedAssetPathInfo, element_class: Opt
 }
 
 #[cfg(feature = "model-api")]
-fn curated_path_text_matches(needle: &str, haystacks: &[&str]) -> bool {
-    let aliases = curated_path_aliases(needle);
+fn curated_path_text_matches(world: &World, needle: &str, haystacks: &[&str]) -> bool {
+    let aliases = curated_path_aliases(world, needle);
     haystacks.iter().any(|haystack| {
         let normalized = normalize_curated_path_text(haystack);
         aliases
@@ -15494,19 +15473,12 @@ fn curated_path_text_matches(needle: &str, haystacks: &[&str]) -> bool {
 }
 
 #[cfg(feature = "model-api")]
-fn curated_path_aliases(needle: &str) -> Vec<String> {
-    let normalized = normalize_curated_path_text(needle);
-    let mut aliases = vec![normalized.clone()];
-    match normalized.as_str() {
-        "roofsystem" => aliases.extend(["roof", "gable", "truss"].map(str::to_string)),
-        "wallassembly" => aliases.extend(["wall", "lightframe", "cavity"].map(str::to_string)),
-        "foundationsystem" => {
-            aliases.extend(["foundation", "slab", "crawlspace"].map(str::to_string))
-        }
-        "window" => aliases.extend(["window", "opening", "glazing"].map(str::to_string)),
-        "door" => aliases.extend(["door", "opening", "entrance"].map(str::to_string)),
-        "house" => aliases.extend(["house", "building", "siteplan"].map(str::to_string)),
-        _ => {}
+fn curated_path_aliases(world: &World, needle: &str) -> Vec<String> {
+    let mut aliases = vec![normalize_curated_path_text(needle)];
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::authoring_guidance::DiscoveryAliases>()
+    {
+        aliases.extend(registry.aliases(needle).iter().cloned());
     }
     aliases.sort();
     aliases.dedup();
@@ -15523,7 +15495,7 @@ fn normalize_curated_path_text(value: &str) -> String {
 }
 
 #[cfg(feature = "model-api")]
-fn guidance_card_ids_for_discovery(element_class: Option<&str>) -> Vec<String> {
+fn guidance_card_ids_for_discovery(world: &World, element_class: Option<&str>) -> Vec<String> {
     let mut ids = vec![
         "dkg.snapshot.start".into(),
         "dkg.authoring_run_contract".into(),
@@ -15533,26 +15505,18 @@ fn guidance_card_ids_for_discovery(element_class: Option<&str>) -> Vec<String> {
         "dkg.no_curated_path".into(),
         "dkg.close_gap".into(),
     ];
-    if element_class.is_some_and(|class| {
-        [
-            "house",
-            "villa",
-            "dwelling",
-            "foundation",
-            "wall",
-            "wall_assembly",
-            "roof",
-            "roof_system",
-            "truss",
-            "rafter",
-            "top_plate",
-            "load_path",
-        ]
-        .iter()
-        .any(|needle| class.contains(needle))
-    }) {
-        ids.insert(2, "dkg.building_skeleton".into());
-        ids.insert(3, "dkg.visual_morphology".into());
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::authoring_guidance::GuidanceCardRegistry>()
+    {
+        ids.extend(
+            registry
+                .cards()
+                .filter(|card| {
+                    element_class
+                        .is_some_and(|class| card.task_tags.iter().any(|tag| class.contains(tag)))
+                })
+                .map(|card| card.id.clone()),
+        );
     }
     ids
 }
@@ -15606,6 +15570,14 @@ fn proactive_passage_card_id(passage_ref: &str) -> String {
 #[cfg(feature = "model-api")]
 fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
     let mut cards = dkc_guidance_cards();
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::authoring_guidance::GuidanceCardRegistry>()
+    {
+        for card in registry.cards() {
+            cards.retain(|existing| existing.id != card.id);
+            cards.push(card.clone());
+        }
+    }
     // Data-driven proactive "skill" cards: any corpus passage that flagged
     // itself proactive (in its JSON) is surfaced as an up-front must-read
     // guidance card. Core stays domain-neutral — it never inspects which
@@ -15693,7 +15665,13 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
             }
         }
     }
+    // Active guidance and chapters override summary cards with the same id.
     cards
+        .into_iter()
+        .map(|card| (card.id.clone(), card))
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_values()
+        .collect()
 }
 
 #[cfg(feature = "model-api")]
@@ -15746,17 +15724,6 @@ pub fn handle_save_agent_skill_draft(
 fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
     vec![
         GuidanceCardInfo {
-            id: "authoring_guidance:architecture.component_structure".into(),
-            title: "Architecture Component Structure".into(),
-            task_tags: vec!["architecture".into(), "authoring".into()],
-            summary: "Read get_authoring_guidance and treat its prompt_text as the active architectural COMPONENT_STRUCTURE contract before editing models.".into(),
-            referenced_tool_ids: vec!["get_authoring_guidance".into()],
-            next_card_ids: vec!["dkg.snapshot.start".into()],
-            json_examples: vec![serde_json::json!({})],
-            body_markdown: None,
-        ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
             id: "mcp_tool:select_recipe".into(),
             title: "Select Recipe".into(),
             task_tags: vec!["recipe".into(), "anti_bluff".into()],
@@ -15764,7 +15731,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             referenced_tool_ids: vec!["select_recipe".into()],
             next_card_ids: vec!["mcp_tool:discover_curated_paths".into(), "dkg.no_curated_path".into()],
             json_examples: vec![serde_json::json!({
-                "element_class": "roof_system",
+                "element_class": "component",
                 "context": { "target_state": "Constructible", "include_session_drafts": true }
             })],
             body_markdown: None,
@@ -15791,12 +15758,12 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             json_examples: vec![
                 serde_json::json!({
                     "path_kind": "parametric",
-                    "element_class": "roof_system",
+                    "element_class": "component",
                     "context": { "target_state": "Constructible" }
                 }),
                 serde_json::json!({
                     "path_kind": "definition",
-                    "element_class": "window"
+                    "element_class": "component"
                 }),
             ],
             body_markdown: None,
@@ -15806,11 +15773,11 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "mcp_tool:request_corpus_expansion".into(),
             title: "Request Corpus Expansion".into(),
             task_tags: vec!["gap".into(), "curation".into()],
-            summary: "Record missing domain knowledge as a CorpusGap before acquiring or drafting new construction knowledge.".into(),
+            summary: "Record missing domain knowledge as a CorpusGap before acquiring or drafting new domain knowledge.".into(),
             referenced_tool_ids: vec!["request_corpus_expansion".into()],
             next_card_ids: vec!["dkg.close_gap".into()],
             json_examples: vec![serde_json::json!({
-                "element_class": "roof_system",
+                "element_class": "component",
                 "missing_artifact_kind": "executable_parametric_or_recipe",
                 "target_state": "Constructible"
             })],
@@ -15821,7 +15788,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "mcp_tool:definition.create".into(),
             title: "Create Definition".into(),
             task_tags: vec!["definition".into(), "authoring".into()],
-            summary: "Author reusable families when no matching Definition exists and the construction knowledge has been grounded.".into(),
+            summary: "Author reusable families when no matching Definition exists and the domain knowledge has been grounded.".into(),
             referenced_tool_ids: vec!["definition.create".into()],
             next_card_ids: vec!["dkg.close_gap".into()],
             json_examples: vec![serde_json::json!({ "name": "Grounded family name" })],
@@ -15840,24 +15807,10 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
         ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
-            id: "parametric_substrate:roof_system".into(),
-            title: "Roof System Parametrics".into(),
-            task_tags: vec!["roof".into(), "parametric".into()],
-            summary: "Use public roof-system parametric types when available; if a truss or roof family lacks representation, treat that as a CorpusGap.".into(),
-            referenced_tool_ids: vec!["discover_curated_paths".into(), "parametric.create".into()],
-            next_card_ids: vec!["dkg.no_curated_path".into()],
-            json_examples: vec![serde_json::json!({
-                "path_kind": "parametric",
-                "element_class": "roof_system"
-            })],
-            body_markdown: None,
-        ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
             id: "canonical_decision:decisions/ADR-042-Agentic-Knowledge-Curation-And-Construction-Expertise.md".into(),
             title: "ADR-042 Curation Gate".into(),
             task_tags: vec!["anti_bluff".into(), "curation".into()],
-            summary: "Construction expertise must be represented as evidence-backed curation assets; missing executable knowledge blocks promotion instead of allowing primitive substitutions.".into(),
+            summary: "Domain expertise must be represented as evidence-backed curation assets; missing executable knowledge blocks promotion instead of allowing primitive substitutions.".into(),
             referenced_tool_ids: vec!["request_corpus_expansion".into(), "save_recipe_draft".into(), "save_assembly_pattern_draft".into()],
             next_card_ids: vec!["dkg.no_curated_path".into()],
             json_examples: Vec::new(),
@@ -15875,8 +15828,6 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "dkg.trajectory_eval".into(),
                 "dkg.design_resources".into(),
                 "dkg.no_curated_path".into(),
-                "dkg.building_skeleton".into(),
-                "dkg.visual_morphology".into(),
             ],
             json_examples: vec![serde_json::json!({ "expanded": false })],
             body_markdown: None,
@@ -16069,7 +16020,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "dkg.design_resources".into(),
             title: "Start From Design Resources".into(),
             task_tags: vec![
-                "architecture".into(),
+                "design".into(),
                 "authoring".into(),
                 "discovery".into(),
                 "morphology".into(),
@@ -16093,7 +16044,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "dkg.executable_asset".into(),
             ],
             json_examples: vec![serde_json::json!({
-                "element_class": "house",
+                "element_class": "component",
                 "path_kind": "prior",
                 "context": {
                     "target_state": "Conceptual",
@@ -16120,125 +16071,6 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
-            id: "dkg.building_skeleton".into(),
-            title: "Houses Need A Structural Skeleton".into(),
-            task_tags: vec![
-                "house".into(),
-                "villa".into(),
-                "dwelling".into(),
-                "foundation".into(),
-                "wall_assembly".into(),
-                "roof_system".into(),
-                "truss".into(),
-                "load_path".into(),
-            ],
-            summary: "For Schematic+ house authoring, the agent must discover or acquire the foundation -> wall frame/top plate -> roof framing/truss load path and assemble validation-relevant generated geometry, not recipe marker boxes. Missing roof/truss anatomy, bearing points, executable paths, or generated aggregate membership are CorpusGaps, not permission to draw decorative sticks or stripes.".into(),
-            referenced_tool_ids: vec![
-                "discover_curated_paths".into(),
-                "request_corpus_expansion".into(),
-                "acquire_corpus_passage".into(),
-                "save_assembly_pattern_draft".into(),
-                "save_recipe_draft".into(),
-                "materialize_learned_asset".into(),
-                "create_assembly".into(),
-                "create_relation".into(),
-                "run_validation_v2".into(),
-                "take_screenshot".into(),
-            ],
-            next_card_ids: vec![
-                "dkg.design_resources".into(),
-                "dkg.no_curated_path".into(),
-                "dkg.close_gap".into(),
-                "dkg.executable_asset".into(),
-                "dkg.visual_morphology".into(),
-            ],
-            json_examples: vec![
-                serde_json::json!({
-                    "path_kind": "recipe",
-                    "element_class": "roof_system",
-                    "context": {
-                        "target_state": "Constructible",
-                        "required_support_stack": [
-                            "foundation_system",
-                            "wall_assembly",
-                            "top_plate",
-                            "roof_system",
-                            "truss_or_rafter"
-                        ]
-                    }
-                }),
-                serde_json::json!({
-                    "element_class": "truss",
-                    "kind": "recipe_or_assembly_pattern",
-                    "rationale": "Roof is being promoted past schematic but no truss family with top chord, bottom chord, web members, panel points, and bearing-on-top-plate relation is available."
-                }),
-                serde_json::json!({
-                    "after_instantiate_recipe": {
-                        "group_element_id_is_the_semantic_aggregate_for": ["refinement", "obligations", "house_assembly_membership", "validation", "screenshots"],
-                        "root_element_id_is_a_locator": "refinement-goal inference resolves a selected recipe locator to its semantic aggregate",
-                        "created_element_ids_are_members_for": ["targeted inspection"]
-                    },
-                    "whole_building_refinement": {
-                        "scope": "the registered semantic house assembly",
-                        "behavior": "preview member obligations, materialize the missing systems, then apply the same scoped goal"
-                    }
-                }),
-            ],
-            body_markdown: None,
-        ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
-            id: "dkg.visual_morphology".into(),
-            title: "Houses Must Read As Houses".into(),
-            task_tags: vec![
-                "house".into(),
-                "villa".into(),
-                "dwelling".into(),
-                "visual".into(),
-                "morphology".into(),
-            ],
-            summary: "For house/villa/dwelling authoring, use visual precedent and typology resources to build a positive morphology checklist before geometry; target-framed screenshots verify the result rather than serving as a brute-force rejection loop.".into(),
-            referenced_tool_ids: vec![
-                "discover_curated_paths".into(),
-                "acquire_corpus_passage".into(),
-                "request_corpus_expansion".into(),
-                "take_screenshot".into(),
-                "set_selection".into(),
-                "run_validation_v2".into(),
-            ],
-            next_card_ids: vec!["dkg.close_gap".into(), "dkg.executable_asset".into()],
-            json_examples: vec![serde_json::json!({
-                "element_class": "house",
-                "path_kind": "prior",
-                "context": {
-                    "target_state": "Schematic",
-                    "visual_morphology_required": true
-                }
-            })],
-            body_markdown: Some(
-                "Visual morphology is a design resource, not a blacklist. For a house, villa, \
-                 dwelling, or cottage, acquire precedent or curated priors, then extract \
-                 positive invariants: overall massing, roof/wall/foundation relationships, \
-                 opening rhythm or intentional absence of openings, material/trim cues, climate \
-                 response, and site relationship. Prompt-specified visible finish cues must be \
-                 represented in the model or left as explicit unresolved gaps; color alone does \
-                 not satisfy a requested pattern such as boards, seams, battens, courses, or \
-                 trim. Author from that checklist before taking screenshots. Frame the authored \
-                 target so it occupies the image and the requested cues are inspectable; if the \
-                 screenshot mostly shows terrain, shadow, cropped roof, or unrelated context, \
-                 reframe/repair and retake before claiming success. Clear selection before the \
-                 final evidence capture unless selection feedback is itself under test, so \
-                 outlines, handles, and rotation guides do not obscure morphology. Inspect the \
-                 inline raster image returned by `take_screenshot`; a saved path alone is not \
-                 visual evidence for a network-only agent. If the necessary \
-                 morphology knowledge is not discoverable, acquire it and save it as a prior, \
-                 assembly pattern, recipe draft, Definition, validator, or agent skill so the \
-                 next agent can find it through MCP."
-                    .into(),
-            ),
-            ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
             id: "dkg.no_curated_path".into(),
             title: "No Curated Path Is A Gap".into(),
             task_tags: vec!["gap".into(), "anti_bluff".into()],
@@ -16250,7 +16082,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             next_card_ids: vec!["dkg.close_gap".into()],
             json_examples: vec![serde_json::json!({
                 "path_kind": "recipe",
-                "element_class": "roof_system",
+                "element_class": "component",
                 "context": { "target_state": "Constructible" }
             })],
             body_markdown: None,
@@ -16279,16 +16111,17 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             next_card_ids: vec!["dkg.executable_asset".into()],
             json_examples: vec![serde_json::json!({
                 "scope": "project",
-                "label": "Learned roof system",
-                "target_class": "roof_system",
+                "label": "Learned component family",
+                "target_class": "component",
                 "jurisdiction": "<region-or-jurisdiction-if-known>",
                 "source_passage_refs": []
             })],
             body_markdown: Some(
-                "When construction practice affects geometry, semantics, validation, or procurement, close the gap as scoped knowledge, not as a local modeling trick.\n\nScope every claim before saving it: generic physical principle; jurisdiction or region; code/standard/regulatory source; manufacturer or product line; off-the-shelf catalog row; or project-only assumption. Use the most specific applicable scope. Do not hard-code any country into the harness: infer the project/request region when explicit, otherwise keep the knowledge generic or ask/record the region gap. For framing dimensions, center-to-center spacing, boards, trusses, fasteners, foundations, wall/floor/roof systems, windows, and doors, prefer region-applicable regulations, standards, supplier catalogs, and manufacturer instructions before generic defaults.\n\nRetrieve progressively and narrowly. First discover by element class, path kind, target state, region/jurisdiction when known, and the natural user terms plus normalized terms. Read only the guidance cards, passages, catalog rows, and Definitions needed for the next authoring decision; do not flood the agent context with a whole regional corpus.\n\nChoose the corpus asset by reuse shape: parametric family for sized systems such as framing modules or layered assemblies; Definition library entry for composable parts such as windows, doors, fixtures, hosted components, and reusable product assemblies; recipe or assembly pattern for construction sequences and layered systems; catalog row/material spec for procurement and BOM identity; validator or rule pack for hard requirements.\n\nBOM-relevant knowledge must preserve catalog/provider identity and off-the-shelf dimensions where available. Do not invent nominal lumber, stud spacing, board thickness, truss geometry, fastener schedules, or product sizes from generic memory when the prompt or project locale implies a regional supply chain. If evidence is missing, record the CorpusGap and leave the value as an explicit assumption instead of promoting it.\n\nAfter saving passages/drafts/Definitions/catalog-backed assets, rediscover using the natural user terms and the normalized English terms, then use the discovered executable or consultable path.".into(),
+                "When domain practice affects geometry, semantics, validation, or procurement, close the gap as scoped knowledge, not as a local modeling trick.\n\nScope every claim before saving it: generic physical principle; jurisdiction or region; code/standard/regulatory source; manufacturer or product line; off-the-shelf catalog row; or project-only assumption. Use the most specific applicable scope. Do not hard-code any country into the harness: infer the project/request region when explicit, otherwise keep the knowledge generic or ask/record the region gap. For physical dimensions, interfaces, materials, tolerances and product configurations, prefer region-applicable regulations, standards, supplier catalogs, and manufacturer instructions before generic defaults.\n\nRetrieve progressively and narrowly. First discover by element class, path kind, target state, region/jurisdiction when known, and the natural user terms plus normalized terms. Read only the guidance cards, passages, catalog rows, and Definitions needed for the next authoring decision; do not flood the agent context with a whole regional corpus.\n\nChoose the corpus asset by reuse shape: parametric family for sized systems such as repeated components or layered assemblies; Definition library entry for composable parts such as parts, fixtures, hosted components, and reusable product assemblies; recipe or assembly pattern for domain procedures and layered systems; catalog row/material spec for procurement and BOM identity; validator or rule pack for hard requirements.\n\nBOM-relevant knowledge must preserve catalog/provider identity and off-the-shelf dimensions where available. Do not invent component dimensions, material thicknesses, connection requirements or product sizes from generic memory when the prompt or project locale implies a regional supply chain. If evidence is missing, record the CorpusGap and leave the value as an explicit assumption instead of promoting it.\n\nAfter saving passages/drafts/Definitions/catalog-backed assets, rediscover using the natural user terms and the normalized English terms, then use the discovered executable or consultable path.".into(),
             ),
         ..GuidanceCardInfo::default()
         },
+
         GuidanceCardInfo {
             id: "dkg.executable_asset".into(),
             title: "Executable Learned Assets".into(),
@@ -16341,120 +16174,6 @@ reports the active frame. ADR-058.".into(),
             ],
             body_markdown: None,
         ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
-            id: "dkg.site_from_survey".into(),
-            title: "Build A Terrain Surface From A Survey".into(),
-            task_tags: vec!["site".into(), "terrain".into(), "import".into()],
-            summary: "If you start from a survey/plot drawing (DWG/DXF), import it with import_file — \
-it creates polylines on named layers. The ground is encoded as height-contour polylines (layers \
-named like HOJDKURVA / contour / elevation / levelcurve), each carrying its elevation. SELECT only \
-those contour polylines with set_selection (NOT property-boundary/building/road layers), then run \
-the terrain command `terrain.prepare_site_surface` via invoke_command to repair the contours, make \
-elevation curves, and drape a Delaunay TIN `terrain_surface` over them — it auto-recenters the \
-survey to local origin. The terrain commands are not standalone tools: discover them with \
-list_commands (terrain.convert_to_elevation_curves, terrain.generate_surface, \
-terrain.prepare_site_surface, terrain.cut_fill_analysis). The resulting terrain_surface is the \
-existing ground; build on it and drape a foundation (see dkg.terrain_foundation). If a project \
-already contains a terrain_surface, skip this and go straight to dkg.terrain_foundation.".into(),
-            referenced_tool_ids: vec![
-                "import_file".into(),
-                "list_importers".into(),
-                "set_selection".into(),
-                "invoke_command".into(),
-                "list_commands".into(),
-            ],
-            next_card_ids: vec!["dkg.terrain_foundation".into()],
-            json_examples: vec![
-                serde_json::json!({ "path": "/path/to/plot.dwg" }),
-                serde_json::json!({ "element_ids": ["<contour_polyline_ids>"] }),
-                serde_json::json!({ "command_id": "terrain.prepare_site_surface", "parameters": {} }),
-            ],
-            body_markdown: None,
-        ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
-            id: "dkg.terrain_foundation".into(),
-            title: "Plant A Building On Terrain With A Hugging Foundation".into(),
-            task_tags: vec!["site".into(), "terrain".into(), "foundation".into()],
-            summary: "To seat a building on a `terrain_surface` so it FOLLOWS the ground, do NOT use \
-a flat box slab or split the building into different coordinate frames. First author one \
-local-coordinate building assembly/group: wall bases, openings, roof, trim, and any temporary base \
-share one floor datum. Then either create a `conforming_solid` under that footprint or call \
-`invoke_command` with `command_id:\"terrain.plant_structure\"` on the semantic structure and \
-terrain, or `invoke_command` with `command_id:\"terrain.plant_on_surface\"` on the grouped building, \
-so the whole assembly is raised onto the foundation top and the conforming \
-foundation belongs to the planted group/assembly. A semantic `structure` plant converts the existing \
-bottom foundation body into the terrain-conforming foundation and records the planting contract. \
-The structure is the semantic prompt/refinement target and the foundation is a semantic \
-`foundation_system`. \
-`terrain.release_planted_structure` detaches terrain-following behavior without deleting geometry; \
-`terrain.demote_conforming_foundation` freezes the foundation_system body as either a snapshot mesh \
-or a max-height box. A terrain AABB is only a flat datum plane; real height comes from `elevation_at`. \
-After planting, sample terrain at the footprint and verify every visible ground-bearing child AABB \
-is at or above the planted assembly datum / sampled grade. If walls remain at world Y=0 while \
-terrain grade is metres above Y=0, the building is buried even if a separate foundation exists.".into(),
-            referenced_tool_ids: vec![
-                "create_entity".into(),
-                "invoke_command".into(),
-                "elevation_at".into(),
-                "get_world_aabb".into(),
-                "take_screenshot".into(),
-            ],
-            next_card_ids: Vec::new(),
-            json_examples: vec![serde_json::json!({
-                "type": "conforming_solid",
-                "surface_id": "<terrain_surface_id>",
-                "position": [3.4, -7.25],
-                "half_extents": [3.35, 3.75],
-                "min_thickness": 0.5,
-                "max_depth": 3.0
-            }), serde_json::json!({
-                "command_id": "terrain.plant_structure",
-                "parameters": {
-                    "structure_id": "<semantic_structure_id>",
-                    "surface_id": "<terrain_surface_id>",
-                    "min_thickness": 0.5
-                }
-            }), serde_json::json!({
-                "command_id": "terrain.plant_on_surface",
-                "parameters": {
-                    "target_id": "<grouped_building_id>",
-                    "surface_id": "<terrain_surface_id>",
-                    "min_thickness": 0.5,
-                    "hide_element_id": "<temporary_flat_base_id_if_any>"
-                }
-            }), serde_json::json!({
-                "command_id": "terrain.demote_conforming_foundation",
-                "parameters": {
-                    "target_id": "<foundation_structure_id>",
-                    "mode": "snapshot"
-                }
-            }), serde_json::json!({
-                "command_id": "terrain.release_planted_structure",
-                "parameters": {
-                    "target_id": "<planted_group_id>"
-                }
-            })],
-            body_markdown: Some(
-                "The terrain placement contract is assembly-wide: a foundation at terrain \
-height does not fix walls or roofs authored later at world Y=0. Author the cottage in one \
-local frame, group it, make it a semantic `structure` with a bottom foundation body, then use \
-`invoke_command { command_id: \"terrain.plant_structure\", parameters: {...} }` with the structure and \
-terrain ids; from the UI, select the visible structure/group and terrain surface, then run Plant \
-Structure. Verify child AABBs against sampled \
-terrain elevations and the planted foundation top. The resulting semantic `structure` is the prompt \
-target for refinement; its nested semantic `foundation_system` is the foundation target. The \
-selected/movable planted group is the behavior target for movement; it must include both the \
-conforming foundation body and the superstructure, so later moves re-seat the house instead of \
-stranding the foundation behind. Use `terrain.demote_conforming_foundation` when the adaptive \
-foundation should become fixed geometry: `snapshot` preserves the current conforming underside, \
-while `max_height_box` uses one rectangular body whose height equals the current maximum thickness. \
-`check_floating` may use a y=0 fallback, so it is \
-not sufficient for terrain-seated buildings unless paired with `elevation_at` samples."
-                    .into(),
-            ),
-            ..GuidanceCardInfo::default()
         },
     ]
 }
@@ -16649,7 +16368,7 @@ fn handle_preview_promotion(
         overrides,
     )?;
     if plan.corpus_gap_required {
-        ensure_wall_thickness_corpus_gap(world, element_id)?;
+        ensure_setting_out_thickness_corpus_gap(world, element_id)?;
     }
 
     Ok(PreviewPromotionResult {
@@ -16662,12 +16381,15 @@ fn handle_preview_promotion(
 }
 
 #[cfg(feature = "model-api")]
-fn ensure_wall_thickness_corpus_gap(world: &mut World, element_id: u64) -> ApiResult<()> {
+fn ensure_setting_out_thickness_corpus_gap(world: &mut World, element_id: u64) -> ApiResult<()> {
+    let element_class = find_entity_by_element_id_readonly(world, ElementId(element_id))
+        .and_then(|entity| world.get::<crate::capability_registry::ElementClassAssignment>(entity))
+        .map(|assignment| assignment.element_class.0.clone());
     let already_recorded = world
         .get_resource::<crate::plugins::corpus_gap::CorpusGapQueue>()
         .is_some_and(|queue| {
             queue.list().iter().any(|gap| {
-                gap.element_class.as_deref() == Some("wall_assembly")
+                gap.element_class == element_class
                     && gap.missing_artifact_kind == "setting_out_thickness_prior"
             })
         });
@@ -16676,11 +16398,11 @@ fn ensure_wall_thickness_corpus_gap(world: &mut World, element_id: u64) -> ApiRe
     }
     handle_request_corpus_expansion(
         world,
-        Some("wall_assembly".to_string()),
+        element_class,
         active_jurisdiction(world, &serde_json::Value::Null),
         "setting_out_thickness_prior".to_string(),
         format!(
-            "Entity {element_id} needs a new wall envelope reservation but has no explicit SettingOutContract, authored stack/physical thickness, or evidence-backed construction-system/jurisdiction prior"
+            "Entity {element_id} needs a new envelope reservation but has no explicit SettingOutContract, authored stack/physical thickness, or evidence-backed construction-system/jurisdiction prior"
         ),
     )?;
     Ok(())
@@ -16749,22 +16471,28 @@ fn override_text<'a>(overrides: &'a serde_json::Value, keys: &[&str]) -> Option<
 }
 
 #[cfg(feature = "model-api")]
-fn authored_stack_thickness_mm(overrides: &serde_json::Value) -> Option<f64> {
-    if let Some(thickness) = override_number(
-        overrides,
-        &[
-            "stack_thickness_mm",
-            "wall_thickness_mm",
-            "wall/thickness_mm",
-            "total_thickness_mm",
-        ],
-    ) {
+fn authored_stack_thickness_mm(
+    overrides: &serde_json::Value,
+    policy: Option<&crate::plugins::refinement::SettingOutPolicy>,
+) -> Option<f64> {
+    let mut thickness_keys = vec!["stack_thickness_mm", "total_thickness_mm"];
+    thickness_keys.extend(
+        policy
+            .into_iter()
+            .flat_map(|policy| policy.thickness_aliases.iter().map(String::as_str)),
+    );
+    if let Some(thickness) = override_number(overrides, &thickness_keys) {
         return (thickness > 0.0).then_some(thickness);
     }
     let layers = overrides
         .as_object()?
         .get("layers")
-        .or_else(|| overrides.as_object()?.get("wall_layers"))?
+        .or_else(|| {
+            policy?
+                .layer_aliases
+                .iter()
+                .find_map(|key| overrides.get(key))
+        })?
         .as_array()?;
     let thickness = layers
         .iter()
@@ -16798,7 +16526,7 @@ fn authored_physical_thickness_mm(world: &World, element_id: ElementId) -> Optio
     {
         return (thickness > 0.0).then_some(thickness * 1_000.0);
     }
-    infer_wall_thickness_from_snapshot(&snapshot)
+    infer_host_thickness_from_snapshot(&snapshot)
         .map(|thickness| thickness as f64 * 1_000.0)
         .filter(|thickness| *thickness > 0.0)
 }
@@ -16870,7 +16598,7 @@ fn contract_for_dimension_choice(
 }
 
 #[cfg(feature = "model-api")]
-fn evaluate_wall_setting_out(
+fn evaluate_setting_out(
     world: &World,
     entity: Entity,
     element_id: ElementId,
@@ -16884,36 +16612,25 @@ fn evaluate_wall_setting_out(
     };
 
     let existing_contract = world.get::<SettingOutContract>(entity).cloned();
-    let stack_thickness = authored_stack_thickness_mm(overrides);
+    let policy = world
+        .get_resource::<crate::plugins::refinement::SettingOutPolicies>()
+        .and_then(|registry| registry.for_class(element_class));
+    let stack_thickness = authored_stack_thickness_mm(overrides, policy);
     let physical_thickness = authored_physical_thickness_mm(world, element_id);
-    let construction_system = override_text(
-        overrides,
-        &[
-            "construction_system",
-            "construction_system_id",
-            "top_level_construction_system",
-            "wall_system",
-            "structural_system",
-        ],
-    )
-    .map(str::to_string)
-    .or_else(|| {
-        world
-            .get::<crate::plugins::refinement::SemanticIntent>(entity)
-            .and_then(|intent| {
-                override_text(
-                    &intent.parameters,
-                    &[
-                        "construction_system",
-                        "construction_system_id",
-                        "top_level_construction_system",
-                        "wall_system",
-                        "structural_system",
-                    ],
-                )
-            })
-            .map(str::to_string)
-    });
+    let mut system_keys = vec!["system", "system_id"];
+    system_keys.extend(
+        policy
+            .into_iter()
+            .flat_map(|policy| policy.system_aliases.iter().map(String::as_str)),
+    );
+    let construction_system = override_text(overrides, &system_keys)
+        .map(str::to_string)
+        .or_else(|| {
+            world
+                .get::<crate::plugins::refinement::SemanticIntent>(entity)
+                .and_then(|intent| override_text(&intent.parameters, &system_keys))
+                .map(str::to_string)
+        });
     let jurisdiction = active_jurisdiction(world, overrides);
     let prior = world
         .get_resource::<SettingOutThicknessPriorRegistry>()
@@ -17109,9 +16826,9 @@ fn build_refinement_promotion_plan(
 
     let setting_out_evaluation = assignment
         .as_ref()
-        .filter(|assignment| assignment.element_class.0 == "wall_assembly")
+        .filter(|assignment| setting_out_policy_applies(world, entity, &assignment.element_class.0))
         .map(|assignment| {
-            evaluate_wall_setting_out(world, entity, eid, &assignment.element_class.0, &overrides)
+            evaluate_setting_out(world, entity, eid, &assignment.element_class.0, &overrides)
         });
 
     let mut missing_inputs = Vec::new();
@@ -17122,7 +16839,7 @@ fn build_refinement_promotion_plan(
         )
     }) {
         missing_inputs.push(
-            "CorpusGap: no explicit setting-out contract, authored wall stack/physical thickness, or evidence-backed wall-thickness prior"
+            "CorpusGap: no explicit setting-out contract, authored stack/physical thickness, or evidence-backed thickness prior"
                 .to_string(),
         );
     }
@@ -17132,7 +16849,7 @@ fn build_refinement_promotion_plan(
         .filter(|impact| impact.accepted_choice.is_none())
     {
         missing_inputs.push(format!(
-            "DimensionImpact: required wall stack is {:.1} mm but reservation is {:.1} mm; explicitly choose preserve_exterior_envelope, preserve_interior_clear, or preserve_governing_grid",
+            "DimensionImpact: required stack is {:.1} mm but reservation is {:.1} mm; explicitly choose preserve_exterior_envelope, preserve_interior_clear, or preserve_governing_grid",
             impact.required_thickness_mm, impact.reserved_thickness_mm
         ));
     }
@@ -17799,7 +17516,7 @@ pub(crate) fn handle_create_refinement_goal(
                 target.overrides.clone(),
             )?;
             if plan.corpus_gap_required {
-                ensure_wall_thickness_corpus_gap(world, eid.0)?;
+                ensure_setting_out_thickness_corpus_gap(world, eid.0)?;
             }
             target_plans.push(plan);
         }
@@ -19517,3 +19234,13 @@ pub fn handle_check_clearance(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "model-api")]
+fn setting_out_policy_applies(world: &World, entity: Entity, class: &str) -> bool {
+    world
+        .get::<crate::plugins::refinement::SettingOutContract>(entity)
+        .is_some()
+        || world
+            .get_resource::<crate::plugins::refinement::SettingOutPolicies>()
+            .is_some_and(|registry| registry.for_class(class).is_some())
+}

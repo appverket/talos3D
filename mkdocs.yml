@@ -1,15 +1,21 @@
-site_name: Talos3D
+site_name: Talos3D Core
+repo_url: https://github.com/appverket/talos3D
+repo_name: appverket/talos3D
+edit_uri: edit/main/docs/
 site_description: AI-first 3D platform documentation
 theme:
   name: material
 nav:
   - Home: index.md
+  - Platform Boundaries: PLATFORM_BOUNDARIES.md
   - Product: PRODUCT.md
   - Render UX Stabilization Plan: PLAN_RENDER_AND_UX_STABILIZATION.md
   - ADR 024 Render/View State Coordination: ADR-024_RENDER_VIEW_STATE_COORDINATION.md
   - Drawing Metadata and Section Views Plan: PLAN_DRAWING_METADATA_AND_SECTION_VIEWS.md
   - ADR 025 Drawing Metadata Boundary: ADR-025_DRAWING_METADATA_BOUNDARY.md
+  - ADR 026 Unified Drafting Workspace: ADR-026_UNIFIED_DRAFTING_WORKSPACE.md
   - MCP Model API: MCP_MODEL_API.md
+  - MCP Security Review: MCP_AUTH_SECURITY_REVIEW.md
   - Developer Onboarding: DEVELOPER_ONBOARDING.md
   - Engine Fork Workflow: ENGINE_FORK_WORKFLOW.md
   - Core Principles: CORE_PRINCIPLES.md

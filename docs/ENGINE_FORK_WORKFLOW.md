@@ -58,8 +58,8 @@ cargo check -p talos3d-core
 cargo test -p talos3d-core
 ```
 
-Run launcher checks from their own manifests because `app/` and `app-core/`
-are separate Cargo workspaces.
+The public `app-core/` launcher is included in `cargo check --workspace`.
+Check specialized edition launchers from their owning repositories.
 
 ### Temporary upstream source pin
 
