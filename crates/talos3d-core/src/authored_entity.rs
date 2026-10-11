@@ -333,6 +333,13 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         None
     }
 
+    /// Capability-owned host/aperture selection data for the Definition browser.
+    fn hosting_selection_context(
+        &self,
+    ) -> Option<crate::plugins::hosting_contracts::HostedSelectionContext> {
+        None
+    }
+
     /// Domain-owned direction of the host's authored reference axis.
     fn hosted_axis(&self) -> Option<Vec3> {
         None
@@ -433,6 +440,11 @@ impl fmt::Debug for BoxedEntity {
 }
 
 impl BoxedEntity {
+    pub fn hosting_selection_context(
+        &self,
+    ) -> Option<crate::plugins::hosting_contracts::HostedSelectionContext> {
+        self.0.hosting_selection_context()
+    }
     pub fn hosted_axis(&self) -> Option<Vec3> {
         self.0.hosted_axis()
     }

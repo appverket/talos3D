@@ -4374,7 +4374,7 @@ fn handle_declare_elevation_intent(
             "label": label,
             "declared_elevations": declared,
             "state": "pending",
-            "next": "Author the building. The intent binds automatically when there is one building assembly to bind it to, or one whose label matches; bind it explicitly with bind_elevation_intent when several are in play. run_validation_v2 then reports every elevation whose built result differs from what you declared, and reports an intent that was never bound at all.",
+            "next": "Author the semantic assembly, then bind this intent with bind_elevation_intent. Loaded capabilities may bind it automatically and validate their supported intent fields.",
         }));
     };
 
@@ -4403,8 +4403,8 @@ fn bind_elevation_intent_to_assembly(
         format!(
             "Entity {element_id} is not a semantic assembly. `create_assembly` returns both \
              `assembly_id` and `group_element_id`; elevation intent belongs on the \
-             `assembly_id`. To declare an intent before any building exists, omit `element_id` \
-             entirely - the intent is held until a building is there to bind it to."
+             `assembly_id`. To declare an intent before any assembly exists, omit `element_id` \
+             entirely - the intent is held until an assembly is there to bind it to."
         )
     })?;
     if let Some(map) = assembly.parameters.as_object_mut() {
@@ -7907,23 +7907,12 @@ fn infer_face_anchors(
             Vec3::Z
         }
     });
-    let normal = Vec3::new(-axis.z, 0.0, axis.x)
-        .try_normalize()
-        .unwrap_or(Vec3::Z);
-    let half = thickness * 0.5;
-    Some((
-        HostedAnchor {
-            id: "opening.exterior_face".to_string(),
-            kind: Some("host_exterior_face".to_string()),
-            position: (opening_center - normal * half).to_array(),
-        },
-        HostedAnchor {
-            id: "opening.interior_face".to_string(),
-            kind: Some("host_interior_face".to_string()),
-            position: (opening_center + normal * half).to_array(),
-        },
-        thickness,
-    ))
+    let anchors = crate::plugins::hosting_contracts::hosted_face_anchors(
+        opening_center,
+        Some(axis),
+        Some(thickness as f64),
+    );
+    Some((anchors[1].clone(), anchors[2].clone(), thickness))
 }
 
 #[cfg(feature = "model-api")]
@@ -7933,10 +7922,9 @@ fn infer_position_along_host(snapshot: &BoxedEntity, point: Vec3) -> Option<f64>
 
 #[cfg(feature = "model-api")]
 fn infer_host_rotation(snapshot: &BoxedEntity) -> Option<Quat> {
-    let axis = extract_host_axis_from_snapshot(snapshot)?;
-    let planar = Vec2::new(axis.x, axis.z).try_normalize()?;
-    let angle = planar.y.atan2(planar.x);
-    Some(Quat::from_rotation_y(-angle))
+    crate::plugins::hosting_contracts::planar_host_rotation(extract_host_axis_from_snapshot(
+        snapshot,
+    )?)
 }
 
 #[cfg(feature = "model-api")]
@@ -15370,6 +15358,8 @@ fn bridged_recipe_relevance(
     ));
     bridge_terms
         .iter()
+        // A target-class token alone is not evidence of compatible content.
+        .filter(|term| !class_text_contains_token(target_class, term))
         .filter(|term| haystack.iter().any(|candidate| candidate == *term))
         .count()
 }
@@ -15409,7 +15399,6 @@ fn bridge_tokens(value: &str) -> Vec<String> {
         "system",
         "target",
         "type",
-        "wall",
     ];
     let mut tokens: Vec<String> = value
         .split(|ch: char| !ch.is_ascii_alphanumeric())

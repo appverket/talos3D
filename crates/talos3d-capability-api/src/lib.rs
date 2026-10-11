@@ -15,10 +15,11 @@ pub mod prelude {
     };
     pub use crate::document_properties::DocumentProperties;
     pub use crate::hosting::{
-        HostAffectedRegion, HostedGeometryPolicies, HostedGeometryPolicy, HostingCheckId,
-        HostingCheckStatus, HostingContractDescriptor, HostingContractInfo, HostingContractKindId,
-        HostingValidationCheck, HostingValidationRequest, HostingValidationResult,
-        HostingValidationStatus, HostingValidatorFn, HostingValidatorId, MeasuredValue,
+        HostAffectedRegion, HostedGeometryPolicies, HostedGeometryPolicy, HostedSelectionContext,
+        HostingCheckId, HostingCheckStatus, HostingContractDescriptor, HostingContractInfo,
+        HostingContractKindId, HostingValidationCheck, HostingValidationRequest,
+        HostingValidationResult, HostingValidationStatus, HostingValidatorFn, HostingValidatorId,
+        MeasuredValue,
     };
     pub use crate::identity::ElementId;
     pub use crate::toolbar::{
@@ -68,10 +69,11 @@ pub mod document_properties {
 
 pub mod hosting {
     pub use talos3d_core::plugins::hosting_contracts::{
-        HostAffectedRegion, HostedGeometryPolicies, HostedGeometryPolicy, HostingCheckId,
-        HostingCheckStatus, HostingContractDescriptor, HostingContractInfo, HostingContractKindId,
-        HostingValidationCheck, HostingValidationRequest, HostingValidationResult,
-        HostingValidationStatus, HostingValidatorFn, HostingValidatorId, MeasuredValue,
+        HostAffectedRegion, HostedGeometryPolicies, HostedGeometryPolicy, HostedSelectionContext,
+        HostingCheckId, HostingCheckStatus, HostingContractDescriptor, HostingContractInfo,
+        HostingContractKindId, HostingValidationCheck, HostingValidationRequest,
+        HostingValidationResult, HostingValidationStatus, HostingValidatorFn, HostingValidatorId,
+        MeasuredValue,
     };
 }
 

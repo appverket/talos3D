@@ -7586,7 +7586,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "declare_elevation_intent",
-        description = "Say what each elevation of a building will look like BEFORE authoring its geometry, in the terms a builder would use. Describing a house is something you do well; composing one through an unfamiliar API is not, and this gives the second thing a target to hit. Call it FIRST - omit `element_id` entirely, since nothing has been built yet to attach a description to. It returns an `intent_id` and binds itself once a building exists: automatically when there is one building assembly, or one whose label matches the `label` you passed; otherwise call `bind_elevation_intent`. Pass an array of objects, one per elevation: {\"elevation\": \"south\", \"apex_count\": 1, \"apex_on_centreline\": true, \"finish_changes_at_eave_line\": false, \"roof_projects_past_wall\": true, \"dominant_finish\": \"<material id>\", \"description\": \"free text\"}. Every field is optional except `elevation`; only what you declare is checked, so a partial description is useful. NOTE on `finish_changes_at_eave_line`: normally FALSE on a gable elevation, where the facade runs unbroken from grade to rake, and TRUE on an eave elevation, where the wall stops and the roof begins - it is a per-elevation fact, not a building-wide one. run_validation_v2 then reports every elevation whose built result differs from what you said, and reports an intent you declared and never bound."
+        description = "Declare per-view design intent before geometry exists. Omit element_id to create a pending intent_id, or supply a semantic assembly id to persist the intent on it. elevations is an array of capability-defined intent objects; Core stores them verbatim. Bind a pending record with bind_elevation_intent. Loaded capabilities define automatic binding and validation; consult their guidance for supported fields and obligations."
     )]
     pub(super) async fn declare_elevation_intent_tool(
         &self,
@@ -7601,7 +7601,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "bind_elevation_intent",
-        description = "Attach a pending elevation intent to a building assembly, when automatic binding cannot tell which is which - that is, when several intents are pending and none carries a label matching the assembly. Pass the `intent_id` from declare_elevation_intent and the assembly's `assembly_id` (not its `group_element_id`). Binding writes the description into the assembly, so it persists with the project from then on."
+        description = "Attach a pending view intent to a semantic assembly using intent_id and element_id. Use the assembly_id returned by create_assembly. The description persists with that assembly; capability validators interpret its fields."
     )]
     pub(super) async fn bind_elevation_intent_tool(
         &self,
@@ -7616,7 +7616,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "get_elevation_profile",
-        description = "Derive one orthographic elevation of the model from the authored geometry: the outline height at every sample column, the apexes standing proud of it, the material bands down the centreline, and each material's share of the visible area. This is the representation a builder reasons in, and the one to check archetypal form against - a gable elevation has exactly one apex on the centreline, the roof outline extends past the wall outline on both rakes, and the facade shows NO material change at the eave line. Unlike take_screenshot this is computed from geometry, not from the viewport, so it contains no gizmos or overlays and is directly comparable between runs. Use it to verify form and finish; use take_screenshot to look."
+        description = "Project authored geometry into an orthographic elevation profile: sampled outline heights, apexes, material bands and visible material coverage. This geometry-derived representation excludes viewport gizmos and overlays. Use it to compare shape and appearance between runs; loaded capabilities define domain-specific form obligations."
     )]
     pub(super) async fn get_elevation_profile_tool(
         &self,
@@ -7631,7 +7631,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "set_surface_debug_render",
-        description = "Toggle the false-colour envelope pass, then take_screenshot to inspect it. Every mesh is painted a flat unlit colour derived from the material it actually resolves to, and anything with NO resolved material is painted MAGENTA. Use it whenever you need to know which surfaces are genuinely finished: a shaded render cannot distinguish an unfinished near-white surface from a deliberately pale one, and that is how bare gable fields and unclad panels survive review. NOTE: magenta means 'no resolved material', which is broader than 'defect'. Concealed substrate - sheathing, underlayment, battens, buried slab faces - is legitimately unfinished and will also show magenta, usually as thin slivers at exposed edges. Magenta on a broad outward-facing surface is the signal; read it alongside the domain finish validator, which is what decides whether a given surface is required to carry a finish. Presentation only - no authored data changes. Disable it again before continuing to author."
+        description = "Toggle the false-colour material diagnostic pass, then inspect with take_screenshot. Resolved material ids receive distinct flat colours; surfaces without resolved materials appear magenta. This reports appearance assignments, not domain finish obligations. Capability validators determine which surfaces require materials. Presentation only; disable it before further authoring."
     )]
     pub(super) async fn set_surface_debug_render_tool(
         &self,
@@ -7644,7 +7644,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         json_tool_result(serde_json::json!({
             "surface_debug_render": enabled,
             "legend": "magenta = no resolved material; every other flat colour is one distinct resolved material id",
-            "reading_it": "Magenta on a broad outward-facing surface is a defect. Magenta on thin slivers at exposed edges is usually concealed substrate (sheathing, underlayment, battens, buried slab faces), which is legitimately unfinished. This pass reports resolved materials, not obligations - the domain finish validator decides which surfaces must carry one, so a clean validation run does not imply zero magenta.",
+            "reading_it": "Magenta means no resolved material. Capability validators determine whether a surface requires a finish; a clean validation run does not imply zero magenta.",
         }))
     }
 

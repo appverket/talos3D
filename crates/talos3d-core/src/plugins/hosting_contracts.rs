@@ -372,6 +372,70 @@ impl From<&HostingContractDescriptor> for HostingContractInfo {
     }
 }
 
+#[derive(Resource, Debug, Clone, Default)]
+pub struct HostedSelectionContext {
+    pub host_element_id: Option<ElementId>,
+    pub opening_element_id: Option<ElementId>,
+    pub opening_center: Option<Vec3>,
+    pub host_axis: Option<Vec3>,
+    pub host_thickness: Option<f64>,
+    pub host_position: Option<f64>,
+    pub opening_width: Option<f64>,
+    pub opening_height: Option<f64>,
+}
+
+impl HostedSelectionContext {
+    pub fn can_host_in_opening(&self) -> bool {
+        self.host_element_id.is_some() && self.opening_element_id.is_some()
+    }
+
+    pub fn summary(&self) -> String {
+        if let (Some(host), Some(opening)) = (self.host_element_id, self.opening_element_id) {
+            format!("Opening {} in host {}", opening.0, host.0)
+        } else if let Some(host) = self.host_element_id {
+            format!("Host {}", host.0)
+        } else {
+            "No host/opening selection".to_string()
+        }
+    }
+}
+
+/// Shared planar host orientation used by browser and API placement.
+pub fn planar_host_rotation(axis: Vec3) -> Option<Quat> {
+    let planar = Vec2::new(axis.x, axis.z).try_normalize()?;
+    Some(Quat::from_rotation_y(-planar.y.atan2(planar.x)))
+}
+
+/// Shared center/face anchors. Capabilities supply the authored axis/thickness.
+pub fn hosted_face_anchors(
+    center: Vec3,
+    axis: Option<Vec3>,
+    thickness: Option<f64>,
+) -> Vec<crate::plugins::modeling::occurrence::HostedAnchor> {
+    use crate::plugins::modeling::occurrence::HostedAnchor;
+    let mut anchors = vec![HostedAnchor {
+        id: "opening.center".into(),
+        kind: Some("opening_center".into()),
+        position: center.to_array(),
+    }];
+    if let Some(thickness) = thickness {
+        let normal = axis
+            .and_then(|axis| Vec3::new(-axis.z, 0.0, axis.x).try_normalize())
+            .unwrap_or(Vec3::Z);
+        for (id, kind, direction) in [
+            ("opening.exterior_face", "host_exterior_face", -1.0),
+            ("opening.interior_face", "host_interior_face", 1.0),
+        ] {
+            anchors.push(HostedAnchor {
+                id: id.into(),
+                kind: Some(kind.into()),
+                position: (center + normal * thickness as f32 * 0.5 * direction).to_array(),
+            });
+        }
+    }
+    anchors
+}
+
 #[cfg(test)]
 mod hosted_occurrence_contract_tests {
     use super::*;

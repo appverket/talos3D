@@ -10,6 +10,9 @@
   available through Core. Capabilities contribute discovery guidance, aliases,
   host-geometry/setting-out policies, support vocabulary and material presets.
 - Domain snapshots supply host-axis, creation-label and restore-order behavior.
+  The Definition browser uses capability-owned `HostedSelectionContext`; its
+  former wall fields are renamed to host fields. Browser/API face anchors and
+  orientation share Core helpers. Legacy `host_mode: wall` remains an alias.
   Core no longer inspects serialized Wall payloads or dispatches on building
   element classes. Architecture retains its model identifiers and command ids.
 - Manufacturer-specific cedar appearance assets move to Architecture. Generic

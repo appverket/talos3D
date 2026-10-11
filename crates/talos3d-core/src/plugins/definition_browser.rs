@@ -35,7 +35,7 @@ use crate::{
             },
             occurrence::{
                 resolve_compound_slot_occurrence_context,
-                resolve_compound_slot_occurrence_context_with_root_overrides, HostedAnchor,
+                resolve_compound_slot_occurrence_context_with_root_overrides,
                 HostedOccurrenceContext, OccurrenceIdentity, OccurrenceSnapshot,
             },
         },
@@ -434,32 +434,7 @@ pub struct DefinitionsWindowState {
     draft_preview_cache: PreviewRegistryCache,
 }
 
-#[derive(Resource, Debug, Clone, Default)]
-pub struct DefinitionSelectionContext {
-    pub wall_element_id: Option<ElementId>,
-    pub opening_element_id: Option<ElementId>,
-    pub opening_center: Option<Vec3>,
-    pub wall_axis: Option<Vec3>,
-    pub wall_thickness: Option<f64>,
-    pub opening_width: Option<f64>,
-    pub opening_height: Option<f64>,
-}
-
-impl DefinitionSelectionContext {
-    pub fn can_host_in_opening(&self) -> bool {
-        self.wall_element_id.is_some() && self.opening_element_id.is_some()
-    }
-
-    pub fn summary(&self) -> String {
-        if let (Some(wall), Some(opening)) = (self.wall_element_id, self.opening_element_id) {
-            format!("Opening {} in wall {}", opening.0, wall.0)
-        } else if let Some(wall) = self.wall_element_id {
-            format!("Wall {}", wall.0)
-        } else {
-            "No wall/opening selection".to_string()
-        }
-    }
-}
+pub use crate::plugins::hosting_contracts::HostedSelectionContext as DefinitionSelectionContext;
 
 pub fn sync_definition_selection_context(world: &mut World) {
     let context = capture_definition_selection_context(world);
@@ -509,10 +484,10 @@ pub fn execute_instantiate_definition(
     let hosted = match host_mode.as_str() {
         "unhosted" => None,
         "opening" | "auto" => selection.can_host_in_opening().then_some(selection.clone()),
-        "wall" => selection.wall_element_id.map(|_| selection.clone()),
+        "host" | "wall" => selection.host_element_id.map(|_| selection.clone()),
         other => {
             return Err(format!(
-                "Unsupported host_mode '{other}'. Expected: auto, unhosted, opening, or wall"
+                "Unsupported host_mode '{other}'. Expected: auto, unhosted, opening, or host"
             ))
         }
     };
@@ -535,7 +510,21 @@ pub fn execute_instantiate_definition(
         .definition_version;
 
     let mut overrides = parse_override_map(object.get("overrides"))?;
-    apply_contextual_window_overrides(&definition, hosted.as_ref(), &mut overrides);
+    let thickness_parameter = world
+        .get_resource::<crate::plugins::hosting_contracts::HostedGeometryPolicies>()
+        .and_then(|policies| {
+            policies
+                .default_relation_type
+                .as_deref()
+                .and_then(|id| policies.for_relation(id))
+        })
+        .and_then(|policy| policy.thickness_parameter.clone());
+    apply_contextual_host_overrides(
+        &definition,
+        hosted.as_ref(),
+        thickness_parameter.as_deref(),
+        &mut overrides,
+    );
     {
         let registry = world.resource::<DefinitionRegistry>();
         registry.validate_overrides(&def_id, &overrides)?;
@@ -566,7 +555,7 @@ pub fn execute_instantiate_definition(
         snapshot.offset = offset;
     }
     if let Some(host_context) = hosted.as_ref() {
-        if let Some(rotation) = wall_host_rotation(host_context) {
+        if let Some(rotation) = host_rotation(host_context) {
             snapshot.rotation = rotation;
         }
     }
@@ -575,12 +564,25 @@ pub fn execute_instantiate_definition(
     created.push(element_id.0);
 
     if let Some(host_context) = hosted {
-        if let Some(wall_id) = host_context.wall_element_id {
+        if let Some(wall_id) = host_context.host_element_id {
+            let relation_type = world
+                .get_resource::<crate::plugins::hosting_contracts::HostedGeometryPolicies>()
+                .and_then(|policies| policies.default_relation_type.clone())
+                .unwrap_or_else(|| "hosted_on".into());
             let relation_id = world.resource_mut::<ElementIdAllocator>().next_id();
             let mut parameters = json!({});
             if let Some(opening_id) = host_context.opening_element_id {
                 parameters["opening_element_id"] = json!(opening_id.0);
                 parameters["placement_anchor"] = json!("opening.center");
+            }
+            if let Some(position) = host_context.host_position {
+                if let Some(parameter) = world
+                    .get_resource::<crate::plugins::hosting_contracts::HostedGeometryPolicies>()
+                    .and_then(|policies| policies.for_relation(&relation_type))
+                    .and_then(|policy| policy.position_parameter.as_ref())
+                {
+                    parameters[parameter] = json!(position);
+                }
             }
             enqueue_create_boxed_entity(
                 world,
@@ -589,7 +591,7 @@ pub fn execute_instantiate_definition(
                     relation: SemanticRelation {
                         source: element_id,
                         target: wall_id,
-                        relation_type: "hosted_on".to_string(),
+                        relation_type: relation_type.clone(),
                         parameters,
                     },
                 }
@@ -1309,54 +1311,14 @@ pub fn capture_definition_selection_context(world: &mut World) -> DefinitionSele
 pub fn analyze_selection_snapshots(snapshots: &[BoxedEntity]) -> DefinitionSelectionContext {
     let mut context = DefinitionSelectionContext::default();
     for snapshot in snapshots {
-        let json = snapshot.to_json();
-        match snapshot.type_name() {
-            "opening" => {
-                let Some(opening_root) = json.get("Opening") else {
-                    continue;
-                };
-                context.opening_element_id = Some(snapshot.element_id());
-                context.opening_center = Some(snapshot.center());
-                context.wall_element_id = opening_root
-                    .get("parent_wall_element_id")
-                    .and_then(Value::as_u64)
-                    .map(ElementId);
-                context.wall_axis = opening_root
-                    .get("parent_wall")
-                    .and_then(wall_axis_from_value);
-                context.opening_width = opening_root
-                    .get("opening")
-                    .and_then(|opening| opening.get("width"))
-                    .and_then(Value::as_f64);
-                context.opening_height = opening_root
-                    .get("opening")
-                    .and_then(|opening| opening.get("height"))
-                    .and_then(Value::as_f64);
-                context.wall_thickness = opening_root
-                    .get("parent_wall")
-                    .and_then(|wall| wall.get("thickness"))
-                    .and_then(Value::as_f64);
-                break;
-            }
-            "wall" => {
-                if context.wall_element_id.is_none() {
-                    context.wall_element_id = Some(snapshot.element_id());
-                }
-                if context.wall_thickness.is_none() {
-                    context.wall_thickness = json
-                        .get("Wall")
-                        .and_then(|wall| wall.get("wall"))
-                        .and_then(|wall| wall.get("thickness"))
-                        .and_then(Value::as_f64);
-                }
-                if context.wall_axis.is_none() {
-                    context.wall_axis = json
-                        .get("Wall")
-                        .and_then(|wall| wall.get("wall"))
-                        .and_then(wall_axis_from_value);
-                }
-            }
-            _ => {}
+        let Some(candidate) = snapshot.hosting_selection_context() else {
+            continue;
+        };
+        if candidate.can_host_in_opening() {
+            return candidate;
+        }
+        if context.host_element_id.is_none() {
+            context = candidate;
         }
     }
     context
@@ -1492,22 +1454,6 @@ fn occurrence_identity_for_hosted_opening(
     hosted_sources
         .into_iter()
         .find_map(|source| occurrence_identity_for_element(world, source))
-}
-
-fn wall_axis_from_value(value: &Value) -> Option<Vec3> {
-    let start = value.get("start")?.as_array()?;
-    let end = value.get("end")?.as_array()?;
-    let start = Vec3::new(
-        start.first()?.as_f64()? as f32,
-        0.0,
-        start.get(1)?.as_f64()? as f32,
-    );
-    let end = Vec3::new(
-        end.first()?.as_f64()? as f32,
-        0.0,
-        end.get(1)?.as_f64()? as f32,
-    );
-    (end - start).try_normalize()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2063,7 +2009,7 @@ fn draw_selected_definition_workspace(
     });
 
     if requires_opening_host && !can_host {
-        ui.label(egui::RichText::new("Requires selected wall opening.").small());
+        ui.label(egui::RichText::new("Requires selected host opening.").small());
     }
 
     let preview_height =
@@ -5340,50 +5286,31 @@ fn ensure_definition_available(
 fn build_hosted_occurrence_context(
     context: &DefinitionSelectionContext,
 ) -> HostedOccurrenceContext {
-    let mut anchors = Vec::new();
-    if let Some(center) = context.opening_center {
-        anchors.push(HostedAnchor {
-            id: "opening.center".to_string(),
-            kind: Some("opening_center".to_string()),
-            position: center.to_array(),
-        });
-        if let Some(thickness) = context.wall_thickness {
-            let half = thickness as f32 * 0.5;
-            let normal = context
-                .wall_axis
-                .map(|axis| Vec3::new(-axis.z, 0.0, axis.x).normalize_or_zero())
-                .filter(|normal| normal.length_squared() > 0.0)
-                .unwrap_or(Vec3::Z);
-            anchors.push(HostedAnchor {
-                id: "opening.exterior_face".to_string(),
-                kind: Some("host_exterior_face".to_string()),
-                position: (center - normal * half).to_array(),
-            });
-            anchors.push(HostedAnchor {
-                id: "opening.interior_face".to_string(),
-                kind: Some("host_interior_face".to_string()),
-                position: (center + normal * half).to_array(),
-            });
-        }
-    }
     HostedOccurrenceContext {
-        host_element_id: context.wall_element_id,
+        host_element_id: context.host_element_id,
         opening_element_id: context.opening_element_id,
         binding: None,
-        anchors,
+        anchors: context
+            .opening_center
+            .map(|center| {
+                crate::plugins::hosting_contracts::hosted_face_anchors(
+                    center,
+                    context.host_axis,
+                    context.host_thickness,
+                )
+            })
+            .unwrap_or_default(),
     }
 }
 
-fn wall_host_rotation(context: &DefinitionSelectionContext) -> Option<Quat> {
-    let axis = context.wall_axis?;
-    let planar = Vec2::new(axis.x, axis.z).try_normalize()?;
-    let angle = planar.y.atan2(planar.x);
-    Some(Quat::from_rotation_y(-angle))
+fn host_rotation(context: &DefinitionSelectionContext) -> Option<Quat> {
+    crate::plugins::hosting_contracts::planar_host_rotation(context.host_axis?)
 }
 
-fn apply_contextual_window_overrides(
+fn apply_contextual_host_overrides(
     definition: &Definition,
     hosted: Option<&DefinitionSelectionContext>,
+    thickness_parameter: Option<&str>,
     overrides: &mut OverrideMap,
 ) {
     let Some(hosted) = hosted else {
@@ -5392,7 +5319,10 @@ fn apply_contextual_window_overrides(
     let auto_values = [
         ("overall_width", hosted.opening_width.map(Value::from)),
         ("overall_height", hosted.opening_height.map(Value::from)),
-        ("wall_thickness", hosted.wall_thickness.map(Value::from)),
+        (
+            thickness_parameter.unwrap_or(""),
+            hosted.host_thickness.map(Value::from),
+        ),
     ];
     for (parameter_name, value) in auto_values {
         if overrides.get(parameter_name).is_some() {

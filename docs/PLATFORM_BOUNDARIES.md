@@ -56,6 +56,9 @@ using capability-supplied margins, tolerances, allowed flush edges and parameter
 names. Host snapshots provide their authored axis and position mapping.
 Architecture supplies the wall-opening contract and its dimensional rules;
 Core does not inspect serialized Wall data or choose building thresholds.
+The Definition browser consumes capability-owned `HostedSelectionContext` through
+snapshot hooks and shares face anchors/orientation with API placement. It uses
+the same contributed relation and parameter policy.
 
 `SettingOutPolicies` selects participating classes and parameter aliases for
 shared envelope reservation. An explicit `SettingOutContract` works for any
