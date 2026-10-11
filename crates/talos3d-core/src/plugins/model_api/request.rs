@@ -2615,8 +2615,7 @@ fn handle_install_recipe_from_session_export(
     use crate::capability_registry::RecipeFamilyId;
     use crate::curation::provenance::Confidence;
     use crate::curation::{
-        AssetId, AssetKindId, CurationMeta, Provenance, RecipeArtifact,
-        RecipeBody, Scope, Trust,
+        AssetId, AssetKindId, CurationMeta, Provenance, RecipeArtifact, RecipeBody, Scope, Trust,
     };
     use crate::plugins::refinement::{AgentId, AuthoringMode};
 

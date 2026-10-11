@@ -19350,5 +19350,4 @@ fn handle_list_project_knowledge(world: &World, request: ProjectKnowledgeIndexRe
     let page: Vec<_> = rows.into_iter().skip(offset).take(limit).collect();
     let end = offset + page.len();
     json!({"layer":"private_project_context","items":page,"total":total,"next_offset":if end<total {Some(end)} else {None},"publication":"none; shared releases require separate confidentiality, rights and evidence review"})
-
 }
