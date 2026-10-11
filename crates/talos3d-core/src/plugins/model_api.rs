@@ -9091,7 +9091,7 @@ pub fn prepare_occurrence_override_request(
         &mut before_snapshots,
         &mut after_snapshots,
     )?;
-    Ok(EditPlanDraft {
+    let mut draft = EditPlanDraft {
         source_artifacts: Vec::new(),
         context: PlanContext {
             planner_id: "core.occurrence_parameters".into(),
@@ -9104,7 +9104,20 @@ pub fn prepare_occurrence_override_request(
         before: before_snapshots,
         after: after_snapshots,
         semantic_intents: crate::semantics::SemanticPlan::none(),
-    })
+    };
+    crate::plugins::authored_edit_plan::modifiers::apply_edit_modifiers(
+        world,
+        &crate::plugins::authored_edit_plan::modifiers::EditModifierRequest::new(
+            "core.occurrence_parameters",
+            &eid,
+        ),
+        &mut draft,
+        &[],
+    );
+    if !draft.context.refusals.is_empty() {
+        return Err(draft.context.refusals.join("; "));
+    }
+    Ok(draft)
 }
 
 #[cfg(feature = "model-api")]

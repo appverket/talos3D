@@ -3983,6 +3983,94 @@ fn occurrence_update_overrides_changes_only_the_target() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn occurrence_control_modifiers_are_shared_by_inspector_and_api() {
+    use crate::plugins::authored_edit_plan::{
+        modifiers::{EditPlanModifiers, OrderedEditModifier},
+        requests,
+    };
+    let mut world = init_model_api_test_world();
+    register_model_api_edit_requests(&mut world);
+    world.init_resource::<EditPlanModifiers>();
+    let definition = handle_create_definition(&mut world, make_rect_extrusion_request()).unwrap();
+    let id = handle_place_occurrence(
+        &mut world,
+        json!({"definition_id": definition.definition_id}),
+    )
+    .unwrap();
+    let dependent = handle_place_occurrence(
+        &mut world,
+        json!({"definition_id": definition.definition_id}),
+    )
+    .unwrap();
+    let original = capture_entity_snapshot(&world, ElementId(dependent)).unwrap();
+    world
+        .resource_mut::<EditPlanModifiers>()
+        .register(OrderedEditModifier::new(
+            "test.dependent",
+            0,
+            "core.occurrence_parameters",
+            move |world, request, draft| {
+                assert_eq!(request.payload::<ElementId>(), Some(&ElementId(id)));
+                draft.after.push(
+                    capture_entity_snapshot(world, ElementId(dependent))
+                        .unwrap()
+                        .translate_by(Vec3::Y),
+                );
+            },
+        ))
+        .unwrap();
+    let preview = requests::preview(
+        &mut world,
+        "core.occurrence_parameters",
+        json!({"element_id":id,"overrides":{"height":5.0}}),
+    )
+    .unwrap();
+    assert_eq!(preview.before_snapshots().len(), 2);
+    assert_eq!(
+        capture_entity_snapshot(&world, ElementId(dependent)).unwrap(),
+        original
+    );
+    handle_update_occurrence_overrides(&mut world, id, json!({"height":5.0})).unwrap();
+    for expected in preview.after_snapshots() {
+        assert_eq!(
+            capture_entity_snapshot(&world, expected.element_id()).unwrap(),
+            *expected
+        );
+    }
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    apply_pending_history_commands(&mut world);
+    assert_eq!(
+        capture_entity_snapshot(&world, ElementId(dependent)).unwrap(),
+        original
+    );
+    world
+        .resource_mut::<EditPlanModifiers>()
+        .register(OrderedEditModifier::new(
+            "test.refusal",
+            100,
+            "core.occurrence_parameters",
+            |_, _, draft| {
+                draft.context.refusals.push("Dependent edit refused".into());
+            },
+        ))
+        .unwrap();
+    let revision = world.resource::<History>().revision_token();
+    assert!(
+        handle_update_occurrence_overrides(&mut world, id, json!({"height":4.0}))
+            .unwrap_err()
+            .contains("Dependent edit refused")
+    );
+    assert!(requests::preview(
+        &mut world,
+        "core.occurrence_parameters",
+        json!({"element_id":id,"overrides":{"height":4.0}})
+    )
+    .is_err());
+    assert_eq!(world.resource::<History>().revision_token(), revision);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn occurrence_material_override_tools_set_and_clear_core_slot() {
     let mut world = init_model_api_test_world();
     for id in ["oak_finish", "walnut_finish"] {

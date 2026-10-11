@@ -924,6 +924,16 @@ semantics, change topology, or establish a refinement claim. Read the current
 snapshot first and verify unchanged source geometry before applying a prepared
 edit. Use native hosted/parametric edits for semantic architectural entities.
 
+## Shared occurrence control planning
+
+Occurrence control edits from the inspector and `occurrence.update_overrides`
+run the same `core.occurrence_parameters` planning stage. Capability-owned
+`EditPlanModifiers` can add dependent authored snapshots before immutable
+capture; their originals become part of the same undo unit. A capability can
+set `PlanContext.refusals` to reject a candidate before mutation. Informational
+findings remain distinct from refusals. This stage is shared by native and
+browser transports and contains no domain-specific hosting rules.
+
 ## Procedural session freshness and retries
 
 `procedural_session.create` captures a transient document identity and monotonic

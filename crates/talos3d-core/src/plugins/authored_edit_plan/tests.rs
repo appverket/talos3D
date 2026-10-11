@@ -63,6 +63,32 @@ fn publish(world: &mut World, plan: AuthoredEditPlan) -> Arc<AuthoredEditPlan> {
 }
 
 #[test]
+fn capability_refusal_cannot_be_committed_as_a_valid_snapshot_edit() {
+    let mut world = world();
+    let original = snapshot(1, 0.);
+    original.apply_to(&mut world);
+    let plan = AuthoredEditPlan::capture(
+        &world,
+        None,
+        world.resource::<History>().revision_token(),
+        PlanContext {
+            refusals: vec!["Dependent geometry cannot accommodate this value".into()],
+            ..Default::default()
+        },
+        vec![original.clone()],
+        vec![snapshot(1, 5.)],
+        SemanticPlan::none(),
+    )
+    .unwrap();
+    assert!(!plan.can_commit());
+    let plan = publish(&mut world, plan);
+    assert!(queue_captured_plan(&mut world, plan.plan_id()).is_err());
+    drain(&mut world);
+    assert_eq!(capture_snapshot(&world, ElementId(1)), Some(original));
+    assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+}
+
+#[test]
 fn heterogeneous_snapshot_changes_apply_once_and_undo_redo_exactly() {
     let mut world = world();
     let before = vec![snapshot(1, 0.), snapshot(2, 1.)];

@@ -6,4 +6,4 @@
 - task-id: TALOS-zqgalyqg
 - target base: origin/main
 - summary: Apply capability edit modifiers to shared occurrence control planning.
-- status: active
+- status: awaiting-merge

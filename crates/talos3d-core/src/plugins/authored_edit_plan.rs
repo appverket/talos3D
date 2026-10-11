@@ -41,6 +41,10 @@ pub struct PlanContext {
     pub unresolved_decisions: Vec<String>,
     pub obligations: Vec<String>,
     pub findings: Vec<String>,
+    /// Capability planning failures. Unlike informational findings, these
+    /// prevent a captured plan from being committed on every surface.
+    #[serde(default)]
+    pub refusals: Vec<String>,
     pub derived_impacts: Vec<String>,
     pub presentation_hints: Vec<String>,
 }
@@ -165,6 +169,7 @@ impl AuthoredEditPlan {
                 }
             }
         }
+        let can_commit = context.refusals.is_empty();
         let mut plan = Self {
             interaction_id,
             plan_id: PlanId(uuid::Uuid::new_v4().to_string()),
@@ -178,7 +183,7 @@ impl AuthoredEditPlan {
             semantic_changes: Vec::new(),
             source_artifacts: Vec::new(),
             semantic_refusals: Vec::new(),
-            can_commit: true,
+            can_commit,
             digest: String::new(),
             retained_bytes: 0,
         };
