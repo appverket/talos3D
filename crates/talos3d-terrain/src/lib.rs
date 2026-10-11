@@ -45,126 +45,32 @@ use crate::{
 /// discovery surface per ADR-042.
 fn terrain_conforming_foundation_skill() -> AgentSkill {
     AgentSkill {
-        id: AgentSkillId("terrain.conforming_foundation".to_string()),
-        title: "Terrain-conforming (hugging) foundation".to_string(),
-        summary:
-            "Place a foundation whose flat top sits at minimum clearance over grade and whose \
-                  underside hugs the terrain; optionally plant an existing building onto it."
-                .to_string(),
-        task_tags: vec![
-            "foundation".to_string(),
-            "terrain".to_string(),
-            "hugging foundation".to_string(),
-            "plant building".to_string(),
-            "site".to_string(),
-        ],
+        id: AgentSkillId("terrain.conforming_foundation".into()),
+        title: "Terrain-conforming support".into(),
+        summary: "Create a support solid from sampled terrain grade and place a complete structure on it through the shared placement plan.".into(),
+        task_tags: vec!["terrain".into(), "support".into(), "surface placement".into()],
         must_read_at_bootstrap: true,
-        referenced_tool_ids: vec![
-            "create_entity".to_string(),
-            "invoke_command".to_string(),
-            "set_property".to_string(),
-        ],
-        required_tool_ids: vec![
-            "get_capability_snapshot".to_string(),
-            "get_agent_skill".to_string(),
-            "elevation_at".to_string(),
-            "take_screenshot".to_string(),
-        ],
-        forbidden_tool_ids: vec![
-            "create_box for a terrain-conforming foundation".to_string(),
-            "get_world_aabb as terrain grade source".to_string(),
-        ],
-        validation_tool_ids: vec![
-            "elevation_at".to_string(),
-            "get_world_aabb".to_string(),
-            "take_screenshot".to_string(),
-        ],
-        success_criteria: vec![
-            "Foundation top is derived from sampled terrain grade, not terrain AABB height."
-                .to_string(),
-            "Superstructure and conforming foundation move as one planted assembly.".to_string(),
-            "When hide_element_id is supplied, the hidden base footprint drives foundation plan size."
-                .to_string(),
-        ],
-        stop_conditions: vec![
-            "No terrain_surface can be identified.".to_string(),
-            "The building assembly cannot be resolved as one movable group or semantic structure."
-                .to_string(),
-        ],
-        screenshot_requirements: vec![
-            "Low side view showing the superstructure seated on the conforming foundation."
-                .to_string(),
-            "Plan/quarter view confirming roof eaves do not inflate the foundation footprint."
-                .to_string(),
-        ],
-        common_failure_modes: vec![
-            "Foundation is placed at the terrain datum while the real grade is higher or lower."
-                .to_string(),
-            "Walls or roof remain at world Y=0 after the foundation is planted on terrain."
-                .to_string(),
-            "Foundation footprint is sized from roof/eave/group bounds instead of the base footprint."
-                .to_string(),
-        ],
-        regression_prompt_ids: vec![
-            "terrain-plant-structure-hugging-foundation".to_string(),
-            "terrain-plant-hidden-base-footprint".to_string(),
-        ],
-        next_skill_ids: vec![],
-        body_markdown: "A *conforming solid* hugs a terrain surface: flat horizontal top at \
-            `Y_top = max(grade under footprint) + min_thickness`, underside `= max(grade, Y_top - \
-            max_depth)` (benches flat past `max_depth`, default 3 m), vertical walls.\n\n\
-            **Create one directly:** `create_entity {\"type\":\"conforming_solid\", \
-            \"surface_id\":<terrain surface id>, \"position\":[x,z], \"half_extents\":[hx,hz], \
-            \"min_thickness\":0.5, \"max_depth\":3.0}`. Move/re-conform it with \
-            `set_property {\"property_name\":\"position\",\"value\":[x,0,z]}` — Y re-derives.\n\n\
-            **Plant a semantic structure:** identify the semantic `structure`, `house`, or `building` assembly, its *complete* \
-            physical building group, and one terrain surface, then run Plant Structure; over MCP call \
-            `invoke_command {\"command_id\":\"terrain.plant_structure\", \"parameters\": \
-            {\"structure_id\":<structure>, \"group_id\":<complete physical group>, \
-            \"foundation_id\":<foundation body>, \"surface_id\":<terrain>}}`. When the structure was \
-            created by `create_assembly`, pass its returned `group_element_id` as `group_id`; the \
-            semantic assembly's first group-valued member may be only a slab/foundation branch and \
-            must never be inferred as the whole building. The group must cover every physical member \
-            of the structure or the command stops before planting. \
-            The command establishes the planting contract, converts the structure's bottom \
-            foundation body into a conforming foundation, keeps that foundation inside the \
-            movable group, and records `structure_id`, `foundation_structure_id`, and \
-            `planted_group_id` for later prompt/refinement/move targeting.\n\n\
-            **Plant an existing building (reversible):** call \
-            `invoke_command {\"command_id\":\"terrain.plant_on_surface\", \"parameters\": \
-            {\"target_id\":<object>, \"surface_id\":<id>, \"min_thickness\":0.5, \
-            \"hide_element_id\":<old foundation/base, optional>}}`. It creates the hugging foundation \
-            under the object, seats the object on its top, creates a semantic `structure` \
-            assembly plus a nested semantic `foundation_system` assembly, and marks the group as \
-            a planted structure so later horizontal moves re-seat the superstructure to the \
-            foundation's newly sampled terrain top. When `hide_element_id` is supplied, that \
-            foundation/base footprint drives the new conforming foundation in plan; roof eaves, \
-            gable closure panels, trim, and other visual overhangs must not inflate the \
-            foundation footprint. \
-            `invoke_command {\"command_id\":\"terrain.release_planted_structure\", \"parameters\": \
-            {\"target_id\":<object>}}` keeps the current \
-            geometry but removes that terrain-following behavior. \
-            `invoke_command {\"command_id\":\"terrain.demote_conforming_foundation\", \
-            \"parameters\":{\"target_id\":<foundation_system_id>, \"mode\":\"snapshot\"}}` \
-            freezes the adaptive foundation body as a static mesh; \
-            `\"mode\":\"max_height_box\"` replaces it with a rectangular box whose height equals \
-            the current conforming foundation's maximum thickness. Either demotion preserves the \
-            semantic foundation_system and releases terrain-following behavior that depended on \
-            the adaptive body. \
-            `invoke_command {\"command_id\":\"terrain.unplant_on_surface\", \"parameters\": \
-            {\"target_id\":<object>}}` reverses it.\n\n\
-            **Mandatory postcondition:** record representative pre-plant AABBs for foundation, \
-            walls, roof, openings, and trim. The plant response returns \
-            `conforming_foundation_body_id`: the original rigid body is replaced in place under \
-            that stable element id. On the next MCP request, inspect its rendered AABB; its plan \
-            footprint must be preserved and its top must equal `y_top`, but its terrain-hugging \
-            underside/min-Y is intentionally not a rigid `raised_by` translation. Every non-foundation \
-            representative must have moved vertically by `raised_by` (within tolerance) and its \
-            bottom must meet the returned `y_top`; the foundation stays at `y_top`. If only a \
-            foundation branch moved, stop and report a planting-contract defect — never repair \
-            the model by translating parts manually. The geometry is grounded in the real terrain \
-            surface (not a stand-in)."
-            .to_string(),
+        referenced_tool_ids: vec!["create_entity".into(), "invoke_command".into(), "set_property".into()],
+        required_tool_ids: vec!["get_capability_snapshot".into(), "get_agent_skill".into(), "elevation_at".into(), "take_screenshot".into()],
+        forbidden_tool_ids: vec!["get_world_aabb as terrain grade source".into()],
+        validation_tool_ids: vec!["elevation_at".into(), "get_world_aabb".into(), "take_screenshot".into()],
+        success_criteria: vec!["Support top derives from sampled terrain grade.".into(), "The complete aggregate moves through one shared plan.".into(), "An authored base footprint determines support plan size.".into()],
+        stop_conditions: vec!["No terrain surface or coherent placement aggregate can be identified.".into()],
+        screenshot_requirements: vec!["Inspect contact and the support footprint in target-framed views.".into()],
+        common_failure_modes: vec!["Using terrain bounds as grade.".into(), "Using visual overhangs instead of the authored base footprint.".into()],
+        regression_prompt_ids: vec!["terrain-plant-structure-hugging-foundation".into(), "terrain-plant-hidden-base-footprint".into()],
+        next_skill_ids: Vec::new(),
+        body_markdown: "A conforming_solid has a flat top at max(sampled grade under the footprint) + min_thickness. Its underside follows grade within max_depth. Use create_entity with type conforming_solid and an explicit surface_id, position, half_extents, min_thickness and max_depth.
+
+Plant the complete semantic structure with terrain.plant_structure through invoke_command; provide structure_id, surface_id and the complete group_id. The legacy foundation_id parameter identifies the support body. The active edition supplies its accepted structure and support assembly types; the generic defaults are structure and support_system.
+
+terrain.plant_on_surface accepts target_id and surface_id for reversible placement. When hide_element_id identifies the previous base, its footprint determines support plan size. Inspect all aggregate members and sampled contact after placement. A changed support AABB is expected; unrelated geometry must be preserved.
+
+terrain.release_planted_structure removes adaptive placement while preserving current geometry. terrain.demote_conforming_foundation freezes the adaptive support as a snapshot or max_height_box; these legacy command ids describe the same generic support operation. terrain.unplant_on_surface reverses placement.
+
+When create_assembly returns group_element_id, use that complete aggregate as group_id. Example: invoke_command {\"command_id\":\"terrain.plant_structure\", \"parameters\":{\"structure_id\":<structure>,\"group_id\":<complete physical group>,\"foundation_id\":<support>,\"surface_id\":<surface>}}. For object placement use invoke_command {\"command_id\":\"terrain.plant_on_surface\", \"parameters\":{\"target_id\":<object>,\"surface_id\":<surface>}}. After a partial or unexpected result, never repair the model by translating parts manually; inspect the shared contract and undo or rerun the aggregate command.
+
+Domain packs supply architectural or engineering obligations and construction guidance. A terrain-derived support alone does not resolve those claims.".into(),
         trust_level: AgentSkillTrustLevel::Shipped,
         source_path: None,
     }
@@ -216,7 +122,7 @@ mod tests {
         let skill = terrain_conforming_foundation_skill();
         assert!(
             skill.must_read_at_bootstrap,
-            "the architecture guidance names this safety-critical workflow as a mandatory bootstrap skill"
+            "surface placement requires this shared workflow as a mandatory bootstrap skill"
         );
 
         assert!(skill

@@ -13741,6 +13741,8 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     }
     // Proactive skill cards are decisive must-reads and must not be truncated
     // away by the base guidance budget; extend the budget by their count.
+    let mut seen_cards = std::collections::HashSet::new();
+    must_read_guidance_card_ids.retain(|id| seen_cards.insert(id.clone()));
     must_read_guidance_card_ids.truncate(guidance_limit + proactive_passage_card_ids.len());
 
     // Session-contract guarantee: the snapshot must never advertise a guidance
