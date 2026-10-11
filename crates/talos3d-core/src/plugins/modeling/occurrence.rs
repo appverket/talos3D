@@ -1363,7 +1363,7 @@ pub(crate) fn render_occurrence(
     let resolved_values = resolved_param_values(&resolved);
     let cache_key = mesh_cache_key_for_definition(&definition, &resolved_values);
     let state = evaluate_definition_state(&definition, &resolved)?;
-    let root_geometry = build_extrusion(&definition, &state, transform.translation)?;
+    let root_geometry = build_geometry(&definition, &state, transform.translation)?;
     let mut parts = Vec::new();
     if let Some(compound) = &definition.body.compound {
         for slot in &compound.child_slots {
@@ -1405,21 +1405,15 @@ pub(crate) fn render_occurrence(
         return Ok(());
     }
 
-    if let Some(extrusion) = root_geometry {
-        if !apply_cached_occurrence_mesh(
+    if let Some(geometry) = root_geometry {
+        apply_prepared_geometry(
             world,
             root_entity,
+            element_id,
+            geometry,
+            transform,
             &cache_key,
-            extrusion.entity_transform(transform.rotation),
-        ) {
-            apply_mesh_primitive(
-                world,
-                element_id,
-                extrusion,
-                ShapeRotation(transform.rotation),
-            );
-            world.entity_mut(root_entity).insert(cache_key);
-        }
+        );
         apply_occurrence_material_assignment(world, root_entity, &definition, identity);
     } else {
         clear_occurrence_root_geometry(world, root_entity);
@@ -1432,14 +1426,16 @@ pub(crate) fn render_occurrence(
             part.identity.slot_path.clone(),
             part.identity.definition_id.clone(),
         ));
-        let mut entity = world.spawn((
-            part.extrusion,
-            ShapeRotation(part.rotation),
-            NeedsMesh,
-            Visibility::Visible,
-            part.identity,
-            part.cache_key,
-        ));
+        let entity_id = world.spawn((Visibility::Visible, part.identity)).id();
+        apply_prepared_geometry(
+            world,
+            entity_id,
+            element_id,
+            part.geometry,
+            part.transform,
+            &part.cache_key,
+        );
+        let mut entity = world.entity_mut(entity_id);
         apply_spawned_material_assignment(&mut entity, &part.definition);
         if selected {
             entity.insert(crate::plugins::selection::Selected);
@@ -1493,9 +1489,14 @@ fn ensure_occurrence_root_entity(
     }
 }
 
+enum PreparedGeometry {
+    Extrusion(ProfileExtrusion),
+    Frozen(super::primitives::TriangleMesh),
+}
+
 struct PreparedOccurrencePart {
-    extrusion: ProfileExtrusion,
-    rotation: Quat,
+    geometry: PreparedGeometry,
+    transform: Transform,
     identity: GeneratedOccurrencePart,
     cache_key: MeshCacheKey,
     definition: Definition,
@@ -1575,10 +1576,11 @@ fn prepare_compound_slot_instance(
     let world_translation =
         context.parent_translation + context.parent_rotation * local_translation;
 
-    if let Some(extrusion) = build_extrusion(&child_definition, &state, world_translation)? {
+    if let Some(geometry) = build_geometry(&child_definition, &state, world_translation)? {
         parts.push(PreparedOccurrencePart {
-            extrusion,
-            rotation: composed_rotation,
+            geometry,
+            transform: Transform::from_translation(world_translation)
+                .with_rotation(composed_rotation),
             identity: GeneratedOccurrencePart {
                 owner: context.owner,
                 slot_path: context.slot_path.clone(),
@@ -2077,6 +2079,90 @@ fn build_extrusion(
     }
 }
 
+fn build_geometry(
+    definition: &Definition,
+    state: &EvaluatedDefinitionState,
+    centre: Vec3,
+) -> Result<Option<PreparedGeometry>, String> {
+    if let Some(EvaluatorDecl::FrozenMesh(mesh)) = definition.body.evaluators.first() {
+        // Library loading does not validate bodies. Preflight must also enforce
+        // the snapshot contract before mutating an occurrence.
+        definition.validate_with(|_| true)?;
+        return super::frozen_mesh::evaluate(mesh).map(|m| Some(PreparedGeometry::Frozen(m)));
+    }
+    build_extrusion(definition, state, centre).map(|g| g.map(PreparedGeometry::Extrusion))
+}
+
+fn apply_prepared_geometry(
+    world: &mut World,
+    entity: Entity,
+    element_id: ElementId,
+    geometry: PreparedGeometry,
+    transform: Transform,
+    cache_key: &MeshCacheKey,
+) {
+    match geometry {
+        PreparedGeometry::Extrusion(extrusion) => {
+            if world.get::<ElementId>(entity).is_none() {
+                // Keep the existing derived-slot mesh-generation/cache path.
+                world.entity_mut(entity).insert((
+                    extrusion,
+                    ShapeRotation(transform.rotation),
+                    NeedsMesh,
+                    cache_key.clone(),
+                ));
+            } else if !apply_cached_occurrence_mesh(
+                world,
+                entity,
+                cache_key,
+                extrusion.entity_transform(transform.rotation),
+            ) {
+                apply_mesh_primitive(
+                    world,
+                    element_id,
+                    extrusion,
+                    ShapeRotation(transform.rotation),
+                );
+                world.entity_mut(entity).insert(cache_key.clone());
+            }
+        }
+        PreparedGeometry::Frozen(mesh) => {
+            world
+                .entity_mut(entity)
+                .remove::<(ProfileExtrusion, ShapeRotation, NeedsMesh)>();
+            if !apply_cached_occurrence_mesh(world, entity, cache_key, transform) {
+                let asset = super::mesh_generation::triangle_mesh_asset(&mesh);
+                let handle = world.resource_mut::<Assets<Mesh>>().add(asset);
+                if let Some(mut cache) = world.get_resource_mut::<RepresentationCache>() {
+                    cache.insert(cache_key.clone(), handle.clone());
+                }
+                world
+                    .entity_mut(entity)
+                    .insert((Mesh3d(handle), cache_key.clone()));
+            }
+            // Immediate analytic bounds support selection before Bevy's render
+            // extraction and remain valid after rotation or a cold reload.
+            let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+            for v in &mesh.vertices {
+                min = min.min(*v);
+                max = max.max(*v);
+            }
+            world.entity_mut(entity).insert((
+                bevy::camera::primitives::Aabb::from_min_max(min, max),
+                transform,
+                GlobalTransform::from(transform),
+                Visibility::Visible,
+            ));
+            if let Some(material) = world
+                .get_resource::<PrimitiveMaterial>()
+                .map(|m| m.0.clone())
+            {
+                world.entity_mut(entity).insert(MeshMaterial3d(material));
+            }
+        }
+    }
+}
+
 /// Pure preflight shared by parameter edits and occurrence materialization.
 /// Resolves the complete body, including late child expressions and constraints.
 pub fn validate_occurrence_geometry(
@@ -2094,7 +2180,7 @@ pub fn occurrence_geometry_part_count(
     let definition = registry.effective_definition(&identity.definition_id)?;
     let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
     let state = evaluate_definition_state(&definition, &resolved)?;
-    let root_count = usize::from(build_extrusion(&definition, &state, Vec3::ZERO)?.is_some());
+    let root_count = usize::from(build_geometry(&definition, &state, Vec3::ZERO)?.is_some());
     let mut parts = Vec::new();
     if let Some(compound) = &definition.body.compound {
         for slot in &compound.child_slots {
@@ -2157,6 +2243,7 @@ fn apply_cached_occurrence_mesh(
             Mesh3d(cached_handle),
             Visibility::Visible,
             transform,
+            GlobalTransform::from(transform),
             cache_key.clone(),
         ));
         if entity_mut
@@ -2183,6 +2270,7 @@ fn clear_occurrence_root_geometry(world: &mut World, entity: Entity) {
             Mesh3d,
             MeshCacheKey,
             MeshMaterial3d<StandardMaterial>,
+            bevy::camera::primitives::Aabb,
         )>();
     }
 }
@@ -3989,5 +4077,154 @@ mod bounds_from_aabb_tests {
             "expected max.x ≈ 3.0, got {}",
             bounds.max.x
         );
+    }
+}
+
+#[cfg(test)]
+mod frozen_mesh_occurrence_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn definition() -> Definition {
+        serde_json::from_value(json!({
+            "id":"test.frozen", "name":"Frozen product", "definition_kind":"Solid",
+            "definition_version":1,
+            "interface":{"parameters":[{"name":"snapshot_width","param_type":"Numeric",
+                "default_value":1.2,"override_policy":"Locked","geometry_affecting":false,
+                "metadata":{"unit":"m"}}]},
+            "body":{"schema_version":1,"evaluators":[{"FrozenMesh":{
+                "coordinate_unit":"mm", "vertices":[[0,0,0],[1200,0,0],[0,1400,0]],"faces":[[0,1,2]]}}],
+                "representations":[{"kind":"PrimaryGeometry","role":"Body","update_policy":"Frozen"}]},
+            "domain_data":{"source":{"digest":"sha256:fixture"},"fidelity":"L2_geometry"}
+        })).unwrap()
+    }
+    fn world() -> World {
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(RepresentationCache::default());
+        world.insert_resource(PrimitiveMaterial(Handle::default()));
+        world
+    }
+    #[test]
+    fn frozen_mesh_occurrences_share_gpu_mesh_and_keep_local_placement_after_reload() {
+        let def = definition();
+        def.validate_with(|_| false).unwrap();
+        let encoded = serde_json::to_value(&def).unwrap();
+        assert!(encoded.get("evaluators").is_none());
+        let def: Definition = serde_json::from_value(encoded).unwrap();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(def.clone());
+        let identity = OccurrenceIdentity::new(def.id, 1);
+        let mut w = world();
+        let rotated = Transform::from_xyz(5.0, 0.0, 3.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        render_occurrence(&mut w, &registry, ElementId(1), &identity, rotated, None).unwrap();
+        render_occurrence(
+            &mut w,
+            &registry,
+            ElementId(2),
+            &identity,
+            Transform::IDENTITY,
+            None,
+        )
+        .unwrap();
+        let a = crate::plugins::commands::find_entity_by_element_id(&mut w, ElementId(1)).unwrap();
+        let b = crate::plugins::commands::find_entity_by_element_id(&mut w, ElementId(2)).unwrap();
+        assert_eq!(
+            w.get::<Mesh3d>(a).unwrap().id(),
+            w.get::<Mesh3d>(b).unwrap().id()
+        );
+        assert_eq!(w.resource::<Assets<Mesh>>().len(), 1);
+        let bounds = occurrence_generated_bounds(&w, ElementId(1)).unwrap();
+        assert!((bounds.min - Vec3::new(5.0, 0.0, 1.8)).length() < 1e-5);
+        assert!((bounds.max - Vec3::new(5.0, 1.4, 3.0)).length() < 1e-5);
+        // Cached reevaluation must update the immediate selection bounds too.
+        render_occurrence(
+            &mut w,
+            &registry,
+            ElementId(1),
+            &identity,
+            Transform::from_xyz(9.0, 0.0, 0.0),
+            None,
+        )
+        .unwrap();
+        let bounds = occurrence_generated_bounds(&w, ElementId(1)).unwrap();
+        assert!((bounds.min.x - 9.0).abs() < 1e-5);
+        assert_eq!(
+            occurrence_geometry_part_count(&registry, &identity).unwrap(),
+            1
+        );
+        let mut overrides = OverrideMap::default();
+        overrides.set("snapshot_width", json!(2.0));
+        let mut changed = identity;
+        changed.overrides = overrides;
+        assert!(validate_occurrence_geometry(&registry, &changed).is_err());
+    }
+    #[test]
+    fn frozen_mesh_compound_parts_preserve_slot_transform_and_selection() {
+        let child = definition();
+        let root: Definition = serde_json::from_value(json!({
+            "id":"test.compound", "name":"Compound frozen fixture", "definition_kind":"Solid", "definition_version":1,
+            "interface":{"parameters":[]}, "body":{"schema_version":1, "compound":{"child_slots":[{
+                "slot_id":"product", "role":"product", "definition_id":"test.frozen",
+                "transform_binding":{"translation":[{"expr_kind":"literal","value":2},{"expr_kind":"literal","value":0},{"expr_kind":"literal","value":0}]},
+                "multiplicity":"Single"}]}}, "domain_data":{}
+        })).unwrap();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(child);
+        registry.insert(root.clone());
+        let identity = OccurrenceIdentity::new(root.id, 1);
+        let mut w = world();
+        let transform = Transform::from_xyz(5.0, 0.0, 3.0)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        render_occurrence(&mut w, &registry, ElementId(1), &identity, transform, None).unwrap();
+        let entity = w
+            .query::<(Entity, &GeneratedOccurrencePart)>()
+            .iter(&w)
+            .next()
+            .unwrap()
+            .0;
+        assert!(w.get::<ElementId>(entity).is_none());
+        w.entity_mut(entity)
+            .insert(crate::plugins::selection::Selected);
+        render_occurrence(&mut w, &registry, ElementId(1), &identity, transform, None).unwrap();
+        let selected = w
+            .query_filtered::<&GeneratedOccurrencePart, With<crate::plugins::selection::Selected>>()
+            .iter(&w)
+            .count();
+        assert_eq!(selected, 1);
+        let bounds = occurrence_generated_bounds(&w, ElementId(1)).unwrap();
+        assert!((bounds.max.z - 1.0).abs() < 1e-5);
+        assert_eq!(w.resource::<Assets<Mesh>>().len(), 1);
+    }
+    #[test]
+    fn frozen_mesh_bad_body_is_rejected_before_existing_geometry_changes() {
+        let mut def = definition();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(def.clone());
+        let identity = OccurrenceIdentity::new(def.id.clone(), 1);
+        let mut w = world();
+        render_occurrence(
+            &mut w,
+            &registry,
+            ElementId(1),
+            &identity,
+            Transform::IDENTITY,
+            None,
+        )
+        .unwrap();
+        def.interface.parameters.0[0].geometry_affecting = true;
+        assert!(def.validate_with(|_| false).is_err());
+        registry.insert(def);
+        assert!(render_occurrence(
+            &mut w,
+            &registry,
+            ElementId(1),
+            &identity,
+            Transform::IDENTITY,
+            None
+        )
+        .is_err());
+        assert_eq!(w.resource::<Assets<Mesh>>().len(), 1);
     }
 }

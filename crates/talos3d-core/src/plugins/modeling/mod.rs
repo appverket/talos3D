@@ -10,6 +10,7 @@ pub mod editable_mesh;
 pub mod exchange_identity;
 pub mod fillet;
 pub mod foundation;
+pub(crate) mod frozen_mesh;
 pub mod generic_factory;
 pub mod generic_snapshot;
 pub mod geometry_health;

@@ -711,7 +711,7 @@ fn attach_mesh_entity(
     entity_commands.remove::<NeedsMesh>().insert(transform);
 }
 
-fn triangle_mesh_asset(primitive: &TriangleMesh) -> Mesh {
+pub(crate) fn triangle_mesh_asset(primitive: &TriangleMesh) -> Mesh {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),

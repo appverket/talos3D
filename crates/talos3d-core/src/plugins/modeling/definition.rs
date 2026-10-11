@@ -494,6 +494,18 @@ pub enum EvaluatorDecl {
     /// A bounded, expression-driven polygon in local X/Z, extruded along Y.
     /// This is part of the canonical body, not a separately persisted evaluator.
     PolygonExtrusion(PolygonExtrusionEvaluator),
+    /// Fixed evaluated geometry. No family logic or dimension editing is implied.
+    FrozenMesh(FrozenMeshEvaluator),
+}
+
+/// A local-space, unit-typed geometry snapshot inside the canonical body.
+/// Importers own provenance and loss records; core knows no source vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenMeshEvaluator {
+    pub coordinate_unit: crate::plugins::units::Unit,
+    pub vertices: Vec<[f64; 3]>,
+    pub faces: Vec<[u32; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2020,6 +2032,29 @@ impl Definition {
             return Err("A Definition body supports one geometry evaluator; use compound child slots for multiple parts".into());
         }
         for evaluator in &self.body.evaluators {
+            if let EvaluatorDecl::FrozenMesh(mesh) = evaluator {
+                super::frozen_mesh::evaluate(mesh)?;
+                if self
+                    .interface
+                    .parameters
+                    .0
+                    .iter()
+                    .any(|p| p.geometry_affecting)
+                {
+                    return Err(
+                        "Frozen mesh parameters must be metadata only (geometry_affecting=false)"
+                            .into(),
+                    );
+                }
+                if !self
+                    .body
+                    .representations
+                    .iter()
+                    .any(|r| r.update_policy == Some(UpdatePolicy::Frozen))
+                {
+                    return Err("Frozen mesh requires an explicitly Frozen representation".into());
+                }
+            }
             if let EvaluatorDecl::PolygonExtrusion(polygon) = evaluator {
                 super::polygon_evaluator::length_scale(polygon.coordinate_unit)?;
                 if !(3..=256).contains(&polygon.profile_xz.len()) {
