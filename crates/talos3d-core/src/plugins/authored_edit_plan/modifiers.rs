@@ -247,6 +247,7 @@ mod tests {
                         half_extents: Vec3::ONE,
                     },
                     rotation: ShapeRotation::default(),
+                    layer: None,
                     material_assignment: None,
                     opening_context: None,
                     subobject_display_overrides: None,

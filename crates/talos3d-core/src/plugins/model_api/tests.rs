@@ -14870,3 +14870,38 @@ fn browser_invocation_adapter_has_every_native_tool() {
         "New native tools must automatically reach the browser adapter"
     );
 }
+
+#[cfg(feature = "model-api")]
+#[test]
+fn unbound_compound_size_control_is_refused_before_history_or_opening_changes() {
+    let mut world = init_model_api_test_world();
+    let child = handle_create_definition(&mut world, make_locked_member_request()).unwrap();
+    let mut request = make_compound_window_request(&child.definition_id);
+    request["compound"]["child_slots"][0]["parameter_bindings"][0]["expr"] =
+        json!({"kind":"literal","value":1.2});
+    let def = handle_create_definition(&mut world, request).unwrap();
+    let id =
+        handle_place_occurrence(&mut world, json!({"definition_id":def.definition_id})).unwrap();
+    let before = capture_entity_snapshot(&world, ElementId(id)).unwrap();
+    let revision = world
+        .resource::<crate::plugins::history::History>()
+        .revision_token();
+    let error = handle_update_occurrence_overrides(&mut world, id, json!({"overall_width":1.6}))
+        .unwrap_err();
+    assert!(
+        error.contains("does not change the evaluated body"),
+        "{error}"
+    );
+    assert_eq!(
+        before,
+        capture_entity_snapshot(&world, ElementId(id)).unwrap()
+    );
+    assert_eq!(
+        revision,
+        world
+            .resource::<crate::plugins::history::History>()
+            .revision_token()
+    );
+    handle_update_occurrence_overrides(&mut world, id, json!({"overall_height":1.6}))
+        .expect("bound height still works");
+}

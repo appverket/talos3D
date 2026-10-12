@@ -279,6 +279,7 @@ fn create_profile_from_closed_polyline(
                 height,
             },
             rotation: ShapeRotation(rotation),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,

@@ -4268,6 +4268,7 @@ fn handle_split_box_face(
         element_id: id_a,
         primitive: prim_a,
         rotation,
+        layer: None,
         material_assignment: None,
         opening_context: None,
         subobject_display_overrides: None,
@@ -4276,6 +4277,7 @@ fn handle_split_box_face(
         element_id: id_b,
         primitive: prim_b,
         rotation,
+        layer: None,
         material_assignment: None,
         opening_context: None,
         subobject_display_overrides: None,
@@ -9075,12 +9077,18 @@ pub fn prepare_occurrence_override_request(
         .downcast_ref::<OccurrenceSnapshot>()
         .ok_or_else(|| format!("Entity {element_id} is not an occurrence"))?
         .clone();
+    let original_identity = next.identity.clone();
     for (name, value) in map {
         next.identity.overrides.set(name.clone(), value.clone());
     }
     let registry = world.resource::<DefinitionRegistry>();
     registry.validate_overrides(&next.identity.definition_id, &next.identity.overrides)?;
     validate_occurrence_geometry(registry, &next.identity)?;
+    crate::plugins::modeling::occurrence::validate_geometry_control_changes(
+        registry,
+        &original_identity,
+        &next.identity,
+    )?;
     let after: BoxedEntity = next.into();
     let mut before_snapshots = vec![before];
     let mut after_snapshots = vec![after.clone()];

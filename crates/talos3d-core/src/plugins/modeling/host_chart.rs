@@ -162,7 +162,19 @@ impl HostChart {
             });
         }
 
-        for (index, point) in opening.profile_loop_2d.vertices.iter().enumerate() {
+        let profile = match self.opening_cut_profile(opening) {
+            Ok(profile) => profile,
+            Err(message) => {
+                issues.push(GeometryHealthIssue {
+                    kind: GeometryHealthIssueKind::HostFeatureOutsideHostDomain,
+                    message,
+                    face_indices: Vec::new(),
+                    measured_area: None,
+                });
+                return GeometryHealthReport { issues };
+            }
+        };
+        for (index, point) in profile.vertices.iter().enumerate() {
             if !self.contains_point(*point) {
                 issues.push(GeometryHealthIssue {
                     kind: GeometryHealthIssueKind::HostFeatureOutsideHostDomain,
@@ -179,13 +191,58 @@ impl HostChart {
         GeometryHealthReport { issues }
     }
 
-    pub fn world_profile(&self, opening: &ChartSpaceOpeningFeature) -> Vec<Vec3> {
-        opening
+    /// Physical cut profile, including per-edge clearance. Uniform physical
+    /// distances currently require a rectangular, metric planar chart. Other
+    /// charts must supply an explicit profile instead of treating radians or
+    /// sampled coordinates as metres.
+    pub fn opening_cut_profile(
+        &self,
+        opening: &ChartSpaceOpeningFeature,
+    ) -> Result<ChartSpaceProfileLoop, String> {
+        let margin = match opening.clearance_policy {
+            OpeningClearancePolicy::None => return Ok(opening.profile_loop_2d.clone()),
+            OpeningClearancePolicy::Uniform { margin } => margin,
+        };
+        if !margin.is_finite() || margin < 0.0 {
+            return Err("Opening clearance must be finite and non-negative".into());
+        }
+        if margin == 0.0 {
+            return Ok(opening.profile_loop_2d.clone());
+        }
+        if !matches!(self.kind, HostChartKind::Planar(_)) {
+            return Err("Uniform opening clearance requires a metric planar chart; provide an explicit cut profile for this chart".into());
+        }
+        let bounds = opening
             .profile_loop_2d
-            .vertices
-            .iter()
-            .map(|point| self.point_at(*point))
-            .collect()
+            .bounds()
+            .ok_or("Opening profile is empty")?;
+        let rectangle = ChartSpaceProfileLoop::rectangle(bounds.min, bounds.max);
+        if opening.profile_loop_2d.vertices.len() != 4
+            || !rectangle
+                .vertices
+                .iter()
+                .all(|corner| opening.profile_loop_2d.vertices.contains(corner))
+        {
+            return Err(
+                "Uniform opening clearance currently requires a rectangular profile".into(),
+            );
+        }
+        Ok(ChartSpaceProfileLoop::rectangle(
+            bounds.min - Vec2::splat(margin),
+            bounds.max + Vec2::splat(margin),
+        ))
+    }
+
+    pub fn world_profile(&self, opening: &ChartSpaceOpeningFeature) -> Vec<Vec3> {
+        self.opening_cut_profile(opening)
+            .map(|profile| {
+                profile
+                    .vertices
+                    .iter()
+                    .map(|point| self.point_at(*point))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn offset_point_at(&self, point: Vec2, side: f32) -> Vec3 {
@@ -832,7 +889,11 @@ pub fn evaluate_chart_host_with_provenance(
     for (opening_index, opening) in openings.iter().enumerate() {
         let report = chart.validate_opening(opening);
         validation_issues.extend(report.issues);
-        if let Some(bounds) = opening.profile_loop_2d.bounds() {
+        if let Some(bounds) = chart
+            .opening_cut_profile(opening)
+            .ok()
+            .and_then(|profile| profile.bounds())
+        {
             opening_rects.push(OpeningRect {
                 opening_index,
                 feature_ref: opening.feature_ref,
@@ -1248,6 +1309,44 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn fitting_clearance_changes_physical_cut_and_reveal_vertices() {
+        let chart = HostChart::planar(
+            "wall",
+            PlanarHostChart::new(
+                Vec3::ZERO,
+                Vec3::X,
+                Vec3::Y,
+                ChartDomain::new(0.0, 4.0),
+                ChartDomain::new(0.0, 3.0),
+                0.2,
+            ),
+        );
+        let opening = ChartSpaceOpeningFeature::new(
+            ElementId(1),
+            "wall",
+            ChartSpaceProfileLoop::rectangle(Vec2::new(1.0, 1.0), Vec2::new(2.18, 1.58)),
+        )
+        .with_clearance(OpeningClearancePolicy::Uniform { margin: 0.01 });
+        let profile = chart.world_profile(&opening);
+        assert!((profile[0].x - 0.99).abs() < 1e-6);
+        assert!((profile[2].x - profile[0].x - 1.2).abs() < 1e-6);
+        assert!((profile[2].y - profile[0].y - 0.6).abs() < 1e-6);
+        let evaluated = evaluate_chart_host_with_provenance(&chart, &[opening.clone()]).unwrap();
+        assert!(evaluated
+            .mesh
+            .vertices
+            .iter()
+            .any(|p| (p.x - 0.99).abs() < 1e-6 && (p.y - 0.99).abs() < 1e-6));
+        assert!(!evaluated
+            .mesh
+            .vertices
+            .iter()
+            .any(|p| (p.x - 1.0).abs() < 1e-6));
+        let outside = opening.with_clearance(OpeningClearancePolicy::Uniform { margin: 1.1 });
+        assert!(evaluate_chart_host_with_provenance(&chart, &[outside]).is_err());
     }
 
     #[test]

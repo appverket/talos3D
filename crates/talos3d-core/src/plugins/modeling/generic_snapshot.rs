@@ -12,6 +12,7 @@ use crate::{
     plugins::{
         commands::{apply_mesh_primitive, despawn_by_element_id, find_entity_by_element_id},
         identity::ElementId,
+        layers::LayerAssignment,
         materials::{
             material_assignment_display_id, material_assignment_option_from_value,
             material_assignment_to_value, MaterialAssignment,
@@ -29,6 +30,7 @@ pub struct PrimitiveSnapshot<P: Primitive> {
     pub element_id: ElementId,
     pub primitive: P,
     pub rotation: ShapeRotation,
+    pub layer: Option<String>,
     pub material_assignment: Option<MaterialAssignment>,
     pub opening_context: Option<OpeningContext>,
     pub subobject_display_overrides: Option<SubobjectDisplayOverrides>,
@@ -42,6 +44,7 @@ where
         self.element_id == other.element_id
             && self.primitive == other.primitive
             && self.rotation == other.rotation
+            && self.layer == other.layer
             && self.material_assignment == other.material_assignment
             && self.opening_context == other.opening_context
             && self.subobject_display_overrides == other.subobject_display_overrides
@@ -156,6 +159,7 @@ where
             element_id: self.element_id,
             primitive: self.primitive.translated(delta),
             rotation: self.rotation,
+            layer: self.layer.clone(),
             material_assignment: self.material_assignment.clone(),
             opening_context: self.opening_context,
             subobject_display_overrides: self.subobject_display_overrides.clone(),
@@ -169,6 +173,7 @@ where
             element_id: self.element_id,
             primitive: new_primitive,
             rotation: ShapeRotation(new_rotation),
+            layer: self.layer.clone(),
             material_assignment: self.material_assignment.clone(),
             opening_context: self.opening_context,
             subobject_display_overrides: self.subobject_display_overrides.clone(),
@@ -181,6 +186,7 @@ where
             element_id: self.element_id,
             primitive: self.primitive.scaled(factor, center),
             rotation: self.rotation,
+            layer: self.layer.clone(),
             material_assignment: self.material_assignment.clone(),
             opening_context: self.opening_context,
             subobject_display_overrides: self.subobject_display_overrides.clone(),
@@ -198,6 +204,7 @@ where
                     element_id: self.element_id,
                     primitive: new_prim,
                     rotation: ShapeRotation(new_rot),
+                    layer: self.layer.clone(),
                     material_assignment: self.material_assignment.clone(),
                     opening_context: self.opening_context,
                     subobject_display_overrides: self.subobject_display_overrides.clone(),
@@ -232,6 +239,7 @@ where
             element_id: self.element_id,
             primitive: new_prim,
             rotation: self.rotation,
+            layer: self.layer.clone(),
             material_assignment: self.material_assignment.clone(),
             opening_context: self.opening_context,
             subobject_display_overrides: self.subobject_display_overrides.clone(),
@@ -251,6 +259,7 @@ where
             element_id: self.element_id,
             primitive: self.primitive.clone(),
             rotation: self.rotation,
+            layer: self.layer.clone(),
             material_assignment: assignment,
             opening_context: self.opening_context,
             subobject_display_overrides: self.subobject_display_overrides.clone(),
@@ -270,6 +279,7 @@ where
             element_id: self.element_id,
             primitive: self.primitive.clone(),
             rotation: self.rotation,
+            layer: self.layer.clone(),
             material_assignment: self.material_assignment.clone(),
             opening_context: self.opening_context,
             subobject_display_overrides: overrides.filter(|overrides| !overrides.is_empty()),
@@ -298,6 +308,7 @@ where
                 element_id: self.element_id,
                 primitive: new_prim,
                 rotation: self.rotation,
+                layer: self.layer.clone(),
                 material_assignment: self.material_assignment.clone(),
                 opening_context: self.opening_context,
                 subobject_display_overrides: self.subobject_display_overrides.clone(),
@@ -321,6 +332,9 @@ where
                 "rotation".to_string(),
                 serde_json::to_value(self.rotation).unwrap_or(Value::Null),
             );
+            if let Some(layer) = &self.layer {
+                object.insert("layer".into(), Value::String(layer.clone()));
+            }
             if let Some(material_assignment) = &self.material_assignment {
                 object.insert(
                     "material_assignment".to_string(),
@@ -354,6 +368,11 @@ where
         );
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             let mut entity_mut = world.entity_mut(entity);
+            if let Some(layer) = &self.layer {
+                entity_mut.insert(LayerAssignment::new(layer));
+            } else {
+                entity_mut.remove::<LayerAssignment>();
+            }
             if let Some(material_assignment) = &self.material_assignment {
                 entity_mut.insert(material_assignment.clone());
             } else {
@@ -390,6 +409,11 @@ where
 
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             let mut entity_mut = world.entity_mut(entity);
+            if let Some(layer) = &self.layer {
+                entity_mut.insert(LayerAssignment::new(layer));
+            } else {
+                entity_mut.remove::<LayerAssignment>();
+            }
             entity_mut.insert((
                 self.primitive.clone(),
                 self.rotation,

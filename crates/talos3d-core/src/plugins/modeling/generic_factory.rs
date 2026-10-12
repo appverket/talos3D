@@ -11,6 +11,7 @@ use crate::{
     },
     plugins::{
         identity::ElementId,
+        layers::LayerAssignment,
         materials::{material_assignment_from_value, MaterialAssignment},
         modeling::{primitives::ShapeRotation, void_declaration::OpeningContext},
     },
@@ -60,6 +61,7 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
                     .get::<ShapeRotation>()
                     .copied()
                     .unwrap_or_default(),
+                layer: entity_ref.get::<LayerAssignment>().map(|a| a.layer.clone()),
                 material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
                 opening_context: entity_ref.get::<OpeningContext>().copied(),
                 subobject_display_overrides: entity_ref.get::<SubobjectDisplayOverrides>().cloned(),
@@ -100,6 +102,7 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
             element_id,
             primitive,
             rotation,
+            layer: data.get("layer").and_then(Value::as_str).map(str::to_owned),
             material_assignment,
             opening_context,
             subobject_display_overrides,
@@ -124,6 +127,10 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
             element_id,
             primitive,
             rotation,
+            layer: request
+                .get("layer")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             material_assignment,
             opening_context: None,
             subobject_display_overrides: None,
@@ -256,5 +263,66 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
                 summary.bounding_points.push(primitive.centre());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod layer_persistence_tests {
+    use super::*;
+    use crate::plugins::modeling::{
+        primitives::ShapeRotation,
+        profile::{Profile2d, ProfileExtrusion},
+    };
+
+    #[test]
+    fn generated_profile_layer_survives_capture_reload_and_edits() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                ElementId(17),
+                ProfileExtrusion {
+                    centre: Vec3::ZERO,
+                    profile: Profile2d::rectangle(2.0, 3.0),
+                    height: 0.2,
+                },
+                ShapeRotation::default(),
+                LayerAssignment::new("Envelope"),
+            ))
+            .id();
+        let factory = PrimitiveFactory::<ProfileExtrusion>::new();
+        let captured = factory
+            .capture_snapshot(&world.entity(entity), &world)
+            .unwrap();
+        let json = captured.to_persisted_json();
+        assert_eq!(json["layer"], "Envelope");
+        let loaded = factory.from_persisted_json(&json).unwrap();
+        let mut reopened = World::new();
+        loaded.apply_to(&mut reopened);
+        let restored = reopened
+            .query::<&LayerAssignment>()
+            .single(&reopened)
+            .unwrap();
+        assert_eq!(restored.layer, "Envelope");
+        for edited in [
+            loaded.translate_by(Vec3::X),
+            loaded.scale_by(Vec3::splat(2.0), Vec3::ZERO),
+            loaded
+                .set_property_json("height", &serde_json::json!(0.3))
+                .unwrap(),
+        ] {
+            assert_eq!(edited.to_persisted_json()["layer"], "Envelope");
+            edited.apply_with_previous(&mut reopened, Some(&loaded));
+            assert_eq!(
+                reopened
+                    .query::<&LayerAssignment>()
+                    .single(&reopened)
+                    .unwrap()
+                    .layer,
+                "Envelope"
+            );
+        }
+        let mut legacy = json;
+        legacy.as_object_mut().unwrap().remove("layer");
+        assert!(factory.from_persisted_json(&legacy).is_ok());
     }
 }

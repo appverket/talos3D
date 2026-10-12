@@ -2172,6 +2172,86 @@ pub fn validate_occurrence_geometry(
     occurrence_geometry_part_count(registry, identity).map(|_| ())
 }
 
+/// Verify that a changed geometry control affects the evaluated body in this state.
+/// Compare physical output, not cache keys or declared parameter metadata.
+/// This is demand-driven preflight; it does not run in the render loop.
+pub fn validate_geometry_control_changes(
+    registry: &DefinitionRegistry,
+    before: &OccurrenceIdentity,
+    after: &OccurrenceIdentity,
+) -> Result<(), String> {
+    let definition = registry.effective_definition(&after.definition_id)?;
+    let old = registry.resolve_params_checked(&before.definition_id, &before.overrides)?;
+    let new = registry.resolve_params_checked(&after.definition_id, &after.overrides)?;
+    let mut final_geometry = None;
+    for parameter in &definition.interface.parameters.0 {
+        if !parameter.geometry_affecting
+            || old.get(&parameter.name).map(|p| &p.value)
+                == new.get(&parameter.name).map(|p| &p.value)
+        {
+            continue;
+        }
+        let Some(old_value) = old.get(&parameter.name) else {
+            continue;
+        };
+        let mut without_change = after.clone();
+        without_change
+            .overrides
+            .set(parameter.name.clone(), old_value.value.clone());
+        let actual = match &final_geometry {
+            Some(value) => value,
+            None => final_geometry.insert(physical_geometry_signature(registry, after)?),
+        };
+        if *actual == physical_geometry_signature(registry, &without_change)? {
+            return Err(format!("Geometry control '{}' does not change the evaluated body in this state. Bind it to the Definition body or mark it as metadata; the edit and dependent opening changes were refused.", parameter.name));
+        }
+    }
+    Ok(())
+}
+
+fn physical_geometry_signature(
+    registry: &DefinitionRegistry,
+    identity: &OccurrenceIdentity,
+) -> Result<Vec<Value>, String> {
+    let definition = registry.effective_definition(&identity.definition_id)?;
+    let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
+    let state = evaluate_definition_state(&definition, &resolved)?;
+    let mut signature = Vec::new();
+    let geometry_json = |geometry: &PreparedGeometry| match geometry {
+        PreparedGeometry::Extrusion(value) => {
+            serde_json::to_value(value).expect("serializable extrusion")
+        }
+        PreparedGeometry::Frozen(value) => serde_json::to_value(value).expect("serializable mesh"),
+    };
+    if let Some(root) = build_geometry(&definition, &state, Vec3::ZERO)? {
+        signature.push(geometry_json(&root));
+    }
+    let mut parts = Vec::new();
+    if let Some(compound) = &definition.body.compound {
+        for slot in &compound.child_slots {
+            prepare_compound_slot(
+                &mut parts,
+                registry,
+                slot,
+                &state,
+                CompoundSpawnContext {
+                    owner: ElementId(0),
+                    parent_translation: Vec3::ZERO,
+                    parent_rotation: Quat::IDENTITY,
+                    slot_path: slot.slot_id.clone(),
+                    local_translation_offset: Vec3::ZERO,
+                },
+            )?;
+        }
+    }
+    for part in parts {
+        signature.push(serde_json::json!({"geometry":geometry_json(&part.geometry),
+            "translation":part.transform.translation.to_array(), "rotation":part.transform.rotation.to_array(),
+            "scale":part.transform.scale.to_array()}));
+    }
+    Ok(signature)
+}
+
 /// Same pure body preflight, with a count for callers that require visible content.
 pub fn occurrence_geometry_part_count(
     registry: &DefinitionRegistry,

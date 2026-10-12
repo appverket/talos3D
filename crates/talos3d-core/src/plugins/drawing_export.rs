@@ -701,7 +701,12 @@ fn process_pending_viewport_export(world: &mut World) {
         ViewportExportScope::Viewport => capture_viewport(world),
         ViewportExportScope::AppWindow => None,
     };
-    if pending.scope == ViewportExportScope::Viewport {
+    // WebGL captures the presented framebuffer reliably; the secondary image
+    // camera may return an unrendered black target on that backend. Crop the
+    // same window capture used by include_ui=true to the actual viewport.
+    if pending.scope == ViewportExportScope::Viewport
+        && !cfg!(all(target_arch = "wasm32", feature = "webgl2"))
+    {
         if let Err(error) =
             queue_offscreen_viewport_screenshot(world, pending.clone(), viewport_capture)
         {

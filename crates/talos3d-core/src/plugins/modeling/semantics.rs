@@ -520,6 +520,7 @@ mod tests {
                 half_extents: Vec3::splat(0.5),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,

@@ -1211,3 +1211,28 @@ For material-bearing model work, verify `get_material_assignment` after saving
 and reopening, including individual overrides that differ from family defaults.
 A successful assignment response or a matching wood colour alone is insufficient
 evidence that a structural grade has been preserved.
+
+### Physical controls and authored layer persistence
+
+Occurrence parameter edits through MCP and the inspector evaluate the complete
+body before committing. A changed parameter marked `geometry_affecting` is
+refused if the physical body is unchanged in that state. This catches compound
+Definitions that advertise dimensions but bind child geometry to literals.
+Connect the parameter to body expressions, or explicitly mark metadata-only
+parameters with `geometry_affecting: false`. The refusal occurs before dependent
+opening or history changes; it does not silently scale a frozen product.
+
+Generic primitive snapshots now retain their optional layer name through native
+project capture, reload and edits. Legacy records without a layer remain valid;
+an assignment absent from an older saved file cannot be reconstructed from it.
+
+Rectangular cuts on metric planar host charts apply `Uniform` clearance to each
+edge of the profile. Cut validation, reported world profile and generated reveal
+vertices use the same expanded geometry. Invalid distances, unsupported profile
+shapes and non-metric chart types are refused instead of treating the allowance
+as decorative metadata.
+
+On browser WebGL2, viewport-only captures crop the presented window framebuffer
+using the viewport bounds. This avoids the secondary render target returning a
+black image while the actual canvas is visible. The evidence-quality check stays
+enabled.
