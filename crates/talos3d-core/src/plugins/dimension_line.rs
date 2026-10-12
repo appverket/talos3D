@@ -838,20 +838,20 @@ fn draw_dimension_line_overlay(
         } else {
             dimension_overlay_color(selected.is_some(), paper_style)
         };
-        // The canonical DrawingScene live batch owns dimension line geometry
-        // in Drafting. This compatibility renderer retains glyph presentation
-        // only until DraftText moves into the shared annotation backend.
+        // The canonical DrawingScene owns both lines and screen-space text
+        // in Drafting. World-space glyphs are depth-tested and disappear under
+        // solids; drawing both backends would also duplicate exterior labels.
         if !drafting_active {
             draw_dimension_world_lines(&mut gizmos, node, color);
+            draw_dimension_world_text(
+                &mut gizmos,
+                node,
+                &doc_props,
+                camera,
+                camera_transform,
+                color,
+            );
         }
-        draw_dimension_world_text(
-            &mut gizmos,
-            node,
-            &doc_props,
-            camera,
-            camera_transform,
-            color,
-        );
     }
 }
 

@@ -135,6 +135,17 @@ impl Default for DrawingSceneLiveCache {
 }
 
 impl DrawingSceneLiveCache {
+    fn observes_mesh_event(&self, event: &AssetEvent<Mesh>) -> bool {
+        match event {
+            AssetEvent::Added { id } | AssetEvent::Modified { id } | AssetEvent::Removed { id } => {
+                self.observed_mesh_handles
+                    .values()
+                    .any(|observed| observed == id)
+            }
+            _ => false,
+        }
+    }
+
     #[must_use]
     pub fn stats(&self) -> DrawingSceneLiveStats {
         self.stats
@@ -392,7 +403,11 @@ fn invalidate_live_drawing_scene(
         || removed_draft_primitives
         || removed_clip_planes
         || removed_drafts;
-    let mesh_asset_changed = mesh_events.read().count() > 0;
+    // Preview/cap/UI meshes are derived presentation, not DrawingScene inputs.
+    // Their asset uploads must not recursively rebuild the canonical scene.
+    let mesh_asset_changed = mesh_events.read().fold(false, |changed, event| {
+        cache.observes_mesh_event(event) || changed
+    });
 
     if !active {
         if cache.scene.is_some() || !cache.dirty {
@@ -522,7 +537,7 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
         clear_live_text_entities(world);
         return 0;
     };
-    let Some((viewport_origin, viewport_size)) = live_viewport_rect(world) else {
+    let Some((camera, viewport_size)) = live_viewport_target(world) else {
         clear_live_text_entities(world);
         return 0;
     };
@@ -541,6 +556,7 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
             .unwrap_or_else(|| world.spawn_empty().id());
         world.entity_mut(entity).insert((
             DrawingSceneLiveText,
+            UiTargetCamera(camera),
             Text::new(spec.content),
             TextFont {
                 font_size: FontSize::Px(spec.font_size_px),
@@ -549,8 +565,8 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
             TextColor(Color::BLACK),
             Node {
                 position_type: PositionType::Absolute,
-                left: px(viewport_origin.x + spec.position_px.x),
-                top: px(viewport_origin.y + spec.position_px.y),
+                left: px(spec.position_px.x),
+                top: px(spec.position_px.y),
                 ..default()
             },
             UiTransform {
@@ -572,19 +588,24 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
     count
 }
 
-fn live_viewport_rect(world: &mut World) -> Option<(Vec2, Vec2)> {
-    let inset = world
-        .get_resource::<ViewportUiInset>()
-        .map(|inset| Vec4::new(inset.left, inset.top, inset.right, inset.bottom))
-        .unwrap_or(Vec4::ZERO);
-    let mut windows = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
-    let window = windows.single(world).ok()?;
-    let origin = Vec2::new(inset.x, inset.y);
-    let size = Vec2::new(
-        window.width() - inset.x - inset.z,
-        window.height() - inset.y - inset.w,
-    );
-    (size.cmpgt(Vec2::ZERO).all()).then_some((origin, size))
+fn live_viewport_target(world: &mut World) -> Option<(Entity, Vec2)> {
+    let mut cameras = world.try_query_filtered::<(Entity, &Camera), With<OrbitCamera>>()?;
+    let (entity, camera) = cameras.single(world).ok()?;
+    let computed_size = camera.logical_viewport_size();
+    let has_explicit_viewport = camera.viewport.is_some();
+    // DrawingScene projects the full camera frustum. UI panels cover its edges;
+    // they do not crop the camera or change the projected annotation anchors.
+    // UiTargetCamera also makes UI coordinates relative to the same viewport.
+    let size = computed_size.or_else(|| {
+        // Before the camera's first render update, the normal full-window
+        // camera has no computed target size yet.
+        if has_explicit_viewport {
+            return None;
+        }
+        let mut windows = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
+        windows.single(world).ok().map(|window| window.size())
+    })?;
+    size.cmpgt(Vec2::ZERO).all().then_some((entity, size))
 }
 
 fn scene_viewport_texts(
@@ -737,6 +758,63 @@ mod tests {
         assert_eq!(batch.spans[0].id, id);
         assert!((batch.vertices[0] - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5);
         assert!((batch.vertices[1] - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn default_plugins_include_the_ui_render_pass_for_draft_text() {
+        // Text and UiPlugin alone produce layout and entities but no pixels.
+        // Exercise the actual feature-selected application plugin group.
+        assert!(DefaultPlugins
+            .build()
+            .contains::<bevy::ui_render::UiRenderPlugin>());
+    }
+
+    #[test]
+    fn text_projection_uses_main_camera_extent_despite_asymmetric_panels() {
+        let mut world = World::new();
+        world.insert_resource(ViewportUiInset {
+            left: 280.0,
+            top: 40.0,
+            right: 80.0,
+            bottom: 24.0,
+        });
+        world.spawn((
+            Window {
+                resolution: (1000, 800).into(),
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        let main = world
+            .spawn((Camera::default(), OrbitCamera::default()))
+            .id();
+        world.spawn(Camera::default()); // Definition preview must not be selected.
+        assert_eq!(
+            live_viewport_target(&mut world),
+            Some((main, Vec2::new(1000.0, 800.0)))
+        );
+        world.resource_mut::<ViewportUiInset>().left = 0.0;
+        assert_eq!(
+            live_viewport_target(&mut world),
+            Some((main, Vec2::new(1000.0, 800.0)))
+        );
+    }
+
+    #[test]
+    fn mesh_invalidation_ignores_derived_uploads_but_tracks_authored_asset_edits() {
+        let mut assets = Assets::<Mesh>::default();
+        let authored = assets.add(Cuboid::default());
+        let derived = assets.add(Cuboid::default());
+        let mut cache = DrawingSceneLiveCache::default();
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        cache.observe_mesh_handle(entity, authored.id());
+        assert!(!cache.observes_mesh_event(&AssetEvent::Modified { id: derived.id() }));
+        assert!(cache.observes_mesh_event(&AssetEvent::Modified { id: authored.id() }));
+        assert!(cache.observes_mesh_event(&AssetEvent::Removed { id: authored.id() }));
+        cache.observe_mesh_handle(entity, derived.id());
+        assert!(!cache.observes_mesh_event(&AssetEvent::Modified { id: authored.id() }));
+        assert!(cache.observes_mesh_event(&AssetEvent::Added { id: derived.id() }));
     }
 
     #[test]

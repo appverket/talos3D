@@ -632,7 +632,7 @@ fn is_valid_white_paper_material(material: &StandardMaterial) -> bool {
 fn setup_render_pipeline_once(
     mut commands: Commands,
     settings: Res<RenderSettings>,
-    camera_query: Query<Entity, With<Camera3d>>,
+    camera_query: Query<Entity, (With<Camera3d>, With<OrbitCamera>)>,
     mut clear_color: ResMut<ClearColor>,
     mut setup_state: ResMut<RenderPipelineSetupState>,
 ) {
@@ -642,7 +642,9 @@ fn setup_render_pipeline_once(
 
     let Ok(camera) = camera_query.single() else {
         if !setup_state.warned_missing_camera {
-            warn!("RenderPipelinePlugin: no Camera3d found; will retry render setup");
+            warn!(
+                "RenderPipelinePlugin: no unique main OrbitCamera found; will retry render setup"
+            );
             setup_state.warned_missing_camera = true;
         }
         return;
@@ -675,7 +677,7 @@ fn setup_render_pipeline_once(
 fn sync_render_settings(
     mut commands: Commands,
     settings: Res<RenderSettings>,
-    camera_query: Query<Entity, With<Camera3d>>,
+    camera_query: Query<Entity, (With<Camera3d>, With<OrbitCamera>)>,
 ) {
     if !settings.is_changed() {
         return;
@@ -1846,6 +1848,47 @@ mod tests {
         let settings = app.world().resource::<RenderSettings>();
         assert!(!settings.xray_enabled);
         assert_eq!(settings.xray_surface_alpha, 0.62);
+    }
+
+    #[test]
+    fn drafting_camera_preset_targets_main_view_with_definition_preview_present() {
+        let mut app = App::new();
+        app.init_resource::<RenderSettings>()
+            .init_resource::<RenderPipelineSetupState>()
+            .init_resource::<ClearColor>()
+            .add_systems(
+                Update,
+                (setup_render_pipeline_once, sync_render_settings).chain(),
+            );
+        let main = app
+            .world_mut()
+            .spawn((Camera3d::default(), OrbitCamera::default()))
+            .id();
+        let preview = app
+            .world_mut()
+            .spawn((Camera3d::default(), Tonemapping::AgX))
+            .id();
+        app.update();
+        assert!(
+            app.world()
+                .resource::<RenderPipelineSetupState>()
+                .configured
+        );
+        apply_drafting_render_preset(&mut app.world_mut().resource_mut::<RenderSettings>());
+        app.update();
+        assert_eq!(
+            app.world().get::<Tonemapping>(main),
+            Some(&Tonemapping::None)
+        );
+        assert_eq!(
+            app.world().get::<Tonemapping>(preview),
+            Some(&Tonemapping::AgX)
+        );
+        assert!(app
+            .world()
+            .get::<ScreenSpaceAmbientOcclusion>(main)
+            .is_none());
+        assert!(app.world().get::<Bloom>(main).is_none());
     }
 
     #[test]
