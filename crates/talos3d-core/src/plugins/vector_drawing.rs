@@ -40,9 +40,7 @@ const WEIGHT_BOUNDARY_MM: f32 = 0.25;
 const WEIGHT_DIMENSION_MM: f32 = 0.18;
 
 const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
-const VISIBLE_EDGE_RAY_SAMPLE_T_VALUES: [f32; 3] = [0.2, 0.5, 0.8];
 const EDGE_VISIBILITY_EPSILON: f32 = 0.01;
-const ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH: f32 = 10_000.0;
 const EDGE_QUANTIZATION_SCALE: f32 = 10_000.0;
 const DIMENSION_LINE_TICK_HALF: f32 = 0.06;
 
@@ -1567,9 +1565,12 @@ pub(crate) fn collect_classified_visible_edges(
     edges
         .into_values()
         .filter(|edge| edge.is_visible_candidate())
-        .filter_map(|edge| {
-            let (start, end) = clip_edge(edge.start_world, edge.end_world, clip_planes)?;
-            edge_is_visible(
+        .flat_map(|edge| {
+            let Some((start, end)) = clip_edge(edge.start_world, edge.end_world, clip_planes)
+            else {
+                return Vec::new();
+            };
+            visible_edge_segments(
                 start,
                 end,
                 entity,
@@ -1579,7 +1580,9 @@ pub(crate) fn collect_classified_visible_edges(
                 scene_triangles,
                 clip_planes,
             )
-            .then_some((start, end, edge.classify()))
+            .into_iter()
+            .map(|(start, end)| (start, end, edge.classify()))
+            .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -1706,7 +1709,11 @@ fn register_feature_edge(
     state.total_faces = state.total_faces.saturating_add(1);
 }
 
-fn edge_is_visible(
+/// Subtract the exact intervals hidden by scene triangles. A visible sample
+/// cannot make the rest of a long edge visible: a stud glimpsed through a
+/// window must stop at the aperture in the drawing. This is the shared offline
+/// projector, not a per-frame viewport visibility implementation.
+fn visible_edge_segments(
     start: Vec3,
     end: Vec3,
     _owner_entity: Entity,
@@ -1715,60 +1722,136 @@ fn edge_is_visible(
     orthographic: bool,
     scene_triangles: &[SceneTriangle],
     clip_planes: &[ClipPlane],
-) -> bool {
-    use crate::plugins::modeling::snapshots::ray_triangle_intersection;
-
-    VISIBLE_EDGE_RAY_SAMPLE_T_VALUES
-        .into_iter()
-        .map(|t| start.lerp(end, t))
-        .any(|sample| {
-            let (ray_origin, ray_direction, max_distance) = if orthographic {
-                let Some(direction) = Dir3::new(camera_forward).ok() else {
-                    return true;
-                };
-                (
-                    sample - direction.as_vec3() * ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH,
-                    direction,
-                    ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH,
-                )
+) -> Vec<(Vec3, Vec3)> {
+    let mut hidden = Vec::new();
+    for triangle in scene_triangles {
+        let normal = (triangle.b - triangle.a)
+            .cross(triangle.c - triangle.a)
+            .normalize_or_zero();
+        if normal == Vec3::ZERO {
+            continue;
+        }
+        let mut interval = (0.0, 1.0);
+        let depth = if orthographic {
+            let denominator = normal.dot(camera_forward);
+            if denominator.abs() < 1e-7 {
+                continue;
+            }
+            // Positive distance from the triangle plane along the view ray.
+            normal / denominator
+        } else {
+            let camera_side = normal.dot(camera_position - triangle.a);
+            if camera_side.abs() < 1e-7 {
+                continue;
+            }
+            -normal * camera_side.signum()
+        };
+        if !restrict_interval(
+            &mut interval,
+            depth.dot(start - triangle.a) - EDGE_VISIBILITY_EPSILON,
+            depth.dot(end - triangle.a) - EDGE_VISIBILITY_EPSILON,
+        ) {
+            continue;
+        }
+        // Clip the occluding surface itself, not just its vertices or the
+        // candidate edge. Avoid a polygon allocation for ordinary elevations.
+        let vertices = [triangle.a, triangle.b, triangle.c];
+        let clipped = (!clip_planes.is_empty())
+            .then(|| clip_occluder_polygon(vertices.to_vec(), clip_planes));
+        let polygon = clipped.as_deref().unwrap_or(&vertices);
+        if polygon.len() < 3 {
+            continue;
+        }
+        // A section tangent to a triangle may leave several duplicate or
+        // collinear vertices. Such a zero-area remainder casts no shadow.
+        if clipped.is_some() {
+            let twice_area = (1..polygon.len() - 1)
+                .map(|i| (polygon[i] - polygon[0]).cross(polygon[i + 1] - polygon[0]))
+                .sum::<Vec3>();
+            if twice_area.length_squared() <= 1e-16 {
+                continue;
+            }
+        }
+        let centre = polygon.iter().copied().sum::<Vec3>() / polygon.len() as f32;
+        let mut inside = true;
+        for i in 0..polygon.len() {
+            let a = polygon[i];
+            let b = polygon[(i + 1) % polygon.len()];
+            let (origin, side) = if orthographic {
+                (a, (b - a).cross(camera_forward))
             } else {
-                let ray_vector = sample - camera_position;
-                let max_distance = ray_vector.length();
-                let Some(direction) = Dir3::new(ray_vector).ok() else {
-                    return true;
-                };
-                (camera_position, direction, max_distance)
-            };
-            let ray = Ray3d::new(ray_origin, ray_direction);
-            !scene_triangles.iter().any(|triangle| {
-                // Skip triangles that are entirely on the clipped side
-                // of any active plane — they are hidden by the section
-                // and must not occlude "elevation beyond" geometry.
-                if triangle_fully_clipped(triangle, clip_planes) {
-                    return false;
-                }
-                ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c).is_some_and(
-                    |d| {
-                        d > EDGE_VISIBILITY_EPSILON
-                            && d < max_distance - EDGE_VISIBILITY_EPSILON
-                            && clip_planes.iter().all(|(origin, normal)| {
-                                (ray.get_point(d) - *origin).dot(*normal) >= 0.0
-                            })
-                    },
+                (
+                    camera_position,
+                    (a - camera_position).cross(b - camera_position),
                 )
-            })
-        })
+            };
+            let side = side.normalize_or_zero();
+            if side == Vec3::ZERO {
+                continue;
+            }
+            let side = side * side.dot(centre - origin).signum();
+            if !restrict_interval(
+                &mut interval,
+                side.dot(start - origin),
+                side.dot(end - origin),
+            ) {
+                inside = false;
+                break;
+            }
+        }
+        if inside && interval.1 > interval.0 {
+            hidden.push(interval);
+        }
+    }
+    hidden.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut visible = Vec::new();
+    let mut cursor: f32 = 0.0;
+    for (lo, hi) in hidden {
+        if lo > cursor + 1e-6 {
+            visible.push((start.lerp(end, cursor), start.lerp(end, lo)));
+        }
+        cursor = cursor.max(hi);
+    }
+    if cursor < 1.0 - 1e-6 {
+        visible.push((start.lerp(end, cursor), end));
+    }
+    visible
 }
 
-/// True iff every vertex of the triangle is on the *clipped* side of at
-/// least one active plane (i.e. the whole triangle is hidden by that
-/// plane's section). `ClipPlaneNode`'s `normal` points toward the
-/// visible side, so the clipped half-space is `signed < 0`.
-fn triangle_fully_clipped(triangle: &SceneTriangle, clip_planes: &[ClipPlane]) -> bool {
-    clip_planes.iter().any(|(origin, normal)| {
-        let signed = |p: Vec3| (p - *origin).dot(*normal);
-        signed(triangle.a) < 0.0 && signed(triangle.b) < 0.0 && signed(triangle.c) < 0.0
-    })
+/// Intersect an edge parameter interval with the linear half-space f(t) >= 0.
+fn restrict_interval(interval: &mut (f32, f32), start: f32, end: f32) -> bool {
+    if start < 0.0 && end < 0.0 {
+        return false;
+    }
+    if start < 0.0 {
+        interval.0 = interval.0.max(start / (start - end));
+    } else if end < 0.0 {
+        interval.1 = interval.1.min(start / (start - end));
+    }
+    interval.0 <= interval.1
+}
+
+fn clip_occluder_polygon(mut polygon: Vec<Vec3>, planes: &[ClipPlane]) -> Vec<Vec3> {
+    for (origin, normal) in planes {
+        if polygon.is_empty() {
+            break;
+        }
+        let mut clipped = Vec::new();
+        for i in 0..polygon.len() {
+            let a = polygon[i];
+            let b = polygon[(i + 1) % polygon.len()];
+            let da = (a - *origin).dot(*normal);
+            let db = (b - *origin).dot(*normal);
+            if da >= 0.0 {
+                clipped.push(a);
+            }
+            if (da < 0.0) != (db < 0.0) {
+                clipped.push(a.lerp(b, da / (da - db)));
+            }
+        }
+        polygon = clipped;
+    }
+    polygon
 }
 
 /// Trim crossing edges against each visible half-space before visibility tests
@@ -1932,7 +2015,7 @@ mod tests {
             c: Vec3::new(0.0, 1.0, 0.0),
         };
         let visible = |planes: &[ClipPlane]| {
-            edge_is_visible(
+            !visible_edge_segments(
                 Vec3::new(-0.1, -0.5, -1.0),
                 Vec3::new(0.1, -0.5, -1.0),
                 owner,
@@ -1942,9 +2025,166 @@ mod tests {
                 std::slice::from_ref(&triangle),
                 planes,
             )
+            .is_empty()
         };
         assert!(!visible(&[]));
         assert!(visible(&planes));
+    }
+
+    fn opaque_rectangle(y_min: f32, y_max: f32, z: f32) -> Vec<SceneTriangle> {
+        let a = Vec3::new(-2.0, y_min, z);
+        let b = Vec3::new(2.0, y_min, z);
+        let c = Vec3::new(2.0, y_max, z);
+        let d = Vec3::new(-2.0, y_max, z);
+        vec![
+            SceneTriangle {
+                entity: Entity::from_bits(2),
+                a,
+                b,
+                c,
+            },
+            SceneTriangle {
+                entity: Entity::from_bits(2),
+                a,
+                b: c,
+                c: d,
+            },
+        ]
+    }
+
+    #[test]
+    fn aperture_exposes_only_its_slice_of_a_long_framing_edge() {
+        // A narrow opening contains none of the former 20/50/80% samples.
+        // Keep its true visible interval, without the hidden continuation
+        // below the sill or above the head, including reversed triangle winding.
+        let mut wall = opaque_rectangle(-1.0, 1.05, 0.0);
+        wall.extend(opaque_rectangle(1.15, 4.0, 0.0));
+        for reverse in [false, true] {
+            if reverse {
+                for triangle in &mut wall {
+                    std::mem::swap(&mut triangle.b, &mut triangle.c);
+                }
+            }
+            let result = visible_edge_segments(
+                Vec3::new(0.0, 0.0, -1.0),
+                Vec3::new(0.0, 3.0, -1.0),
+                Entity::from_bits(1),
+                Vec3::Z * 10.0,
+                Vec3::NEG_Z,
+                true,
+                &wall,
+                &[],
+            );
+            assert_eq!(result.len(), 1, "{result:?}");
+            assert!(result[0].0.abs_diff_eq(Vec3::new(0.0, 1.05, -1.0), 1e-5));
+            assert!(result[0].1.abs_diff_eq(Vec3::new(0.0, 1.15, -1.0), 1e-5));
+        }
+    }
+
+    #[test]
+    fn perspective_occlusion_splits_at_projected_boundary_and_keeps_front_edges() {
+        let wall = opaque_rectangle(-1.0, 1.0, 0.0);
+        let segments = |z| {
+            visible_edge_segments(
+                Vec3::new(0.0, 0.0, z),
+                Vec3::new(0.0, 4.0, z),
+                Entity::from_bits(1),
+                Vec3::Z * 2.0,
+                Vec3::NEG_Z,
+                false,
+                &wall,
+                &[],
+            )
+        };
+        let behind = segments(-2.0);
+        assert_eq!(behind.len(), 1);
+        assert!(behind[0].0.abs_diff_eq(Vec3::new(0.0, 2.0, -2.0), 1e-5));
+        assert!(behind[0].1.abs_diff_eq(Vec3::new(0.0, 4.0, -2.0), 1e-5));
+        for z in [0.0, 1.0] {
+            let front = segments(z);
+            assert_eq!(
+                front,
+                vec![(Vec3::new(0.0, 0.0, z), Vec3::new(0.0, 4.0, z))]
+            );
+        }
+    }
+
+    #[test]
+    fn reversed_edge_keeps_reversed_visible_interval_and_camera_rear_does_not_occlude() {
+        let wall = opaque_rectangle(-1.0, 1.0, 0.0);
+        for orthographic in [true, false] {
+            let result = visible_edge_segments(
+                Vec3::new(0.0, 4.0, -2.0),
+                Vec3::new(0.0, 0.0, -2.0),
+                Entity::from_bits(1),
+                Vec3::Z * 2.0,
+                Vec3::NEG_Z,
+                orthographic,
+                &wall,
+                &[],
+            );
+            assert_eq!(result.len(), 1);
+            assert!(result[0].0.abs_diff_eq(Vec3::new(0.0, 4.0, -2.0), 1e-5));
+            let boundary = if orthographic { 1.0 } else { 2.0 };
+            assert!(result[0]
+                .1
+                .abs_diff_eq(Vec3::new(0.0, boundary, -2.0), 1e-5));
+        }
+        // This surface is behind the camera, so cannot hide an edge in front.
+        let behind_camera = opaque_rectangle(-10.0, 10.0, 3.0);
+        let start = Vec3::new(0.0, 0.0, -2.0);
+        let end = Vec3::new(0.0, 4.0, -2.0);
+        assert_eq!(
+            visible_edge_segments(
+                start,
+                end,
+                Entity::from_bits(1),
+                Vec3::Z * 2.0,
+                Vec3::NEG_Z,
+                false,
+                &behind_camera,
+                &[],
+            ),
+            vec![(start, end)]
+        );
+    }
+
+    #[test]
+    fn section_clips_partial_occluder_before_interval_subtraction() {
+        let wall = opaque_rectangle(-1.0, 4.0, 0.0);
+        let result = visible_edge_segments(
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 3.0, -1.0),
+            Entity::from_bits(1),
+            Vec3::Z * 10.0,
+            Vec3::NEG_Z,
+            true,
+            &wall,
+            &[(Vec3::Y, Vec3::Y)],
+        );
+        assert_eq!(result.len(), 1);
+        assert!(result[0].0.abs_diff_eq(Vec3::new(0.0, 0.0, -1.0), 1e-5));
+        assert!(result[0].1.abs_diff_eq(Vec3::new(0.0, 1.0, -1.0), 1e-5));
+    }
+
+    #[test]
+    fn section_tangent_to_occluder_does_not_hide_geometry() {
+        let wall = opaque_rectangle(-1.0, 1.0, 0.0);
+        let start = Vec3::new(0.0, 0.0, -1.0);
+        let end = Vec3::new(0.0, 3.0, -1.0);
+        assert_eq!(
+            visible_edge_segments(
+                start,
+                end,
+                Entity::from_bits(1),
+                Vec3::Z * 10.0,
+                Vec3::NEG_Z,
+                true,
+                &wall,
+                &[(Vec3::Y, Vec3::Y)],
+            ),
+            vec![(start, end)]
+        );
     }
 
     #[test]

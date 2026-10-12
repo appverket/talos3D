@@ -11169,16 +11169,31 @@ pub fn handle_set_property(
         overrides.insert(property_name.to_string(), value);
         return handle_update_occurrence_overrides(world, element_id, Value::Object(overrides));
     }
+    crate::plugins::authored_edit_plan::requests::ensure_authored_base(world)?;
     let updated = snapshot.set_property_json(property_name, &value)?;
-    send_event(
+    let draft = crate::plugins::commands::prepare_entity_changes(
         world,
         ApplyEntityChangesCommand {
             label: "AI set property",
             before: vec![snapshot],
             after: vec![updated.clone()],
         },
-    );
-    flush_model_api_write_pipeline(world);
+    )?;
+    let plan = draft
+        .capture(
+            world,
+            None,
+            world
+                .resource::<crate::plugins::history::History>()
+                .revision_token(),
+        )
+        .map_err(|error| error.to_string())?;
+    world.init_resource::<crate::plugins::authored_edit_plan::AuthoredEditPlanRegistry>();
+    let plan = world
+        .resource_mut::<crate::plugins::authored_edit_plan::AuthoredEditPlanRegistry>()
+        .publish(plan)
+        .map_err(|error| error.to_string())?;
+    apply_captured_plan_and_flush(world, &plan)?;
     Ok(updated.to_json())
 }
 
@@ -11744,6 +11759,7 @@ pub(crate) fn transform_rotation(
     let radians = scalar_from_value(&request.value)?.to_radians();
     Ok(match parse_axis(request.axis.as_deref())? {
         Some(AxisName::X) => Quat::from_rotation_x(radians),
+        Some(AxisName::Y) => Quat::from_rotation_y(radians),
         Some(AxisName::Z) => Quat::from_rotation_z(radians),
         _ => Quat::from_axis_angle(authoring_rotation_axis(authoring), radians),
     })
@@ -19408,4 +19424,28 @@ fn handle_list_project_knowledge(world: &World, request: ProjectKnowledgeIndexRe
     let page: Vec<_> = rows.into_iter().skip(offset).take(limit).collect();
     let end = offset + page.len();
     json!({"layer":"private_project_context","items":page,"total":total,"next_offset":if end<total {Some(end)} else {None},"publication":"none; shared releases require separate confidentiality, rights and evidence review"})
+}
+
+#[cfg(all(test, feature = "model-api"))]
+mod explicit_rotation_axis_tests {
+    use super::*;
+    #[test]
+    fn explicit_y_is_world_axis_in_an_elevation_draft() {
+        let frame = GroupFrame {
+            translation: Vec3::ZERO,
+            rotation: Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        };
+        let mut request = TransformToolRequest {
+            element_ids: vec![1],
+            operation: "rotate".into(),
+            axis: Some("Y".into()),
+            value: json!(90),
+            pivot: None,
+        };
+        let explicit = transform_rotation(&request, &frame).unwrap();
+        assert!((explicit * Vec3::X).distance(Vec3::NEG_Z) < 1e-5);
+        request.axis = None;
+        let unconstrained = transform_rotation(&request, &frame).unwrap();
+        assert!((unconstrained * Vec3::X).distance(Vec3::Y) < 1e-5);
+    }
 }

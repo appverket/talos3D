@@ -199,6 +199,7 @@ impl EditorCommand for DeleteEntitiesHistoryCommand {
 }
 
 struct ModifyEntitiesHistoryCommand {
+    refusal: Option<String>,
     label: &'static str,
     before: Vec<BoxedEntity>,
     after: Vec<BoxedEntity>,
@@ -207,6 +208,18 @@ struct ModifyEntitiesHistoryCommand {
 impl EditorCommand for ModifyEntitiesHistoryCommand {
     fn label(&self) -> &'static str {
         self.label
+    }
+
+    fn preflight(&self, _world: &World) -> Option<crate::semantics::Refusal> {
+        self.refusal
+            .as_ref()
+            .map(|reason| crate::semantics::Refusal {
+                violated: None,
+                reason: reason.clone(),
+                observed: self.label.into(),
+                repair: "Revise the edit using the reported constraint.".into(),
+                contrasts: Vec::new(),
+            })
     }
 
     fn apply(&mut self, world: &mut World) {
@@ -781,17 +794,69 @@ fn active_authoring_frame(world: &World, edit_context: &GroupEditContext) -> Gro
     active_drafting_frame(world).unwrap_or(group_frame)
 }
 
+/// Prepare ordinary authored property edits through the same domain modifier
+/// stage used by interactive occurrence controls. Planning never mutates the world.
+pub fn prepare_entity_changes(
+    world: &World,
+    command: ApplyEntityChangesCommand,
+) -> Result<crate::plugins::authored_edit_plan::modifiers::EditPlanDraft, String> {
+    use crate::plugins::authored_edit_plan::{
+        modifiers::{apply_edit_modifiers, EditModifierRequest, EditPlanDraft},
+        PlanContext,
+    };
+    let mut draft = EditPlanDraft {
+        source_artifacts: Vec::new(),
+        context: PlanContext {
+            planner_id: "core.authored_changes".into(),
+            planner_version: 1,
+            request_kind: "core.authored_changes".into(),
+            mutation_scope: "authored properties and dependent entities".into(),
+            intent: command.label.into(),
+            ..Default::default()
+        },
+        before: command.before,
+        after: command.after,
+        semantic_intents: crate::semantics::SemanticPlan::none(),
+    };
+    apply_edit_modifiers(
+        world,
+        &EditModifierRequest::new("core.authored_changes", &()),
+        &mut draft,
+        &[],
+    );
+    if !draft.context.refusals.is_empty() {
+        return Err(draft.context.refusals.join("; "));
+    }
+    Ok(draft)
+}
+
 pub(crate) fn enqueue_apply_entity_changes(world: &mut World, command: ApplyEntityChangesCommand) {
     if command.before.is_empty() || command.after.is_empty() {
         return;
     }
 
+    let (before, after, refusal) =
+        match prepare_entity_changes(world, command.clone()) {
+            Ok(draft) if draft.source_artifacts.is_empty() && draft.semantic_intents.is_empty() => {
+                (draft.before, draft.after, None)
+            }
+            result => (
+                command.before,
+                command.after,
+                Some(result.err().unwrap_or_else(|| {
+                    "This edit requires an explicit captured semantic plan".into()
+                })),
+            ),
+        };
+    // Queue refusals too: history preflight must reject the entire enclosing
+    // command group, not silently drop one invalid edit while applying siblings.
     world
         .resource_mut::<PendingCommandQueue>()
         .push_command(Box::new(ModifyEntitiesHistoryCommand {
             label: command.label,
-            before: command.before,
-            after: command.after,
+            before,
+            after,
+            refusal,
         }));
 }
 
@@ -1040,6 +1105,67 @@ mod tests {
             },
         },
     };
+
+    #[test]
+    fn property_modifier_refusal_rejects_the_whole_queued_group() {
+        use crate::plugins::authored_edit_plan::{
+            capture_snapshot,
+            modifiers::{EditPlanModifiers, OrderedEditModifier},
+        };
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PolylineFactory);
+        world.insert_resource(registry);
+        world.init_resource::<PendingCommandQueue>();
+        world.init_resource::<History>();
+        world.init_resource::<Assets<Mesh>>();
+        let mut modifiers = EditPlanModifiers::default();
+        modifiers
+            .register(OrderedEditModifier::new(
+                "test.constraint",
+                10,
+                "core.authored_changes",
+                |_, _, draft| {
+                    if draft.after.iter().any(|s| s.element_id() == ElementId(2)) {
+                        draft
+                            .context
+                            .refusals
+                            .push("dependent geometry would intersect".into());
+                    }
+                },
+            ))
+            .unwrap();
+        world.insert_resource(modifiers);
+        let mut originals = Vec::new();
+        for id in [1, 2] {
+            world.spawn((
+                ElementId(id),
+                Polyline {
+                    points: vec![Vec3::ZERO, Vec3::X],
+                },
+            ));
+            originals.push(capture_snapshot(&world, ElementId(id)).unwrap());
+        }
+        world
+            .resource_mut::<PendingCommandQueue>()
+            .begin_group("two properties");
+        for prior in &originals {
+            enqueue_apply_entity_changes(
+                &mut world,
+                ApplyEntityChangesCommand {
+                    label: "property edit",
+                    before: vec![prior.clone()],
+                    after: vec![prior.translate_by(Vec3::Y)],
+                },
+            );
+        }
+        world.resource_mut::<PendingCommandQueue>().end_group();
+        apply_pending_history_commands(&mut world);
+        assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+        for prior in originals {
+            assert_eq!(capture_snapshot(&world, prior.element_id()).unwrap(), prior);
+        }
+    }
 
     #[test]
     fn delete_entities_command_is_resolved_and_applied() {
