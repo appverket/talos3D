@@ -717,6 +717,22 @@ The renderer and lighting surfaces are intentionally agent-facing:
 - the startup/default daylight setup is recoverable through
   `restore_default_light_rig`
 
+`view_update` overlays only explicitly supplied camera fields onto the saved
+view. A description-only update preserves its camera even when the live camera
+has moved. Invalid projection values and conflicting renames leave the view
+unchanged. `view_save` continues to use the live camera for omitted fields.
+
+Active clipping planes cut crossing StandardMaterial geometry in color and
+shadow/depth passes on native, WebGPU and WebGL2. The live renderer supports up
+to eight planes; exceeding that capacity reports an error and hides geometry
+rather than rendering an incomplete subset. Opaque cut faces use a transient,
+batched cache rebuilt on relevant geometry, visibility or material changes.
+Cap construction schedules at most 32,768 source-triangle/plane pairs per update;
+a single mesh exceeding that limit skips live caps with a warning while retaining
+GPU clipping and offline section export. These render caches are not authored
+project entities. Drawing-owned dimensions appear in their active Draft rather
+than accumulating all drawing views in ordinary 3D.
+
 Lighting is treated as authored scene state rather than a private startup
 fixture. That means:
 
