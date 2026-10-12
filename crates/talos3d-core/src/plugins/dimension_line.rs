@@ -1994,10 +1994,10 @@ fn legacy_dimension_style(display_unit: DisplayUnit) -> DimensionStyle {
         DisplayUnit::Feet | DisplayUnit::Inches => DimensionStyle::architectural_imperial(),
         _ => DimensionStyle::architectural_metric(),
     };
-    style.text_placement = TextPlacement::Centered {
-        break_line: false,
-        gap_mm: 0.0,
-    };
+    // Native dimension anchors denote the text baseline (as in the existing
+    // PDF adapter and world glyph overlay), not its visual centre. A zero gap
+    // retains the established exported anchor coordinates and line geometry.
+    style.text_placement = TextPlacement::Above { gap_mm: 0.0 };
     style.text_color_hex = "4A4A4E".to_string();
     style
 }
@@ -3312,6 +3312,50 @@ mod tests {
         .expect("an active camera should be selected");
 
         assert_eq!(selected_transform.translation(), Vec3::new(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn native_projected_dimensions_use_baseline_without_moving_exported_anchors() {
+        let node = DimensionLineNode::default();
+        let doc = DocumentProperties::default();
+        for (a, b, offset) in [
+            (Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(0.0, 3.0)),
+            (Vec2::new(10.0, 0.0), Vec2::ZERO, Vec2::new(0.0, 3.0)),
+            (Vec2::ZERO, Vec2::new(0.0, 10.0), Vec2::new(3.0, 0.0)),
+            (Vec2::new(0.0, 10.0), Vec2::ZERO, Vec2::new(3.0, 0.0)),
+        ] {
+            let primitives =
+                render_dimension_line_projected_primitives(&node, &doc, a, b, offset, 1.0);
+            let (anchor, rotation, mode) = primitives
+                .iter()
+                .find_map(|primitive| {
+                    if let DimPrimitive::Text {
+                        anchor,
+                        rotation_rad,
+                        anchor_mode,
+                        ..
+                    } = primitive
+                    {
+                        Some((*anchor, *rotation_rad, *anchor_mode))
+                    } else {
+                        None
+                    }
+                })
+                .expect("native dimension text");
+            assert_eq!(mode, crate::plugins::drafting::TextAnchor::CenterBaseline);
+            assert!(anchor.abs_diff_eq((a + b) * 0.5 + offset, 1e-6));
+            assert!(
+                rotation >= -std::f32::consts::FRAC_PI_2 && rotation <= std::f32::consts::FRAC_PI_2
+            );
+            assert!(
+                primitives.iter().any(|primitive| matches!(primitive,
+                    DimPrimitive::LineSegment { a: line_a, b: line_b, .. }
+                        if ((*line_a + *line_b) * 0.5).abs_diff_eq(anchor, 1e-6)
+                        && line_a.distance(*line_b) >= a.distance(b)
+                )),
+                "continuous dimension stroke keeps its established location"
+            );
+        }
     }
 
     #[test]
