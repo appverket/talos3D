@@ -605,7 +605,13 @@ impl AuthoredEntity for OccurrenceSnapshot {
     }
 
     fn property_fields(&self) -> Vec<PropertyFieldDef> {
-        vec![]
+        vec![crate::authored_entity::property_field(
+            "label",
+            crate::authored_entity::PropertyValueKind::Text,
+            Some(crate::authored_entity::PropertyValue::Text(
+                self.label.clone(),
+            )),
+        )]
     }
 
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
@@ -613,6 +619,13 @@ impl AuthoredEntity for OccurrenceSnapshot {
             return self.set_material_assignment(material_assignment_option_from_value(value)?);
         }
         let mut next = self.clone();
+        if property_name == "label" {
+            next.label = value
+                .as_str()
+                .ok_or("Occurrence label must be text")?
+                .to_string();
+            return Ok(BoxedEntity(Box::new(next)));
+        }
         next.identity.overrides.set(property_name, value.clone());
         Ok(BoxedEntity(Box::new(next)))
     }

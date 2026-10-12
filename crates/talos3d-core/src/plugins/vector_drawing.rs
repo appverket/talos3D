@@ -1723,103 +1723,141 @@ fn visible_edge_segments(
     scene_triangles: &[SceneTriangle],
     clip_planes: &[ClipPlane],
 ) -> Vec<(Vec3, Vec3)> {
+    use bevy::math::DVec3;
+    let start64 = start.as_dvec3();
+    let end64 = end.as_dvec3();
+    let forward = camera_forward.as_dvec3().normalize_or_zero();
+    let camera = camera_position.as_dvec3();
+    let right = forward.any_orthonormal_vector();
+    let up = forward.cross(right);
     let mut hidden = Vec::new();
     for triangle in scene_triangles {
-        let normal = (triangle.b - triangle.a)
-            .cross(triangle.c - triangle.a)
+        let vertices = [
+            triangle.a.as_dvec3(),
+            triangle.b.as_dvec3(),
+            triangle.c.as_dvec3(),
+        ];
+        // Broad phase in the view plane. Nearly edge-on triangles are common
+        // in transformed compound parts; disjoint projected bounds cannot hide
+        // the edge regardless of extrapolated plane depth.
+        if orthographic
+            && [right, up].into_iter().any(|axis| {
+                let lo = vertices
+                    .iter()
+                    .map(|v| v.dot(axis))
+                    .fold(f64::INFINITY, f64::min);
+                let hi = vertices
+                    .iter()
+                    .map(|v| v.dot(axis))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let a = start64.dot(axis);
+                let b = end64.dot(axis);
+                a.max(b) < lo || a.min(b) > hi
+            })
+        {
+            continue;
+        }
+        let normal = (vertices[1] - vertices[0])
+            .cross(vertices[2] - vertices[0])
             .normalize_or_zero();
-        if normal == Vec3::ZERO {
+        if normal == DVec3::ZERO {
             continue;
         }
         let mut interval = (0.0, 1.0);
         let depth = if orthographic {
-            let denominator = normal.dot(camera_forward);
-            if denominator.abs() < 1e-7 {
+            let denominator = normal.dot(forward);
+            if denominator.abs() < 1e-12 {
                 continue;
             }
-            // Positive distance from the triangle plane along the view ray.
             normal / denominator
         } else {
-            let camera_side = normal.dot(camera_position - triangle.a);
-            if camera_side.abs() < 1e-7 {
+            let camera_side = normal.dot(camera - vertices[0]);
+            if camera_side.abs() < 1e-12 {
                 continue;
             }
             -normal * camera_side.signum()
         };
         if !restrict_interval(
             &mut interval,
-            depth.dot(start - triangle.a) - EDGE_VISIBILITY_EPSILON,
-            depth.dot(end - triangle.a) - EDGE_VISIBILITY_EPSILON,
+            depth.dot(start64 - vertices[0]) - EDGE_VISIBILITY_EPSILON as f64,
+            depth.dot(end64 - vertices[0]) - EDGE_VISIBILITY_EPSILON as f64,
         ) {
             continue;
         }
-        // Clip the occluding surface itself, not just its vertices or the
-        // candidate edge. Avoid a polygon allocation for ordinary elevations.
-        let vertices = [triangle.a, triangle.b, triangle.c];
-        let clipped = (!clip_planes.is_empty())
-            .then(|| clip_occluder_polygon(vertices.to_vec(), clip_planes));
+        let clipped = (!clip_planes.is_empty()).then(|| {
+            clip_occluder_polygon(vec![triangle.a, triangle.b, triangle.c], clip_planes)
+                .into_iter()
+                .map(|v| v.as_dvec3())
+                .collect::<Vec<_>>()
+        });
         let polygon = clipped.as_deref().unwrap_or(&vertices);
         if polygon.len() < 3 {
             continue;
         }
-        // A section tangent to a triangle may leave several duplicate or
-        // collinear vertices. Such a zero-area remainder casts no shadow.
         if clipped.is_some() {
             let twice_area = (1..polygon.len() - 1)
                 .map(|i| (polygon[i] - polygon[0]).cross(polygon[i + 1] - polygon[0]))
-                .sum::<Vec3>();
-            if twice_area.length_squared() <= 1e-16 {
+                .sum::<DVec3>();
+            if twice_area.length_squared() <= 1e-24 {
                 continue;
             }
         }
-        let centre = polygon.iter().copied().sum::<Vec3>() / polygon.len() as f32;
+        // Double precision is essential here. With f32 a sub-micron projected
+        // triangle can round its centroid onto an edge, reverse a half-space,
+        // and incorrectly hide every feature on a distant facade.
+        let centre = polygon.iter().copied().sum::<DVec3>() / polygon.len() as f64;
         let mut inside = true;
         for i in 0..polygon.len() {
             let a = polygon[i];
             let b = polygon[(i + 1) % polygon.len()];
             let (origin, side) = if orthographic {
-                (a, (b - a).cross(camera_forward))
+                (a, (b - a).cross(forward))
             } else {
-                (
-                    camera_position,
-                    (a - camera_position).cross(b - camera_position),
-                )
+                (camera, (a - camera).cross(b - camera))
             };
             let side = side.normalize_or_zero();
-            if side == Vec3::ZERO {
+            if side == DVec3::ZERO {
                 continue;
             }
-            let side = side * side.dot(centre - origin).signum();
+            let orientation = side.dot(centre - origin);
+            if orientation.abs() < 1e-12 {
+                inside = false;
+                break;
+            }
+            let side = side * orientation.signum();
             if !restrict_interval(
                 &mut interval,
-                side.dot(start - origin),
-                side.dot(end - origin),
+                side.dot(start64 - origin),
+                side.dot(end64 - origin),
             ) {
                 inside = false;
                 break;
             }
         }
         if inside && interval.1 > interval.0 {
+            if interval.0 <= 0.0 && interval.1 >= 1.0 {
+                return Vec::new();
+            }
             hidden.push(interval);
         }
     }
     hidden.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut visible = Vec::new();
-    let mut cursor: f32 = 0.0;
+    let mut cursor: f64 = 0.0;
     for (lo, hi) in hidden {
         if lo > cursor + 1e-6 {
-            visible.push((start.lerp(end, cursor), start.lerp(end, lo)));
+            visible.push((start.lerp(end, cursor as f32), start.lerp(end, lo as f32)));
         }
         cursor = cursor.max(hi);
     }
     if cursor < 1.0 - 1e-6 {
-        visible.push((start.lerp(end, cursor), end));
+        visible.push((start.lerp(end, cursor as f32), end));
     }
     visible
 }
 
 /// Intersect an edge parameter interval with the linear half-space f(t) >= 0.
-fn restrict_interval(interval: &mut (f32, f32), start: f32, end: f32) -> bool {
+fn restrict_interval(interval: &mut (f64, f64), start: f64, end: f64) -> bool {
     if start < 0.0 && end < 0.0 {
         return false;
     }
@@ -2185,6 +2223,70 @@ mod tests {
             ),
             vec![(start, end)]
         );
+    }
+
+    #[test]
+    fn nearly_edge_on_compound_triangle_does_not_erase_remote_elevation() {
+        // Actual transformed cottage door31 stile vertices. The former f32
+        // centroid predicate claimed this west door hid an entire east corner.
+        let mut triangle = SceneTriangle {
+            entity: Entity::from_bits(2),
+            a: Vec3::new(2.330899953842163, 0.06999999284744263, -1.4349998235702515),
+            b: Vec3::new(2.390899896621704, 0.06999999284744263, -1.434999704360962),
+            c: Vec3::new(2.390899896621704, 1.9500000476837158, -1.434999704360962),
+        };
+        for reverse in [false, true] {
+            if reverse {
+                std::mem::swap(&mut triangle.b, &mut triangle.c);
+            }
+            let start = Vec3::new(-2.5, 0.0, -3.0);
+            let end = Vec3::new(-2.5, 2.3, -3.0);
+            assert_eq!(
+                visible_edge_segments(
+                    start,
+                    end,
+                    Entity::from_bits(1),
+                    Vec3::NEG_X * 10.0,
+                    Vec3::X,
+                    true,
+                    std::slice::from_ref(&triangle),
+                    &[]
+                ),
+                vec![(start, end)]
+            );
+        }
+    }
+
+    #[test]
+    fn closed_box_preserves_visible_outlines_in_all_cardinal_views() {
+        let mesh = Mesh::from(Cuboid::new(5.0, 2.3, 6.0));
+        let mut assets = Assets::<Mesh>::default();
+        let handle = assets.add(mesh.clone());
+        let owner = Entity::from_bits(1);
+        let triangles = collect_scene_triangles(
+            &[MeshSubject {
+                entity: owner,
+                mesh_handle: handle,
+                mesh_transform: GlobalTransform::IDENTITY,
+            }],
+            &assets,
+        );
+        for forward in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z, Vec3::NEG_Y] {
+            let edges = collect_classified_visible_edges(
+                &mesh,
+                &GlobalTransform::IDENTITY,
+                owner,
+                -forward * 10.0,
+                forward,
+                true,
+                &triangles,
+                &[],
+            );
+            assert!(
+                edges.len() >= 4,
+                "cardinal view lost closed-box outline: {forward:?}: {edges:?}"
+            );
+        }
     }
 
     #[test]

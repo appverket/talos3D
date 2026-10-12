@@ -11164,7 +11164,7 @@ pub fn handle_set_property(
 ) -> Result<Value, String> {
     ensure_user_editable_entity(world, ElementId(element_id), "edited")?;
     let snapshot = capture_snapshot_by_id(world, ElementId(element_id))?;
-    if snapshot.type_name() == "occurrence" {
+    if snapshot.type_name() == "occurrence" && property_name != "label" {
         let mut overrides = serde_json::Map::new();
         overrides.insert(property_name.to_string(), value);
         return handle_update_occurrence_overrides(world, element_id, Value::Object(overrides));
@@ -13416,31 +13416,43 @@ pub fn handle_run_validation(
             })
             .collect();
 
-    // A conceptual wall is allowed to render as one plain body, but that body
-    // must still occupy the full envelope reserved by its setting-out
-    // contract. Catch datum/envelope drift before a later refinement silently
-    // changes exterior dimensions or interior clearances.
+    // A recipe locator may reserve a physical envelope represented by a linked
+    // authored entity. Resolve only explicit, active and structurally connected
+    // satisfaction evidence; never compare the locator glyph to that envelope.
     if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
-        if let (Some(contract), Some(actual_thickness_mm)) = (
-            world.get::<crate::plugins::refinement::SettingOutContract>(entity),
-            authored_physical_thickness_mm(world, eid),
-        ) {
-            let reserved_thickness_mm = contract.reserved_thickness_mm();
-            let drift_mm = (actual_thickness_mm - reserved_thickness_mm).abs();
-            if drift_mm > contract.tolerance_mm {
-                infos.push(ValidationFindingInfo {
-                        finding_id: format!("setting_out_contract_drift:{element_id}"),
-                        entity_element_id: element_id,
-                        validator: "SettingOutContractDrift".to_string(),
-                        severity: "Error".to_string(),
-                        message: format!(
-                            "Element thickness is {actual_thickness_mm:.1} mm but its setting-out contract reserves {reserved_thickness_mm:.1} mm (drift {drift_mm:.1} mm exceeds tolerance {:.1} mm)",
-                            contract.tolerance_mm
-                        ),
-                        rationale: "Refinement must preserve the governing datum and locked dimensions; conceptual geometry reserves the full future envelope rather than growing when layers or framing are resolved".to_string(),
-                        obligation_id: None,
-                        passage_ref: contract.source_ref.clone(),
-                    });
+        if let Some(contract) = world.get::<crate::plugins::refinement::SettingOutContract>(entity)
+        {
+            match governing_physical_thickness_mm(world, eid) {
+                Ok(Some(actual_thickness_mm)) => {
+                    let reserved_thickness_mm = contract.reserved_thickness_mm();
+                    let drift_mm = (actual_thickness_mm - reserved_thickness_mm).abs();
+                    if drift_mm > contract.tolerance_mm {
+                        infos.push(ValidationFindingInfo {
+                            finding_id: format!("setting_out_contract_drift:{element_id}"),
+                            entity_element_id: element_id,
+                            validator: "SettingOutContractDrift".into(), severity: "Error".into(),
+                            message: format!("Element thickness is {actual_thickness_mm:.1} mm but its setting-out contract reserves {reserved_thickness_mm:.1} mm (drift {drift_mm:.1} mm exceeds tolerance {:.1} mm)", contract.tolerance_mm),
+                            rationale: "Refinement must preserve the governing datum and locked dimensions; measure the explicit active physical representation rather than a recipe locator".into(),
+                            obligation_id: None, passage_ref: contract.source_ref.clone(),
+                        });
+                    }
+                }
+                Err(reason) => infos.push(ValidationFindingInfo {
+                    finding_id: format!("setting_out_physical_binding:{element_id}"),
+                    entity_element_id: element_id,
+                    validator: "SettingOutPhysicalBinding".into(), severity: "Error".into(),
+                    message: reason,
+                    rationale: "An explicit physical representation must resolve uniquely to an active authored member of this refinement; broken evidence cannot fall back to a locator".into(),
+                    obligation_id: None, passage_ref: contract.source_ref.clone(),
+                }),
+                Ok(None) => infos.push(ValidationFindingInfo {
+                    finding_id: format!("setting_out_physical_binding:{element_id}"),
+                    entity_element_id: element_id,
+                    validator: "SettingOutPhysicalBinding".into(), severity: "Error".into(),
+                    message: format!("Element {element_id} has no measurable authored physical representation for its setting-out contract"),
+                    rationale: "A reserved envelope requires an authored physical body or an explicit active representation binding".into(),
+                    obligation_id: None, passage_ref: contract.source_ref.clone(),
+                }),
             }
         }
     }
@@ -16629,14 +16641,124 @@ fn authored_stack_thickness_mm(
     (thickness > 0.0).then_some(thickness)
 }
 
+/// Resolve physical representation through existing refinement satisfaction
+/// evidence. Assembly membership is generic; no wall parameter or class is used.
+#[cfg(feature = "model-api")]
+fn governing_physical_thickness_mm(world: &World, root: ElementId) -> Result<Option<f64>, String> {
+    use crate::plugins::{
+        modeling::assembly::SemanticAssembly,
+        refinement::{
+            is_parked_refinement_entity, query_refined_into, ObligationSet, ObligationStatus,
+        },
+    };
+    fn in_active_scope(world: &World, root: ElementId, target: ElementId) -> bool {
+        let mut visited = std::collections::BTreeSet::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id.0) || is_parked_refinement_entity(world, id) {
+                continue;
+            }
+            if id == target {
+                return true;
+            }
+            pending.extend(query_refined_into(world, id));
+            if let Some(entity) = find_entity_by_element_id_readonly(world, id) {
+                if let Some(assembly) = world.get::<SemanticAssembly>(entity) {
+                    pending.extend(assembly.members.iter().map(|member| member.target));
+                }
+            }
+        }
+        false
+    }
+    let mut visited = std::collections::BTreeSet::new();
+    let mut current = root;
+    loop {
+        if !visited.insert(current.0) {
+            return Err(format!(
+                "Cyclic setting-out physical representation at element {}",
+                current.0
+            ));
+        }
+        let entity = find_entity_by_element_id_readonly(world, current).ok_or_else(|| {
+            format!(
+                "Setting-out physical representation {} is missing",
+                current.0
+            )
+        })?;
+        if is_parked_refinement_entity(world, current) {
+            return Err(format!(
+                "Setting-out physical representation {} is parked",
+                current.0
+            ));
+        }
+        let targets = world
+            .get::<ObligationSet>(entity)
+            .into_iter()
+            .flat_map(|set| &set.entries)
+            .filter(|entry| {
+                matches!(
+                    entry.id.0.as_str(),
+                    "setting_out_reservation" | "coarse_envelope"
+                )
+            })
+            .filter_map(|entry| match entry.status {
+                ObligationStatus::SatisfiedBy(id) => Some(id),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if targets.len() > 1 {
+            return Err(format!(
+                "Ambiguous setting-out physical representations for element {}: {:?}",
+                current.0, targets
+            ));
+        }
+        let Some(target) = targets.into_iter().next().map(ElementId) else {
+            let thickness = direct_authored_physical_thickness_mm(world, current);
+            return if current != root && thickness.is_none() {
+                Err(format!(
+                    "Setting-out physical representation {} has no measurable authored thickness",
+                    current.0
+                ))
+            } else {
+                Ok(thickness)
+            };
+        };
+        if target == current {
+            return direct_authored_physical_thickness_mm(world, current).map(Some)
+                .ok_or_else(|| format!("Setting-out physical representation {} has no measurable authored thickness", current.0));
+        }
+        if find_entity_by_element_id_readonly(world, target).is_none() {
+            return Err(format!(
+                "Setting-out physical representation {} is missing",
+                target.0
+            ));
+        }
+        if !in_active_scope(world, current, target) {
+            return Err(format!(
+                "Setting-out physical representation {} is not an active member of refinement {}",
+                target.0, current.0
+            ));
+        }
+        current = target;
+    }
+}
+
 #[cfg(feature = "model-api")]
 fn authored_physical_thickness_mm(world: &World, element_id: ElementId) -> Option<f64> {
+    governing_physical_thickness_mm(world, element_id)
+        .ok()
+        .flatten()
+}
+
+#[cfg(feature = "model-api")]
+fn direct_authored_physical_thickness_mm(world: &World, element_id: ElementId) -> Option<f64> {
     let snapshot = capture_entity_snapshot(world, element_id)?;
-    if let Some(thickness) = snapshot
-        .property_fields()
-        .into_iter()
-        .find(|field| field.name == "total_thickness" || field.name == "thickness")
-        .and_then(|field| field.value)
+    let fields = snapshot.property_fields();
+    if let Some(thickness) = fields
+        .iter()
+        .find(|field| field.name == "total_thickness")
+        .or_else(|| fields.iter().find(|field| field.name == "thickness"))
+        .and_then(|field| field.value.clone())
         .and_then(|value| match value {
             crate::authored_entity::PropertyValue::Scalar(value) => Some(value as f64),
             _ => None,
@@ -19447,5 +19569,215 @@ mod explicit_rotation_axis_tests {
         request.axis = None;
         let unconstrained = transform_rotation(&request, &frame).unwrap();
         assert!((unconstrained * Vec3::X).distance(Vec3::Y) < 1e-5);
+    }
+}
+
+#[cfg(all(test, feature = "model-api"))]
+mod setting_out_physical_binding_tests {
+    use super::*;
+    use crate::plugins::refinement::RefinementState;
+    use crate::plugins::{
+        modeling::{
+            assembly::{AssemblyMemberRef, SemanticAssembly, SemanticRelation},
+            generic_factory::PrimitiveFactory,
+            primitives::{BoxPrimitive, ShapeRotation},
+        },
+        refinement::{
+            Obligation, ObligationId, ObligationSet, ObligationStatus, SemanticRole,
+            SettingOutContract, SettingOutDatum, SettingOutSource,
+        },
+    };
+    fn obligation(id: &str, target: u64) -> Obligation {
+        Obligation {
+            id: ObligationId(id.into()),
+            role: SemanticRole("envelope".into()),
+            required_by_state: RefinementState::Conceptual,
+            status: ObligationStatus::SatisfiedBy(target),
+        }
+    }
+    #[test]
+    fn physical_binding_measures_active_member_and_reports_drift_or_broken_evidence() {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+        let root = world
+            .spawn((
+                ElementId(1),
+                BoxPrimitive {
+                    centre: Vec3::ZERO,
+                    half_extents: Vec3::splat(0.01),
+                },
+                ShapeRotation::default(),
+                ObligationSet {
+                    entries: vec![
+                        obligation("setting_out_reservation", 2),
+                        obligation("coarse_envelope", 2),
+                    ],
+                },
+                SettingOutContract {
+                    revision: 1,
+                    datum: SettingOutDatum::Centreline,
+                    locked_dimensions: Default::default(),
+                    reserved_negative_offset_mm: 139.1,
+                    reserved_positive_offset_mm: 139.1,
+                    source: SettingOutSource::User,
+                    confidence: 1.0,
+                    tolerance_mm: 0.5,
+                    source_ref: None,
+                },
+            ))
+            .id();
+        let physical = world
+            .spawn((
+                ElementId(2),
+                BoxPrimitive {
+                    centre: Vec3::ZERO,
+                    half_extents: Vec3::new(2.0, 1.5, 0.1391),
+                },
+                ShapeRotation::default(),
+            ))
+            .id();
+        let assembly = world
+            .spawn((
+                ElementId(3),
+                SemanticAssembly {
+                    assembly_type: "arbitrary_capability".into(),
+                    label: "Envelope representation".into(),
+                    members: vec![AssemblyMemberRef {
+                        target: ElementId(2),
+                        role: "physical_body".into(),
+                    }],
+                    parameters: json!({}),
+                    metadata: json!({}),
+                },
+            ))
+            .id();
+        let branch = world
+            .spawn((
+                ElementId(4),
+                SemanticRelation {
+                    source: ElementId(1),
+                    target: ElementId(3),
+                    relation_type: "refined_into".into(),
+                    parameters: json!({}),
+                },
+            ))
+            .id();
+        assert!(
+            (governing_physical_thickness_mm(&world, ElementId(1))
+                .unwrap()
+                .unwrap()
+                - 278.2)
+                .abs()
+                < 1e-3
+        );
+        assert!(!handle_run_validation(&world, 1)
+            .unwrap()
+            .iter()
+            .any(|f| f.validator.starts_with("SettingOut")));
+        world
+            .get_mut::<BoxPrimitive>(physical)
+            .unwrap()
+            .half_extents
+            .z = 0.15;
+        assert!(handle_run_validation(&world, 1)
+            .unwrap()
+            .iter()
+            .any(|f| f.validator == "SettingOutContractDrift"));
+        world
+            .get_mut::<BoxPrimitive>(physical)
+            .unwrap()
+            .half_extents
+            .z = 0.1391;
+        world.get_mut::<ObligationSet>(root).unwrap().entries[1] = obligation("coarse_envelope", 3);
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("Ambiguous"));
+        world.get_mut::<ObligationSet>(root).unwrap().entries =
+            vec![obligation("setting_out_reservation", 999)];
+        assert!(handle_run_validation(&world, 1)
+            .unwrap()
+            .iter()
+            .any(|f| f.validator == "SettingOutPhysicalBinding" && f.message.contains("missing")));
+        world.get_mut::<ObligationSet>(root).unwrap().entries =
+            vec![obligation("setting_out_reservation", 2)];
+        world
+            .get_mut::<SemanticAssembly>(assembly)
+            .unwrap()
+            .members
+            .clear();
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("not an active member"));
+        world
+            .get_mut::<SemanticAssembly>(assembly)
+            .unwrap()
+            .members
+            .push(AssemblyMemberRef {
+                target: ElementId(2),
+                role: "body".into(),
+            });
+        world.entity_mut(physical).insert((
+            ObligationSet {
+                entries: vec![obligation("setting_out_reservation", 1)],
+            },
+            SemanticAssembly {
+                assembly_type: "bad_cycle".into(),
+                label: "Invalid".into(),
+                members: vec![AssemblyMemberRef {
+                    target: ElementId(1),
+                    role: "body".into(),
+                }],
+                parameters: json!({}),
+                metadata: json!({}),
+            },
+        ));
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("Cyclic"));
+        world
+            .entity_mut(physical)
+            .remove::<(ObligationSet, SemanticAssembly)>();
+        world
+            .entity_mut(branch)
+            .insert(crate::plugins::refinement::RefinementBranch {
+                root_element_id: 1,
+                parent_element_id: 1,
+                child_element_id: 3,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                status: crate::plugins::refinement::RefinementBranchStatus::Parked,
+                basis: Default::default(),
+            });
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("not an active member"));
+        world
+            .entity_mut(branch)
+            .remove::<crate::plugins::refinement::RefinementBranch>();
+        world.entity_mut(physical).remove::<BoxPrimitive>();
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("no measurable authored thickness"));
+        world.despawn(branch);
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("not an active member"));
+        world.entity_mut(root).remove::<ObligationSet>();
+        assert!(
+            (governing_physical_thickness_mm(&world, ElementId(1))
+                .unwrap()
+                .unwrap()
+                - 20.0)
+                .abs()
+                < 1e-3,
+            "an undelegated physical body must still be measured directly"
+        );
+        world.entity_mut(root).remove::<BoxPrimitive>();
+        assert!(handle_run_validation(&world, 1)
+            .unwrap()
+            .iter()
+            .any(|f| f.validator == "SettingOutPhysicalBinding"));
     }
 }
