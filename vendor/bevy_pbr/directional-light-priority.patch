@@ -1,0 +1,87 @@
+--- a/crates/bevy_pbr/src/render/light.rs
++++ b/crates/bevy_pbr/src/render/light.rs
+@@ -1006,0 +1007,38 @@
++// Keep shadow-casting keys ahead of unshadowed fills when a backend truncates
++// the directional-light list (WebGL supports only one directional light).
++fn directional_light_priority<T: Ord>(
++    volumetric: bool,
++    shadows: bool,
++    entity: T,
++) -> (bool, bool, T) {
++    (!volumetric, !shadows, entity)
++}
++
++#[cfg(test)]
++mod directional_light_priority_tests {
++    use super::directional_light_priority;
++
++    #[test]
++    fn one_light_backend_retains_shadowed_key_before_fill() {
++        let mut lights = [(false, false, 1u32), (false, true, 9u32)];
++        lights.sort_by_key(|&(v, s, id)| directional_light_priority(v, s, id));
++        let retained: Vec<_> = lights.iter().take(1).collect();
++        assert_eq!(retained[0].2, 9);
++        assert_eq!(retained.iter().filter(|l| l.1).count(), 1);
++    }
++
++    #[test]
++    fn priority_is_volumetric_then_shadow_then_stable_identity() {
++        let mut lights = [
++            (false, false, 0u32),
++            (false, true, 7),
++            (true, true, 8),
++            (false, true, 3),
++        ];
++        lights.sort_by_key(|&(v, s, id)| directional_light_priority(v, s, id));
++        assert_eq!(lights.map(|l| l.2), [8, 3, 7, 0]);
++        assert_eq!(lights.iter().take(2).filter(|l| l.0).count(), 1);
++        assert_eq!(lights.iter().take(2).filter(|l| l.1).count(), 2);
++    }
++}
++
+@@ -1109,0 +1148,13 @@
++    // Sort lights by
++    // - those with volumetric (and shadows) enabled first, so that the
++    //   volumetric lighting pass can quickly find the volumetric lights;
++    // - then those with shadows enabled second, so that the index can be used
++    //   to render at most `directional_light_shadow_maps_count` directional light
++    //   shadows
++    // - then by entity as a stable key to ensure that a consistent set of
++    //   lights are chosen if the light count limit is exceeded.
++    directional_light_entities.sort_by_cached_key(|entity| {
++        let light = directional_lights.get(*entity).unwrap().2;
++        directional_light_priority(light.volumetric, light.shadow_maps_enabled, *entity)
++    });
++
+@@ -1181 +1232 @@
+-    let directional_volumetric_enabled_count = directional_lights
++    let directional_volumetric_enabled_count = directional_light_entities
+@@ -1184 +1235 @@
+-        .filter(|(_, _, light, _)| light.volumetric)
++        .filter(|entity| directional_lights.get(**entity).unwrap().2.volumetric)
+@@ -1188 +1239 @@
+-    let directional_shadow_enabled_count = directional_lights
++    let directional_shadow_enabled_count = directional_light_entities
+@@ -1191 +1242,7 @@
+-        .filter(|(_, _, light, _)| light.shadow_maps_enabled)
++        .filter(|entity| {
++            directional_lights
++                .get(**entity)
++                .unwrap()
++                .2
++                .shadow_maps_enabled
++        })
+@@ -1225,13 +1281,0 @@
+-    });
+-
+-    // Sort lights by
+-    // - those with volumetric (and shadows) enabled first, so that the
+-    //   volumetric lighting pass can quickly find the volumetric lights;
+-    // - then those with shadows enabled second, so that the index can be used
+-    //   to render at most `directional_light_shadow_maps_count` directional light
+-    //   shadows
+-    // - then by entity as a stable key to ensure that a consistent set of
+-    //   lights are chosen if the light count limit is exceeded.
+-    directional_light_entities.sort_by_cached_key(|entity| {
+-        let light = directional_lights.get(*entity).unwrap().2;
+-        (light.volumetric, light.shadow_maps_enabled, *entity)

@@ -1,4 +1,7 @@
-use std::{any::Any, collections::HashMap};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -620,11 +623,24 @@ impl AuthoredEntityFactory for DimensionLineFactory {
         if !visibility.show_all {
             return None;
         }
-        let mut query = world.try_query::<(Entity, &DimensionLineNode)>()?;
+        let scope = DimensionDraftScope::from_world(world);
+        let mut query = world.try_query::<(Entity, &ElementId, &DimensionLineNode)>()?;
         query
             .iter(world)
-            .filter(|(_, node)| node.visible)
-            .filter_map(|(entity, node)| {
+            .filter(|(entity, id, node)| {
+                node.visible
+                    && scope.permits(
+                        **id,
+                        world
+                            .get::<crate::plugins::selection::Selected>(*entity)
+                            .is_some(),
+                    )
+                    && dimension_layer_visible(
+                        world.get_resource::<LayerRegistry>(),
+                        world.get::<LayerAssignment>(*entity),
+                    )
+            })
+            .filter_map(|(entity, _, node)| {
                 let segments =
                     dimension_segments(node.start, node.end, node.line_point, node.extension);
                 let best_distance = segments
@@ -651,11 +667,23 @@ impl AuthoredEntityFactory for DimensionLineFactory {
         if !visibility.show_all {
             return;
         }
-        let Some(mut query) = world.try_query::<&DimensionLineNode>() else {
+        let scope = DimensionDraftScope::from_world(world);
+        let Some(mut query) = world.try_query::<(Entity, &ElementId, &DimensionLineNode)>() else {
             return;
         };
-        for node in query.iter(world) {
-            if !node.visible {
+        for (entity, id, node) in query.iter(world) {
+            if !node.visible
+                || !scope.permits(
+                    *id,
+                    world
+                        .get::<crate::plugins::selection::Selected>(entity)
+                        .is_some(),
+                )
+                || !dimension_layer_visible(
+                    world.get_resource::<LayerRegistry>(),
+                    world.get::<LayerAssignment>(entity),
+                )
+            {
                 continue;
             }
             out.push(SnapPoint {
@@ -685,6 +713,77 @@ impl AuthoredEntityFactory for DimensionLineFactory {
     }
 }
 
+fn dimension_layer_visible(
+    registry: Option<&LayerRegistry>,
+    layer: Option<&LayerAssignment>,
+) -> bool {
+    registry.is_none_or(|registry| {
+        registry.is_visible(
+            layer.map_or(crate::plugins::layers::DEFAULT_LAYER_NAME, |layer| {
+                layer.layer.as_str()
+            }),
+        )
+    })
+}
+
+/// Draft-owned dimensions belong to their drawing view. Keep ordinary unowned
+/// 3D annotations visible, and allow a selected dimension to be edited in 3D.
+#[derive(Default)]
+struct DimensionDraftScope {
+    initialized: bool,
+    state: (bool, Option<ElementId>, usize),
+    owned: HashSet<ElementId>,
+    active_members: Option<HashSet<ElementId>>,
+}
+
+impl DimensionDraftScope {
+    fn rebuild<'a>(
+        &mut self,
+        active: bool,
+        active_id: Option<ElementId>,
+        drafts: impl Iterator<Item = (ElementId, &'a crate::plugins::drafting::draft::DraftNode)>,
+    ) {
+        self.owned.clear();
+        self.active_members = active
+            .then_some(active_id)
+            .flatten()
+            .map(|_| HashSet::new());
+        let mut count = 0;
+        for (id, draft) in drafts {
+            count += 1;
+            self.owned.extend(draft.members.iter().copied());
+            if active && Some(id) == active_id {
+                self.active_members = Some(draft.members.iter().copied().collect());
+            }
+        }
+        self.state = (active, active_id, count);
+        self.initialized = true;
+    }
+
+    fn permits(&self, id: ElementId, selected: bool) -> bool {
+        if let Some(members) = &self.active_members {
+            members.contains(&id)
+        } else {
+            !self.owned.contains(&id) || selected
+        }
+    }
+
+    fn from_world(world: &World) -> Self {
+        let workspace = world.get_resource::<crate::plugins::drafting::DraftingWorkspaceState>();
+        let mut scope = Self::default();
+        if let Some(mut query) =
+            world.try_query::<(&ElementId, &crate::plugins::drafting::draft::DraftNode)>()
+        {
+            scope.rebuild(
+                workspace.is_some_and(|w| w.is_active()),
+                workspace.and_then(|w| w.active_draft_id()),
+                query.iter(world).map(|(id, draft)| (*id, draft)),
+            );
+        }
+        scope
+    }
+}
+
 fn draw_dimension_line_overlay(
     mut gizmos: Gizmos,
     doc_props: Res<DocumentProperties>,
@@ -693,8 +792,13 @@ fn draw_dimension_line_overlay(
     render_settings: Res<RenderSettings>,
     drafting_workspace: Option<Res<crate::plugins::drafting::DraftingWorkspaceState>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
+    drafts: Query<(&ElementId, Ref<crate::plugins::drafting::draft::DraftNode>)>,
+    mut scope: Local<DimensionDraftScope>,
+    layers: Option<Res<LayerRegistry>>,
     dimensions: Query<(
+        &ElementId,
         &DimensionLineNode,
+        Option<&LayerAssignment>,
         Option<&crate::plugins::selection::Selected>,
     )>,
 ) {
@@ -708,8 +812,25 @@ fn draw_dimension_line_overlay(
     let drafting_active = drafting_workspace
         .as_ref()
         .is_some_and(|workspace| workspace.is_active());
-    for (node, selected) in &dimensions {
-        if !node.visible {
+    let active_id = drafting_workspace
+        .as_ref()
+        .and_then(|w| w.active_draft_id());
+    let count = drafts.iter().count();
+    if !scope.initialized
+        || scope.state != (drafting_active, active_id, count)
+        || drafts.iter().any(|(_, draft)| draft.is_changed())
+    {
+        scope.rebuild(
+            drafting_active,
+            active_id,
+            drafts.iter().map(|(id, draft)| (*id, draft.into_inner())),
+        );
+    }
+    for (id, node, layer, selected) in &dimensions {
+        if !node.visible
+            || !scope.permits(*id, selected.is_some())
+            || !dimension_layer_visible(layers.as_deref(), layer)
+        {
             continue;
         }
         let color = if drafting_active && selected.is_none() {
@@ -2707,6 +2828,38 @@ fn preview_dimension_line_node(
 mod tests {
     use super::*;
     use crate::capability_registry::AuthoredEntityFactory;
+
+    #[test]
+    fn drawing_dimensions_follow_their_view_without_leaking_into_3d() {
+        use crate::plugins::drafting::draft::DraftNode;
+        let mut plan = DraftNode::new("Plan");
+        plan.members = vec![ElementId(1), ElementId(3)];
+        let mut elevation = DraftNode::new("Elevation");
+        elevation.members = vec![ElementId(2), ElementId(3)];
+        let mut scope = DimensionDraftScope::default();
+        let drafts = [(ElementId(10), &plan), (ElementId(20), &elevation)];
+        scope.rebuild(false, Some(ElementId(10)), drafts.into_iter());
+        assert!(!scope.permits(ElementId(1), false));
+        assert!(!scope.permits(ElementId(2), false));
+        assert!(scope.permits(ElementId(1), true));
+        assert!(
+            scope.permits(ElementId(99), false),
+            "ordinary 3D dimensions remain visible"
+        );
+        scope.rebuild(true, Some(ElementId(10)), drafts.into_iter());
+        assert!(scope.permits(ElementId(1), false));
+        assert!(scope.permits(ElementId(3), false), "shared view annotation");
+        assert!(!scope.permits(ElementId(2), true));
+        assert!(!scope.permits(ElementId(99), false));
+        scope.rebuild(true, Some(ElementId(20)), drafts.into_iter());
+        assert!(scope.permits(ElementId(2), false));
+        assert!(!scope.permits(ElementId(1), false));
+        scope.rebuild(false, None, std::iter::empty());
+        assert!(
+            scope.permits(ElementId(1), false),
+            "removing Draft membership restores ordinary annotation"
+        );
+    }
 
     #[test]
     fn create_request_defaults_visible_extension() {

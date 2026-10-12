@@ -20,3 +20,7 @@ opt-level = 3
 
 # All members build from a standalone public checkout. Specialized app
 # compositions and domain integration tests live in their owning repositories.
+
+# Temporary upstream renderer correction; see vendor/bevy_pbr/PATCHES.md.
+[patch.crates-io]
+bevy_pbr = { path = "vendor/bevy_pbr" }
