@@ -6,4 +6,4 @@
 - task-id: TALOS-zgjhbasj; TALOS-vgpxnzhy; TALOS-wwrqripp
 - target base: main
 - summary: Repair floorplan authoring and browser continuation, then fresh independent source-only test.
-- status: active
+- status: awaiting-merge
