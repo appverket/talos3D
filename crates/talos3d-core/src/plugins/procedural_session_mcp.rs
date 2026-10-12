@@ -83,6 +83,9 @@ pub struct SessionExportRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct SessionCreateResponse {
+    /// Registered step tools are a subset of the full MCP surface. Other tools
+    /// must be called directly; being listed by MCP does not admit them here.
+    pub registered_step_tools: Vec<McpToolId>,
     pub session_id: SessionId,
     pub snapshot: SessionSnapshot,
 }
@@ -228,7 +231,12 @@ pub fn world_create(world: &mut World, req: SessionCreateRequest) -> SessionCrea
         .get_mut(&session_id)
         .expect("session just created")
         .snapshot();
+    let registered_step_tools = world
+        .get_resource::<SessionToolRegistry>()
+        .map(|tools| tools.known_tools().cloned().collect())
+        .unwrap_or_default();
     SessionCreateResponse {
+        registered_step_tools,
         session_id,
         snapshot,
     }
@@ -449,6 +457,10 @@ mod tests {
             },
         );
         assert_eq!(response.snapshot.spec.allowed_tools.len(), 1);
+        assert_eq!(
+            response.registered_step_tools,
+            vec![McpToolId::new("architecture.opening.place_hosted")]
+        );
 
         let snap = world_snapshot(
             app.world_mut(),

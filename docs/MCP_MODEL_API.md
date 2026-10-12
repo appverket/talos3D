@@ -1236,3 +1236,14 @@ On browser WebGL2, viewport-only captures crop the presented window framebuffer
 using the viewport bounds. This avoids the secondary render target returning a
 black image while the actual canvas is visible. The evidence-quality check stays
 enabled.
+
+`definition.create` and `definition.update` accept `material_assignment` using
+the same typed assignment, material-id string or null accepted by other material
+edits. Invalid references are refused before history changes; an explicit
+assignment is retained in the Definition.
+
+`procedural_session.create` returns `registered_step_tools`. This is the admitted
+step surface, which is smaller than the full MCP tool list. An advertised tool
+such as `instantiate_recipe` can be called directly even when it has no
+procedural-session descriptor; unsupported batching is now reported with that
+next action instead of an unexplained registry error.

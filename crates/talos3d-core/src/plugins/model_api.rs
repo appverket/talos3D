@@ -6645,7 +6645,11 @@ fn build_definition_from_object(
             external_context_requirements: Vec::new(),
         },
         body,
-        material_assignment: None,
+        material_assignment: object
+            .get("material_assignment")
+            .map(crate::plugins::materials::material_assignment_option_from_value)
+            .transpose()?
+            .flatten(),
         visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
         domain_data: object.get("domain_data").cloned().unwrap_or(Value::Null),
     })
@@ -6785,6 +6789,9 @@ pub fn handle_create_definition(world: &mut World, request: Value) -> ApiResult<
         .ok_or_else(|| "definition.create expects a JSON object".to_string())?;
 
     let definition = build_definition_from_object(obj)?;
+    if let Some(assignment) = &definition.material_assignment {
+        crate::plugins::materials::validate_material_assignment(world, assignment)?;
+    }
     let entry = {
         let registry = world.resource::<DefinitionRegistry>();
         registry.validate_definition(&definition)?;
@@ -6874,6 +6881,14 @@ pub fn handle_update_definition(world: &mut World, request: Value) -> ApiResult<
         }
         if obj.contains_key("compound") {
             after.body.compound = parse_optional_compound(obj)?;
+        }
+    }
+
+    if let Some(value) = obj.get("material_assignment") {
+        after.material_assignment =
+            crate::plugins::materials::material_assignment_option_from_value(value)?;
+        if let Some(assignment) = &after.material_assignment {
+            crate::plugins::materials::validate_material_assignment(world, assignment)?;
         }
     }
 

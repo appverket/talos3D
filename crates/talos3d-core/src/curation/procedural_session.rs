@@ -544,7 +544,7 @@ impl std::fmt::Display for SessionError {
             Self::AlreadyCommitted(s) => write!(f, "session '{}' already committed; retry with identical options for its receipt, or create a new session for a deliberate rerun", s.0),
             Self::CommitIdentityMismatch { expected } => write!(f, "commit identity mismatch: expected {expected}; a different id cannot rerun this session"),
             Self::UnknownTool { tool } => {
-                write!(f, "tool '{}' has no descriptor registered", tool.0)
+                write!(f, "tool '{}' is not registered for procedural sessions; inspect registered_step_tools from procedural_session.create and call this tool directly if it is advertised by MCP", tool.0)
             }
             Self::DisallowedTool { tool } => write!(
                 f,

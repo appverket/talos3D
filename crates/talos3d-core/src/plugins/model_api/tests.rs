@@ -14905,3 +14905,46 @@ fn unbound_compound_size_control_is_refused_before_history_or_opening_changes() 
     handle_update_occurrence_overrides(&mut world, id, json!({"overall_height":1.6}))
         .expect("bound height still works");
 }
+
+#[cfg(feature = "model-api")]
+#[test]
+fn definition_create_and_update_preserve_explicit_material_defaults() {
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<MaterialRegistry>()
+        .upsert(MaterialDef {
+            id: "test.finish".into(),
+            name: "Test finish".into(),
+            ..Default::default()
+        });
+    let mut request = make_rect_extrusion_request();
+    request["material_assignment"] = json!("test.finish");
+    let def = handle_create_definition(&mut world, request).unwrap();
+    let id = crate::plugins::modeling::definition::DefinitionId(def.definition_id.clone());
+    assert_eq!(
+        world
+            .resource::<crate::plugins::modeling::definition::DefinitionRegistry>()
+            .get(&id)
+            .unwrap()
+            .material_assignment,
+        Some(MaterialAssignment::new("test.finish"))
+    );
+    let revision = world.resource::<History>().revision_token();
+    assert!(handle_update_definition(
+        &mut world,
+        json!({"definition_id":def.definition_id,"material_assignment":"missing"})
+    )
+    .is_err());
+    assert_eq!(revision, world.resource::<History>().revision_token());
+    handle_update_definition(
+        &mut world,
+        json!({"definition_id":def.definition_id,"material_assignment":null}),
+    )
+    .unwrap();
+    assert!(world
+        .resource::<crate::plugins::modeling::definition::DefinitionRegistry>()
+        .get(&id)
+        .unwrap()
+        .material_assignment
+        .is_none());
+}
