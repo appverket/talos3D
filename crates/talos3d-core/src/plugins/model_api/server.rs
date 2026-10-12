@@ -2683,6 +2683,19 @@ fn json_tool_result<T: Serialize>(value: T) -> Result<CallToolResult, McpError> 
 }
 
 #[cfg(feature = "model-api")]
+pub(super) fn drawing_export_tool_result(path: String) -> Result<CallToolResult, McpError> {
+    if let Some((mime, data)) = path
+        .strip_prefix("data:")
+        .and_then(|s| s.split_once(";base64,"))
+    {
+        return json_tool_result(
+            serde_json::json!({"transport":"browser_memory", "mime_type":mime, "data_base64":data}),
+        );
+    }
+    json_tool_result(serde_json::json!({"path":path}))
+}
+
+#[cfg(feature = "model-api")]
 pub(super) fn screenshot_tool_result(path: String) -> Result<CallToolResult, McpError> {
     use base64::Engine as _;
 
@@ -7577,7 +7590,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "export_drawing",
-        description = "Export the current cropped drawing viewport to PNG, PDF, or SVG. SVG is also accepted via the legacy `svd` file extension alias. Returns the file path where the drawing was saved."
+        description = "Export the current cropped drawing viewport to PNG, PDF, or SVG. SVG is also accepted via the legacy `svd` file extension alias. Returns the saved path on native; browsers return transport=browser_memory, mime_type and data_base64. Browser drawing exports require an orthographic camera."
     )]
     pub(super) async fn export_drawing_tool(
         &self,
@@ -7587,12 +7600,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .request_export_drawing(params.path)
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
-        json_tool_result(serde_json::json!({ "path": path }))
+        drawing_export_tool_result(path)
     }
 
     #[tool(
         name = "export_drafting_sheet",
-        description = "Capture the current orthographic camera into a paper-mm DraftingSheet and export it. Extension selects the writer: .svg (paper-mm native), .pdf, .dxf (mm), or .png. Optional `scale_denominator` sets the drawing scale (1:N), defaulting to 1:50. Refuses perspective cameras."
+        description = "Capture the current orthographic camera into a paper-mm DraftingSheet and export it. Extension selects the writer: .svg (paper-mm native), .pdf, .dxf (mm), or .png. Optional `scale_denominator` sets the drawing scale (1:N), defaulting to 1:50. Refuses perspective cameras. Native returns path; browsers return transport=browser_memory, mime_type and data_base64."
     )]
     pub(super) async fn export_drafting_sheet_tool(
         &self,
@@ -7602,7 +7615,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .request_export_drafting_sheet(params.path, params.scale_denominator)
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
-        json_tool_result(serde_json::json!({ "path": path }))
+        drawing_export_tool_result(path)
     }
 
     #[tool(

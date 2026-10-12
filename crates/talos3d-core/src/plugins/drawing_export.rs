@@ -29,7 +29,6 @@ use crate::plugins::{
 };
 
 const STATUS_MESSAGE_DURATION_SECONDS: f32 = 2.0;
-#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_EXPORT_FILE_STEM: &str = "drawing";
 const DEFAULT_OFFSCREEN_SCREENSHOT_WIDTH: u32 = 1600;
 const DEFAULT_OFFSCREEN_SCREENSHOT_HEIGHT: u32 = 1000;
@@ -195,7 +194,7 @@ pub(crate) fn pdf_export_available(world: &World) -> bool {
         .unwrap_or(false)
 }
 
-fn require_pdf_export_available(world: &World) -> Result<(), String> {
+pub(crate) fn require_pdf_export_available(world: &World) -> Result<(), String> {
     if pdf_export_available(world) {
         Ok(())
     } else {
@@ -398,10 +397,12 @@ pub fn export_drawing_now(world: &mut World) -> Result<Option<PathBuf>, String> 
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn export_drawing_now_with_format(
-    _world: &mut World,
-    _preferred_format: Option<ViewportExportFormat>,
+    world: &mut World,
+    preferred_format: Option<ViewportExportFormat>,
 ) -> Result<Option<PathBuf>, String> {
-    Err("Native drawing export dialogs are not available in the browser shell".to_string())
+    let format = preferred_format.unwrap_or(ViewportExportFormat::Svg);
+    let name = default_export_file_name(None, Some(format));
+    export_drawing_to_path(world, PathBuf::from(name)).map(Some)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1173,7 +1174,6 @@ fn write_pdf_object(
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn default_export_file_stem(current_path: Option<&Path>) -> String {
     current_path
         .and_then(|path| path.file_stem())
@@ -1181,7 +1181,6 @@ fn default_export_file_stem(current_path: Option<&Path>) -> String {
         .unwrap_or_else(|| DEFAULT_EXPORT_FILE_STEM.to_string())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn default_export_file_name(
     current_path: Option<&Path>,
     preferred_format: Option<ViewportExportFormat>,

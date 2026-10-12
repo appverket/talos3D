@@ -6220,6 +6220,34 @@ fn recipe_discovery_without_element_class_searches_bounded_registered_targets() 
 
 #[cfg(feature = "model-api")]
 #[test]
+fn drawing_result_returns_browser_bytes_without_a_filesystem_path() {
+    use base64::Engine as _;
+    let bytes = b"%PDF-1.4\nfixture";
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let result =
+        super::server::drawing_export_tool_result(format!("data:application/pdf;base64,{data}"))
+            .unwrap();
+    let encoded = serde_json::to_value(result).unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(encoded["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["transport"], "browser_memory");
+    assert_eq!(payload["mime_type"], "application/pdf");
+    assert!(payload.get("path").is_none());
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(payload["data_base64"].as_str().unwrap())
+            .unwrap(),
+        bytes
+    );
+    let native = super::server::drawing_export_tool_result("drawing.pdf".into()).unwrap();
+    let encoded = serde_json::to_value(native).unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(encoded["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["path"], "drawing.pdf");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn screenshot_result_inlines_raster_for_network_only_agents() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("network-proof.png");

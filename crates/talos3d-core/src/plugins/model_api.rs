@@ -4496,11 +4496,24 @@ fn handle_bind_elevation_intent(
 
 #[cfg(feature = "model-api")]
 fn handle_export_drawing(world: &mut World, path: &str) -> Result<String, String> {
-    let path_buf = crate::plugins::drawing_export::export_drawing_to_path(
-        world,
-        std::path::PathBuf::from(path),
-    )?;
-    Ok(path_buf.to_string_lossy().to_string())
+    #[cfg(target_arch = "wasm32")]
+    {
+        if std::path::Path::new(path)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+        {
+            crate::plugins::drawing_export::require_pdf_export_available(world)?;
+        }
+        return crate::plugins::drafting_sheet::export_sheet_to_data_url(world, path.into(), None);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path_buf = crate::plugins::drawing_export::export_drawing_to_path(
+            world,
+            std::path::PathBuf::from(path),
+        )?;
+        Ok(path_buf.to_string_lossy().to_string())
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -4509,12 +4522,21 @@ fn handle_export_drafting_sheet(
     path: &str,
     scale_denominator: Option<f32>,
 ) -> Result<String, String> {
-    let path_buf = crate::plugins::drafting_sheet::export_sheet_to_path(
+    #[cfg(target_arch = "wasm32")]
+    return crate::plugins::drafting_sheet::export_sheet_to_data_url(
         world,
-        std::path::PathBuf::from(path),
+        path.into(),
         scale_denominator,
-    )?;
-    Ok(path_buf.to_string_lossy().to_string())
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path_buf = crate::plugins::drafting_sheet::export_sheet_to_path(
+            world,
+            std::path::PathBuf::from(path),
+            scale_denominator,
+        )?;
+        Ok(path_buf.to_string_lossy().to_string())
+    }
 }
 
 #[cfg(feature = "model-api")]

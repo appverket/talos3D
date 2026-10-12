@@ -60,13 +60,13 @@ pub const DEFAULT_PNG_DPI: f32 = 200.0;
 
 /// One-call export: capture the current orthographic camera into a
 /// paper-mm sheet at `scale_denominator` (or [`DEFAULT_SCALE_DENOMINATOR`]
-/// if `None`), choose the writer by file extension, and write bytes to
-/// `path`. Returns the path on success, an error string otherwise.
-pub fn export_sheet_to_path(
+/// if `None`), choose the writer by file extension, and return normalized name,
+/// MIME type and bytes. This path does not access the native filesystem.
+pub fn export_sheet_to_bytes(
     world: &World,
     path: PathBuf,
     scale_denominator: Option<f32>,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, &'static str, Vec<u8>), String> {
     let path = normalize_path(path);
     let active_layout = crate::plugins::drafting::active_draft_layout(world);
     let scale = scale_denominator
@@ -85,9 +85,6 @@ pub fn export_sheet_to_path(
     let sheet = capture_sheet(world, &view)
         .ok_or_else(|| "sheet capture returned nothing (no visible geometry?)".to_string())?;
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -104,8 +101,63 @@ pub fn export_sheet_to_path(
         }
         None => return Err("export path must have an extension (svg/pdf/dxf/png)".to_string()),
     };
-    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    let mime = match ext.as_deref() {
+        Some("pdf") => "application/pdf",
+        Some("png") => "image/png",
+        Some("dxf") => "image/vnd.dxf",
+        _ => "image/svg+xml",
+    };
+    Ok((path, mime, bytes))
+}
+
+/// Native file output and browser download use the same in-memory sheet writer.
+pub fn export_sheet_to_path(
+    world: &World,
+    path: PathBuf,
+    scale_denominator: Option<f32>,
+) -> Result<PathBuf, String> {
+    let (path, mime, bytes) = export_sheet_to_bytes(world, path, scale_denominator)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = mime;
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_arch = "wasm32")]
+    download_sheet(
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("drawing.svg"),
+        mime,
+        &bytes,
+    )
+    .map_err(|e| format!("Browser download failed: {e:?}"))?;
     Ok(path)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(
+    inline_js = "export function download_sheet(name, mime, bytes) { const url = URL.createObjectURL(new Blob([bytes], {type: mime})); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }"
+)]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(catch)]
+    fn download_sheet(name: &str, mime: &str, bytes: &[u8]) -> Result<(), wasm_bindgen::JsValue>;
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "model-api"))]
+pub fn export_sheet_to_data_url(
+    world: &World,
+    path: PathBuf,
+    scale: Option<f32>,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    let (_, mime, bytes) = export_sheet_to_bytes(world, path, scale)?;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 fn normalize_path(path: PathBuf) -> PathBuf {

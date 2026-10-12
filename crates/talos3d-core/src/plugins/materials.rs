@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use base64::prelude::*;
 use bevy::{
     asset::RenderAssetUsages,
-    image::{CompressedImageFormats, ImageSampler, ImageType},
+    image::{
+        CompressedImageFormats, ImageAddressMode, ImageSampler, ImageSamplerDescriptor, ImageType,
+    },
     math::Affine2,
     prelude::*,
 };
@@ -133,7 +135,13 @@ impl TexturePayload {
                     image_type,
                     CompressedImageFormats::NONE,
                     true,
-                    ImageSampler::default(),
+                    // Material UV scale/offset describes tiling; clamping to the
+                    // last texel makes most of a scaled surface appear flat.
+                    ImageSampler::Descriptor(ImageSamplerDescriptor {
+                        address_mode_u: ImageAddressMode::Repeat,
+                        address_mode_v: ImageAddressMode::Repeat,
+                        ..ImageSamplerDescriptor::linear()
+                    }),
                     RenderAssetUsages::RENDER_WORLD,
                 )
                 .ok()?;
@@ -2033,6 +2041,29 @@ fn uuid_v4() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_material_texture_tiles_beyond_unit_uvs() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        let payload = TexturePayload::Embedded {
+            // Small generated two-tone tile: exercise the actual PNG decode path.
+            data: "iVBORw0KGgoAAAANSUhEUgAAABAAAACACAIAAACN9351AAAANElEQVR4nO3LMQEAIAzAsClGMV6Ghh58yZ850fwPN+phI0EQBEEQBEEQBEEQBEEQBEEQigdbnIqqnsP9nAAAAABJRU5ErkJggg==".into(),
+            mime: "image/png".into(),
+        };
+        let mut images = Assets::<Image>::default();
+        let handle = payload
+            .load(app.world().resource::<AssetServer>(), &mut images)
+            .unwrap();
+        let image = images.get(&handle).unwrap();
+        assert_eq!(image.width(), 16);
+        assert_eq!(image.height(), 128);
+        let ImageSampler::Descriptor(sampler) = &image.sampler else {
+            panic!("material sampler must be explicit");
+        };
+        assert_eq!(sampler.address_mode_u, ImageAddressMode::Repeat);
+        assert_eq!(sampler.address_mode_v, ImageAddressMode::Repeat);
+    }
 
     #[test]
     fn selection_material_commands_update_authored_occurrence_binding() {

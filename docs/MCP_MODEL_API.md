@@ -1247,3 +1247,19 @@ step surface, which is smaller than the full MCP tool list. An advertised tool
 such as `instantiate_recipe` can be called directly even when it has no
 procedural-session descriptor; unsupported batching is now reported with that
 next action instead of an unexplained registry error.
+
+Browser drawing exports use the same paper-mm sheet writers as native exports.
+`export_drawing` and `export_drafting_sheet` return `transport: "browser_memory"`,
+`mime_type` and `data_base64` in the browser; native callers retain `path`.
+Decode the returned bytes to obtain the PDF/SVG/DXF/PNG. The view must be
+orthographic. Browser menu export downloads the generated file without a native
+filesystem or save dialog. PDF menu export retains the Drafting-mode requirement.
+
+Section visibility culls only meshes whose transformed Bevy bounds lie entirely
+on the hidden side. Crossing meshes remain available to the canonical
+DrawingScene section projector. Updating or disabling a section does not unhide
+unrelated hidden meshes. Bounds/transform/plane changes invalidate this work;
+idle frames do not traverse mesh vertices or rewrite visibility.
+
+Embedded material textures use a repeating sampler so UV scale/offset actually
+tiles the image instead of stretching the last texel across the surface.

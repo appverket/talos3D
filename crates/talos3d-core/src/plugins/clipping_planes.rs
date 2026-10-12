@@ -2,14 +2,14 @@
 //!
 //! A [`ClipPlaneNode`] is an authored entity that defines a half-space in world
 //! space. The [`ClippingPlanesPlugin`] hides any renderable mesh whose
-//! Transform origin lies on the *negative-normal* side of every active plane.
+//! world-space bounding box lies fully on the hidden side of any active plane.
 //! It recomputes all renderables only when the plane set changes and otherwise
-//! visits only moved or newly-meshed entities. Geometry that straddles a plane
-//! is left visible (approximate but correct for whole-room architectural cuts).
+//! visits only changed transforms/bounds/meshes. Crossing geometry remains
+//! available to the canonical DrawingScene section projector.
 
 use std::{any::Any, collections::HashMap};
 
-use bevy::prelude::*;
+use bevy::{camera::primitives::Aabb, prelude::*};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -71,7 +71,9 @@ impl ClipPlaneNode {
 /// Marker: this mesh entity is currently hidden because it lies on the clipped
 /// side of at least one active [`ClipPlaneNode`].
 #[derive(Component, Debug, Clone)]
-pub struct ClippedByPlane;
+pub struct ClippedByPlane {
+    previous: Visibility,
+}
 
 #[derive(Resource, Default)]
 struct SectionViewSyncState {
@@ -106,65 +108,95 @@ impl Plugin for ClippingPlanesPlugin {
 ///
 /// Entities that are [`CsgOperand`] (already hidden by the CSG pipeline) are
 /// skipped so we never fight with CSG visibility.
+type ClipRenderable<'a> = (Entity, &'a GlobalTransform, Option<&'a Aabb>);
+
 fn apply_clip_plane_visibility(
+    mut commands: Commands,
     clip_planes: Query<Ref<ClipPlaneNode>>,
     mut renderables: ParamSet<(
-        Query<(Entity, &Transform), (With<Mesh3d>, Without<ClipPlaneNode>, Without<CsgOperand>)>,
+        Query<ClipRenderable, (With<Mesh3d>, Without<ClipPlaneNode>, Without<CsgOperand>)>,
         Query<
-            (Entity, &Transform),
+            ClipRenderable,
             (
                 With<Mesh3d>,
                 Without<ClipPlaneNode>,
                 Without<CsgOperand>,
-                Or<(Changed<Transform>, Added<Mesh3d>)>,
+                Or<(Changed<GlobalTransform>, Changed<Aabb>, Changed<Mesh3d>)>,
             ),
         >,
     )>,
     mut removed_clip_planes: RemovedComponents<ClipPlaneNode>,
-    mut visibility: Query<&mut Visibility>,
+    mut visibility: Query<(&mut Visibility, Option<&ClippedByPlane>)>,
 ) {
     let plane_set_changed = clip_planes.iter().any(|plane| plane.is_changed())
         || removed_clip_planes.read().count() > 0;
     let active_planes: Vec<ClipPlaneNode> = clip_planes
         .iter()
-        .filter(|plane| plane.active)
-        .map(|plane| (*plane).clone())
+        .filter(|p| p.active)
+        .map(|p| (*p).clone())
         .collect();
-
     if plane_set_changed {
-        for (entity, transform) in renderables.p0().iter() {
-            apply_visibility_for_entity(entity, transform, &active_planes, &mut visibility);
+        for (entity, transform, bounds) in renderables.p0().iter() {
+            apply_visibility_for_entity(
+                entity,
+                transform,
+                bounds,
+                &active_planes,
+                &mut visibility,
+                &mut commands,
+            );
         }
     } else if !active_planes.is_empty() {
-        for (entity, transform) in renderables.p1().iter() {
-            apply_visibility_for_entity(entity, transform, &active_planes, &mut visibility);
+        for (entity, transform, bounds) in renderables.p1().iter() {
+            apply_visibility_for_entity(
+                entity,
+                transform,
+                bounds,
+                &active_planes,
+                &mut visibility,
+                &mut commands,
+            );
         }
     }
 }
 
 fn apply_visibility_for_entity(
     entity: Entity,
-    transform: &Transform,
+    transform: &GlobalTransform,
+    bounds: Option<&Aabb>,
     active_planes: &[ClipPlaneNode],
-    visibility: &mut Query<&mut Visibility>,
+    visibility: &mut Query<(&mut Visibility, Option<&ClippedByPlane>)>,
+    commands: &mut Commands,
 ) {
-    let pos = transform.translation;
-    let clipped = active_planes
-        .iter()
-        .any(|plane| (pos - plane.origin).dot(plane.normal) < 0.0);
-    let desired = if clipped {
-        Visibility::Hidden
-    } else {
-        Visibility::Visible
+    // No bounds yet: defer instead of guessing from the object's local origin.
+    let Some(bounds) = bounds else {
+        return;
     };
-
-    if let Ok(mut current) = visibility.get_mut(entity) {
-        // Only overwrite Visible/Hidden; never un-hide a CsgOperand-hidden
-        // entity (those use Visibility::Hidden for other reasons but are
-        // excluded by the query above anyway). Equality matters: identical
-        // writes would wake every Changed<Visibility> consumer downstream.
-        if *current != desired {
-            *current = desired;
+    let affine = transform.affine();
+    let centre: Vec3 = affine.transform_point3a(bounds.center).into();
+    let half = bounds.half_extents;
+    let clipped = active_planes.iter().any(|plane| {
+        let normal = bevy::math::Vec3A::from(plane.normal);
+        let radius = normal.dot(affine.matrix3.x_axis).abs() * half.x
+            + normal.dot(affine.matrix3.y_axis).abs() * half.y
+            + normal.dot(affine.matrix3.z_axis).abs() * half.z;
+        (centre - plane.origin).dot(plane.normal) + radius < -1e-5
+    });
+    if let Ok((mut current, previous)) = visibility.get_mut(entity) {
+        if clipped {
+            if previous.is_none() {
+                commands
+                    .entity(entity)
+                    .insert(ClippedByPlane { previous: *current });
+            }
+            if *current != Visibility::Hidden {
+                *current = Visibility::Hidden;
+            }
+        } else if let Some(previous) = previous {
+            if *current != previous.previous {
+                *current = previous.previous;
+            }
+            commands.entity(entity).remove::<ClippedByPlane>();
         }
     }
 }
@@ -723,7 +755,8 @@ mod tests {
             .world_mut()
             .spawn((
                 Mesh3d(Handle::default()),
-                Transform::from_xyz(0.0, -1.0, 0.0),
+                GlobalTransform::from_translation(Vec3::NEG_Y),
+                Aabb::from_min_max(Vec3::splat(-0.1), Vec3::splat(0.1)),
                 Visibility::Visible,
             ))
             .id();
@@ -738,17 +771,84 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<VisibilityChangeCount>().0, 0);
 
-        app.world_mut()
+        *app.world_mut()
             .entity_mut(renderable)
-            .get_mut::<Transform>()
-            .unwrap()
-            .translation = Vec3::Y;
+            .get_mut::<GlobalTransform>()
+            .unwrap() = GlobalTransform::from_translation(Vec3::Y);
         app.update();
         assert_eq!(
             *app.world().get::<Visibility>(renderable).unwrap(),
             Visibility::Visible
         );
         assert_eq!(app.world().resource::<VisibilityChangeCount>().0, 1);
+    }
+
+    #[test]
+    fn section_culls_actual_offset_geometry_and_retains_crossing_and_layer_hidden_meshes() {
+        let mut app = App::new();
+        app.add_systems(Update, apply_clip_plane_visibility);
+        let plane = app
+            .world_mut()
+            .spawn(ClipPlaneNode {
+                name: "cut".into(),
+                origin: Vec3::Y * 1.2,
+                normal: Vec3::NEG_Y,
+                active: true,
+            })
+            .id();
+        let roof = app
+            .world_mut()
+            .spawn((
+                Mesh3d(Handle::default()),
+                GlobalTransform::IDENTITY,
+                Aabb::from_min_max(Vec3::new(-2.0, 2.3, -3.0), Vec3::new(2.0, 3.4, 3.0)),
+                Visibility::Visible,
+            ))
+            .id();
+        let wall = app
+            .world_mut()
+            .spawn((
+                Mesh3d(Handle::default()),
+                GlobalTransform::from_translation(Vec3::Y * 1.3),
+                Aabb::from_min_max(Vec3::new(-2.0, -1.3, -0.1), Vec3::new(2.0, 1.3, 0.1)),
+                Visibility::Visible,
+            ))
+            .id();
+        let hidden = app
+            .world_mut()
+            .spawn((
+                Mesh3d(Handle::default()),
+                GlobalTransform::IDENTITY,
+                Aabb::from_min_max(Vec3::ZERO, Vec3::ONE),
+                Visibility::Hidden,
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(roof).unwrap(),
+            Visibility::Hidden
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(wall).unwrap(),
+            Visibility::Visible
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(hidden).unwrap(),
+            Visibility::Hidden
+        );
+        app.world_mut()
+            .get_mut::<ClipPlaneNode>(plane)
+            .unwrap()
+            .active = false;
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(roof).unwrap(),
+            Visibility::Visible
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(hidden).unwrap(),
+            Visibility::Hidden
+        );
     }
 
     #[test]
