@@ -1099,7 +1099,13 @@ fn current_dimension_plane(world: &World) -> Option<DrawingPlane> {
         .or(Some(fallback))
 }
 
-fn sync_dimension_annotations(world: &mut World) {
+/// A replaced document must replay metadata even when its bytes are unchanged.
+pub(crate) fn reset_metadata_sync(world: &mut World) {
+    world.insert_resource(DimensionAnnotationSyncState::default());
+}
+
+pub(crate) fn sync_dimension_annotations(world: &mut World) {
+    world.init_resource::<DimensionAnnotationSyncState>();
     let saved = {
         let doc_props = world.resource::<DocumentProperties>();
         doc_props

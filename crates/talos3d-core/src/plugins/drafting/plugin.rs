@@ -330,10 +330,16 @@ fn execute_set_preset(world: &mut World, preset: &str) -> Result<CommandResult, 
     Ok(CommandResult::empty())
 }
 
+/// A replaced document must replay metadata even when its bytes are unchanged.
+pub(crate) fn reset_metadata_sync(world: &mut World) {
+    world.insert_resource(DraftingAnnotationSyncState::default());
+}
+
 /// Bidirectional sync between ECS entities (`ElementId` + `DimensionAnnotationNode`)
 /// and `DocumentProperties.domain_defaults[DRAFTING_ANNOTATIONS_KEY]`.
 /// Mirrors the pattern in `dimension_line.rs::sync_dimension_annotations`.
-fn sync_drafting_annotations(world: &mut World) {
+pub(crate) fn sync_drafting_annotations(world: &mut World) {
+    world.init_resource::<DraftingAnnotationSyncState>();
     // DocumentProperties is owned by the persistence/document_state plugins;
     // during early boot before those init, skip quietly.
     if !world.contains_resource::<DocumentProperties>() {

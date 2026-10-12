@@ -711,7 +711,13 @@ fn process_pending_viewport_export(world: &mut World) {
     // WebGL captures the presented framebuffer reliably; the secondary image
     // camera may return an unrendered black target on that backend. Crop the
     // same window capture used by include_ui=true to the actual viewport.
+    // Drafting text is Bevy UI attached to the primary camera; a secondary
+    // image camera would silently omit it. Capture the presented viewport.
+    let drafting_active = world
+        .get_resource::<crate::plugins::drafting::DraftingWorkspaceState>()
+        .is_some_and(|state| state.is_active());
     if pending.scope == ViewportExportScope::Viewport
+        && !drafting_active
         && !cfg!(all(target_arch = "wasm32", feature = "webgl2"))
     {
         if let Err(error) =

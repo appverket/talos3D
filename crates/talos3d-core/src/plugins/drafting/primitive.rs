@@ -933,7 +933,13 @@ pub(crate) struct DraftPrimitiveSyncState {
     last_serialized: Option<Value>,
 }
 
+/// A replaced document must replay metadata even when its bytes are unchanged.
+pub(crate) fn reset_metadata_sync(world: &mut World) {
+    world.insert_resource(DraftPrimitiveSyncState::default());
+}
+
 pub(crate) fn sync_draft_primitives(world: &mut World) {
+    world.init_resource::<DraftPrimitiveSyncState>();
     if !world.contains_resource::<DocumentProperties>() {
         return;
     }

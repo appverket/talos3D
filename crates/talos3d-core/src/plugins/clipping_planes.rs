@@ -464,7 +464,13 @@ impl From<ClipPlaneSnapshot> for BoxedEntity {
     }
 }
 
-fn sync_section_views(world: &mut World) {
+/// A replaced document must replay metadata even when its bytes are unchanged.
+pub(crate) fn reset_metadata_sync(world: &mut World) {
+    world.insert_resource(SectionViewSyncState::default());
+}
+
+pub(crate) fn sync_section_views(world: &mut World) {
+    world.init_resource::<SectionViewSyncState>();
     let saved = {
         let doc_props = world.resource::<DocumentProperties>();
         doc_props

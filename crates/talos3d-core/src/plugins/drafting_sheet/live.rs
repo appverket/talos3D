@@ -31,6 +31,7 @@ use crate::{
         },
         identity::ElementId,
         materials::{MaterialAssignment, MaterialRegistry},
+        modeling::occurrence::GeneratedOccurrencePart,
         registry_generation::RegistryGeneration,
     },
 };
@@ -263,12 +264,42 @@ fn invalidate_live_drawing_scene(
     mut scene_changes: ParamSet<(
         Query<(), (With<OrbitCamera>, Changed<GlobalTransform>)>,
         Query<(), (With<OrbitCamera>, Changed<Projection>)>,
-        Query<(), (With<ElementId>, Added<Mesh3d>)>,
-        Query<(Entity, &Mesh3d), (With<ElementId>, Changed<Mesh3d>)>,
-        Query<(), (With<ElementId>, Changed<GlobalTransform>)>,
-        Query<(), (With<ElementId>, Changed<Visibility>)>,
+        Query<
+            (),
+            (
+                Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+                Added<Mesh3d>,
+            ),
+        >,
+        Query<
+            (Entity, &Mesh3d),
+            (
+                Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+                Changed<Mesh3d>,
+            ),
+        >,
+        Query<
+            (),
+            (
+                Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+                Changed<GlobalTransform>,
+            ),
+        >,
+        Query<
+            (),
+            (
+                Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+                Changed<Visibility>,
+            ),
+        >,
         Query<(), (With<Mesh3d>, Changed<ElementId>)>,
-        Query<(), (With<ElementId>, Changed<MaterialAssignment>)>,
+        Query<
+            (),
+            (
+                Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+                Changed<MaterialAssignment>,
+            ),
+        >,
     )>,
     mut semantic_changes: ParamSet<(
         Query<

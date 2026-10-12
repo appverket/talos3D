@@ -21,7 +21,7 @@
 //!    If something is wrong, it's wrong here — never deep inside a writer.
 
 use std::{
-    collections::{hash_map::DefaultHasher, HashSet},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
     hash::{Hash, Hasher},
 };
 
@@ -31,7 +31,6 @@ use bevy::prelude::*;
 use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::{
     commands::find_entity_by_element_id_readonly,
-    definition_preview_scene::PreviewOnly,
     dimension_line::{
         dimension_line_midpoint, dimension_line_offset_vector,
         render_dimension_line_projected_primitives, DimensionLineNode, DimensionLineVisibility,
@@ -44,8 +43,8 @@ use crate::plugins::{
     identity::ElementId,
     section_fill::{extract_section_fills, SectionFillRegion},
     vector_drawing::{
-        collect_active_clip_planes, collect_classified_visible_edges, collect_scene_triangles,
-        drawing_overlay_excluded, EdgeType, MeshSubject,
+        collect_active_clip_planes, collect_classified_visible_edges,
+        collect_drawing_mesh_subjects, collect_scene_triangles, EdgeType, MeshSubject,
     },
 };
 
@@ -96,42 +95,14 @@ pub fn build_drawing_scene(world: &World, view: &SheetView) -> Option<DrawingSce
     let ndc_to_drawing = NdcToDrawing { paper_w, paper_h };
 
     // 1) Collect visible mesh subjects and their triangles.
-    let mut subject_query = world.try_query_filtered::<(
-        Entity,
-        &crate::plugins::identity::ElementId,
-        &Mesh3d,
-        &GlobalTransform,
-        Option<&Visibility>,
-    ), Without<PreviewOnly>>()?;
-    let mut subjects = Vec::new();
-    for (entity, element_id, mesh_handle, mesh_transform, visibility) in subject_query.iter(world) {
-        if member_filter
-            .as_ref()
-            .is_some_and(|members| !members.contains(element_id))
-        {
-            continue;
-        }
-        if visibility.is_some_and(|v| *v == Visibility::Hidden) {
-            continue;
-        }
-        let Ok(entity_ref) = world.get_entity(entity) else {
-            continue;
-        };
-        let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
-            continue;
-        };
-        if drawing_overlay_excluded(snapshot.type_name()) {
-            continue;
-        }
-        subjects.push((
-            *element_id,
-            MeshSubject {
-                entity,
-                mesh_handle: mesh_handle.0.clone(),
-                mesh_transform: *mesh_transform,
-            },
-        ));
-    }
+    let subjects: Vec<_> = collect_drawing_mesh_subjects(world, registry)
+        .into_iter()
+        .filter(|(owner, _)| {
+            member_filter
+                .as_ref()
+                .is_none_or(|members| members.contains(owner))
+        })
+        .collect();
     let mesh_subjects: Vec<MeshSubject> = subjects
         .iter()
         .map(|(_, subject)| MeshSubject {
@@ -165,6 +136,7 @@ pub fn build_drawing_scene(world: &World, view: &SheetView) -> Option<DrawingSce
     }
 
     // 2) Visible edges → paper-mm line segments, classified.
+    let mut owner_ordinals: HashMap<ElementId, u32> = HashMap::new();
     for (owner, subject) in &subjects {
         let Some(mesh) = mesh_assets.get(&subject.mesh_handle) else {
             continue;
@@ -179,17 +151,20 @@ pub fn build_drawing_scene(world: &World, view: &SheetView) -> Option<DrawingSce
             &scene_triangles,
             &clip_planes,
         );
-        for (ordinal, (a_world, b_world, edge_type)) in classified.into_iter().enumerate() {
+        for (a_world, b_world, edge_type) in classified {
             if let (Some(a), Some(b)) = (
                 project_world_to_normalized(a_world, &view_proj, &ndc_to_drawing),
                 project_world_to_normalized(b_world, &view_proj, &ndc_to_drawing),
             ) {
+                let ordinal = owner_ordinals.entry(*owner).or_default();
+                let id = DrawingPrimitiveId {
+                    owner: *owner,
+                    role: DrawingPrimitiveRole::VisibleEdge,
+                    ordinal: *ordinal,
+                };
+                *ordinal += 1;
                 scene.lines.push(DrawingSceneLine {
-                    id: DrawingPrimitiveId {
-                        owner: *owner,
-                        role: DrawingPrimitiveRole::VisibleEdge,
-                        ordinal: ordinal as u32,
-                    },
+                    id,
                     owner: *owner,
                     a,
                     b,
@@ -1013,6 +988,7 @@ fn direction_paper(kind: &DimensionKind, a: Vec2, b: Vec2) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::definition_preview_scene::PreviewOnly;
 
     #[test]
     fn ndc_mapping_separates_normalized_scene_from_paper_layout() {
@@ -1099,6 +1075,73 @@ mod tests {
             "ground y = {}",
             ground.y
         );
+    }
+
+    #[test]
+    fn draft_projects_compound_parts_with_unique_owner_ids_and_section_fills() {
+        use crate::plugins::{
+            clipping_planes::ClipPlaneNode,
+            modeling::{
+                definition::DefinitionId,
+                occurrence::{GeneratedOccurrencePart, OccurrenceFactory, OccurrenceIdentity},
+            },
+        };
+        let mut world = World::new();
+        let mut meshes = Assets::<Mesh>::default();
+        let cube = meshes.add(Cuboid::new(0.5, 1.0, 0.5));
+        world.insert_resource(meshes);
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(OccurrenceFactory);
+        world.insert_resource(registry);
+        world.insert_resource(DocumentProperties::default());
+        let definition_id = DefinitionId("test.compound".into());
+        for owner in [ElementId(50), ElementId(51)] {
+            world.spawn((owner, OccurrenceIdentity::new(definition_id.clone(), 1)));
+            for (slot, x) in [("left", -1.0), ("right", 1.0)] {
+                world.spawn((
+                    GeneratedOccurrencePart {
+                        owner,
+                        slot_path: slot.into(),
+                        definition_id: definition_id.clone(),
+                    },
+                    Mesh3d(cube.clone()),
+                    GlobalTransform::from_translation(Vec3::new(
+                        x,
+                        0.0,
+                        if owner.0 == 50 { 0.0 } else { 2.0 },
+                    )),
+                    Visibility::Visible,
+                ));
+            }
+        }
+        world.spawn(ClipPlaneNode::at_y(0.0));
+        let mut draft = drafting::DraftNode::new("Compound section");
+        draft.members = vec![ElementId(50)];
+        world.spawn((ElementId(1), draft));
+        let mut workspace = drafting::DraftingWorkspaceState::default();
+        workspace.select_draft(Some(ElementId(1)));
+        world.insert_resource(workspace);
+        let view = SheetView {
+            eye: Vec3::new(0.0, -10.0, 0.0),
+            target: Vec3::ZERO,
+            up: Vec3::Z,
+            ortho_height_m: 5.0,
+            aspect: 1.0,
+            scale_denominator: 50.0,
+            margin_mm: 10.0,
+        };
+        let scene = build_drawing_scene(&world, &view).unwrap();
+        assert!(!scene.lines.is_empty());
+        assert!(!scene.hatches.is_empty());
+        assert!(scene.lines.iter().all(|line| line.owner == ElementId(50)));
+        assert!(scene
+            .hatches
+            .iter()
+            .all(|hatch| hatch.owner == ElementId(50)));
+        let ids: HashSet<_> = scene.lines.iter().map(|line| line.id).collect();
+        assert_eq!(ids.len(), scene.lines.len());
+        assert!(scene.lines.iter().any(|line| line.a.x < 0.4));
+        assert!(scene.lines.iter().any(|line| line.a.x > 0.6));
     }
 
     #[test]

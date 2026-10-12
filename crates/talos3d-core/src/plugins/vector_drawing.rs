@@ -22,6 +22,8 @@ use crate::{
         drafting::{
             self, DimPrimitive, DimensionAnnotationNode, DimensionStyleRegistry, DraftingVisibility,
         },
+        identity::ElementId,
+        modeling::occurrence::GeneratedOccurrencePart,
         render_pipeline::RenderSettings,
         section_fill::{
             extract_section_fills, generate_hatch_lines, HatchPattern, ProjectedSectionFill,
@@ -139,35 +141,10 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
 
     let (vp_width, vp_height, world_width, world_height) = viewport_dimensions(orbit, projection);
 
-    // Collect mesh subjects
-    let mut entity_query = world.try_query_filtered::<(
-        Entity,
-        &crate::plugins::identity::ElementId,
-        &Mesh3d,
-        &GlobalTransform,
-        Option<&Visibility>,
-    ), Without<PreviewOnly>>()?;
-
-    let mut subjects = Vec::new();
-    for (entity, _eid, mesh_handle, mesh_transform, visibility) in entity_query.iter(world) {
-        if visibility.is_some_and(|v| *v == Visibility::Hidden) {
-            continue;
-        }
-        let Ok(entity_ref) = world.get_entity(entity) else {
-            continue;
-        };
-        let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
-            continue;
-        };
-        if drawing_overlay_excluded(snapshot.type_name()) {
-            continue;
-        }
-        subjects.push(MeshSubject {
-            entity,
-            mesh_handle: mesh_handle.0.clone(),
-            mesh_transform: *mesh_transform,
-        });
-    }
+    let subjects: Vec<MeshSubject> = collect_drawing_mesh_subjects(world, registry)
+        .into_iter()
+        .map(|(_, subject)| subject)
+        .collect();
 
     let scene_triangles = collect_scene_triangles(&subjects, mesh_assets);
     let clip_planes = collect_active_clip_planes(world);
@@ -1362,6 +1339,54 @@ fn pdf_escape_text(s: &str) -> String {
 }
 
 // ─── Internal geometry helpers ───────────────────────────────────────────────
+
+/// Resolve derived component meshes to their authored owner for every drawing
+/// backend. Compound occurrence roots intentionally have no render mesh.
+pub(crate) fn collect_drawing_mesh_subjects(
+    world: &World,
+    registry: &CapabilityRegistry,
+) -> Vec<(ElementId, MeshSubject)> {
+    let Some(mut owners) = world.try_query::<(Entity, &ElementId)>() else {
+        return Vec::new();
+    };
+    let owners: HashMap<_, _> = owners
+        .iter(world)
+        .map(|(entity, id)| (*id, entity))
+        .collect();
+    let Some(mut meshes) =
+        world.try_query::<(EntityRef, &Mesh3d, &GlobalTransform, Option<&Visibility>)>()
+    else {
+        return Vec::new();
+    };
+    meshes
+        .iter(world)
+        .filter_map(|(entity_ref, mesh, transform, visibility)| {
+            if entity_ref.contains::<PreviewOnly>()
+                || visibility.is_some_and(|v| *v == Visibility::Hidden)
+            {
+                return None;
+            }
+            let owner = entity_ref
+                .get::<GeneratedOccurrencePart>()
+                .map(|part| part.owner)
+                .or_else(|| entity_ref.get::<ElementId>().copied())?;
+            let owner_entity = *owners.get(&owner)?;
+            let owner_ref = world.get_entity(owner_entity).ok()?;
+            let snapshot = registry.capture_snapshot(&owner_ref, world)?;
+            if drawing_overlay_excluded(snapshot.type_name()) {
+                return None;
+            }
+            Some((
+                owner,
+                MeshSubject {
+                    entity: entity_ref.id(),
+                    mesh_handle: mesh.0.clone(),
+                    mesh_transform: *transform,
+                },
+            ))
+        })
+        .collect()
+}
 
 pub(crate) struct MeshSubject {
     pub(crate) entity: Entity,

@@ -1227,7 +1227,18 @@ fn clear_active_recovery(world: &mut World) {
     }
 }
 
+/// Flush authored drawing metadata at the persistence boundary rather than
+/// depending on the relative order of API requests and Update systems.
+fn sync_drawing_metadata(world: &mut World) {
+    crate::plugins::dimension_line::sync_dimension_annotations(world);
+    crate::plugins::clipping_planes::sync_section_views(world);
+    crate::plugins::drafting::plugin::sync_drafting_annotations(world);
+    crate::plugins::drafting::draft::sync_drafts(world);
+    crate::plugins::drafting::primitive::sync_draft_primitives(world);
+}
+
 fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
+    sync_drawing_metadata(world);
     // `Without<PreviewOnly>` is defense-in-depth: the definition preview scene
     // spawns an occurrence root with `ElementId(u64::MAX - 1)` that must never
     // appear in a saved project file.  `PreviewOnly` is the single gate.
@@ -1936,6 +1947,8 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     world
         .resource_mut::<NextState<ActiveTool>>()
         .set(ActiveTool::Select);
+    // Restore exact authored IDs before callers can resolve Draft membership.
+    sync_drawing_metadata(world);
     focus_camera_on_loaded_snapshots(world, &restored_snapshots);
     Ok(())
 }
@@ -2043,6 +2056,11 @@ fn is_legacy_primitive_record_type(type_name: &str) -> bool {
 }
 
 fn clear_scene(world: &mut World) {
+    crate::plugins::dimension_line::reset_metadata_sync(world);
+    crate::plugins::clipping_planes::reset_metadata_sync(world);
+    crate::plugins::drafting::plugin::reset_metadata_sync(world);
+    crate::plugins::drafting::draft::reset_metadata_sync(world);
+    crate::plugins::drafting::primitive::reset_metadata_sync(world);
     // Flush world-owned commands before removing authored content. System-local
     // deferred buffers belong to their schedules; API replacement runs in First.
     world.flush();
@@ -4174,6 +4192,112 @@ mod tests {
         assert!(saved_layers.layers.contains_key("House"));
         assert!(!saved_layers.layers.contains_key("HOJDKURVA"));
         assert!(!saved_layers.layers.contains_key("VAG_KANT"));
+    }
+
+    #[test]
+    fn drawing_metadata_survives_immediate_capture_and_repeated_same_document_open() {
+        use crate::plugins::clipping_planes::{ClipPlaneNode, SECTION_VIEW_METADATA_KEY};
+        use crate::plugins::dimension_line::{DimensionLineNode, DIMENSION_ANNOTATIONS_KEY};
+        use crate::plugins::drafting::{
+            DimensionAnnotationNode, DimensionKind, DraftLine, DraftNode, DraftPrimitiveGeometry,
+            DraftPrimitiveNode, DRAFTING_ANNOTATIONS_KEY, DRAFTS_METADATA_KEY,
+            DRAFT_PRIMITIVES_METADATA_KEY,
+        };
+        use crate::plugins::units::DisplayUnit;
+
+        let mut world = shell_world();
+        world.init_resource::<PropertyEditState>();
+        world.init_resource::<TransformState>();
+        world.init_resource::<NextState<ActiveTool>>();
+        let dimension = DimensionLineNode {
+            start: Vec3::new(2.5, 0.0, -3.0),
+            end: Vec3::new(-2.5, 0.0, -3.0),
+            line_point: Vec3::new(0.0, 0.0, -3.65),
+            extension: 0.24,
+            visible: true,
+            label: Some("Overall width".into()),
+            display_unit: Some(DisplayUnit::Millimetres),
+            precision: Some(0),
+        };
+        let annotation = DimensionAnnotationNode {
+            kind: DimensionKind::Aligned,
+            a: Vec3::ZERO,
+            b: Vec3::new(2.0, 0.0, 1.0),
+            offset: Vec3::new(0.0, 0.0, -0.4),
+            style_name: "architectural_metric".into(),
+            text_override: Some("Diagonal".into()),
+            visible: true,
+        };
+        let section = ClipPlaneNode::at_y(1.2);
+        let primitive = DraftPrimitiveNode {
+            geometry: DraftPrimitiveGeometry::Line(DraftLine {
+                a: Vec2::ZERO,
+                b: Vec2::X,
+            }),
+            layer: "Default".into(),
+            style_name: "architectural_metric".into(),
+            visible: true,
+        };
+        let mut draft = DraftNode::new("Plan");
+        draft.members = vec![ElementId(657), ElementId(658), ElementId(660)];
+        world.spawn((ElementId(657), dimension.clone()));
+        world.spawn((ElementId(658), annotation.clone()));
+        world.spawn((ElementId(659), section.clone()));
+        world.spawn((ElementId(660), primitive.clone()));
+        world.spawn((ElementId(661), draft.clone()));
+        world.resource_mut::<ElementIdAllocator>().set_next(662);
+
+        // No Update runs between command application, capture and open.
+        let bytes = capture_project_bytes(&mut world).unwrap();
+        let captured: ProjectFile = serde_json::from_slice(&bytes).unwrap();
+        let expected = captured.document_properties.unwrap().domain_defaults;
+        for key in [
+            DIMENSION_ANNOTATIONS_KEY,
+            DRAFTING_ANNOTATIONS_KEY,
+            SECTION_VIEW_METADATA_KEY,
+            DRAFTS_METADATA_KEY,
+            DRAFT_PRIMITIVES_METADATA_KEY,
+        ] {
+            assert!(expected.contains_key(key), "capture must flush {key}");
+        }
+        for _ in 0..2 {
+            open_project_bytes(&mut world, &bytes).unwrap();
+            let entity = |id| entity_for_element_id(&world, ElementId(id)).unwrap();
+            assert_eq!(
+                world.get::<DimensionLineNode>(entity(657)),
+                Some(&dimension)
+            );
+            assert_eq!(
+                world.get::<DimensionAnnotationNode>(entity(658)),
+                Some(&annotation)
+            );
+            assert_eq!(world.get::<ClipPlaneNode>(entity(659)), Some(&section));
+            assert_eq!(
+                world.get::<DraftPrimitiveNode>(entity(660)),
+                Some(&primitive)
+            );
+            assert_eq!(world.get::<DraftNode>(entity(661)), Some(&draft));
+            // The normal Update sync also must not remove restored objects.
+            sync_drawing_metadata(&mut world);
+            let recaptured: ProjectFile =
+                serde_json::from_slice(&capture_project_bytes(&mut world).unwrap()).unwrap();
+            assert_eq!(
+                recaptured.document_properties.unwrap().domain_defaults,
+                expected
+            );
+            assert_eq!(recaptured.next_element_id, 662);
+        }
+
+        // A fresh node after document replacement must not be mistaken for a
+        // stale cached annotation and deleted by the next capture.
+        clear_scene(&mut world);
+        world.insert_resource(DocumentProperties::default());
+        world.spawn((ElementId(700), dimension.clone()));
+        let fresh: ProjectFile =
+            serde_json::from_slice(&capture_project_bytes(&mut world).unwrap()).unwrap();
+        let metadata = fresh.document_properties.unwrap().domain_defaults;
+        assert_eq!(metadata[DIMENSION_ANNOTATIONS_KEY][0]["element_id"], 700);
+        assert!(!metadata.contains_key(SECTION_VIEW_METADATA_KEY));
     }
 
     #[test]

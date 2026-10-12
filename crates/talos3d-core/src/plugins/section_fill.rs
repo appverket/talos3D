@@ -393,27 +393,28 @@ pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<S
         return Vec::new();
     }
 
-    let mesh_query = world.try_query_filtered::<(
-        Entity,
-        &ElementId,
-        &Mesh3d,
-        &GlobalTransform,
-        Option<&Visibility>,
-        Option<&MaterialAssignment>,
-    ), Without<PreviewOnly>>();
+    let mesh_query =
+        world.try_query::<(EntityRef, &Mesh3d, &GlobalTransform, Option<&Visibility>)>();
     let Some(mut mesh_query) = mesh_query else {
         return Vec::new();
     };
 
     let mut fills = Vec::new();
 
-    for (_entity, owner, mesh_handle, mesh_transform, visibility, mat_assign) in
-        mesh_query.iter(world)
-    {
-        if visibility.is_some_and(|v| *v == Visibility::Hidden) {
+    for (entity_ref, mesh_handle, mesh_transform, visibility) in mesh_query.iter(world) {
+        if entity_ref.contains::<PreviewOnly>()
+            || visibility.is_some_and(|v| *v == Visibility::Hidden)
+        {
             continue;
         }
-
+        let Some(owner) = entity_ref
+            .get::<crate::plugins::modeling::occurrence::GeneratedOccurrencePart>()
+            .map(|part| part.owner)
+            .or_else(|| entity_ref.get::<ElementId>().copied())
+        else {
+            continue;
+        };
+        let mat_assign = entity_ref.get::<MaterialAssignment>();
         let Some(mesh) = mesh_assets.get(&mesh_handle.0) else {
             continue;
         };
@@ -431,7 +432,7 @@ pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<S
             for polygon in loops {
                 if polygon.len() >= 3 {
                     fills.push(SectionFillRegion {
-                        owner: *owner,
+                        owner,
                         polygon_3d: polygon,
                         pattern,
                         fill_color,
