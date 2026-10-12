@@ -749,6 +749,15 @@ impl Plugin for LightingPlugin {
                     draw_scene_light_gizmos,
                 ),
             );
+        // Bevy WebGL deliberately supports one directional light. Keep this
+        // approximation in derived presentation, never authored settings.
+        #[cfg(all(target_arch = "wasm32", feature = "webgl2", not(feature = "webgpu")))]
+        app.add_systems(
+            Update,
+            sync_webgl_directional_ambient
+                .after(sync_scene_lights)
+                .after(sync_ambient_light),
+        );
     }
 }
 
@@ -833,6 +842,88 @@ fn sync_ambient_light(
     );
     ambient.brightness = settings.ambient_brightness;
     ambient.affects_lightmapped_meshes = settings.affects_lightmapped_meshes;
+}
+
+/// Approximate the spherical-mean contribution of lights beyond WebGL's
+/// single-directional-light budget. This is a legibility fallback, not
+/// photometric parity: shadowing and direction of the omitted lights are lost.
+/// The 1/4 factor is the mean of max(0, N dot L) over the unit sphere.
+#[cfg(any(
+    test,
+    all(target_arch = "wasm32", feature = "webgl2", not(feature = "webgpu"))
+))]
+fn webgl_ambient_from_directionals(
+    settings: &SceneLightingSettings,
+    mut lights: Vec<(Entity, bool, bool, Color, f32)>,
+) -> GlobalAmbientLight {
+    let mut ambient = GlobalAmbientLight {
+        color: Color::srgb(
+            settings.ambient_color[0],
+            settings.ambient_color[1],
+            settings.ambient_color[2],
+        ),
+        brightness: settings.ambient_brightness,
+        affects_lightmapped_meshes: settings.affects_lightmapped_meshes,
+    };
+    if lights.len() <= 1 {
+        return ambient;
+    }
+    // Exact priority used by the corrected Bevy renderer, including its
+    // render-world entity tie-breaker. Do not infer retention from lux/name.
+    lights.sort_by_key(|&(entity, volumetric, shadows, _, _)| (!volumetric, !shadows, entity));
+    let base = ambient.color.to_linear();
+    let mut energy = Vec3::new(base.red, base.green, base.blue) * ambient.brightness;
+    for (_, _, _, color, intensity) in lights.into_iter().skip(1) {
+        let linear = color.to_linear();
+        energy += Vec3::new(linear.red, linear.green, linear.blue) * (intensity.max(0.0) * 0.25);
+    }
+    let brightness = energy.max_element();
+    if brightness > 0.0 {
+        let rgb = energy / brightness;
+        ambient.color = Color::linear_rgb(rgb.x, rgb.y, rgb.z);
+        ambient.brightness = brightness;
+    }
+    ambient
+}
+
+#[cfg(any(
+    test,
+    all(target_arch = "wasm32", feature = "webgl2", not(feature = "webgpu"))
+))]
+fn sync_webgl_directional_ambient(
+    settings: Res<SceneLightingSettings>,
+    lights: Query<
+        (
+            Entity,
+            &DirectionalLight,
+            Has<bevy::light::VolumetricLight>,
+            Option<&bevy::render::sync_world::RenderEntity>,
+        ),
+        With<SceneLightNode>,
+    >,
+    mut ambient: ResMut<GlobalAmbientLight>,
+) {
+    let candidates = lights
+        .iter()
+        .map(|(entity, light, volumetric, render_entity)| {
+            (
+                render_entity.map(|id| id.id()).unwrap_or(entity),
+                volumetric,
+                light.shadow_maps_enabled,
+                light.color,
+                light.illuminance,
+            )
+        })
+        .collect();
+    let derived = webgl_ambient_from_directionals(&settings, candidates);
+    // Always derive from authored settings, including after deletion/disable;
+    // never accumulate last frame's fill or mark the document dirty.
+    if ambient.color != derived.color
+        || ambient.brightness != derived.brightness
+        || ambient.affects_lightmapped_meshes != derived.affects_lightmapped_meshes
+    {
+        *ambient = derived;
+    }
 }
 
 fn sync_scene_lights(
@@ -1212,6 +1303,97 @@ fn default_light_shadows(kind: SceneLightKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webgl_no_or_single_directional_preserves_authored_ambient_exactly() {
+        let settings = SceneLightingSettings::default();
+        let entity = World::new().spawn_empty().id();
+        for lights in [vec![], vec![(entity, false, true, Color::WHITE, 8000.0)]] {
+            let ambient = webgl_ambient_from_directionals(&settings, lights);
+            assert_eq!(ambient.brightness, settings.ambient_brightness);
+            assert_eq!(ambient.color, Color::srgb(0.9, 0.92, 1.0));
+        }
+    }
+
+    #[test]
+    fn webgl_retains_shadow_key_and_adds_only_omitted_linear_fill() {
+        let mut world = World::new();
+        let fill = world.spawn_empty().id();
+        let key = world.spawn_empty().id();
+        let settings = SceneLightingSettings {
+            ambient_color: [0.0; 3],
+            ambient_brightness: 0.0,
+            affects_lightmapped_meshes: false,
+        };
+        let ambient = webgl_ambient_from_directionals(
+            &settings,
+            vec![
+                (
+                    fill,
+                    false,
+                    false,
+                    Color::linear_rgb(0.25, 0.5, 1.0),
+                    2000.0,
+                ),
+                (key, false, true, Color::WHITE, 8000.0),
+            ],
+        );
+        assert_eq!(ambient.brightness, 500.0);
+        assert_eq!(ambient.color, Color::linear_rgb(0.25, 0.5, 1.0));
+        assert!(!ambient.affects_lightmapped_meshes);
+    }
+
+    #[test]
+    fn webgl_fill_sync_does_not_accumulate_or_mutate_settings_and_resets_on_removal() {
+        let mut app = App::new();
+        let settings = SceneLightingSettings::default();
+        app.insert_resource(settings.clone())
+            .insert_resource(GlobalAmbientLight::default())
+            .add_systems(Update, sync_webgl_directional_ambient);
+        app.world_mut().spawn((
+            SceneLightNode::default(),
+            DirectionalLight {
+                illuminance: 8000.0,
+                shadow_maps_enabled: true,
+                ..default()
+            },
+        ));
+        let fill = app
+            .world_mut()
+            .spawn((
+                SceneLightNode::default(),
+                DirectionalLight {
+                    illuminance: 2000.0,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+            ))
+            .id();
+        // A disabled authored light has no derived DirectionalLight component.
+        app.world_mut().spawn(SceneLightNode {
+            enabled: false,
+            intensity: 100_000.0,
+            ..default()
+        });
+        app.update();
+        let first = app.world().resource::<GlobalAmbientLight>().brightness;
+        assert!(first > settings.ambient_brightness);
+        app.update();
+        assert_eq!(
+            app.world().resource::<GlobalAmbientLight>().brightness,
+            first
+        );
+        assert_eq!(app.world().resource::<SceneLightingSettings>(), &settings);
+        app.world_mut()
+            .entity_mut(fill)
+            .remove::<DirectionalLight>();
+        app.update();
+        assert_eq!(
+            app.world().resource::<GlobalAmbientLight>().brightness,
+            settings.ambient_brightness
+        );
+        assert_eq!(app.world().resource::<SceneLightingSettings>(), &settings);
+    }
 
     #[test]
     fn default_daylight_rig_matches_pre_pp59_startup_contract() {
