@@ -385,7 +385,7 @@ impl DraftPrimitiveSnapshot {
                     content: text.content.clone(),
                     height_mm: style.text_height_mm,
                     rotation_rad,
-                    anchor_mode: TextAnchor::CenterBaseline,
+                    anchor_mode: TextAnchor::LeftBaseline,
                     font_family: style.text_font.clone(),
                     color_hex: style.text_color_hex.clone(),
                 }]
@@ -1441,6 +1441,11 @@ mod tests {
         assert!(value[0].get("draft_id").is_none());
 
         let snapshots: Vec<DraftPrimitiveSnapshot> = serde_json::from_value(value).unwrap();
+        let primitives =
+            snapshots[0].to_scene_primitives(&DimensionStyle::architectural_metric(), Some);
+        assert!(matches!(&primitives[0], DimPrimitive::Text {
+            anchor, content, anchor_mode: TextAnchor::LeftBaseline, ..
+        } if *anchor == Vec2::new(2.0, 3.0) && content == "ROOM"));
         let mut target = World::new();
         apply_snapshots(&mut target, &snapshots);
         let entity =

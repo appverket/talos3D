@@ -189,6 +189,7 @@ fn write_primitive(out: &mut String, prim: &DimPrimitive) {
             // Because we render inside scale(1 -1), text would draw upside-down
             // without a compensating local scale(1 -1) around each text anchor.
             let (text_anchor, dominant_baseline) = match anchor_mode {
+                TextAnchor::LeftBaseline => ("start", "alphabetic"),
                 TextAnchor::CenterBaseline => ("middle", "alphabetic"),
                 TextAnchor::Center => ("middle", "middle"),
             };

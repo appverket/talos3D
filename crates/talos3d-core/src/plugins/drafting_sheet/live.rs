@@ -14,6 +14,7 @@ use bevy::{
     gizmos::config::{GizmoConfigGroup, GizmoConfigStore},
     math::Rot2,
     prelude::*,
+    text::{ComputedTextBlock, TextLayoutInfo},
     transform::TransformSystems,
     window::PrimaryWindow,
 };
@@ -27,7 +28,7 @@ use crate::{
         dimension_line::{DimensionLineNode, DimensionLineVisibility},
         drafting::{
             DimensionAnnotationNode, DimensionStyleRegistry, DraftNode, DraftPrimitiveNode,
-            DraftingVisibility, DraftingWorkspaceState,
+            DraftingVisibility, DraftingWorkspaceState, TextAnchor,
         },
         identity::ElementId,
         materials::{MaterialAssignment, MaterialRegistry},
@@ -81,6 +82,15 @@ struct DrawingSceneViewportText {
     position_px: Vec2,
     content: String,
     font_size_px: f32,
+    rotation_rad: f32,
+    anchor_mode: TextAnchor,
+}
+
+/// Alignment is derived from Bevy's shaped glyph layout, never estimated from
+/// character count or a font-size fraction. This component is presentation only.
+#[derive(Component, Clone, Copy)]
+struct DrawingSceneTextAnchor {
+    mode: TextAnchor,
     rotation_rad: f32,
 }
 
@@ -198,7 +208,9 @@ impl DrawingSceneLiveCache {
         self.last_rebuild_at = None;
         self.last_invalidation_mask = 0;
         self.observed_material_generation = None;
-        self.observed_mesh_handles.clear();
+        // Keep the source index across presentation shutdown. Changed<Mesh3d>
+        // does not replay for unchanged entities when Drafting is re-entered.
+        // Invalidation keeps this index current (including removals) while off.
         self.stats.last_line_count = 0;
         self.stats.last_text_count = 0;
         self.stats.source_model_revision = 0;
@@ -255,6 +267,10 @@ impl Plugin for DrawingSceneLivePlugin {
                 )
                     .chain()
                     .after(TransformSystems::Propagate),
+            )
+            .add_systems(
+                PostUpdate,
+                align_live_text.after(bevy::ui::UiSystems::PostLayout),
             );
     }
 }
@@ -557,7 +573,12 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
         world.entity_mut(entity).insert((
             DrawingSceneLiveText,
             UiTargetCamera(camera),
+            DrawingSceneTextAnchor {
+                mode: spec.anchor_mode,
+                rotation_rad: spec.rotation_rad,
+            },
             Text::new(spec.content),
+            TextLayout::default().with_no_wrap(),
             TextFont {
                 font_size: FontSize::Px(spec.font_size_px),
                 ..default()
@@ -586,6 +607,58 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
     let mut cache = world.resource_mut::<DrawingSceneLiveCache>();
     cache.text_entities = next_entities;
     count
+}
+
+fn text_anchor_transform(size: Vec2, baseline: f32, anchor: DrawingSceneTextAnchor) -> UiTransform {
+    let local_anchor = match anchor.mode {
+        TextAnchor::LeftBaseline => Vec2::new(0.0, baseline),
+        TextAnchor::CenterBaseline => Vec2::new(size.x * 0.5, baseline),
+        TextAnchor::Center => size * 0.5,
+    };
+    let rotation = Rot2::radians(-anchor.rotation_rad);
+    // Bevy rotates UI nodes about their centre. Move that centre so the semantic
+    // insertion point stays fixed even for vertical and oblique dimensions.
+    let translation = rotation * (size * 0.5 - local_anchor) - size * 0.5;
+    UiTransform {
+        translation: Val2::px(translation.x, translation.y),
+        rotation,
+        ..default()
+    }
+}
+
+fn shaped_text_anchor_transform(
+    layout: &TextLayoutInfo,
+    physical_baseline: f32,
+    anchor: DrawingSceneTextAnchor,
+) -> UiTransform {
+    // Bevy UI already converts TextLayoutInfo.size to logical pixels. Parley
+    // retains physical font metrics, so only its baseline needs DPI conversion.
+    text_anchor_transform(layout.size, physical_baseline / layout.scale_factor, anchor)
+}
+
+fn align_live_text(
+    mut texts: Query<
+        (
+            &DrawingSceneTextAnchor,
+            &ComputedTextBlock,
+            &TextLayoutInfo,
+            &mut UiTransform,
+        ),
+        Or<(Changed<TextLayoutInfo>, Changed<DrawingSceneTextAnchor>)>,
+    >,
+) {
+    for (anchor, shaped, layout, mut transform) in &mut texts {
+        let Some(line) = shaped.buffer().lines().next() else {
+            continue;
+        };
+        if !layout.scale_factor.is_finite() || layout.scale_factor <= 0.0 {
+            continue;
+        }
+        let aligned = shaped_text_anchor_transform(layout, line.metrics().baseline, *anchor);
+        if *transform != aligned {
+            *transform = aligned;
+        }
+    }
 }
 
 fn live_viewport_target(world: &mut World) -> Option<(Entity, Vec2)> {
@@ -626,6 +699,7 @@ fn scene_viewport_texts(
                 content,
                 height_mm,
                 rotation_rad,
+                anchor_mode,
                 ..
             } = primitive
             else {
@@ -648,6 +722,7 @@ fn scene_viewport_texts(
                 content: content.clone(),
                 font_size_px: (*height_mm / paper_height * viewport_size.y).max(1.0),
                 rotation_rad: *rotation_rad,
+                anchor_mode: *anchor_mode,
             })
         })
         .collect()
@@ -717,6 +792,27 @@ mod tests {
     }
 
     #[test]
+    fn leaving_and_reentering_draft_preserves_mesh_removal_invalidation() {
+        let mut assets = Assets::<Mesh>::default();
+        let mesh = assets.add(Cuboid::default());
+        let mut cache = DrawingSceneLiveCache::default();
+        let entity = Entity::from_bits(7);
+        cache.observe_mesh_handle(entity, mesh.id());
+        let now = Instant::now();
+        cache.record_rebuild(None, None, 0, Duration::ZERO, now);
+        cache.clear(); // Leaving Draft removes presentation, not source tracking.
+        cache.record_rebuild(None, None, 0, Duration::ZERO, now); // Re-enter unchanged.
+        assert!(!cache.is_dirty());
+        let removal = AssetEvent::Removed { id: mesh.id() };
+        assert!(cache.observes_mesh_event(&removal));
+        if cache.observes_mesh_event(&removal) {
+            cache.invalidate(INVALIDATE_MESH_ASSET);
+        }
+        assert!(cache.is_dirty());
+        assert_eq!(cache.last_invalidation_reasons(), vec!["mesh_asset"]);
+    }
+
+    #[test]
     fn renderer_change_ticks_do_not_masquerade_as_handle_changes() {
         let mut cache = DrawingSceneLiveCache::default();
         let entity = Entity::from_bits(7);
@@ -758,6 +854,60 @@ mod tests {
         assert_eq!(batch.spans[0].id, id);
         assert!((batch.vertices[0] - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5);
         assert!((batch.vertices[1] - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn shaped_text_dpi_conversion_keeps_logical_size_and_scales_only_baseline() {
+        let anchor = DrawingSceneTextAnchor {
+            mode: TextAnchor::CenterBaseline,
+            rotation_rad: 0.7,
+        };
+        let logical_size = Vec2::new(80.0, 20.0);
+        let normal = TextLayoutInfo {
+            size: logical_size,
+            scale_factor: 1.0,
+            ..default()
+        };
+        let retina = TextLayoutInfo {
+            size: logical_size,
+            scale_factor: 2.0,
+            ..default()
+        };
+        assert_eq!(
+            shaped_text_anchor_transform(&normal, 15.0, anchor),
+            shaped_text_anchor_transform(&retina, 30.0, anchor)
+        );
+    }
+
+    #[test]
+    fn shaped_text_alignment_preserves_baseline_anchor_through_rotation() {
+        let size = Vec2::new(80.0, 20.0);
+        let baseline = 15.0;
+        for angle in [0.0, std::f32::consts::FRAC_PI_2, 0.37] {
+            for (mode, local_anchor) in [
+                (TextAnchor::LeftBaseline, Vec2::new(0.0, baseline)),
+                (TextAnchor::CenterBaseline, Vec2::new(40.0, baseline)),
+                (TextAnchor::Center, size * 0.5),
+            ] {
+                let transform = text_anchor_transform(
+                    size,
+                    baseline,
+                    DrawingSceneTextAnchor {
+                        mode,
+                        rotation_rad: angle,
+                    },
+                );
+                let Val::Px(x) = transform.translation.x else {
+                    panic!("pixel alignment");
+                };
+                let Val::Px(y) = transform.translation.y else {
+                    panic!("pixel alignment");
+                };
+                let projected_anchor =
+                    size * 0.5 + Vec2::new(x, y) + transform.rotation * (local_anchor - size * 0.5);
+                assert!(projected_anchor.length() < 1e-5, "{mode:?} at {angle}");
+            }
+        }
     }
 
     #[test]

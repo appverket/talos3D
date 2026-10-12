@@ -101,6 +101,9 @@ pub enum DimPrimitive {
 /// Where `anchor` lies on the text glyph box.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TextAnchor {
+    /// Authored text insertion point at the left end of the baseline.
+    LeftBaseline,
+
     /// Anchor at the centre of the baseline — text extends upward and is
     /// horizontally centred on the anchor. Use with `Above` placement.
     CenterBaseline,

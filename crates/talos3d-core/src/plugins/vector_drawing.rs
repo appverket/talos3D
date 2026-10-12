@@ -888,6 +888,7 @@ fn write_drafting_primitive(out: &mut Vec<u8>, prim: &DimPrimitive) {
             color_hex,
         } => {
             let (ta, db) = match anchor_mode {
+                crate::plugins::drafting::TextAnchor::LeftBaseline => ("start", "alphabetic"),
                 crate::plugins::drafting::TextAnchor::CenterBaseline => ("middle", "alphabetic"),
                 crate::plugins::drafting::TextAnchor::Center => ("middle", "middle"),
             };
