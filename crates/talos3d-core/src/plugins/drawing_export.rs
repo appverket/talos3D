@@ -609,7 +609,8 @@ fn queue_screenshot_export(
     Ok(())
 }
 
-/// Hide every viewport overlay while a **viewport** export is in flight.
+/// Hide interaction overlays while a **viewport** export is in flight.
+/// Canonical DrawingScene lines are model evidence and remain visible.
 ///
 /// `take_screenshot` is the harness's evidence channel: agents accept or reject
 /// a model by looking at what it returns. The viewport also carries manipulator
@@ -653,6 +654,11 @@ fn suppress_overlays_during_viewport_export(
         }
         if saved.is_empty() {
             for (type_id, config, _) in config_store.iter_mut() {
+                if *type_id
+                    == std::any::TypeId::of::<crate::plugins::drafting_sheet::DrawingSceneGizmos>()
+                {
+                    continue;
+                }
                 saved.push((*type_id, config.enabled));
                 config.enabled = false;
             }
@@ -1502,6 +1508,51 @@ mod tests {
         state.pending.as_mut().unwrap().stage = PendingViewportExportStage::CaptureNextFrame;
         assert!(state.ui_suppressed());
         assert!(!state.annotation_overlays_suppressed());
+    }
+
+    #[test]
+    fn viewport_capture_preserves_drawing_lines_but_hides_interaction_gizmos() {
+        use crate::plugins::drafting_sheet::DrawingSceneGizmos;
+        let mut app = App::new();
+        let mut configs = GizmoConfigStore::default();
+        configs.insert(
+            Default::default(),
+            bevy::gizmos::config::DefaultGizmoConfigGroup,
+        );
+        configs.insert(Default::default(), DrawingSceneGizmos);
+        app.insert_resource(configs)
+            .insert_resource(ViewportExportState {
+                pending: Some(PendingViewportExport {
+                    #[cfg(feature = "model-api")]
+                    memory_result: None,
+                    path: PathBuf::from("drawing.png"),
+                    stage: PendingViewportExportStage::CaptureNextFrame,
+                    scope: ViewportExportScope::Viewport,
+                }),
+            })
+            .add_systems(Update, suppress_overlays_during_viewport_export);
+        app.update();
+        let configs = app.world().resource::<GizmoConfigStore>();
+        assert!(configs.config::<DrawingSceneGizmos>().0.enabled);
+        assert!(
+            !configs
+                .config::<bevy::gizmos::config::DefaultGizmoConfigGroup>()
+                .0
+                .enabled
+        );
+        app.world_mut()
+            .resource_mut::<ViewportExportState>()
+            .pending = None;
+        for _ in 0..5 {
+            app.update();
+        }
+        assert!(
+            app.world()
+                .resource::<GizmoConfigStore>()
+                .config::<bevy::gizmos::config::DefaultGizmoConfigGroup>()
+                .0
+                .enabled
+        );
     }
 
     #[test]

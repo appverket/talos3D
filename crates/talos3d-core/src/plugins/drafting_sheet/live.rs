@@ -107,6 +107,8 @@ pub struct DrawingSceneLiveCache {
     text_entities: Vec<Entity>,
     dirty: bool,
     last_invalidation_mask: u32,
+    observed_workspace: Option<(bool, Option<ElementId>)>,
+    observed_viewport_inset: Option<Vec4>,
     observed_material_generation: Option<RegistryGeneration>,
     observed_mesh_handles: HashMap<Entity, AssetId<Mesh>>,
     last_rebuild_at: Option<Instant>,
@@ -121,6 +123,8 @@ impl Default for DrawingSceneLiveCache {
             text_entities: Vec::new(),
             dirty: true,
             last_invalidation_mask: 0,
+            observed_workspace: None,
+            observed_viewport_inset: None,
             observed_material_generation: None,
             observed_mesh_handles: HashMap::new(),
             last_rebuild_at: None,
@@ -292,7 +296,14 @@ fn invalidate_live_drawing_scene(
     mut cache: ResMut<DrawingSceneLiveCache>,
 ) {
     let active = workspace.as_ref().is_some_and(|state| state.is_active());
-    let workspace_changed = workspace.as_ref().is_some_and(|state| state.is_changed());
+    // UI systems borrow these resources mutably every frame. Compare semantic
+    // values rather than change ticks, or idle Drafting rebuilds continuously.
+    let workspace_value = (
+        active,
+        workspace.as_ref().and_then(|state| state.active_draft_id()),
+    );
+    let workspace_changed = cache.observed_workspace != Some(workspace_value);
+    cache.observed_workspace = Some(workspace_value);
     let drafting_visibility_changed = drafting_visibility
         .as_ref()
         .is_some_and(|value| value.is_changed());
@@ -319,7 +330,9 @@ fn invalidate_live_drawing_scene(
     let mesh_handle_changed = scene_changes
         .p3()
         .iter()
-        .any(|(entity, mesh)| cache.observe_mesh_handle(entity, mesh.id()));
+        .fold(false, |changed, (entity, mesh)| {
+            cache.observe_mesh_handle(entity, mesh.id()) || changed
+        });
     let mesh_transform_changed = !scene_changes.p4().is_empty();
     let mesh_visibility_changed = !scene_changes.p5().is_empty();
     let mesh_identity_changed = !scene_changes.p6().is_empty();
@@ -327,10 +340,12 @@ fn invalidate_live_drawing_scene(
     let annotation_changed = !semantic_changes.p0().is_empty();
     let clip_changed = !semantic_changes.p1().is_empty();
     let draft_changed = !semantic_changes.p2().is_empty();
-    let viewport_changed = semantic_changes
+    let viewport_value = semantic_changes
         .p3()
         .as_ref()
-        .is_some_and(|value| value.is_changed());
+        .map(|inset| Vec4::new(inset.left, inset.top, inset.right, inset.bottom));
+    let viewport_changed = cache.observed_viewport_inset != viewport_value;
+    cache.observed_viewport_inset = viewport_value;
     let removed_mesh_entities: Vec<Entity> = removed_meshes.read().collect();
     for entity in &removed_mesh_entities {
         cache.observed_mesh_handles.remove(entity);

@@ -29,7 +29,10 @@ use crate::{
         document_state::DocumentState,
         history::{History, HistorySet, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
-        layers::{DocumentVisibility, LayerRegistry, ObjectVisibility, DEFAULT_LAYER_NAME},
+        layers::{
+            DocumentVisibility, LayerAssignment, LayerRegistry, ObjectVisibility,
+            DEFAULT_LAYER_NAME,
+        },
         lighting::{ensure_default_lighting_scene, SceneLightingSettings},
         materials::{
             is_builtin_material_id, material_texture_asset_ids, normalize_material_textures,
@@ -213,6 +216,11 @@ pub struct PersistedEntityRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistedSemanticSidecars {
+    /// Document membership belongs to Core, including for capability snapshots
+    /// that do not serialize a layer in their geometry payload. Legacy payload
+    /// layer fields remain supported; an explicit sidecar is authoritative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_assignment: Option<LayerAssignment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantities: Option<crate::plugins::modeling::quantity_set::QuantitySet>,
     #[serde(flatten)]
@@ -337,6 +345,7 @@ fn current_project_created_by() -> ProjectCreatedBy {
 
 fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSemanticSidecars> {
     let sidecars = PersistedSemanticSidecars {
+        layer_assignment: entity_ref.get::<LayerAssignment>().cloned(),
         quantities: entity_ref
             .get::<crate::plugins::modeling::quantity_set::QuantitySet>()
             .cloned(),
@@ -356,7 +365,8 @@ fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSema
         semantic_bindings: entity_ref.get::<SemanticBindings>().cloned(),
         setting_out_contract: entity_ref.get::<SettingOutContract>().cloned(),
     };
-    (sidecars.quantities.is_some()
+    (sidecars.layer_assignment.is_some()
+        || sidecars.quantities.is_some()
         || !sidecars.extensions.is_empty()
         || sidecars.element_class.is_some()
         || sidecars.refinement_state.is_some()
@@ -381,6 +391,9 @@ fn apply_semantic_sidecars(
         return;
     };
     let mut entity_mut = world.entity_mut(entity);
+    if let Some(assignment) = &sidecars.layer_assignment {
+        entity_mut.insert(assignment.clone());
+    }
     if let Some(quantities) = &sidecars.quantities {
         entity_mut.insert(quantities.clone());
     }
@@ -3590,8 +3603,21 @@ mod tests {
             rationale: Some("PP-185 persistence fixture".into()),
         };
 
+        // Like capability-owned geometry snapshots, AssemblySnapshot has no
+        // layer field. Core must preserve this independently of its payload.
+        let assignment = LayerAssignment::new("Hidden components");
+        source
+            .resource_mut::<LayerRegistry>()
+            .ensure_layer(&assignment.layer);
+        source
+            .resource_mut::<LayerRegistry>()
+            .layers
+            .get_mut(&assignment.layer)
+            .unwrap()
+            .visible = false;
         source.spawn((
             ElementId(77),
+            assignment.clone(),
             SemanticAssembly {
                 assembly_type: "house".to_string(),
                 label: "Fabrication ready house".to_string(),
@@ -3613,6 +3639,16 @@ mod tests {
             .iter()
             .find(|record| record.type_name == "semantic_assembly")
             .expect("semantic assembly should persist");
+        assert_eq!(
+            assembly_record
+                .semantic
+                .as_ref()
+                .unwrap()
+                .layer_assignment
+                .as_ref(),
+            Some(&assignment)
+        );
+        assert!(assembly_record.data["Assembly"].get("layer").is_none());
         assert_eq!(
             assembly_record.data["Assembly"]["refinement_state"].as_str(),
             Some("FabricationReady")
@@ -3654,7 +3690,38 @@ mod tests {
         target.insert_resource(State::new(ActiveTool::Select));
         target.insert_resource(NextState::<ActiveTool>::default());
 
-        load_project(&mut target, project).expect("project should load");
+        let encoded = serde_json::to_vec(&project).unwrap();
+        load_project(&mut target, serde_json::from_slice(&encoded).unwrap())
+            .expect("project should load");
+
+        let entity = entity_for_element_id(&target, ElementId(77)).unwrap();
+        assert_eq!(target.get::<LayerAssignment>(entity), Some(&assignment));
+        assert!(!target
+            .resource::<LayerRegistry>()
+            .is_visible(&assignment.layer));
+        // An ordinary snapshot property edit and its inverse must keep the
+        // restored membership even though neither geometry snapshot owns it.
+        let before = target
+            .resource::<CapabilityRegistry>()
+            .capture_snapshot(&target.entity(entity), &target)
+            .unwrap();
+        let after = before
+            .set_property_json("label", &serde_json::json!("Edited component"))
+            .unwrap();
+        after.apply_with_previous(&mut target, Some(&before));
+        assert_eq!(target.get::<LayerAssignment>(entity), Some(&assignment));
+        before.apply_with_previous(&mut target, Some(&after));
+        assert_eq!(target.get::<LayerAssignment>(entity), Some(&assignment));
+        let recaptured = build_project_file(&mut target).unwrap();
+        let record = recaptured
+            .entities
+            .iter()
+            .find(|record| record.type_name == "semantic_assembly")
+            .unwrap();
+        assert_eq!(
+            record.semantic.as_ref().unwrap().layer_assignment.as_ref(),
+            Some(&assignment)
+        );
 
         let mut query = target.query::<(
             &ElementId,

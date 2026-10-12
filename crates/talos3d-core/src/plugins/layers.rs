@@ -357,7 +357,8 @@ fn apply_layer_visibility(
     registry: Res<LayerRegistry>,
     objects: Option<Res<ObjectVisibility>>,
     resolved: Option<ResMut<DocumentVisibility>>,
-    groups: Query<(&ElementId, &GroupMembers, Option<&LayerAssignment>)>,
+    groups: Query<(&ElementId, &GroupMembers)>,
+    authored: Query<(&ElementId, Option<&LayerAssignment>), Without<LayerVisibilityExempt>>,
     changed: Query<(), Or<(Changed<LayerAssignment>, Changed<GroupMembers>)>>,
     mut removed_groups: RemovedComponents<GroupMembers>,
     mut query: Query<
@@ -385,15 +386,16 @@ fn apply_layer_visibility(
     {
         return;
     }
-    let group_index: HashMap<_, _> = groups
-        .iter()
-        .map(|(id, members, _)| (*id, members))
-        .collect();
+    let group_index: HashMap<_, _> = groups.iter().map(|(id, members)| (*id, members)).collect();
     let mut pending: Vec<_> = objects
         .as_ref()
         .map(|objects| objects.hidden.iter().copied().collect())
         .unwrap_or_default();
-    for (id, _, assignment) in &groups {
+    // Resolve authored membership independently of render state. Compound
+    // occurrence roots can have no Visibility at all: only their derived parts
+    // render. Excluding those roots here loses both layer hiding and picking
+    // exclusions, while explicit object hiding still appears to work.
+    for (id, assignment) in &authored {
         let layer = assignment.map_or(DEFAULT_LAYER_NAME, |assignment| assignment.layer.as_str());
         if !registry.is_visible(layer) {
             pending.push(*id);
@@ -406,13 +408,6 @@ fn apply_layer_visibility(
         }
         if let Some(group) = group_index.get(&id) {
             pending.extend_from_slice(&group.member_ids);
-        }
-    }
-    for (id, assignment, _, _, _, _) in &query {
-        if let (Some(id), Some(assignment)) = (id, assignment) {
-            if !registry.is_visible(&assignment.layer) {
-                hidden.insert(*id);
-            }
         }
     }
     for (id, assignment, generated, mut visibility, focus_restore, wireframe_restore) in &mut query
@@ -514,6 +509,89 @@ pub fn count_entities_per_layer(world: &World) -> BTreeMap<String, usize> {
 mod tests {
     use super::*;
     use bevy::ecs::system::SystemState;
+
+    #[test]
+    fn hidden_layer_resolves_renderless_owners_and_regenerated_parts() {
+        use crate::plugins::modeling::definition::DefinitionId;
+
+        let mut app = App::new();
+        app.add_plugins(LayerPlugin);
+        app.world_mut()
+            .resource_mut::<LayerRegistry>()
+            .ensure_layer("Components");
+        // Compound occurrences own their layer but need not have a root mesh
+        // or Visibility. Their generated render parts carry only the owner id.
+        let owner = app
+            .world_mut()
+            .spawn((ElementId(1), LayerAssignment::new("Components")))
+            .id();
+        let part = app
+            .world_mut()
+            .spawn((
+                GeneratedOccurrencePart {
+                    owner: ElementId(1),
+                    slot_path: "body".into(),
+                    definition_id: DefinitionId("test.body".into()),
+                },
+                Visibility::Visible,
+            ))
+            .id();
+        app.update();
+        app.world_mut()
+            .resource_mut::<LayerRegistry>()
+            .layers
+            .get_mut("Components")
+            .unwrap()
+            .visible = false;
+        app.update();
+        assert!(app.world().get::<Visibility>(owner).is_none());
+        assert!(app
+            .world()
+            .resource::<DocumentVisibility>()
+            .hidden
+            .contains(&ElementId(1)));
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Hidden)
+        );
+        assert!(entity_document_hidden(app.world(), part));
+
+        // Mesh regeneration may restore Visible without changing a layer.
+        app.world_mut().entity_mut(part).insert(Visibility::Visible);
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Hidden)
+        );
+
+        // A domain owner acquiring its own render body later obeys the same
+        // authored exclusion, without a separate domain visibility algorithm.
+        app.world_mut()
+            .entity_mut(owner)
+            .insert(Visibility::Visible);
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(owner),
+            Some(&Visibility::Hidden)
+        );
+
+        app.world_mut()
+            .resource_mut::<LayerRegistry>()
+            .layers
+            .get_mut("Components")
+            .unwrap()
+            .visible = true;
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Inherited)
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(owner),
+            Some(&Visibility::Inherited)
+        );
+        assert!(!entity_document_hidden(app.world(), part));
+    }
 
     #[test]
     fn object_hide_composes_with_nested_groups_layers_and_undo_redo() {

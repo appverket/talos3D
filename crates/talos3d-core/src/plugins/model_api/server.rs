@@ -1294,6 +1294,7 @@ impl ModelApiServer {
             .round_trip(|response| ModelApiRequest::ExportDrawing { path, response })
             .await??;
 
+        #[cfg(not(target_arch = "wasm32"))]
         wait_for_written_file(&saved_path, &self.sender).await?;
         Ok(saved_path)
     }
@@ -1311,6 +1312,7 @@ impl ModelApiServer {
             })
             .await??;
 
+        #[cfg(not(target_arch = "wasm32"))]
         wait_for_written_file(&saved_path, &self.sender).await?;
         Ok(saved_path)
     }

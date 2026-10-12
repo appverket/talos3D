@@ -1184,15 +1184,16 @@ fn display_override_material(
 }
 
 fn paper_fill_material_from(source: &StandardMaterial) -> StandardMaterial {
-    let mut override_material = source.clone();
-    override_material.base_color = Color::WHITE;
-    override_material.emissive = LinearRgba::BLACK;
-    override_material.perceptual_roughness = 1.0;
-    override_material.metallic = 0.0;
-    override_material.reflectance = 0.0;
-    override_material.unlit = true;
-    override_material.alpha_mode = AlphaMode::Opaque;
-    override_material
+    // Paper must not inherit textures, transmission, or other physical surface
+    // channels: those would tint or pattern the canonical black-on-white view.
+    StandardMaterial {
+        base_color: Color::WHITE,
+        unlit: true,
+        cull_mode: source.cull_mode,
+        double_sided: source.double_sided,
+        fog_enabled: false,
+        ..Default::default()
+    }
 }
 
 fn xray_material_from(source: &StandardMaterial, xray_alpha: f32) -> StandardMaterial {
@@ -1845,6 +1846,22 @@ mod tests {
         let settings = app.world().resource::<RenderSettings>();
         assert!(!settings.xray_enabled);
         assert_eq!(settings.xray_surface_alpha, 0.62);
+    }
+
+    #[test]
+    fn paper_fill_discards_source_texture_and_transmission() {
+        let source = StandardMaterial {
+            base_color_texture: Some(Handle::default()),
+            specular_transmission: 0.9,
+            diffuse_transmission: 0.6,
+            cull_mode: None,
+            ..Default::default()
+        };
+        let paper = paper_fill_material_from(&source);
+        assert!(is_valid_white_paper_material(&paper));
+        assert_eq!(paper.specular_transmission, 0.0);
+        assert_eq!(paper.diffuse_transmission, 0.0);
+        assert_eq!(paper.cull_mode, None);
     }
 
     #[test]

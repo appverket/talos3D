@@ -1542,13 +1542,11 @@ pub(crate) fn collect_classified_visible_edges(
     edges
         .into_values()
         .filter(|edge| edge.is_visible_candidate())
-        // Edges whose whole extent is on the clipped side of any active
-        // plane are hidden by the section — skip them entirely.
-        .filter(|edge| !edge_fully_clipped(edge.start_world, edge.end_world, clip_planes))
-        .filter(|edge| {
+        .filter_map(|edge| {
+            let (start, end) = clip_edge(edge.start_world, edge.end_world, clip_planes)?;
             edge_is_visible(
-                edge.start_world,
-                edge.end_world,
+                start,
+                end,
                 entity,
                 camera_position,
                 camera_forward,
@@ -1556,8 +1554,8 @@ pub(crate) fn collect_classified_visible_edges(
                 scene_triangles,
                 clip_planes,
             )
+            .then_some((start, end, edge.classify()))
         })
-        .map(|edge| (edge.start_world, edge.end_world, edge.classify()))
         .collect()
 }
 
@@ -1686,7 +1684,7 @@ fn register_feature_edge(
 fn edge_is_visible(
     start: Vec3,
     end: Vec3,
-    owner_entity: Entity,
+    _owner_entity: Entity,
     camera_position: Vec3,
     camera_forward: Vec3,
     orthographic: bool,
@@ -1724,15 +1722,14 @@ fn edge_is_visible(
                 if triangle_fully_clipped(triangle, clip_planes) {
                     return false;
                 }
-                if triangle.entity == owner_entity {
-                    return ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c)
-                        .is_some_and(|d| {
-                            d > EDGE_VISIBILITY_EPSILON
-                                && d < max_distance - EDGE_VISIBILITY_EPSILON
-                        });
-                }
                 ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c).is_some_and(
-                    |d| d > EDGE_VISIBILITY_EPSILON && d < max_distance - EDGE_VISIBILITY_EPSILON,
+                    |d| {
+                        d > EDGE_VISIBILITY_EPSILON
+                            && d < max_distance - EDGE_VISIBILITY_EPSILON
+                            && clip_planes.iter().all(|(origin, normal)| {
+                                (ray.get_point(d) - *origin).dot(*normal) >= 0.0
+                            })
+                    },
                 )
             })
         })
@@ -1749,13 +1746,22 @@ fn triangle_fully_clipped(triangle: &SceneTriangle, clip_planes: &[ClipPlane]) -
     })
 }
 
-/// True iff both endpoints of the edge are strictly on the clipped side
-/// of at least one active plane.
-fn edge_fully_clipped(start: Vec3, end: Vec3, clip_planes: &[ClipPlane]) -> bool {
-    clip_planes.iter().any(|(origin, normal)| {
-        let signed = |p: Vec3| (p - *origin).dot(*normal);
-        signed(start) < 0.0 && signed(end) < 0.0
-    })
+/// Trim crossing edges against each visible half-space before visibility tests
+/// and projection. Merely rejecting fully hidden edges leaks geometry beyond cuts.
+fn clip_edge(mut start: Vec3, mut end: Vec3, clip_planes: &[ClipPlane]) -> Option<(Vec3, Vec3)> {
+    for (origin, normal) in clip_planes {
+        let a = (start - *origin).dot(*normal);
+        let b = (end - *origin).dot(*normal);
+        if a < 0.0 && b < 0.0 {
+            return None;
+        }
+        if a < 0.0 {
+            start = start.lerp(end, a / (a - b));
+        } else if b < 0.0 {
+            end = start.lerp(end, a / (a - b));
+        }
+    }
+    Some((start, end))
 }
 
 fn mesh_positions(mesh: &Mesh) -> Option<Vec<[f32; 3]>> {
@@ -1882,6 +1888,39 @@ fn dimension_display_text(node: &DimensionLineNode, doc_props: &DocumentProperti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn section_trims_crossing_edges_and_ignores_clipped_ray_hits() {
+        let planes = [(Vec3::ZERO, Vec3::Y)];
+        assert_eq!(
+            clip_edge(Vec3::NEG_Y, Vec3::Y, &planes),
+            Some((Vec3::ZERO, Vec3::Y))
+        );
+        assert!(clip_edge(Vec3::NEG_Y, Vec3::NEG_Y * 2.0, &planes).is_none());
+        let owner = Entity::from_bits(1);
+        // Triangle straddles the cut, but its intersection with the viewing ray
+        // is below it. It must not hide the retained edge behind the cut.
+        let triangle = SceneTriangle {
+            entity: Entity::from_bits(2),
+            a: Vec3::new(-2.0, -1.0, 0.0),
+            b: Vec3::new(2.0, -1.0, 0.0),
+            c: Vec3::new(0.0, 1.0, 0.0),
+        };
+        let visible = |planes: &[ClipPlane]| {
+            edge_is_visible(
+                Vec3::new(-0.1, -0.5, -1.0),
+                Vec3::new(0.1, -0.5, -1.0),
+                owner,
+                Vec3::new(0.0, 0.0, 2.0),
+                Vec3::NEG_Z,
+                true,
+                std::slice::from_ref(&triangle),
+                planes,
+            )
+        };
+        assert!(!visible(&[]));
+        assert!(visible(&planes));
+    }
 
     #[test]
     fn edge_type_weights_follow_iso_conventions() {

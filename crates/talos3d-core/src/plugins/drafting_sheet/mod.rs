@@ -39,7 +39,7 @@ pub use export_dxf::sheet_to_dxf;
 pub use export_pdf::sheet_to_pdf;
 pub use export_png::sheet_to_png;
 pub use export_svg::sheet_to_svg;
-pub use live::{DrawingSceneLiveCache, DrawingSceneLivePlugin, DrawingSceneLiveStats};
+pub use live::{DrawingSceneGizmos, DrawingSceneLiveCache, DrawingSceneLivePlugin, DrawingSceneLiveStats};
 pub use preview::{DraftingSheetPreviewPlugin, SheetPreviewState};
 pub use scene::{
     DrawingPrimitiveId, DrawingPrimitiveRole, DrawingScene, DrawingSceneAnnotation,
