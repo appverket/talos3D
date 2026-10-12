@@ -94,6 +94,7 @@ fn pbr_input_from_standard_material(
     let alpha_cutoff = pbr_bindings::material.alpha_cutoff;
 #endif
 
+
     let double_sided = (flags & pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
 
     var pbr_input: pbr_types::PbrInput = pbr_input_from_vertex_output(in, is_front, double_sided);
@@ -838,6 +839,23 @@ pbr_input.material.uv_transform = uv_transform;
 
         pbr_input.lightmap_light = lightmap(in.uv_b, lightmap_exposure, in.instance_index);
 #endif
+    }
+
+
+#ifdef BINDLESS
+    let clip_count = pbr_bindings::material_array[material_indices[slot].material].clip_plane_count;
+#else
+    let clip_count = pbr_bindings::material.clip_plane_count;
+#endif
+    for (var clip_index = 0u; clip_index < min(clip_count, 8u); clip_index += 1u) {
+#ifdef BINDLESS
+        let plane = pbr_bindings::material_array[material_indices[slot].material].clip_planes[clip_index];
+#else
+        let plane = pbr_bindings::material.clip_planes[clip_index];
+#endif
+        if dot(plane.xyz, in.world_position.xyz) + plane.w < -0.0001 {
+            discard;
+        }
     }
 
     return pbr_input;

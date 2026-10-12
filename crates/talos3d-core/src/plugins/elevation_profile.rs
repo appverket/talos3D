@@ -153,7 +153,10 @@ pub fn compute_elevation_profile(
 
 /// Project only `subject`, when given. A validator checking one building must
 /// not have its outline confounded by terrain, neighbouring structures, or
-/// anything else that happens to share the view.
+/// anything else that happens to share the view. An explicit subject measures
+/// authored geometry regardless of display visibility; hiding the roof for
+/// floor-plan work must not change a building validation verdict. The unscoped
+/// inspection path retains the visible-scene behavior.
 pub fn compute_elevation_profile_for(
     world: &World,
     direction: ElevationDirection,
@@ -179,7 +182,7 @@ pub fn compute_elevation_profile_for(
     let (view_dir, u_axis) = direction.axes();
 
     for (entity, mesh_handle, transform, assignment, visibility) in query.iter(world) {
-        if visibility.is_some_and(|v| *v == Visibility::Hidden) {
+        if subject.is_none() && visibility.is_some_and(|v| *v == Visibility::Hidden) {
             continue;
         }
         if subject.is_some_and(|allowed| !allowed.contains(&entity)) {
@@ -517,6 +520,80 @@ fn find_apexes(upper: &[Option<f32>], cell_width: f32, columns: usize) -> Vec<Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_subject_profile_is_unchanged_when_roof_is_hidden() {
+        use crate::plugins::materials::MaterialBinding;
+        use bevy::platform::collections::HashSet;
+
+        let mut world = World::new();
+        let mut meshes = Assets::<Mesh>::default();
+        let wall_mesh = meshes.add(Cuboid::new(5.0, 2.3, 6.0));
+        let roof_mesh = meshes.add(Cuboid::new(5.6, 0.8, 6.6));
+        world.insert_resource(meshes);
+        let wall = world
+            .spawn((
+                Mesh3d(wall_mesh),
+                GlobalTransform::from_translation(Vec3::new(0.0, 1.15, 0.0)),
+                MaterialAssignment::Single(MaterialBinding::render_only("wall_white")),
+                Visibility::Visible,
+            ))
+            .id();
+        let roof = world
+            .spawn((
+                Mesh3d(roof_mesh),
+                GlobalTransform::from_translation(Vec3::new(0.0, 2.7, 0.0)),
+                MaterialAssignment::Single(MaterialBinding::render_only("roof_black")),
+                Visibility::Visible,
+            ))
+            .id();
+        // Unrelated hidden geometry must not enter the explicit building subject.
+        let unrelated_mesh = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::new(100.0, 100.0, 100.0));
+        let unrelated = world
+            .spawn((
+                Mesh3d(unrelated_mesh),
+                GlobalTransform::IDENTITY,
+                Visibility::Hidden,
+            ))
+            .id();
+        let subject = HashSet::from_iter([wall, roof]);
+        let visible =
+            compute_elevation_profile_for(&world, ElevationDirection::East, 128, Some(&subject))
+                .unwrap();
+        assert!(visible
+            .centre_bands
+            .iter()
+            .any(|band| band.material_id.as_deref() == Some("roof_black")
+                && (band.from_height_m - 2.3).abs() < 0.05));
+        world.entity_mut(roof).insert(Visibility::Hidden);
+        let hidden =
+            compute_elevation_profile_for(&world, ElevationDirection::East, 128, Some(&subject))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&visible).unwrap(),
+            serde_json::to_value(&hidden).unwrap()
+        );
+        let displayed = compute_elevation_profile(&world, ElevationDirection::East, 128).unwrap();
+        assert!(displayed.height_m < 2.31);
+        assert!(displayed
+            .centre_bands
+            .iter()
+            .all(|band| band.material_id.as_deref() != Some("roof_black")));
+        // Actually removing the roof still removes its finish boundary; visibility
+        // independence must not invent missing material or authored geometry.
+        world.despawn(roof);
+        world.despawn(unrelated);
+        let missing =
+            compute_elevation_profile_for(&world, ElevationDirection::East, 128, Some(&subject))
+                .unwrap();
+        assert!(missing.height_m < 2.31);
+        assert!(missing
+            .centre_bands
+            .iter()
+            .all(|band| band.material_id.as_deref() != Some("roof_black")));
+    }
 
     #[test]
     fn cardinal_axes_follow_the_talos3d_compass() {

@@ -60,6 +60,23 @@ fn prepass_alpha_discard(in: VertexOutput) {
     }
 #endif // VERTEX_UVS
 
+
+#ifdef BINDLESS
+    let clip_count = pbr_bindings::material_array[material_indices[slot].material].clip_plane_count;
+#else
+    let clip_count = pbr_bindings::material.clip_plane_count;
+#endif
+    for (var clip_index = 0u; clip_index < min(clip_count, 8u); clip_index += 1u) {
+#ifdef BINDLESS
+        let plane = pbr_bindings::material_array[material_indices[slot].material].clip_planes[clip_index];
+#else
+        let plane = pbr_bindings::material.clip_planes[clip_index];
+#endif
+        if dot(plane.xyz, in.world_position.xyz) + plane.w < -0.0001 {
+            discard;
+        }
+    }
+
     let alpha_mode = flags & pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;
     if alpha_mode == pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_MASK {
 #ifdef BINDLESS

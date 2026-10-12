@@ -676,6 +676,10 @@ pub struct StandardMaterial {
     ///
     /// See [`AlphaMode`] for details. Defaults to [`AlphaMode::Opaque`].
     pub alpha_mode: AlphaMode,
+    /// World-space clipping half-spaces (xyz normal, w offset); negative distances are discarded.
+    /// Derived render state. At most eight planes, including depth and shadow passes.
+    pub clip_planes: [Vec4; 8],
+    pub clip_plane_count: u32,
 
     /// Adjust rendered depth.
     ///
@@ -927,6 +931,8 @@ impl Default for StandardMaterial {
             unlit: false,
             fog_enabled: true,
             alpha_mode: AlphaMode::Opaque,
+            clip_planes: [Vec4::ZERO; 8],
+            clip_plane_count: 0,
             depth_bias: 0.0,
             depth_map: None,
             parallax_depth_scale: 0.1,
@@ -1061,6 +1067,8 @@ pub struct StandardMaterialUniform {
     pub max_relief_mapping_search_steps: u32,
     /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
     pub deferred_lighting_pass_id: u32,
+    pub clip_planes: [Vec4; 8],
+    pub clip_plane_count: u32,
 }
 
 impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
@@ -1207,6 +1215,8 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
             lightmap_exposure: self.lightmap_exposure,
             max_relief_mapping_search_steps: self.parallax_mapping_method.max_steps(),
             deferred_lighting_pass_id: self.deferred_lighting_pass_id as u32,
+            clip_planes: self.clip_planes,
+            clip_plane_count: self.clip_plane_count.min(8),
             uv_transform: self.uv_transform.into(),
         }
     }
@@ -1380,7 +1390,11 @@ impl Material for StandardMaterial {
 
     #[inline]
     fn alpha_mode(&self) -> AlphaMode {
-        self.alpha_mode
+        if self.clip_plane_count > 0 && self.alpha_mode == AlphaMode::Opaque {
+            AlphaMode::Mask(0.0)
+        } else {
+            self.alpha_mode
+        }
     }
 
     #[inline]

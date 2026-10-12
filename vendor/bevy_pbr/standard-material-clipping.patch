@@ -1,0 +1,131 @@
+diff --git a/src/pbr_material.rs b/src/pbr_material.rs
+index ed69dc0..5d6ddd7 100644
+--- a/src/pbr_material.rs
++++ b/src/pbr_material.rs
+@@ -676,6 +676,10 @@ pub struct StandardMaterial {
+     ///
+     /// See [`AlphaMode`] for details. Defaults to [`AlphaMode::Opaque`].
+     pub alpha_mode: AlphaMode,
++    /// World-space clipping half-spaces (xyz normal, w offset); negative distances are discarded.
++    /// Derived render state. At most eight planes, including depth and shadow passes.
++    pub clip_planes: [Vec4; 8],
++    pub clip_plane_count: u32,
+ 
+     /// Adjust rendered depth.
+     ///
+@@ -927,6 +931,8 @@ impl Default for StandardMaterial {
+             unlit: false,
+             fog_enabled: true,
+             alpha_mode: AlphaMode::Opaque,
++            clip_planes: [Vec4::ZERO; 8],
++            clip_plane_count: 0,
+             depth_bias: 0.0,
+             depth_map: None,
+             parallax_depth_scale: 0.1,
+@@ -1061,6 +1067,8 @@ pub struct StandardMaterialUniform {
+     pub max_relief_mapping_search_steps: u32,
+     /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
+     pub deferred_lighting_pass_id: u32,
++    pub clip_planes: [Vec4; 8],
++    pub clip_plane_count: u32,
+ }
+ 
+ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
+@@ -1207,6 +1215,8 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
+             lightmap_exposure: self.lightmap_exposure,
+             max_relief_mapping_search_steps: self.parallax_mapping_method.max_steps(),
+             deferred_lighting_pass_id: self.deferred_lighting_pass_id as u32,
++            clip_planes: self.clip_planes,
++            clip_plane_count: self.clip_plane_count.min(8),
+             uv_transform: self.uv_transform.into(),
+         }
+     }
+@@ -1380,7 +1390,11 @@ impl Material for StandardMaterial {
+ 
+     #[inline]
+     fn alpha_mode(&self) -> AlphaMode {
+-        self.alpha_mode
++        if self.clip_plane_count > 0 && self.alpha_mode == AlphaMode::Opaque {
++            AlphaMode::Mask(0.0)
++        } else {
++            self.alpha_mode
++        }
+     }
+ 
+     #[inline]
+diff --git a/src/render/pbr_fragment.wgsl b/src/render/pbr_fragment.wgsl
+index b09131c..ad68ed3 100644
+--- a/src/render/pbr_fragment.wgsl
++++ b/src/render/pbr_fragment.wgsl
+@@ -94,6 +94,7 @@ fn pbr_input_from_standard_material(
+     let alpha_cutoff = pbr_bindings::material.alpha_cutoff;
+ #endif
+ 
++
+     let double_sided = (flags & pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
+ 
+     var pbr_input: pbr_types::PbrInput = pbr_input_from_vertex_output(in, is_front, double_sided);
+@@ -840,5 +841,22 @@ pbr_input.material.uv_transform = uv_transform;
+ #endif
+     }
+ 
++
++#ifdef BINDLESS
++    let clip_count = pbr_bindings::material_array[material_indices[slot].material].clip_plane_count;
++#else
++    let clip_count = pbr_bindings::material.clip_plane_count;
++#endif
++    for (var clip_index = 0u; clip_index < min(clip_count, 8u); clip_index += 1u) {
++#ifdef BINDLESS
++        let plane = pbr_bindings::material_array[material_indices[slot].material].clip_planes[clip_index];
++#else
++        let plane = pbr_bindings::material.clip_planes[clip_index];
++#endif
++        if dot(plane.xyz, in.world_position.xyz) + plane.w < -0.0001 {
++            discard;
++        }
++    }
++
+     return pbr_input;
+ }
+diff --git a/src/render/pbr_prepass_functions.wgsl b/src/render/pbr_prepass_functions.wgsl
+index d2d2c71..ff89464 100644
+--- a/src/render/pbr_prepass_functions.wgsl
++++ b/src/render/pbr_prepass_functions.wgsl
+@@ -60,6 +60,23 @@ fn prepass_alpha_discard(in: VertexOutput) {
+     }
+ #endif // VERTEX_UVS
+ 
++
++#ifdef BINDLESS
++    let clip_count = pbr_bindings::material_array[material_indices[slot].material].clip_plane_count;
++#else
++    let clip_count = pbr_bindings::material.clip_plane_count;
++#endif
++    for (var clip_index = 0u; clip_index < min(clip_count, 8u); clip_index += 1u) {
++#ifdef BINDLESS
++        let plane = pbr_bindings::material_array[material_indices[slot].material].clip_planes[clip_index];
++#else
++        let plane = pbr_bindings::material.clip_planes[clip_index];
++#endif
++        if dot(plane.xyz, in.world_position.xyz) + plane.w < -0.0001 {
++            discard;
++        }
++    }
++
+     let alpha_mode = flags & pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_RESERVED_BITS;
+     if alpha_mode == pbr_types::STANDARD_MATERIAL_FLAGS_ALPHA_MODE_MASK {
+ #ifdef BINDLESS
+diff --git a/src/render/pbr_types.wgsl b/src/render/pbr_types.wgsl
+index b8b51c5..fb0a5b2 100644
+--- a/src/render/pbr_types.wgsl
++++ b/src/render/pbr_types.wgsl
+@@ -28,6 +28,8 @@ struct StandardMaterial {
+     max_relief_mapping_search_steps: u32,
+     /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
+     deferred_lighting_pass_id: u32,
++    clip_planes: array<vec4<f32>, 8>,
++    clip_plane_count: u32,
+ };
+ 
+ // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

@@ -1141,8 +1141,8 @@ fn orbit_from_camera_params(
 ) -> Result<OrbitCamera, String> {
     let live = live_camera_snapshot(world);
 
-    let Some(params) = params else {
-        return Ok(OrbitCamera {
+    overlay_camera_params(
+        OrbitCamera {
             focus: live.focus,
             radius: live.radius,
             orthographic_scale: live.orthographic_scale,
@@ -1150,26 +1150,34 @@ fn orbit_from_camera_params(
             pitch: live.pitch,
             projection_mode: live.projection_mode,
             focal_length_mm: live.focal_length_mm,
-        });
-    };
+        },
+        params,
+    )
+}
 
-    let projection_mode = if let Some(ref proj) = params.projection {
-        projection_mode_from_str(proj)?
-    } else {
-        live.projection_mode
+/// Apply only explicitly supplied fields to the caller's chosen camera baseline.
+#[cfg(feature = "model-api")]
+fn overlay_camera_params(
+    base: OrbitCamera,
+    params: Option<&CameraParams>,
+) -> Result<OrbitCamera, String> {
+    let Some(params) = params else {
+        return Ok(base);
     };
-
     Ok(OrbitCamera {
         focus: params
             .focus
             .map(bevy::math::Vec3::from)
-            .unwrap_or(live.focus),
-        radius: params.radius.unwrap_or(live.radius),
-        orthographic_scale: params.orthographic_scale.unwrap_or(live.orthographic_scale),
-        yaw: params.yaw.unwrap_or(live.yaw),
-        pitch: params.pitch.unwrap_or(live.pitch),
-        projection_mode,
-        focal_length_mm: params.focal_length_mm.unwrap_or(live.focal_length_mm),
+            .unwrap_or(base.focus),
+        radius: params.radius.unwrap_or(base.radius),
+        orthographic_scale: params.orthographic_scale.unwrap_or(base.orthographic_scale),
+        yaw: params.yaw.unwrap_or(base.yaw),
+        pitch: params.pitch.unwrap_or(base.pitch),
+        projection_mode: match &params.projection {
+            Some(projection) => projection_mode_from_str(projection)?,
+            None => base.projection_mode,
+        },
+        focal_length_mm: params.focal_length_mm.unwrap_or(base.focal_length_mm),
     })
 }
 
@@ -1225,17 +1233,24 @@ fn handle_view_update(
     description: Option<String>,
     camera_params: Option<CameraParams>,
 ) -> Result<NamedViewInfo, String> {
-    // Resolve camera params against the current live camera or existing view.
-    let orbit = if camera_params.is_some() {
-        orbit_from_camera_params(world, camera_params.as_ref())?
-    } else {
-        // Keep existing camera params from the stored view.
-        world
+    // A flattened optional request can deserialize omitted camera fields as
+    // Some(empty). Both that case and partial updates must retain the saved view,
+    // regardless of where the user has navigated the live camera.
+    let saved = world
+        .resource::<NamedViewRegistry>()
+        .get(&name)
+        .ok_or_else(|| format!("No view named '{name}' exists"))?
+        .to_orbit();
+    let orbit = overlay_camera_params(saved, camera_params.as_ref())?;
+    if let Some(target_name) = &new_name {
+        if world
             .resource::<NamedViewRegistry>()
-            .get(&name)
-            .ok_or_else(|| format!("No view named '{name}' exists"))?
-            .to_orbit()
-    };
+            .get(target_name)
+            .is_some()
+        {
+            return Err(format!("A view named '{target_name}' already exists"));
+        }
+    }
 
     {
         let mut registry = world.resource_mut::<NamedViewRegistry>();
@@ -5647,7 +5662,7 @@ fn move_recipe_semantics_from_anchor_to_group(
         if let Some(provenance) = provenance {
             group.insert(provenance);
         }
-        if let Some(obligations) = obligations {
+        if let Some(obligations) = obligations.clone() {
             group.insert(obligations);
         }
     }
@@ -5659,7 +5674,21 @@ fn move_recipe_semantics_from_anchor_to_group(
     anchor.remove::<RefinementStateComponent>();
     anchor.remove::<SemanticIntent>();
     anchor.remove::<AuthoringProvenance>();
+    // The locator retains the dimensional representation evidence governing its
+    // setting-out contract. Other semantic claims belong only to the group.
+    let dimensional = obligations.map(|mut set| {
+        set.entries.retain(|entry| {
+            matches!(
+                entry.id.0.as_str(),
+                "setting_out_reservation" | "coarse_envelope"
+            )
+        });
+        set
+    });
     anchor.remove::<ObligationSet>();
+    if let Some(set) = dimensional.filter(|set| !set.entries.is_empty()) {
+        anchor.insert(set);
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -16691,8 +16720,41 @@ fn governing_physical_thickness_mm(world: &World, root: ElementId) -> Result<Opt
                 current.0
             ));
         }
-        let targets = world
-            .get::<ObligationSet>(entity)
+        let direct_bindings = world.get::<ObligationSet>(entity);
+        // Older instantiate_recipe captures relocated all obligations onto the
+        // owner group. Resolve that persisted evidence, never the locator AABB.
+        // A unique semantic owner is required and the target is still checked
+        // against this locator's active refinement subtree below.
+        let legacy_owners: Vec<_> = if direct_bindings.is_none() {
+            world
+                .iter_entities()
+                .filter(|candidate| {
+                    candidate
+                        .get::<crate::plugins::modeling::group::GroupMembers>()
+                        .is_some_and(|group| group.member_ids.contains(&current))
+                        && candidate
+                            .get::<crate::capability_registry::ElementClassAssignment>()
+                            .is_some()
+                        && candidate
+                            .get::<ElementId>()
+                            .is_some_and(|id| !is_parked_refinement_entity(world, *id))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if legacy_owners.len() > 1 {
+            return Err(format!(
+                "Ambiguous semantic owners for setting-out locator {}",
+                current.0
+            ));
+        }
+        let bindings = direct_bindings.or_else(|| {
+            legacy_owners
+                .first()
+                .and_then(|owner| owner.get::<ObligationSet>())
+        });
+        let targets = bindings
             .into_iter()
             .flat_map(|set| &set.entries)
             .filter(|entry| {
@@ -19676,6 +19738,72 @@ mod setting_out_physical_binding_tests {
             .unwrap()
             .iter()
             .any(|f| f.validator.starts_with("SettingOut")));
+        // Exercise the exact final instantiate_recipe metadata grouping stage,
+        // not only the preceding promotion. The locator contract survives it.
+        use crate::capability_registry::{ElementClassAssignment, ElementClassId};
+        use crate::plugins::modeling::group::GroupMembers;
+        world.entity_mut(root).insert(ElementClassAssignment {
+            element_class: ElementClassId("arbitrary_capability".into()),
+            active_recipe: None,
+        });
+        world
+            .get_mut::<ObligationSet>(root)
+            .unwrap()
+            .entries
+            .push(obligation("other_claim", 3));
+        let group = world
+            .spawn((
+                ElementId(5),
+                GroupMembers {
+                    name: "Recipe outputs".into(),
+                    member_ids: vec![ElementId(1), ElementId(3)],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        move_recipe_semantics_from_anchor_to_group(&mut world, ElementId(1), ElementId(5));
+        assert_eq!(world.get::<ObligationSet>(root).unwrap().entries.len(), 2);
+        assert_eq!(world.get::<ObligationSet>(group).unwrap().entries.len(), 3);
+        assert!(world.get::<ElementClassAssignment>(root).is_none());
+        assert!(
+            (governing_physical_thickness_mm(&world, ElementId(1))
+                .unwrap()
+                .unwrap()
+                - 278.2)
+                .abs()
+                < 1e-3
+        );
+        // A saved project from before this repair has bindings only on the group.
+        let retained = world.get::<ObligationSet>(root).unwrap().clone();
+        world.entity_mut(root).remove::<ObligationSet>();
+        assert!(
+            (governing_physical_thickness_mm(&world, ElementId(1))
+                .unwrap()
+                .unwrap()
+                - 278.2)
+                .abs()
+                < 1e-3
+        );
+        world.get_mut::<ObligationSet>(group).unwrap().entries[0] =
+            obligation("setting_out_reservation", 999);
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("Ambiguous"));
+        world.entity_mut(group).insert(retained.clone());
+        let duplicate = world
+            .spawn((
+                ElementId(6),
+                world.get::<GroupMembers>(group).unwrap().clone(),
+                world.get::<ElementClassAssignment>(group).unwrap().clone(),
+            ))
+            .id();
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("Ambiguous semantic owners"));
+        world.despawn(duplicate);
+        world.entity_mut(root).insert(retained);
+        world.despawn(group);
         world
             .get_mut::<BoxPrimitive>(physical)
             .unwrap()

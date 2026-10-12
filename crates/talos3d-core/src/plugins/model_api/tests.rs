@@ -14976,3 +14976,100 @@ fn definition_create_and_update_preserve_explicit_material_defaults() {
         .material_assignment
         .is_none());
 }
+
+#[cfg(feature = "model-api")]
+#[test]
+fn named_view_updates_preserve_saved_camera_for_omitted_and_partial_fields() {
+    let mut world = World::new();
+    world.init_resource::<NamedViewRegistry>();
+    // Deliberately distinct from the live/default camera.
+    let saved = OrbitCamera {
+        focus: Vec3::new(4.0, 5.0, 6.0),
+        radius: 12.0,
+        orthographic_scale: 4.3,
+        yaw: 1.4,
+        pitch: -0.2,
+        projection_mode: CameraProjectionMode::Isometric,
+        focal_length_mm: 70.0,
+    };
+    world
+        .resource_mut::<NamedViewRegistry>()
+        .save(crate::plugins::named_views::NamedView::from_orbit(
+            "North", &saved,
+        ))
+        .unwrap();
+    for request in [
+        serde_json::json!({"name":"North", "description":"North elevation"}),
+        serde_json::json!({"name":"North", "radius":18.0}),
+    ] {
+        let request: server::ViewUpdateRequest = serde_json::from_value(request).unwrap();
+        handle_view_update(
+            &mut world,
+            request.name,
+            request.new_name,
+            request.description,
+            request.camera,
+        )
+        .unwrap();
+        let registry = world.resource::<NamedViewRegistry>();
+        let actual = registry.get("North").unwrap();
+        assert_eq!(actual.focus, [4.0, 5.0, 6.0]);
+        assert_eq!(actual.orthographic_scale, Some(4.3));
+        assert_eq!(actual.yaw, 1.4);
+        assert_eq!(actual.pitch, -0.2);
+        assert_eq!(actual.projection_mode, CameraProjectionMode::Isometric);
+        assert_eq!(actual.focal_length_mm, 70.0);
+        assert_eq!(actual.description.as_deref(), Some("North elevation"));
+    }
+    assert_eq!(
+        world
+            .resource::<NamedViewRegistry>()
+            .get("North")
+            .unwrap()
+            .radius,
+        18.0
+    );
+    let before =
+        serde_json::to_value(world.resource::<NamedViewRegistry>().get("North").unwrap()).unwrap();
+    world
+        .resource_mut::<NamedViewRegistry>()
+        .save(crate::plugins::named_views::NamedView::from_orbit(
+            "South", &saved,
+        ))
+        .unwrap();
+    for target in ["North", "South"] {
+        let request: server::ViewUpdateRequest = serde_json::from_value(serde_json::json!({
+            "name":"North", "new_name":target, "radius":99.0, "description":"must not apply"
+        }))
+        .unwrap();
+        assert!(handle_view_update(
+            &mut world,
+            request.name,
+            request.new_name,
+            request.description,
+            request.camera
+        )
+        .is_err());
+        assert_eq!(
+            serde_json::to_value(world.resource::<NamedViewRegistry>().get("North").unwrap())
+                .unwrap(),
+            before
+        );
+    }
+    let request: server::ViewUpdateRequest = serde_json::from_value(serde_json::json!({
+        "name":"North", "description":"must not apply", "projection":"invalid"
+    }))
+    .unwrap();
+    assert!(handle_view_update(
+        &mut world,
+        request.name,
+        request.new_name,
+        request.description,
+        request.camera
+    )
+    .is_err());
+    assert_eq!(
+        serde_json::to_value(world.resource::<NamedViewRegistry>().get("North").unwrap()).unwrap(),
+        before
+    );
+}

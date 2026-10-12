@@ -85,6 +85,7 @@ pub mod remote_catalog;
 pub mod render_pipeline;
 pub mod scenario_scoring;
 pub mod scene_ray;
+pub mod section_caps;
 pub mod section_fill;
 pub mod selection;
 pub mod semantic_shadow;

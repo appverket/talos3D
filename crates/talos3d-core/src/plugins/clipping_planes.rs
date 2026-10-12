@@ -4,8 +4,9 @@
 //! space. The [`ClippingPlanesPlugin`] hides any renderable mesh whose
 //! world-space bounding box lies fully on the hidden side of any active plane.
 //! It recomputes all renderables only when the plane set changes and otherwise
-//! visits only changed transforms/bounds/meshes. Crossing geometry remains
-//! available to the canonical DrawingScene section projector.
+//! visits only changed transforms/bounds/meshes. StandardMaterial fragments are
+//! clipped on the GPU, so crossing geometry is cut in the viewport as well as
+//! in the canonical DrawingScene section projector.
 
 use std::{any::Any, collections::HashMap};
 
@@ -89,20 +90,87 @@ pub struct ClippingPlanesPlugin;
 
 impl Plugin for ClippingPlanesPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SectionViewSyncState>().add_systems(
-            Update,
-            (
-                sync_section_views,
-                apply_clip_plane_visibility,
-                draw_clip_plane_gizmos,
-            ),
-        );
+        app.add_plugins(super::section_caps::SectionCapsPlugin)
+            .add_message::<AssetEvent<StandardMaterial>>()
+            .init_resource::<SectionViewSyncState>()
+            .add_systems(
+                Update,
+                (
+                    sync_section_views,
+                    apply_clip_plane_visibility,
+                    sync_material_clip_planes,
+                    draw_clip_plane_gizmos,
+                ),
+            );
     }
 }
 
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
+
+/// Fixed uniforms work on WebGL2 as well as native/WebGPU. Overflow deliberately
+/// renders no material surfaces and logs an error, rather than showing a false cut.
+const GPU_CLIP_PLANE_CAPACITY: usize = 8;
+
+fn packed_clip_planes<'a>(
+    planes: impl Iterator<Item = &'a ClipPlaneNode>,
+) -> ([Vec4; 8], u32, bool) {
+    let mut packed = [Vec4::ZERO; GPU_CLIP_PLANE_CAPACITY];
+    let mut count = 0;
+    for plane in planes.filter(|plane| plane.active) {
+        let Some(normal) = plane.normal.try_normalize() else {
+            continue;
+        };
+        if count == GPU_CLIP_PLANE_CAPACITY {
+            packed = [Vec4::ZERO; GPU_CLIP_PLANE_CAPACITY];
+            packed[0] = Vec4::new(0.0, 0.0, 0.0, -1.0);
+            return (packed, 1, true);
+        }
+        packed[count] = normal.extend(-normal.dot(plane.origin));
+        count += 1;
+    }
+    (packed, count as u32, false)
+}
+
+fn sync_material_clip_planes(
+    planes: Query<&ClipPlaneNode>,
+    materials: Option<ResMut<Assets<StandardMaterial>>>,
+    mut events: MessageReader<AssetEvent<StandardMaterial>>,
+    mut previous: Local<Option<([Vec4; 8], u32, bool)>>,
+) {
+    let Some(mut materials) = materials else {
+        return;
+    };
+    let packed = packed_clip_planes(planes.iter());
+    let all_changed = previous.as_ref() != Some(&packed);
+    let changed_ids = events
+        .read()
+        .filter_map(|event| match event {
+            AssetEvent::Added { id } | AssetEvent::Modified { id } => Some(*id),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if all_changed && packed.2 {
+        error!("Section view supports at most eight active clipping planes; disable extra planes to restore rendering");
+    }
+    let ids = if all_changed {
+        materials.iter().map(|(id, _)| id).collect::<Vec<_>>()
+    } else {
+        changed_ids.into_iter().collect()
+    };
+    for id in ids {
+        if materials.get(id).is_some_and(|material| {
+            material.clip_planes != packed.0 || material.clip_plane_count != packed.1
+        }) {
+            if let Some(mut material) = materials.get_mut(id) {
+                material.clip_planes = packed.0;
+                material.clip_plane_count = packed.1;
+            }
+        }
+    }
+    *previous = Some(packed);
+}
 
 /// Hide or show renderable mesh entities based on active clip planes.
 ///
@@ -738,6 +806,98 @@ fn parse_normal_field(request: &Value) -> Option<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_clipping_tracks_planes_new_materials_and_restores_authored_alpha() {
+        use bevy::pbr::Material;
+        let mut app = App::new();
+        app.insert_resource(Assets::<StandardMaterial>::default())
+            .add_message::<AssetEvent<StandardMaterial>>()
+            .add_systems(Update, sync_material_clip_planes);
+        let handle = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let plane = app
+            .world_mut()
+            .spawn(ClipPlaneNode {
+                name: "Plan".into(),
+                origin: Vec3::new(0.0, 1.2, 0.0),
+                normal: -Vec3::Y * 2.0,
+                active: true,
+            })
+            .id();
+        app.update();
+        let material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&handle)
+            .unwrap();
+        assert_eq!(material.clip_plane_count, 1);
+        assert_eq!(material.clip_planes[0], Vec4::new(0.0, -1.0, 0.0, 1.2));
+        assert_eq!(
+            material.alpha_mode,
+            AlphaMode::Opaque,
+            "authored alpha remains intact"
+        );
+        assert_eq!(
+            Material::alpha_mode(material),
+            AlphaMode::Mask(0.0),
+            "depth/shadow pipelines must execute fragment discard"
+        );
+        assert!(material.clip_planes[0].dot(Vec3::new(0.0, 2.3, 0.0).extend(1.0)) < 0.0);
+        assert!(material.clip_planes[0].dot(Vec3::new(0.0, 1.0, 0.0).extend(1.0)) > 0.0);
+        let glass = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                alpha_mode: AlphaMode::Blend,
+                ..Default::default()
+            });
+        app.world_mut()
+            .write_message(AssetEvent::Added { id: glass.id() });
+        app.update();
+        let material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&glass)
+            .unwrap();
+        assert_eq!(material.clip_plane_count, 1);
+        assert_eq!(Material::alpha_mode(material), AlphaMode::Blend);
+        app.world_mut().despawn(plane);
+        app.update();
+        for handle in [&handle, &glass] {
+            assert_eq!(
+                app.world()
+                    .resource::<Assets<StandardMaterial>>()
+                    .get(handle)
+                    .unwrap()
+                    .clip_plane_count,
+                0
+            );
+        }
+        assert_eq!(
+            Material::alpha_mode(
+                app.world()
+                    .resource::<Assets<StandardMaterial>>()
+                    .get(&handle)
+                    .unwrap()
+            ),
+            AlphaMode::Opaque
+        );
+    }
+
+    #[test]
+    fn gpu_clip_plane_overflow_fails_closed_instead_of_showing_wrong_section() {
+        let planes = vec![ClipPlaneNode::at_y(1.2); 9];
+        let (packed, count, overflow) = packed_clip_planes(planes.iter());
+        assert!(overflow);
+        assert_eq!(count, 1);
+        assert_eq!(packed[0], Vec4::new(0.0, 0.0, 0.0, -1.0));
+        let (_, count, overflow) = packed_clip_planes(planes[..8].iter());
+        assert!(!overflow);
+        assert_eq!(count, 8);
+    }
 
     #[derive(Resource, Default)]
     struct VisibilityChangeCount(usize);
