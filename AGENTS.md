@@ -78,3 +78,16 @@ registry to find the correct port before connecting.
 
 See [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md) for the transport and
 tool surface.
+
+## Reusable agent learning
+
+Talos3D workflows should be discoverable through MCP rather than depending on
+provider-local skill installation. Use `list_agent_skills`, `get_agent_skill`
+and pinned `get_agent_skill_resource` reads; check `get_agent_corpus_status`
+at task boundaries and before authoring. Contribute useful generalized new
+procedures, references/helper source, applicability, limitations, source rights
+and regression evidence through `contribute_agent_skill`. Operator review
+releases immutable cloud revisions. Keep private facts in private project
+knowledge and domain/executable assets in the owning capability's existing
+curation substrates. Core owns the generic protocol/client; domain knowledge
+must remain in domain packs. See `docs/MCP_MODEL_API.md`.

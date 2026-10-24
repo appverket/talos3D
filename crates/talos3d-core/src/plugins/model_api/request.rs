@@ -969,6 +969,7 @@ pub(super) enum ModelApiRequest {
         card_id: String,
         response: oneshot::Sender<ApiResult<GuidanceCardInfo>>,
     },
+    AgentCorpusConnection(oneshot::Sender<crate::plugins::agent_skills::AgentCorpusConnection>),
     ListAgentSkills {
         filter: crate::plugins::agent_skills::AgentSkillSearch,
         response: oneshot::Sender<Vec<crate::plugins::agent_skills::AgentSkillSummary>>,
@@ -2516,6 +2517,14 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::GetGuidanceCard { card_id, response } => {
             let _ = response.send(handle_get_guidance_card(world, card_id));
+        }
+        ModelApiRequest::AgentCorpusConnection(response) => {
+            let _ = response.send(
+                world
+                    .get_resource::<crate::plugins::agent_skills::AgentCorpusConnection>()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
         }
         ModelApiRequest::ListAgentSkills { filter, response } => {
             let _ = response.send(handle_list_agent_skills(world, filter));

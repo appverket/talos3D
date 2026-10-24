@@ -1279,3 +1279,45 @@ idle frames do not traverse mesh vertices or rewrite visibility.
 
 Embedded material textures use a repeating sampler so UV scale/offset actually
 tiles the image instead of stretching the last texel across the surface.
+
+## Shared cloud agent skills
+
+The stable onboarding path is `get_instance_info`, `negotiate_agent_session`
+(with the task), `get_authoring_guidance`, `get_capability_snapshot`, then every
+required card and skill. Native transport and browser gateways must advertise
+this path in MCP initialization instructions; a client must not need repository
+or provider-local skill files to discover it.
+
+Applications supply `AgentCorpusConnection`: a trusted HTTPS service URL and,
+for contributions/review, the host's existing account credential. Core supplies
+one async client and the same handlers for native and browser. Credentials are
+never MCP parameters or results. The reference service reuses authenticated
+project accounts, Postgres metadata/audit and immutable R2 bundles.
+
+- `list_agent_skills` / `find_agent_skills`: merge released cloud skills with
+  bundled/private procedures. Cloud status is explicit; an outage is not proof
+  of freshness. Withdrawn skills suppress stale bundled fallback while online.
+- `get_agent_skill`: retrieve the latest released procedure, its immutable
+  `corpus_revision`, resource index and epoch. `get_agent_skill_resource` fetches
+  a reference/schema/helper source by that exact revision; fetched code is
+  never automatically executed.
+- `get_agent_corpus_status`: check the live epoch on onboarding, at task
+  boundaries, after learning, and before authoring. Re-fetch changed procedures.
+  No tool can retroactively update text already in an agent's context. App/tool
+  schema changes still require compatible application releases.
+- `contribute_agent_skill` (curation): persist a generalized bundle, applicable
+  scope, limitations, source/regression evidence and redistribution rights.
+  A receipt identifies a durable candidate, not a release. Reusable procedures
+  belong here rather than only in a provider's home-directory skill store.
+- `list_agent_skill_contributions`, `get_agent_skill_contribution`,
+  `review_agent_skill_contribution`: the authenticated publisher review path.
+  Release requires confidentiality, rights and regression review. Released bytes
+  are immutable; withdraw/reject are audited transitions, not in-place rewrites.
+- `save_agent_skill_draft`: private project data, undoable and persisted in native
+  capture/open and private project cloud sync; cannot replace shipped skills or
+  grant itself bootstrap authority. New/open documents drop previous private skills.
+
+Keep private site/customer/project facts in private project knowledge. Domain
+facts, geometry-producing knowledge and product families belong in existing
+recipes, Definitions, catalogs, source passages and validators; skills explain
+how to use those assets and do not create a competing geometry or rule engine.

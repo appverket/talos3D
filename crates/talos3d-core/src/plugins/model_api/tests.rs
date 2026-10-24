@@ -6665,6 +6665,16 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
         .referenced_tool_ids
         .contains(&"definition.instantiate_hosted".to_string()));
 
+    let forged: AgentSkillDraftRequest =
+        serde_json::from_value(serde_json::to_value(&skill).unwrap()).unwrap();
+    assert!(handle_save_agent_skill_draft(&mut world, forged).is_err());
+    assert_eq!(
+        handle_get_agent_skill(&world, skill.id.0.clone())
+            .unwrap()
+            .body_markdown,
+        skill.body_markdown
+    );
+
     let draft = handle_save_agent_skill_draft(
         &mut world,
         AgentSkillDraftRequest {
@@ -6689,7 +6699,7 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
     )
     .expect("draft should save");
     assert_eq!(draft.id.0, "project.skill.opening_review");
-    assert_eq!(draft.trust_level, AgentSkillTrustLevel::SessionDraft);
+    assert_eq!(draft.trust_level, AgentSkillTrustLevel::ProjectDraft);
     assert!(draft.forbidden_tool_ids.contains(&"create_box".to_string()));
 }
 

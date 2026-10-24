@@ -61,6 +61,37 @@ impl ModelApiTransportSecurity {
     }
 }
 
+#[cfg(feature = "model-api")]
+impl ModelApiServer {
+    async fn corpus_connection(&self) -> crate::plugins::agent_skills::AgentCorpusConnection {
+        self.round_trip(ModelApiRequest::AgentCorpusConnection)
+            .await
+            .unwrap_or_default()
+    }
+    async fn cloud_skill_list(
+        &self,
+        filter: crate::plugins::agent_skills::AgentSkillSearch,
+    ) -> (Vec<crate::plugins::agent_skills::AgentSkillSummary>, Value) {
+        use crate::plugins::agent_skill_cloud as cloud;
+        let local = self.request_list_agent_skills(filter.clone()).await;
+        let index = cloud::index(&self.corpus_connection().await).await;
+        let status = cloud::status(&index);
+        let mut by_id = local
+            .into_iter()
+            .map(|s| (s.id.clone(), s))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if let Ok(index) = index {
+            for id in &index.withdrawn_skill_ids {
+                by_id.remove(id);
+            }
+            for skill in index.filter(&filter) {
+                by_id.insert(skill.id.clone(), skill);
+            }
+        }
+        (by_id.into_values().collect(), status)
+    }
+}
+
 /// Process-wide frozen tool catalog: the sanitized router plus one frozen,
 /// sorted, sanitized tool list per capability profile. Built once; server
 /// instances clone the (cheap, `Arc`-backed) router and share the lists.
@@ -2769,8 +2800,14 @@ impl ServerHandler for ModelApiServer {
         let catalog = profile_tool_catalog();
         let mut info = ServerInfo::default();
         info.instructions = Some(format!(
-            "Read and write access to the Talos3D authored model. The tool surface is \
-             gated by a capability profile; this session advertises the '{}' profile \
+            "Read and write access to the Talos3D authored model. \
+             Before editing: get_instance_info, negotiate_agent_session with your task, then \
+             get_authoring_guidance, get_capability_snapshot and the required cards/skills. \
+             list_agent_skills/get_agent_skill read released cloud knowledge; check \
+             get_agent_corpus_status at task boundaries for newer revisions. Reusable new \
+             procedures belong in contribute_agent_skill with generalized references/evidence; \
+             private project facts belong in project knowledge, never local-only skills. \
+             The tool surface is gated by a capability profile; this session advertises the '{}' profile \
              ({} of {} tools). Call set_session_profile to switch profiles \
              (authoring, inspection, curation, ux-automation, full).",
             profile.name(),
@@ -3152,11 +3189,15 @@ pub(super) fn assemble_agent_welcome(
             "list_guidance_cards".to_string(),
             "get_guidance_card".to_string(),
             "get_agent_skill".to_string(),
+            "get_agent_skill_resource".to_string(),
+            "get_agent_corpus_status".to_string(),
             "discover_curated_paths".to_string(),
         ],
         bootstrap_steps,
         required_invariants: vec![
             "Confirm AgentWelcome.instance.instance_id before acting.".to_string(),
+            "Check get_agent_corpus_status at task boundaries, after learning and before authoring; fetch changed skill revisions and their pinned resources. Cloud outage means freshness is unverified.".to_string(),
+            "Contribute useful generalized new procedures through contribute_agent_skill, including resources, applicability, limitations, rights and regression evidence. Private facts stay in project knowledge; domain assets use recipes/Definitions/catalogs/validators. Do not leave reusable Talos3D knowledge only in local provider skills.".to_string(),
             "Treat get_authoring_guidance from the running instance as authoritative."
                 .to_string(),
             "Use curated recipes, parametrics, definitions, and priors when present; report a CorpusGap instead of bluffing missing construction knowledge."
@@ -5532,6 +5573,12 @@ pub(super) struct MirrorEntityRequest {
     pub(super) element_id: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub(super) struct GetAgentSkillResourceRequest {
+    pub content_hash: String,
+    pub path: String,
+}
+
 #[cfg(feature = "model-api")]
 #[tool_router(router = tool_router)]
 impl ModelApiServer {
@@ -5575,22 +5622,26 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         let snapshot = self.request_get_capability_snapshot(false).await;
-        let skills = self
-            .request_list_agent_skills(crate::plugins::agent_skills::AgentSkillSearch::default())
+        let (skills, cloud_status) = self
+            .cloud_skill_list(crate::plugins::agent_skills::AgentSkillSearch::default())
             .await;
         let loopback = matches!(
             instance.http_host.as_str(),
             "127.0.0.1" | "::1" | "localhost"
         );
         let security = self.transport_security.session_info(loopback);
-        json_tool_result(assemble_agent_welcome(
+        let welcome = assemble_agent_welcome(
             hello,
             instance,
             self.profile_state.get(),
             snapshot,
             skills,
             security,
-        ))
+        );
+        let mut value = serde_json::to_value(welcome)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        value["cloud_corpus"] = cloud_status;
+        json_tool_result(value)
     }
 
     #[tool(
@@ -8806,8 +8857,13 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<ListAgentSkillsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let skills = self.request_list_agent_skills(params.into()).await;
-        json_tool_result(skills)
+        let (skills, status) = self.cloud_skill_list(params.into()).await;
+        let mut result = json_tool_result(skills)?;
+        result.content.push(rmcp::model::Content::text(format!(
+            "Cloud corpus: {}",
+            status
+        )));
+        Ok(result)
     }
 
     #[tool(
@@ -8819,8 +8875,13 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<ListAgentSkillsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let skills = self.request_list_agent_skills(params.into()).await;
-        json_tool_result(skills)
+        let (skills, status) = self.cloud_skill_list(params.into()).await;
+        let mut result = json_tool_result(skills)?;
+        result.content.push(rmcp::model::Content::text(format!(
+            "Cloud corpus: {}",
+            status
+        )));
+        Ok(result)
     }
 
     #[tool(
@@ -8832,17 +8893,164 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<GetAgentSkillRequest>,
     ) -> Result<CallToolResult, McpError> {
+        use crate::plugins::agent_skill_cloud as cloud;
+        let connection = self.corpus_connection().await;
+        let index = cloud::index(&connection).await;
+        if let Ok(index) = &index {
+            if index.withdrawn_skill_ids.contains(&params.skill_id) {
+                return Err(McpError::invalid_params(
+                    "Skill withdrawn from cloud corpus; bundled fallback is suppressed",
+                    None,
+                ));
+            }
+            if let Some(entry) = index.skills.iter().find(|e| e.skill.id == params.skill_id) {
+                let bundle = cloud::bundle(&connection, &entry.content_hash)
+                    .await
+                    .map_err(|e| McpError::internal_error(e, None))?;
+                if bundle.skill.id.0 != params.skill_id {
+                    return Err(McpError::internal_error(
+                        "Cloud skill identity mismatch",
+                        None,
+                    ));
+                }
+                let mut value = serde_json::to_value(bundle.skill)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                value["publication_evidence"] = bundle.provenance;
+                value["corpus_revision"] = json!(entry.content_hash);
+                value["corpus_epoch"] = json!(index.epoch);
+                value["resources"] = json!(bundle
+                    .resources
+                    .iter()
+                    .map(|(path, r)| json!({"path":path,"media_type":r.media_type}))
+                    .collect::<Vec<_>>());
+                let catalog = profile_tool_catalog();
+                let available = catalog
+                    .tools_for(CapabilityProfile::Full)
+                    .iter()
+                    .map(|t| t.name.as_ref())
+                    .collect::<std::collections::HashSet<_>>();
+                let missing = value["required_tool_ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str())
+                    .filter(|id| !available.contains(id))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                value["runtime_compatibility"] = json!({"required_tools_available":missing.is_empty(),"missing_required_tool_ids":missing,"note":"A corpus update does not add runtime tools. Treat missing tools as a capability gap; profile filters may require an explicit switch."});
+                value["resource_tool"] = json!("get_agent_skill_resource");
+                return json_tool_result(value);
+            }
+        }
         let skill = self
             .request_get_agent_skill(params.skill_id)
             .await
-            .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(skill)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let mut value = serde_json::to_value(skill)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        value["cloud_corpus"] = cloud::status(&index);
+        value["delivery"] = json!("bundled_or_private_fallback");
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "get_agent_corpus_status",
+        description = "Check the live cloud skill corpus epoch. Check on onboarding, at task boundaries, after learning/contribution, and before authoring. Re-fetch changed skill revisions; existing context is not updated automatically. An unavailable cloud means freshness is unverified, not current."
+    )]
+    pub(super) async fn get_agent_corpus_status_tool(&self) -> Result<CallToolResult, McpError> {
+        use crate::plugins::agent_skill_cloud as cloud;
+        json_tool_result(cloud::status(
+            &cloud::index(&self.corpus_connection().await).await,
+        ))
+    }
+
+    #[tool(
+        name = "get_agent_skill_resource",
+        description = "Fetch a reference, schema or helper source from the immutable cloud corpus revision returned by get_agent_skill. Resources are returned as text, never automatically executed; use their declared runtime and inspect applicability."
+    )]
+    pub(super) async fn get_agent_skill_resource_tool(
+        &self,
+        Parameters(params): Parameters<GetAgentSkillResourceRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let bundle = crate::plugins::agent_skill_cloud::bundle(
+            &self.corpus_connection().await,
+            &params.content_hash,
+        )
+        .await
+        .map_err(|e| McpError::internal_error(e, None))?;
+        let resource = bundle
+            .resources
+            .get(&params.path)
+            .ok_or_else(|| McpError::invalid_params("Skill resource not found", None))?;
+        json_tool_result(
+            json!({"content_hash":params.content_hash,"path":params.path,"media_type":resource.media_type,"content":resource.content}),
+        )
+    }
+
+    #[tool(
+        name = "contribute_agent_skill",
+        description = "Durably contribute a generalized reusable procedure and supporting references/helper sources to the shared cloud corpus using the signed-in host account. Include applicability, limitations, evidence/regression results and redistribution rights; remove private project facts. Contributions await operator review before global discovery. Reuse this for useful skills learned during work instead of leaving them only in a provider's local skill directory. No code is executed and no private project is uploaded automatically."
+    )]
+    pub(super) async fn contribute_agent_skill_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::agent_skill_cloud::SkillContribution>,
+    ) -> Result<CallToolResult, McpError> {
+        let response =
+            crate::plugins::agent_skill_cloud::contribute(&self.corpus_connection().await, params)
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(response)
+    }
+
+    #[tool(
+        name = "list_agent_skill_contributions",
+        description = "List durable skill candidates awaiting review in the cloud corpus. Requires an authenticated publisher account; ordinary authoring agents cannot enumerate unpublished contributions."
+    )]
+    pub(super) async fn list_agent_skill_contributions_tool(
+        &self,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(
+            crate::plugins::agent_skill_cloud::contribution_index(&self.corpus_connection().await)
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?,
+        )
+    }
+    #[tool(
+        name = "get_agent_skill_contribution",
+        description = "Publisher-only inspection of an unpublished skill bundle and its resources by the immutable hash from list_agent_skill_contributions. Read exact candidate content and evidence before reviewing; fetching does not install or release it."
+    )]
+    pub(super) async fn get_agent_skill_contribution_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::agent_skill_cloud::SkillRevisionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(
+            crate::plugins::agent_skill_cloud::candidate_bundle(
+                &self.corpus_connection().await,
+                &params.content_hash,
+            )
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?,
+        )
+    }
+    #[tool(
+        name = "review_agent_skill_contribution",
+        description = "Publisher-only release/reject/withdraw of an immutable cloud skill contribution. Review the exact content hash for confidentiality, redistribution rights and regression evidence. A candidate is not released merely because it was used successfully. Requires the signed-in host's existing publisher authorization."
+    )]
+    pub(super) async fn review_agent_skill_contribution_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::agent_skill_cloud::SkillReview>,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(
+            crate::plugins::agent_skill_cloud::review(&self.corpus_connection().await, params)
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?,
+        )
     }
 
     #[tool(
         name = "save_agent_skill_draft",
-        description = "Save a session-scoped agent skill draft. Use this for new operating \
-            procedures learned during an MCP session; shipped or project promotion remains a \
+        description = "Save a private project-scoped agent skill draft (undoable and persisted with the project). Use this for new operating \
+            private procedures learned during an MCP session. Reusable generalized procedures should use contribute_agent_skill; shipped promotion remains a \
             separate curation step."
     )]
     pub(super) async fn save_agent_skill_draft_tool(

@@ -62,6 +62,8 @@ semver = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 thiserror = "2"
 hex = "0.4"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 uuid = { version = "1", features = ["serde"] }
 # Lightweight pure-Rust expression evaluator for AuthoringScript ArgExpr::Expr.
 # Supports arithmetic, tan/sin/cos/sqrt/pi, and variable contexts (PP82/Change-4).

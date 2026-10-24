@@ -9,6 +9,14 @@ use std::collections::BTreeMap;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+/// Host-owned connection. Credentials never appear in tool arguments or results.
+#[derive(Clone, Default, Resource)]
+pub struct AgentCorpusConnection {
+    pub base_url: String,
+    pub bearer_token: Option<String>,
+    pub trusted_public_keys: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct AgentSkillId(pub String);
@@ -105,7 +113,7 @@ impl AgentSkill {
         }
     }
 
-    fn matches(&self, query: Option<&str>, tags: &[String]) -> bool {
+    pub(crate) fn matches(&self, query: Option<&str>, tags: &[String]) -> bool {
         let query_matches = query
             .map(|query| {
                 let query = query.to_ascii_lowercase();
@@ -230,6 +238,32 @@ impl AgentSkillRegistry {
         self.skills.get(id)
     }
 
+    pub fn private_skills(&self) -> Vec<AgentSkill> {
+        self.skills
+            .values()
+            .filter(|s| s.trust_level != AgentSkillTrustLevel::Shipped)
+            .cloned()
+            .collect()
+    }
+    pub fn clear_private(&mut self) {
+        self.skills
+            .retain(|_, s| s.trust_level == AgentSkillTrustLevel::Shipped);
+    }
+    pub fn insert_private(&mut self, mut skill: AgentSkill) -> Result<(), String> {
+        if self
+            .get(&skill.id)
+            .is_some_and(|s| s.trust_level == AgentSkillTrustLevel::Shipped)
+            || skill.trust_level == AgentSkillTrustLevel::Shipped
+        {
+            return Err(
+                "Private skills cannot acquire shipped trust or replace a shipped skill".into(),
+            );
+        }
+        skill.must_read_at_bootstrap = false;
+        skill.trust_level = AgentSkillTrustLevel::ProjectDraft;
+        self.insert(skill);
+        Ok(())
+    }
     pub fn list(&self) -> Vec<&AgentSkill> {
         self.skills.values().collect()
     }

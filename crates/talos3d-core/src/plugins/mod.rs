@@ -1,3 +1,5 @@
+#[cfg(feature = "model-api")]
+pub mod agent_skill_cloud;
 pub mod agent_skills;
 pub mod assembly_pattern_drafts;
 pub mod asset_browser;

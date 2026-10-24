@@ -651,6 +651,11 @@ pub fn new_document(world: &mut World) {
     {
         registry.clear_project_passages();
     }
+    if let Some(mut skills) =
+        world.get_resource_mut::<crate::plugins::agent_skills::AgentSkillRegistry>()
+    {
+        skills.clear_private();
+    }
     world.insert_resource(ProjectExtensions::default());
     clear_scene(world);
 
@@ -788,6 +793,13 @@ pub fn install_project_library(
             after.passages.register_private(passage)?;
         }
     }
+    if let Some(value) = project.extensions.get("core.project_agent_skills.v1") {
+        let skills: Vec<crate::plugins::agent_skills::AgentSkill> =
+            serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        for skill in skills {
+            after.skills.insert_private(skill)?;
+        }
+    }
     if let Some(value) = project.extensions.get("core.project_recipe_artifacts.v1") {
         let artifacts: Vec<crate::curation::RecipeArtifact> =
             serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
@@ -863,6 +875,7 @@ struct LibrarySnapshot {
     interference: crate::plugins::interference::InterferencePolicy,
     recipes: crate::curation::RecipeArtifactRegistry,
     passages: crate::plugins::corpus_gap::CorpusPassageRegistry,
+    skills: crate::plugins::agent_skills::AgentSkillRegistry,
     libraries: DefinitionLibraryRegistry,
     materials: MaterialRegistry,
     textures: TextureRegistry,
@@ -883,6 +896,10 @@ impl LibrarySnapshot {
                 .get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
                 .cloned()
                 .unwrap_or_default(),
+            skills: world
+                .get_resource::<crate::plugins::agent_skills::AgentSkillRegistry>()
+                .cloned()
+                .unwrap_or_default(),
             libraries: world.resource::<DefinitionLibraryRegistry>().clone(),
             materials: world.resource::<MaterialRegistry>().clone(),
             textures: world
@@ -899,6 +916,7 @@ impl LibrarySnapshot {
         world.insert_resource(self.interference.clone());
         world.insert_resource(self.recipes.clone());
         world.insert_resource(self.passages.clone());
+        world.insert_resource(self.skills.clone());
         world.insert_resource(self.libraries.clone());
         world.insert_resource(self.materials.clone());
         world.insert_resource(self.textures.clone());
@@ -1379,6 +1397,17 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         .get_resource::<ProjectExtensions>()
         .map(|e| e.0.clone())
         .unwrap_or_default();
+    extensions.remove("core.project_agent_skills.v1");
+    if let Some(registry) = world.get_resource::<crate::plugins::agent_skills::AgentSkillRegistry>()
+    {
+        let skills = registry.private_skills();
+        if !skills.is_empty() {
+            extensions.insert(
+                "core.project_agent_skills.v1".into(),
+                serde_json::to_value(skills).map_err(|e| e.to_string())?,
+            );
+        }
+    }
     extensions.remove("core.project_knowledge_passages.v1");
     if let Some(registry) =
         world.get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
@@ -1734,6 +1763,19 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         }
     }
 
+    let mut skill_registry = world
+        .get_resource::<crate::plugins::agent_skills::AgentSkillRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    skill_registry.clear_private();
+    let private_skills: Vec<crate::plugins::agent_skills::AgentSkill> = extensions
+        .get("core.project_agent_skills.v1")
+        .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or_default();
+    for skill in private_skills {
+        skill_registry.insert_private(skill)?;
+    }
     // Validate into a cloned registry before replacing the document. Opening
     // another project drops private passages while keeping shipped pack content.
     let mut passage_registry = world
@@ -1777,6 +1819,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
     clear_scene(world);
     world.insert_resource(ProjectExtensions(extensions));
+    world.insert_resource(skill_registry);
     world.insert_resource(passage_registry);
     world.insert_resource(recipe_registry);
     world.insert_resource(interference_policy);
@@ -2217,6 +2260,42 @@ mod tests {
     fn private_passage(ref_id: &str) -> crate::plugins::knowledge_persistence::PersistedPassage {
         serde_json::from_value(serde_json::json!({"passage_ref":ref_id,"text":"Private design preference", "citation":"Owner brief", "license":"vendor_eula:private","proactive_guidance":{"title":"Private","summary":"Private","task_tags":["authoring"]}})).unwrap()
     }
+    #[test]
+    fn private_agent_skills_survive_project_open_without_shipped_trust_or_cross_project_leak() {
+        use crate::plugins::agent_skills::*;
+        let mut source = shell_world();
+        let draft:AgentSkill=serde_json::from_value(serde_json::json!({"id":"project.skill.check","title":"Private check","summary":"Private project procedure","body_markdown":"Project assumptions only","trust_level":"project_draft"})).unwrap();
+        let mut registry = AgentSkillRegistry::default();
+        registry.insert_private(draft).unwrap();
+        source.insert_resource(registry);
+        let bytes = capture_project_bytes(&mut source).unwrap();
+        let mut target = shell_world();
+        target.init_resource::<PropertyEditState>();
+        target.init_resource::<TransformState>();
+        target.init_resource::<NextState<ActiveTool>>();
+        open_project_bytes(&mut target, &bytes).unwrap();
+        assert_eq!(
+            target
+                .resource::<AgentSkillRegistry>()
+                .private_skills()
+                .len(),
+            1
+        );
+        let clean = capture_project_bytes(&mut shell_world()).unwrap();
+        open_project_bytes(&mut target, &clean).unwrap();
+        assert!(target
+            .resource::<AgentSkillRegistry>()
+            .private_skills()
+            .is_empty());
+        let mut forged: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        forged["core.project_agent_skills.v1"][0]["trust_level"] = serde_json::json!("shipped");
+        assert!(open_project_bytes(&mut target, &serde_json::to_vec(&forged).unwrap()).is_err());
+        assert!(target
+            .resource::<AgentSkillRegistry>()
+            .private_skills()
+            .is_empty());
+    }
+
     #[test]
     fn private_passages_transfer_with_project_and_do_not_leak_to_next_document() {
         use crate::plugins::corpus_gap::CorpusPassageRegistry;

@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-10-12
-- branch: codex/floorplan-repair
-- task-id: TALOS-zgjhbasj; TALOS-vgpxnzhy; TALOS-wwrqripp
+- created: 2026-10-24
+- branch: codex/shared-agent-skills
+- task-id: TALOS-wgrtxomb
 - target base: main
-- summary: Repair floorplan authoring and browser continuation, then fresh independent source-only test.
-- status: awaiting-merge
+- summary: Cloud-distributed reusable agent skills and cold MCP onboarding
+- status: active

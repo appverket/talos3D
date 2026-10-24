@@ -15873,10 +15873,31 @@ pub fn handle_save_agent_skill_draft(
         world.insert_resource(AgentSkillRegistry::default());
     }
     let skill = request.into_skill();
-    world
-        .resource_mut::<AgentSkillRegistry>()
-        .insert(skill.clone());
-    Ok(skill)
+    if world
+        .resource::<AgentSkillRegistry>()
+        .get(&skill.id)
+        .is_some_and(|s| {
+            s.trust_level == crate::plugins::agent_skills::AgentSkillTrustLevel::Shipped
+        })
+    {
+        return Err(
+            "A draft cannot overwrite a shipped skill; contribute a new cloud revision".into(),
+        );
+    }
+    let before = world.resource::<AgentSkillRegistry>().clone();
+    let mut after = before.clone();
+    after.insert_private(skill.clone())?;
+    crate::plugins::knowledge_assets::apply_knowledge_update(
+        world,
+        before,
+        after,
+        "Save project agent skill",
+    );
+    Ok(world
+        .resource::<AgentSkillRegistry>()
+        .get(&skill.id)
+        .unwrap()
+        .clone())
 }
 
 #[cfg(feature = "model-api")]

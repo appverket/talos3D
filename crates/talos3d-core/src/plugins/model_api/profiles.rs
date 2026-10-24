@@ -227,6 +227,21 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("list_agent_skills", ToolCategory::SessionContract),
     ("find_agent_skills", ToolCategory::SessionContract),
     ("get_agent_skill", ToolCategory::SessionContract),
+    ("get_agent_corpus_status", ToolCategory::SessionContract),
+    ("get_agent_skill_resource", ToolCategory::SessionContract),
+    ("contribute_agent_skill", ToolCategory::CurationExtended),
+    (
+        "list_agent_skill_contributions",
+        ToolCategory::CurationExtended,
+    ),
+    (
+        "get_agent_skill_contribution",
+        ToolCategory::CurationExtended,
+    ),
+    (
+        "review_agent_skill_contribution",
+        ToolCategory::CurationExtended,
+    ),
     // --- Inspection (core reads) ---
     ("list_entities", ToolCategory::Inspection),
     ("get_entity", ToolCategory::Inspection),
