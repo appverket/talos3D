@@ -8904,7 +8904,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                 ));
             }
             if let Some(entry) = index.skills.iter().find(|e| e.skill.id == params.skill_id) {
-                let bundle = cloud::bundle(&connection, &entry.content_hash)
+                let mut bundle = cloud::bundle(&connection, &entry.content_hash)
                     .await
                     .map_err(|e| McpError::internal_error(e, None))?;
                 if bundle.skill.id.0 != params.skill_id {
@@ -8913,6 +8913,8 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                         None,
                     ));
                 }
+                bundle.skill.trust_level =
+                    crate::plugins::agent_skills::AgentSkillTrustLevel::Shipped;
                 let mut value = serde_json::to_value(bundle.skill)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                 value["publication_evidence"] = bundle.provenance;

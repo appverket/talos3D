@@ -228,13 +228,13 @@ pub fn decode_bundle(bytes: &[u8], hash: &str) -> Result<SkillBundle, String> {
     if hash.len() != 64 || hex::encode(Sha256::digest(bytes)) != hash {
         return Err("Cloud skill checksum mismatch".into());
     }
-    let b: SkillBundle = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-    if b.schema != SCHEMA
-        || b.skill.must_read_at_bootstrap
-        || b.skill.trust_level != super::agent_skills::AgentSkillTrustLevel::Shipped
-    {
+    let mut b: SkillBundle = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if b.schema != SCHEMA || b.skill.must_read_at_bootstrap {
         return Err("Invalid cloud skill release".into());
     }
+    // Immutable candidate bytes do not attest publication. Only the signed
+    // released index and host admission may confer shipped trust.
+    b.skill.trust_level = super::agent_skills::AgentSkillTrustLevel::ProjectDraft;
     Ok(b)
 }
 pub async fn bundle(c: &AgentCorpusConnection, hash: &str) -> Result<SkillBundle, String> {
