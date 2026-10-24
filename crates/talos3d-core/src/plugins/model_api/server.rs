@@ -2984,9 +2984,8 @@ fn relevant_agent_skills(
     must_read_ids: &[String],
     skills: Vec<crate::plugins::agent_skills::AgentSkillSummary>,
 ) -> Vec<crate::plugins::agent_skills::AgentSkillSummary> {
-    if !hello.supports.agent_skills {
-        return Vec::new();
-    }
+    // Every MCP client can fetch procedure text through get_agent_skill.
+    // Native provider skill support must not gate the shared learning route.
     const STOP_WORDS: &[&str] = &[
         "and", "the", "for", "with", "from", "into", "inspect", "author", "create", "make",
         "model", "system",
@@ -10170,4 +10169,19 @@ pub(super) struct ProjectKnowledgeIndexRequest {
     pub offset: usize,
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[cfg(test)]
+mod cloud_skill_client_compatibility {
+    use super::*;
+    #[test]
+    fn ordinary_mcp_clients_receive_relevant_procedure_recommendations() {
+        let hello: AgentHello =
+            serde_json::from_value(serde_json::json!({"task":"inspect edge interfaces"})).unwrap();
+        assert!(!hello.supports.agent_skills);
+        let skill:crate::plugins::agent_skills::AgentSkill=serde_json::from_value(serde_json::json!({"id":"core.edge.review","title":"Edge inspection","summary":"Review edge interfaces","body_markdown":"Inspect interfaces."})).unwrap();
+        let found = relevant_agent_skills(&hello, &[], vec![skill.summary_info()]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "core.edge.review");
+    }
 }
