@@ -1321,3 +1321,21 @@ Keep private site/customer/project facts in private project knowledge. Domain
 facts, geometry-producing knowledge and product families belong in existing
 recipes, Definitions, catalogs, source passages and validators; skills explain
 how to use those assets and do not create a competing geometry or rule engine.
+
+### Bounded deformation of measured geometry
+
+`definition.create` / `definition.update` accept `DeformableMesh` in the canonical
+body. It contains `mesh` (the unit-typed FrozenMesh shape) and 1–3 `axes`:
+`{axis: 0|1|2, parameter, reference_value, stations: [[coordinate, weight], ...]}`.
+At a new dimension, each target station is `coordinate + weight *
+(parameter-reference_value)`. Between stations, coordinates interpolate linearly.
+Equal adjacent weights preserve measured border widths. At the reference value,
+the original geometry is reproduced. Stations must cover every vertex and remain
+strictly increasing; collapsed, inverted, nonfinite or undeclared dimensions are
+rejected before geometry changes. Parameters must be geometry-affecting.
+
+This is a generic editing mechanism; domain capabilities own which controls and
+constraints are justified by source evidence. It makes no claim to recover a
+manufacturer's parametric design history. Evaluation uses the ordinary shared
+occurrence preflight, GPU mesh cache, material/compound, transform and persistence
+paths. No import recognition runs in the viewport loop.

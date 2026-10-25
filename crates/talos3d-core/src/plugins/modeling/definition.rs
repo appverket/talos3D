@@ -496,6 +496,8 @@ pub enum EvaluatorDecl {
     PolygonExtrusion(PolygonExtrusionEvaluator),
     /// Fixed evaluated geometry. No family logic or dimension editing is implied.
     FrozenMesh(FrozenMeshEvaluator),
+    /// Measured topology with bounded, monotone, piecewise-linear dimensional controls.
+    DeformableMesh(DeformableMeshEvaluator),
 }
 
 /// A local-space, unit-typed geometry snapshot inside the canonical body.
@@ -506,6 +508,29 @@ pub struct FrozenMeshEvaluator {
     pub coordinate_unit: crate::plugins::units::Unit,
     pub vertices: Vec<[f64; 3]>,
     pub faces: Vec<[u32; 3]>,
+}
+
+/// A measured mesh with explicit deformation stations. Topology never changes.
+/// This does not infer manufacturing or family rules from imported geometry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeformableMeshEvaluator {
+    pub mesh: FrozenMeshEvaluator,
+    pub axes: Vec<MeshAxisDeformation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshAxisDeformation {
+    /// 0=X, 1=Y, 2=Z in the mesh's local frame.
+    pub axis: usize,
+    pub parameter: String,
+    /// Parameter value at which the measured mesh is reproduced exactly.
+    pub reference_value: f64,
+    /// [source coordinate, dimension-change weight]. Target coordinate is
+    /// source + weight * (parameter - reference_value). Equal adjacent weights
+    /// preserve that region's measured width; all stations must stay ordered.
+    pub stations: Vec<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2053,6 +2078,23 @@ impl Definition {
                     .any(|r| r.update_policy == Some(UpdatePolicy::Frozen))
                 {
                     return Err("Frozen mesh requires an explicitly Frozen representation".into());
+                }
+            }
+            if let EvaluatorDecl::DeformableMesh(mesh) = evaluator {
+                super::deformable_mesh::validate(mesh)?;
+                for axis in &mesh.axes {
+                    if !self
+                        .interface
+                        .parameters
+                        .0
+                        .iter()
+                        .any(|p| p.name == axis.parameter && p.geometry_affecting)
+                    {
+                        return Err(format!(
+                            "Deformable mesh requires geometry parameter '{}'",
+                            axis.parameter
+                        ));
+                    }
                 }
             }
             if let EvaluatorDecl::PolygonExtrusion(polygon) = evaluator {

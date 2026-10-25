@@ -8232,8 +8232,26 @@ fn aperture_host_validation_result(
         };
     };
 
-    let host_bounds = alignment_bounds(&host_snapshot);
-    let opening_bounds = alignment_bounds(&opening_snapshot);
+    // Validate oblique hosts in their authored frame, projecting actual
+    // geometry rather than rotating an already expanded world AABB.
+    let frame = host_snapshot
+        .hosted_axis()
+        .and_then(|axis| axis.try_normalize())
+        .map(|axis| Quat::from_rotation_arc(axis, Vec3::X));
+    let projected = frame.and_then(|rotation| {
+        Some((
+            host_snapshot.0.bounds_in_frame(rotation)?,
+            opening_snapshot.0.bounds_in_frame(rotation)?,
+            hosted_center.map(|center| rotation * center),
+        ))
+    });
+    let (host_bounds, opening_bounds, hosted_center) = projected.unwrap_or_else(|| {
+        (
+            alignment_bounds(&host_snapshot),
+            alignment_bounds(&opening_snapshot),
+            hosted_center,
+        )
+    });
     let Some(axes) = hosted_opening_axes(host_bounds) else {
         checks.push(hosted_opening_check(
             "host.thickness_axis",
@@ -8253,6 +8271,11 @@ fn aperture_host_validation_result(
         };
     };
 
+    let minimum_remaining_host = host_snapshot
+        .0
+        .hosting_edge_margin()
+        .filter(|margin| margin.is_finite() && *margin >= 0.0)
+        .unwrap_or(policy.minimum_remaining_host);
     let opening_center = opening_bounds.center();
     let host_thickness = axis_extent(host_bounds, axes.normal);
     let opening_thickness = axis_extent(opening_bounds, axes.normal);
@@ -8318,7 +8341,7 @@ fn aperture_host_validation_result(
         } else {
             remaining_min.min(remaining_max)
         };
-        let status = if remaining + policy.geometry_tolerance >= policy.minimum_remaining_host {
+        let status = if remaining + policy.geometry_tolerance >= minimum_remaining_host {
             HostingCheckStatus::Passed
         } else {
             HostingCheckStatus::Failed
@@ -8342,13 +8365,13 @@ fn aperture_host_validation_result(
             } else {
                 format!(
                     "Opening must leave at least {:.2} model units of host on both sides along {} (or be exactly flush with the bottom edge).",
-                    policy.minimum_remaining_host,
+                    minimum_remaining_host,
                     axis_name(axis)
                 )
             },
             Some(validation_measured(remaining as f64, "model_units")),
             Some(validation_measured(
-                policy.minimum_remaining_host as f64,
+                minimum_remaining_host as f64,
                 "model_units",
             )),
             Some("host"),

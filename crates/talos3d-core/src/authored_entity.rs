@@ -345,6 +345,11 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         None
     }
     /// Parametric coordinate along the host for a world-space point.
+    /// Capability-specific geometric edge margin. This is not a structural
+    /// adequacy claim; None uses the registered host policy.
+    fn hosting_edge_margin(&self) -> Option<f32> {
+        None
+    }
     fn position_along_host(&self, _point: Vec3) -> Option<f64> {
         None
     }
@@ -380,6 +385,12 @@ pub trait AuthoredEntity: Send + Sync + 'static {
 
     fn handles(&self) -> Vec<HandleInfo>;
     fn bounds(&self) -> Option<EntityBounds> {
+        None
+    }
+    /// Bounds of actual authored geometry after a world-to-frame rotation.
+    /// Capabilities must project their geometry, not a world AABB. None means
+    /// that this snapshot does not provide oriented validation bounds.
+    fn bounds_in_frame(&self, _rotation: Quat) -> Option<EntityBounds> {
         None
     }
     fn snap_segments(&self) -> Vec<(Vec3, Vec3)> {

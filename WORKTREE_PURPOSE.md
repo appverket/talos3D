@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-10-24
-- branch: codex/shared-agent-skills
-- task-id: TALOS-wgrtxomb
-- target base: main
-- summary: Cloud-distributed reusable agent skills and cold MCP onboarding
-- status: active
+- created: 2026-10-25
+- branch: codex/complete-semantic-recovery
+- task-id: TALOS-dpqgdebp
+- target base: origin/main
+- summary: Complete editable historic component and wall recovery
+- status: awaiting-merge

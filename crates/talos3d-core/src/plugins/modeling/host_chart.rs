@@ -883,6 +883,17 @@ pub fn evaluate_chart_host_with_provenance(
     chart: &HostChart,
     openings: &[ChartSpaceOpeningFeature],
 ) -> Result<ChartHostEvaluation, GeometryHealthReport> {
+    evaluate_chart_host_subdivided(chart, openings, &[], &[])
+}
+
+/// Extra bounded chart subdivisions for capability-owned piecewise profiles.
+/// Uses the same cut/provenance kernel as ordinary hosted geometry.
+pub fn evaluate_chart_host_subdivided(
+    chart: &HostChart,
+    openings: &[ChartSpaceOpeningFeature],
+    extra_u: &[f32],
+    extra_v: &[f32],
+) -> Result<ChartHostEvaluation, GeometryHealthReport> {
     let mut validation_issues = Vec::new();
     let mut opening_rects = Vec::new();
 
@@ -926,6 +937,20 @@ pub fn evaluate_chart_host_with_provenance(
         v_breakpoints.push(opening.v_max);
     }
 
+    u_breakpoints.extend(
+        extra_u
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite() && *v > u_domain.min && *v < u_domain.max)
+            .take(1024),
+    );
+    v_breakpoints.extend(
+        extra_v
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite() && *v > v_domain.min && *v < v_domain.max)
+            .take(1024),
+    );
     sort_dedup_breakpoints(&mut u_breakpoints);
     sort_dedup_breakpoints(&mut v_breakpoints);
 

@@ -2103,6 +2103,11 @@ fn build_geometry(
         definition.validate_with(|_| true)?;
         return super::frozen_mesh::evaluate(mesh).map(|m| Some(PreparedGeometry::Frozen(m)));
     }
+    if let Some(EvaluatorDecl::DeformableMesh(mesh)) = definition.body.evaluators.first() {
+        definition.validate_with(|_| true)?;
+        return super::deformable_mesh::evaluate(mesh, &state.values, &state.units)
+            .map(|m| Some(PreparedGeometry::Frozen(m)));
+    }
     build_extrusion(definition, state, centre).map(|g| g.map(PreparedGeometry::Extrusion))
 }
 
@@ -4289,6 +4294,36 @@ mod frozen_mesh_occurrence_tests {
         let bounds = occurrence_generated_bounds(&w, ElementId(1)).unwrap();
         assert!((bounds.max.z - 1.0).abs() < 1e-5);
         assert_eq!(w.resource::<Assets<Mesh>>().len(), 1);
+    }
+    #[test]
+    fn deformable_mesh_renders_resized_bounds_and_rejects_invalid_edits_atomically() {
+        let mut encoded = serde_json::to_value(definition()).unwrap();
+        encoded["body"]["evaluators"] = json!([{"DeformableMesh":{
+            "mesh":{"coordinate_unit":"m","vertices":[[-1,0,0],[-0.9,1,0],[0.9,1,0],[1,0,0]],"faces":[[0,1,2],[0,2,3]]},
+            "axes":[{"axis":0,"parameter":"width","reference_value":2,
+                "stations":[[-1,-0.5],[-0.9,-0.5],[0.9,0.5],[1,0.5]]}]}}]);
+        encoded["interface"]["parameters"] = json!([{"name":"width","param_type":"Numeric",
+            "default_value":2,"override_policy":"Overridable","geometry_affecting":true,"metadata":{"unit":"m"}}]);
+        let def: Definition = serde_json::from_value(encoded).unwrap();
+        def.validate_with(|_| false).unwrap();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(def.clone());
+        let mut identity = OccurrenceIdentity::new(def.id, 1);
+        let mut w = world();
+        let transform = Transform::from_xyz(5., 2., 0.)
+            .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        render_occurrence(&mut w, &registry, ElementId(1), &identity, transform, None).unwrap();
+        identity.overrides.set("width", json!(3.));
+        render_occurrence(&mut w, &registry, ElementId(1), &identity, transform, None).unwrap();
+        let bounds = occurrence_generated_bounds(&w, ElementId(1)).unwrap();
+        assert!((bounds.min.z + 1.5).abs() < 1e-5 && (bounds.max.z - 1.5).abs() < 1e-5);
+        identity.overrides.set("width", json!(0.1));
+        assert!(
+            render_occurrence(&mut w, &registry, ElementId(1), &identity, transform, None).is_err()
+        );
+        let unchanged = occurrence_generated_bounds(&w, ElementId(1)).unwrap();
+        assert_eq!(bounds.min, unchanged.min);
+        assert_eq!(bounds.max, unchanged.max);
     }
     #[test]
     fn frozen_mesh_bad_body_is_rejected_before_existing_geometry_changes() {
