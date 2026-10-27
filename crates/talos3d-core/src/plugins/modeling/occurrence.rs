@@ -1225,7 +1225,6 @@ fn invalidate_changed_definition_cache(
 
 /// Re-evaluate occurrences that have the `NeedsEval` marker component.
 pub fn evaluate_occurrences(world: &mut World) {
-    let registry = world.resource::<DefinitionRegistry>().clone();
     let occurrences: Vec<(Entity, ElementId, OccurrenceIdentity, Transform)> = {
         let mut query = world.query_filtered::<
             (Entity, &ElementId, &OccurrenceIdentity, Option<&Transform>),
@@ -1244,6 +1243,12 @@ pub fn evaluate_occurrences(world: &mut World) {
             .collect()
     };
 
+    if occurrences.is_empty() {
+        return;
+    }
+    // Definitions can contain large frozen meshes. Only snapshot the registry
+    // when an occurrence actually needs evaluation, never on navigation frames.
+    let registry = world.resource::<DefinitionRegistry>().clone();
     for (entity, element_id, identity, transform) in occurrences {
         if let Err(error) =
             render_occurrence(world, &registry, element_id, &identity, transform, None)

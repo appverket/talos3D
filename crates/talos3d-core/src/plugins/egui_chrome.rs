@@ -4750,13 +4750,14 @@ fn display_unit_description(unit: DisplayUnit) -> &'static str {
 fn draw_render_settings_window(
     ctx: &egui::Context,
     state: &mut RenderSettingsWindowState,
-    settings: &mut RenderSettings,
+    settings_resource: &mut ResMut<RenderSettings>,
     drafting_state: &DraftingWorkspaceState,
 ) {
     if !state.visible {
         return;
     }
 
+    let mut settings = settings_resource.clone();
     egui::Window::new("Renderer")
         .open(&mut state.visible)
         .default_width(340.0)
@@ -4953,6 +4954,7 @@ fn draw_render_settings_window(
             });
 
         });
+    settings_resource.set_if_neq(settings);
 }
 
 fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
@@ -6181,6 +6183,50 @@ fn apply_chrome_visuals(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::{MenuSubmenuSpec, CREATE_MENU_GROUPS, VIEW_MENU_GROUPS};
+
+    #[test]
+    fn renderer_window_does_not_invalidate_settings_without_an_edit() {
+        use super::*;
+        #[derive(Resource, Default)]
+        struct Changes(Vec<bool>);
+        let mut app = App::new();
+        app.init_resource::<RenderSettings>()
+            .init_resource::<RenderSettingsWindowState>()
+            .init_resource::<DraftingWorkspaceState>()
+            .init_resource::<Changes>()
+            .add_systems(
+                Update,
+                (
+                    |mut settings: ResMut<RenderSettings>,
+                     mut state: ResMut<RenderSettingsWindowState>,
+                     drafting: Res<DraftingWorkspaceState>,
+                     ctx: Local<egui::Context>| {
+                        ctx.begin_pass(egui::RawInput::default());
+                        draw_render_settings_window(&ctx, &mut state, &mut settings, &drafting);
+                        ctx.end_pass().drop_without_applying_deltas();
+                    },
+                    |settings: Res<RenderSettings>, mut changes: ResMut<Changes>| {
+                        changes.0.push(settings.is_changed())
+                    },
+                )
+                    .chain(),
+            );
+        app.update();
+        app.update();
+        assert_eq!(app.world().resource::<Changes>().0.last(), Some(&false));
+        app.world_mut()
+            .resource_mut::<RenderSettingsWindowState>()
+            .visible = true;
+        app.update();
+        app.update();
+        assert_eq!(app.world().resource::<Changes>().0.last(), Some(&false));
+        app.world_mut()
+            .resource_mut::<RenderSettings>()
+            .bloom_enabled = true;
+        app.update();
+        assert_eq!(app.world().resource::<Changes>().0.last(), Some(&true));
+        assert!(app.world().resource::<RenderSettings>().bloom_enabled);
+    }
 
     fn command_ids_for<'a>(groups: &'a [MenuSubmenuSpec], label: &str) -> &'a [&'a str] {
         groups

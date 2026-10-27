@@ -6,4 +6,4 @@
 - task-id: TALOS-yytglont
 - target base: main
 - summary: Disable default bloom and investigate native large-model performance after Bevy 0.20.
-- status: active
+- status: awaiting-merge

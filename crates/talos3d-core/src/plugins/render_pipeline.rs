@@ -177,7 +177,7 @@ impl Default for RenderSettings {
             exposure_ev100: Exposure::EV100_BLENDER,
             ssao_enabled: true,
             ssao_constant_object_thickness: 0.1,
-            bloom_enabled: true,
+            bloom_enabled: false,
             bloom_intensity: 0.15,
             bloom_low_frequency_boost: 0.7,
             bloom_low_frequency_boost_curvature: 0.95,
@@ -1913,6 +1913,12 @@ mod tests {
                 .resource::<RenderPipelineSetupState>()
                 .configured
         );
+        assert!(app.world().get::<Bloom>(main).is_none());
+        app.world_mut()
+            .resource_mut::<RenderSettings>()
+            .bloom_enabled = true;
+        app.update();
+        assert!(app.world().get::<Bloom>(main).is_some());
         apply_drafting_render_preset(&mut app.world_mut().resource_mut::<RenderSettings>());
         app.update();
         assert_eq!(

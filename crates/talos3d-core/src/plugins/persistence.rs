@@ -956,11 +956,27 @@ fn save_to_path(world: &mut World, path: &Path) -> Result<(), String> {
 }
 
 fn load_from_path(world: &mut World, path: &Path) -> Result<(), String> {
+    let started = web_time::Instant::now();
     let key = path.to_string_lossy().into_owned();
     let contents = String::from_utf8(world.resource::<Storage>().0.load(&key)?)
         .map_err(|error| error.to_string())?;
+    let bytes = contents.len();
+    let read_elapsed = started.elapsed();
     let project: ProjectFile = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
+    // The parsed project owns its data. Release the potentially large source
+    // buffer before restoring entities and building their derived geometry.
+    drop(contents);
+    let parsed_elapsed = started.elapsed();
+    let entity_count = project.entities.len();
     load_project(world, project)?;
+    info!(
+        bytes,
+        entity_count,
+        read_ms = read_elapsed.as_secs_f64() * 1000.0,
+        parse_ms = (parsed_elapsed - read_elapsed).as_secs_f64() * 1000.0,
+        restore_ms = (started.elapsed() - parsed_elapsed).as_secs_f64() * 1000.0,
+        "Project data loaded (derived render preparation follows)"
+    );
 
     let mut doc_state = world.resource_mut::<DocumentState>();
     doc_state.mark_saved(path.to_path_buf());

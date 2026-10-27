@@ -11,7 +11,7 @@ use std::{
 
 use bevy::{
     asset::AssetServer,
-    prelude::{Assets, Handle, Image},
+    prelude::{Assets, DetectChangesMut, Handle, Image, ResMut},
 };
 use bevy_egui::{egui, EguiContexts, EguiTextureHandle};
 
@@ -469,8 +469,8 @@ pub fn draw_materials_window(
     contexts: &mut EguiContexts,
     ctx: &egui::Context,
     state: &mut MaterialsWindowState,
-    registry: &mut MaterialRegistry,
-    texture_registry: &mut TextureRegistry,
+    registry: &mut ResMut<MaterialRegistry>,
+    texture_registry: &mut ResMut<TextureRegistry>,
     source_registry: &mut SourceRegistry,
     nomination_queue: &mut NominationQueue,
     asset_server: &AssetServer,
@@ -480,21 +480,43 @@ pub fn draw_materials_window(
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     poll_texture_picker(ctx, state);
-    state.visible = MATERIALS_BROWSER_WINDOW.show(ctx, state.visible, |ui| {
-        draw_browser_panel(
-            ui,
-            contexts,
-            state,
-            registry,
-            texture_registry,
-            source_registry,
-            nomination_queue,
-            asset_server,
-            images,
-            pending,
-            selected_assignments,
-        );
+    edit_browser_registries(registry, texture_registry, |registry, texture_registry| {
+        state.visible = MATERIALS_BROWSER_WINDOW.show(ctx, state.visible, |ui| {
+            draw_browser_panel(
+                ui,
+                contexts,
+                state,
+                registry,
+                texture_registry,
+                source_registry,
+                nomination_queue,
+                asset_server,
+                images,
+                pending,
+                selected_assignments,
+            );
+        });
     });
+}
+
+// Browsing is not an authored change. Every texture mutation in this window
+// belongs to Apply, which also mutates the material and bumps its generation.
+// Preserve ECS change ticks on navigation frames; otherwise all material
+// handles, mesh extraction and bounds are rebuilt even with this window closed.
+fn edit_browser_registries(
+    registry: &mut ResMut<MaterialRegistry>,
+    textures: &mut ResMut<TextureRegistry>,
+    edit: impl FnOnce(&mut MaterialRegistry, &mut TextureRegistry),
+) {
+    let before = registry.generation();
+    edit(
+        registry.bypass_change_detection(),
+        textures.bypass_change_detection(),
+    );
+    if registry.generation() != before {
+        registry.set_changed();
+        textures.set_changed();
+    }
 }
 
 // ─── Browser panel (left list + right editor) ─────────────────────────────────
@@ -2404,6 +2426,64 @@ fn idx_to_texture_projection(idx: usize) -> TextureProjection {
 mod tests {
     use super::*;
     use crate::curation::{SourceLicense, SourceTier};
+
+    #[test]
+    fn browser_reads_preserve_change_ticks_and_apply_invalidates_both_registries() {
+        use bevy::prelude::*;
+        #[derive(Resource, Default)]
+        struct Observed(Vec<(bool, bool)>);
+        #[derive(Resource, Default)]
+        struct Apply(bool);
+        let mut app = App::new();
+        app.init_resource::<MaterialRegistry>()
+            .init_resource::<TextureRegistry>()
+            .init_resource::<Observed>()
+            .init_resource::<Apply>()
+            .add_systems(
+                Update,
+                (
+                    |mut registry: ResMut<MaterialRegistry>,
+                     mut textures: ResMut<TextureRegistry>,
+                     apply: Res<Apply>| {
+                        edit_browser_registries(&mut registry, &mut textures, |registry, _| {
+                            if apply.0 {
+                                registry.create("User material");
+                            } else {
+                                // The same read-only path used while the browser is hidden
+                                // or showing its material list.
+                                assert_eq!(registry.count(), registry.all().count());
+                            }
+                        });
+                    },
+                    |registry: Res<MaterialRegistry>,
+                     textures: Res<TextureRegistry>,
+                     mut observed: ResMut<Observed>| {
+                        observed
+                            .0
+                            .push((registry.is_changed(), textures.is_changed()));
+                    },
+                )
+                    .chain(),
+            );
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<Observed>().0.last(),
+            Some(&(false, false))
+        );
+        app.world_mut().resource_mut::<Apply>().0 = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Observed>().0.last(),
+            Some(&(true, true))
+        );
+        app.world_mut().resource_mut::<Apply>().0 = false;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Observed>().0.last(),
+            Some(&(false, false))
+        );
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
