@@ -567,6 +567,10 @@ fn update_transform_preview(world: &mut World) {
                 }
             }
         }
+        #[cfg(feature = "perf-stats")]
+        {
+            add_transform_preview_time(&mut world.resource_mut::<PerfStats>(), start.elapsed());
+        }
         return;
     }
     // Modifiers read authored data. Remove last frame's non-rigid presentation

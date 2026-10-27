@@ -890,7 +890,7 @@ fn handle_push_pull_shortcut(world: &mut World) {
     if !face_context.is_active() {
         return;
     }
-    use crate::plugins::modeling::boundary_edit::{self, BoundarySession};
+    use crate::plugins::modeling::boundary_edit::{self, BoundaryFeedback, BoundarySession};
     let reference = boundary_edit::selected_reference(world);
     let boundary = reference
         .as_ref()
@@ -908,9 +908,13 @@ fn handle_push_pull_shortcut(world: &mut World) {
         } else {
             "erase"
         };
-        if let Err(error) =
-            boundary_edit::execute(world, reference.unwrap(), op, &serde_json::json!({}))
-        {
+        if let Err(error) = boundary_edit::execute(
+            world,
+            reference.clone().unwrap(),
+            op,
+            &serde_json::json!({}),
+        ) {
+            world.resource_mut::<BoundaryFeedback>().0 = Some((reference.unwrap(), error.clone()));
             world.resource_mut::<StatusBarData>().hint = error;
         }
         return;
@@ -947,6 +951,7 @@ fn handle_push_pull_shortcut(world: &mut World) {
         return;
     }
 
+    world.resource_mut::<BoundaryFeedback>().0 = None;
     let boundary_gesture = match boundary
         .clone()
         .map(|b| boundary_edit::capture(world, b))
@@ -954,6 +959,9 @@ fn handle_push_pull_shortcut(world: &mut World) {
     {
         Ok(g) => g,
         Err(error) => {
+            if let Some(reference) = reference {
+                world.resource_mut::<BoundaryFeedback>().0 = Some((reference, error.clone()));
+            }
             world.resource_mut::<StatusBarData>().hint = error;
             return;
         }
@@ -1170,16 +1178,26 @@ fn update_face_edit_status(world: &mut World) {
                 "Drawing ({mode}) {n} pts · click to add · A: arc · Esc to cancel"
             ));
         }
-    } else if let Some(hit) = &hovered_edge {
-        parts.push(format!(
-            "Hover: {} · Click to select · Shift-click to add or remove",
-            hit.edge.label()
-        ));
+    } else if let Some((_, error)) = world
+        .get_resource::<crate::plugins::modeling::boundary_edit::BoundaryFeedback>()
+        .and_then(|feedback| feedback.0.as_ref())
+        .filter(|(reference, _)| {
+            world
+                .resource::<SubobjectSelection>()
+                .refs
+                .contains(reference)
+        })
+    {
+        parts.push(error.clone());
     } else if selected_edge_count > 0 {
-        let plural = if selected_edge_count == 1 { "" } else { "s" };
-        parts.push(format!(
-            "{selected_edge_count} edge{plural} selected · Shift-click an edge to add or remove"
-        ));
+        parts.push(if selected_edge_count == 1 {
+            "Edge selected · G: move boundary · H: hide · Delete: close opening / erase feature"
+                .into()
+        } else {
+            format!("{selected_edge_count} edges selected · Select one boundary to edit")
+        });
+    } else if hovered_edge.is_some() {
+        parts.push("Edge · Click to select · Shift-click to add or remove".into());
     } else if let Some(selected) = &face_context.selected_face {
         let label = selected
             .generated_face_ref

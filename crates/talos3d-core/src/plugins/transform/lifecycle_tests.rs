@@ -508,6 +508,17 @@ fn boundary_preview_can_collapse_reopen_cancel_commit_and_undo_without_mesh_conv
     });
     let gesture = boundary_edit::capture(&world, binding.clone()).unwrap();
     world.insert_resource(BoundarySession(Some(gesture.clone())));
+    // A ray can pass through the hole rather than hit the semantic owner.
+    // Boundary inference must still use that owner's frozen edges.
+    let raw = binding.origin + binding.normal + Vec3::Y * 0.25;
+    world.resource_mut::<CursorWorldPos>().raw = Some(raw);
+    world.resource_mut::<SnapResult>().raw_position = Some(raw);
+    world.resource_mut::<CursorWorldPos>().hovered_element_id = None;
+    crate::plugins::inference::update_inference(&mut world);
+    assert!(matches!(
+        world.resource::<SnapResult>().kind,
+        crate::plugins::snap::SnapKind::OnEdge | crate::plugins::snap::SnapKind::Midpoint
+    ));
     // Preview passes through zero and can move back without losing the original.
     world.resource_mut::<TransformState>().numeric_buffer = Some("1".into());
     update_transform_preview(&mut world);

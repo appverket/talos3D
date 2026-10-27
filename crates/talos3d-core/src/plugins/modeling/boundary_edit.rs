@@ -35,6 +35,9 @@ pub struct BoundaryGesture {
     pub presented: Option<BoundaryPlan>,
 }
 #[derive(Resource, Default)]
+pub struct BoundaryFeedback(pub Option<(SelectableSubobjectRef, String)>);
+
+#[derive(Resource, Default)]
 pub struct BoundarySession(pub Option<BoundaryGesture>);
 
 pub fn resolve(world: &World, reference: &SelectableSubobjectRef) -> Option<BoundaryBinding> {
@@ -148,6 +151,9 @@ pub fn preview(world: &mut World, distance: f32) -> Result<Vec<BoxedEntity>, Str
 }
 pub fn selected_reference(world: &World) -> Option<SelectableSubobjectRef> {
     let refs = &world.get_resource::<SubobjectSelection>()?.refs;
+    if refs.len() != 1 {
+        return None;
+    }
     refs.iter()
         .find(|r| matches!(r, SelectableSubobjectRef::Edge { .. }))
         .or_else(|| refs.first())
@@ -157,7 +163,7 @@ fn reference(world: &World, args: &Value) -> Result<SelectableSubobjectRef, Stri
     args.get("reference")
         .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
         .unwrap_or_else(|| {
-            selected_reference(world).ok_or("Select a boundary or supply reference".into())
+            selected_reference(world).ok_or("Select one boundary or supply reference".into())
         })
 }
 pub fn execute(
@@ -281,6 +287,7 @@ fn inspect(world: &mut World, args: &Value) -> Result<CommandResult, String> {
 pub fn register(app: &mut App) {
     use crate::plugins::command_registry::CommandHandler;
     app.init_resource::<BoundarySession>();
+    app.init_resource::<BoundaryFeedback>();
     for (id, label, handler) in [
         (
             "inspect_boundary",

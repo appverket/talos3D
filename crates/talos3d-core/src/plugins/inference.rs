@@ -359,23 +359,25 @@ pub(crate) fn update_inference(world: &mut World) {
         .get_resource::<crate::plugins::modeling::boundary_edit::BoundarySession>()
         .and_then(|s| s.0.as_ref())
         .map(|g| g.binding.owner);
-    let owner = hovered.and_then(|id| {
-        if boundary_owner == Some(id) {
-            return Some(id);
-        }
+    let owner = boundary_owner.or_else(|| {
+        hovered.and_then(|id| {
+            if boundary_owner == Some(id) {
+                return Some(id);
+            }
 
-        if let Some((_, parent)) = support.filter(|(feature, _)| *feature == id) {
-            return Some(parent);
-        }
-        world
-            .get_resource::<TransformState>()
-            .is_none_or(|state| {
-                !state
-                    .initial_snapshots
-                    .iter()
-                    .any(|(_, s)| s.element_id() == id)
-            })
-            .then_some(id)
+            if let Some((_, parent)) = support.filter(|(feature, _)| *feature == id) {
+                return Some(parent);
+            }
+            world
+                .get_resource::<TransformState>()
+                .is_none_or(|state| {
+                    !state
+                        .initial_snapshots
+                        .iter()
+                        .any(|(_, s)| s.element_id() == id)
+                })
+                .then_some(id)
+        })
     });
     // A hit on the moving feature is not a stationary surface target. Only its
     // cached support edges may be used; other scene faces remain valid targets.
