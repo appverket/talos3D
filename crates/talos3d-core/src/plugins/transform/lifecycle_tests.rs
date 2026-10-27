@@ -372,7 +372,9 @@ fn push_pull_support_edge_inference_matches_live_preview_commit_and_undo() {
         normal: Vec3::X,
         feature_parent: None,
         feature_anchor_origin: None,
-        drag_plane: DrawingPlane::from_face(Vec3::X * 2., Vec3::Z),
+        // A tessellated cap centroid may carry rounding residue. The authored
+        // anchor and depth must still produce an exactly flush inference.
+        drag_plane: DrawingPlane::from_face(Vec3::X * 2.000015, Vec3::Z),
         initial_cursor_screen: None,
         screen_normal: None,
         live_csg: None,
@@ -399,14 +401,14 @@ fn push_pull_support_edge_inference_matches_live_preview_commit_and_undo() {
     assert!((world.resource::<SnapResult>().position.unwrap().x - 0.5).abs() < 1e-6);
     update_transform_preview(&mut world);
     let presented = world.resource::<ActiveTransformPreview>().snapshots[0].clone();
-    assert!(world.get::<FaceProfileFeature>(entity).unwrap().depth.abs() < 1e-6);
+    assert_eq!(world.get::<FaceProfileFeature>(entity).unwrap().depth, 0.0);
     assert_eq!(
         capture_snapshot(&world, ElementId(2)).as_ref(),
         Some(&presented)
     );
     // Repeating frames must not move the fixed target or accumulate depth.
     update_transform_preview(&mut world);
-    assert!(world.get::<FaceProfileFeature>(entity).unwrap().depth.abs() < 1e-6);
+    assert_eq!(world.get::<FaceProfileFeature>(entity).unwrap().depth, 0.0);
     world
         .resource_mut::<ButtonInput<KeyCode>>()
         .press(KeyCode::Enter);

@@ -1739,6 +1739,25 @@ fn push_pull_distance(
         crate::plugins::snap::SnapKind::None | crate::plugins::snap::SnapKind::Grid
     ) {
         if let Some(target) = snap.position.filter(|point| point.is_finite()) {
+            // Authored feature planes avoid accumulated precision loss from
+            // averaging a tessellated cap, and make support-plane snaps exactly flush.
+            if let Some(feature) = state
+                .initial_snapshots
+                .iter()
+                .find_map(|(entity, snapshot)| {
+                    (*entity == pp.entity)
+                        .then(|| {
+                            snapshot.0.as_any().downcast_ref::<
+                    crate::plugins::modeling::profile_feature::FaceProfileFeatureSnapshot,
+                >()
+                        })
+                        .flatten()
+                })
+            {
+                return Some(
+                    (target - feature.feature.anchor_origin).dot(pp.normal) - feature.feature.depth,
+                );
+            }
             return Some((target - pp.drag_plane.origin).dot(pp.normal));
         }
     }
