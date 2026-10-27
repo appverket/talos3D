@@ -345,6 +345,9 @@ pub(crate) fn update_inference(world: &mut World) {
             cursor.surface_normal,
         )
     };
+    // Muted geometry is context, not an occluder of the active component.
+    // Reuse the existing hit and visibility marker; do not cast another ray.
+    let surface = inference_occluding_surface(world, hovered, surface);
     // A face feature renders its supporting body too. During its push/pull,
     // exclude the moving operand but keep the unchanged parent's edges available.
     let support = world
@@ -870,6 +873,28 @@ pub(crate) fn update_inference(world: &mut World) {
         // Legacy creation tools and their previews consume this published point.
         world.resource_mut::<CursorWorldPos>().snapped = Some(resolved);
     });
+}
+
+fn inference_occluding_surface(
+    world: &World,
+    hovered: Option<ElementId>,
+    surface: Option<Vec3>,
+) -> Option<Vec3> {
+    if world
+        .get_resource::<crate::plugins::render_pipeline::RenderSettings>()
+        .is_some_and(|settings| settings.xray_enabled)
+        || hovered
+            .and_then(|id| find_entity_by_element_id_readonly(world, id))
+            .is_some_and(|entity| {
+                world
+                    .get::<crate::plugins::modeling::group::GroupEditMuted>(entity)
+                    .is_some()
+            })
+    {
+        None
+    } else {
+        surface
+    }
 }
 
 fn visible_near_surface(

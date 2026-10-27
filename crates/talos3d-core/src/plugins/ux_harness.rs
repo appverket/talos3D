@@ -186,6 +186,22 @@ pub struct UxHarnessSnapshot {
     pub preview_error: Option<String>,
     #[serde(default)]
     pub drag_trace: Option<UxDragTrace>,
+    /// Resolved viewport inference and semantic boundary owner during a gesture.
+    #[serde(default)]
+    pub inference: Option<UxInferenceSnapshot>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UxInferenceSnapshot {
+    pub kind: String,
+    pub raw_position: Option<[f32; 3]>,
+    pub position: Option<[f32; 3]>,
+    pub target: Option<[f32; 3]>,
+    pub hovered_element_id: Option<u64>,
+    pub boundary_owner: Option<u64>,
+    pub boundary_target: Option<u64>,
+    pub label: Option<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -452,6 +468,30 @@ pub fn observe_ux(world: &mut World) -> Result<UxHarnessSnapshot, String> {
             .get_resource::<crate::plugins::transform::ActiveTransformPreview>()
             .and_then(|active| active.refusal.clone()),
         drag_trace: trace::observe(world),
+        inference: world
+            .get_resource::<crate::plugins::snap::SnapResult>()
+            .map(|snap| {
+                let binding = world
+                    .get_resource::<crate::plugins::modeling::boundary_edit::BoundarySession>()
+                    .and_then(|session| session.0.as_ref())
+                    .map(|gesture| &gesture.binding);
+                UxInferenceSnapshot {
+                    kind: format!("{:?}", snap.kind),
+                    raw_position: snap.raw_position.map(|p| p.to_array()),
+                    position: snap.position.map(|p| p.to_array()),
+                    target: snap.target.map(|p| p.to_array()),
+                    hovered_element_id: world
+                        .get_resource::<crate::plugins::cursor::CursorWorldPos>()
+                        .and_then(|cursor| cursor.hovered_element_id)
+                        .map(|id| id.0),
+                    boundary_owner: binding.map(|binding| binding.owner.0),
+                    boundary_target: binding.map(|binding| binding.target.0),
+                    label: world
+                        .get_resource::<crate::plugins::inference::InferenceEngine>()
+                        .and_then(|engine| engine.best_label())
+                        .map(str::to_string),
+                }
+            }),
     })
 }
 

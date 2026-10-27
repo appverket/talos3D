@@ -109,3 +109,8 @@ metres along the returned normal, or world `delta: [x,y,z]`. The registered
 agent routes use the same representation-owned snapshot plan, including exact
 preview/commit parity and reversible collapse. Edge caches use bounded derived
 topology and retained Bevy line rendering; no scene-wide edge raycasts are added.
+
+`ux_observe.inference` reports the actual snap kind, world point, hovered object,
+and active boundary owner/target, so an agent can verify the same gesture without
+inferring it from a screenshot. Muted geometry outside the current edit context
+does not occlude inference to the active component's visible boundaries.

@@ -363,3 +363,26 @@ fn visible_face_boundary_is_not_rejected_by_its_larger_camera_distance() {
         eye
     ));
 }
+
+#[test]
+fn muted_context_cannot_occlude_active_boundary_inference() {
+    use crate::plugins::modeling::group::GroupEditMuted;
+    let mut world = World::new();
+    let occluder = world.spawn((ElementId(7), GroupEditMuted)).id();
+    let surface = Some(Vec3::Z);
+    let eye = Some(Vec3::Z * 5.0);
+    let boundary = Vec3::ZERO;
+    assert!(visible_near_surface(
+        boundary,
+        inference_occluding_surface(&world, Some(ElementId(7)), surface),
+        Some(Vec3::Z),
+        eye,
+    ));
+    world.entity_mut(occluder).remove::<GroupEditMuted>();
+    assert!(!visible_near_surface(
+        boundary,
+        inference_occluding_surface(&world, Some(ElementId(7)), surface),
+        Some(Vec3::Z),
+        eye,
+    ));
+}
