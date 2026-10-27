@@ -33,7 +33,14 @@ pub struct HitCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum GeneratedFaceRef {
-    BoxFace { axis: u8, positive: bool },
+    /// Capability-owned semantic surface key, independent of triangle indices.
+    CapabilitySurface {
+        key: String,
+    },
+    BoxFace {
+        axis: u8,
+        positive: bool,
+    },
     CylinderTop,
     CylinderBottom,
     CylinderSide,
@@ -53,6 +60,7 @@ pub enum GeneratedFaceRef {
 impl GeneratedFaceRef {
     pub fn label(&self) -> String {
         match self {
+            Self::CapabilitySurface { key } => key.clone(),
             Self::BoxFace { axis, positive } => {
                 let axis_label = match axis {
                     0 => "x",

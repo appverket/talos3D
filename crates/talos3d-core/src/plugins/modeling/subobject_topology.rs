@@ -92,8 +92,14 @@ pub fn generated_face_ref_for_entity(
     entity_ref: &EntityRef,
     face_id: FaceId,
 ) -> Option<GeneratedFaceRef> {
-    first_primitive!(entity_ref, get, |primitive| primitive
-        .generated_face_ref(face_id))
+    entity_ref
+        .get::<super::planar_body::PlanarBody>()
+        .and_then(|b| b.surfaces.get(face_id.0 as usize))
+        .and_then(|s| s.reference.clone())
+        .or_else(|| {
+            first_primitive!(entity_ref, get, |primitive| primitive
+                .generated_face_ref(face_id))
+        })
 }
 
 /// Whether the entity's interaction body may have changed since the calling

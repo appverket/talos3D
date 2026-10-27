@@ -454,13 +454,15 @@ fn enforce_document_visibility(
             Option<&ElementId>,
             Option<&GeneratedOccurrencePart>,
             &mut Visibility,
+            Option<&crate::plugins::modeling::profile_feature::FeatureOperand>,
         ),
         Changed<Visibility>,
     >,
 ) {
-    for (id, part, mut visibility) in &mut query {
+    for (id, part, mut visibility, feature_operand) in &mut query {
         if *visibility != Visibility::Hidden
-            && (id.is_some_and(|id| resolved.hidden.contains(id))
+            && (feature_operand.is_some()
+                || id.is_some_and(|id| resolved.hidden.contains(id))
                 || part.is_some_and(|part| resolved.hidden.contains(&part.owner)))
         {
             *visibility = Visibility::Hidden;
@@ -928,5 +930,37 @@ mod tests {
         state.apply(&mut world);
 
         assert!(world.get_entity(entity).is_err());
+    }
+}
+
+#[cfg(test)]
+mod face_feature_visibility_tests {
+    use super::*;
+    #[test]
+    fn layer_refresh_cannot_reveal_a_feature_operand() {
+        let mut app = App::new();
+        app.init_resource::<DocumentVisibility>();
+        app.add_systems(Update, enforce_document_visibility);
+        let host = app
+            .world_mut()
+            .spawn((
+                ElementId(1),
+                Visibility::Inherited,
+                crate::plugins::modeling::profile_feature::FeatureOperand {
+                    owner: ElementId(2),
+                },
+            ))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(host),
+            Some(&Visibility::Hidden)
+        );
+        app.world_mut().entity_mut(host).insert(Visibility::Visible);
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(host),
+            Some(&Visibility::Hidden)
+        );
     }
 }

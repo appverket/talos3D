@@ -345,6 +345,13 @@ pub struct PendingCommandInvocations {
     invocations: Vec<PendingCommandInvocation>,
 }
 
+#[cfg(test)]
+impl PendingCommandInvocations {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.invocations.is_empty()
+    }
+}
+
 pub trait CommandRegistryAppExt {
     fn register_command(
         &mut self,

@@ -269,6 +269,11 @@ pub fn body_summary_from_triangles(triangles: &[CsgTriangle]) -> EvaluatedBodySu
             };
             tri[index] = next_index;
         }
+        // Quantization can collapse sub-tolerance BSP slivers; they have no
+        // topological edge or volume at this inspection tolerance.
+        if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
+            continue;
+        }
         indexed_triangles.push(tri);
         signed_volume +=
             triangle.vertices[0].dot(triangle.vertices[1].cross(triangle.vertices[2])) / 6.0;

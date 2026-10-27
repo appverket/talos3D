@@ -403,7 +403,44 @@ fn handle_transform_input(world: &mut World) {
 
     let keys = world.resource::<ButtonInput<KeyCode>>();
     let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let just_pressed: Vec<KeyCode> = keys.get_just_pressed().copied().collect();
+    // Preserve native text order and keyboard-layout meaning (e.g. Swedish
+    // minus lives on the physical Slash key). ButtonInput folds repeated keys
+    // in one frame and cannot represent a typed measurement faithfully.
+    let native: Vec<KeyCode> = world
+        .get_resource::<Messages<bevy::input::keyboard::KeyboardInput>>()
+        .map(|events| {
+            events
+                .iter_current_update_messages()
+                .filter(|event| event.state == bevy::input::ButtonState::Pressed)
+                .map(|event| {
+                    if let bevy::input::keyboard::Key::Character(text) = &event.logical_key {
+                        match text.as_str() {
+                            "0" => KeyCode::Digit0,
+                            "1" => KeyCode::Digit1,
+                            "2" => KeyCode::Digit2,
+                            "3" => KeyCode::Digit3,
+                            "4" => KeyCode::Digit4,
+                            "5" => KeyCode::Digit5,
+                            "6" => KeyCode::Digit6,
+                            "7" => KeyCode::Digit7,
+                            "8" => KeyCode::Digit8,
+                            "9" => KeyCode::Digit9,
+                            "-" => KeyCode::Minus,
+                            "." | "," => KeyCode::Period,
+                            _ => event.key_code,
+                        }
+                    } else {
+                        event.key_code
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let just_pressed: Vec<KeyCode> = if native.is_empty() {
+        keys.get_just_pressed().copied().collect()
+    } else {
+        native
+    };
     let _ = keys;
 
     let mut transform_state = world.resource_mut::<TransformState>();
@@ -3233,6 +3270,43 @@ mod tests {
         assert!(state.is_idle());
         assert!(!state.is_pending());
         assert_eq!(state.pending_mode, None);
+    }
+
+    #[test]
+    fn face_push_pull_numeric_input_preserves_native_order_and_layout_minus() {
+        use bevy::input::keyboard::{Key, KeyboardInput};
+        let mut world = transform_input_world(
+            TransformState {
+                mode: TransformMode::Moving,
+                ..Default::default()
+            },
+            ButtonInput::default(),
+        );
+        world.init_resource::<Messages<KeyboardInput>>();
+        for (code, text) in [
+            (KeyCode::Slash, "-"),
+            (KeyCode::Digit0, "0"),
+            (KeyCode::Period, "."),
+            (KeyCode::Digit4, "4"),
+            (KeyCode::Digit0, "0"),
+            (KeyCode::Digit0, "0"),
+        ] {
+            world
+                .resource_mut::<Messages<KeyboardInput>>()
+                .write(KeyboardInput {
+                    key_code: code,
+                    logical_key: Key::Character(text.into()),
+                    state: bevy::input::ButtonState::Pressed,
+                    text: Some(text.into()),
+                    repeat: false,
+                    window: Entity::PLACEHOLDER,
+                });
+        }
+        handle_transform_input(&mut world);
+        assert_eq!(
+            world.resource::<TransformState>().numeric_buffer.as_deref(),
+            Some("-0.400")
+        );
     }
 
     #[test]

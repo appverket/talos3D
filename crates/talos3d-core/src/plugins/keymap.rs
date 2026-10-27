@@ -469,7 +469,10 @@ pub fn dispatch_command_shortcuts(
             continue;
         }
         if face_editing
-            && matches!(chord.key, KeyCode::KeyL | KeyCode::KeyC | KeyCode::KeyP)
+            && matches!(
+                chord.key,
+                KeyCode::KeyL | KeyCode::KeyC | KeyCode::KeyP | KeyCode::KeyG
+            )
             && !primary
             && !alt
             && !shift
@@ -512,6 +515,39 @@ mod tests {
             activates_tool: activates_tool.map(str::to_string),
             capability_id: None,
         }
+    }
+
+    #[test]
+    fn face_editing_owns_shape_and_push_pull_shortcuts() {
+        let mut app = App::new();
+        let bindings = [
+            descriptor("guide", "G", Some("GuideLine")),
+            descriptor("circle", "C", Some("Circle")),
+        ]
+        .iter()
+        .flat_map(descriptor_bindings)
+        .collect();
+        app.insert_resource(Keymap {
+            bindings,
+            ..Default::default()
+        });
+        app.init_resource::<PendingCommandInvocations>();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        let mut context = FaceEditContext::default();
+        context.entity = Some(Entity::PLACEHOLDER);
+        app.insert_resource(context);
+        app.add_systems(Update, dispatch_command_shortcuts);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyG);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyC);
+        app.update();
+        assert!(app
+            .world()
+            .resource::<PendingCommandInvocations>()
+            .is_empty());
     }
 
     #[test]

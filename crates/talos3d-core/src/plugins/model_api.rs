@@ -3506,6 +3506,13 @@ fn handle_list_subobjects(
     let entity_ref = world
         .get_entity(entity)
         .map_err(|_| format!("Element {element_id} entity is not available"))?;
+    if let Some(body) = entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>() {
+        return Ok(body.surfaces.iter().filter_map(|surface| surface.reference.clone()).map(|face| SelectableSubobjectInfo {
+            label:format!("face:{}",face.label()), reference:SelectableSubobjectRef::Face { element_id, face }, owner_element_id:element_id,
+            selectable:true, supports_transform:false, supports_visibility_override:false, hidden:false,
+            unsupported_reason:Some("Draw an authored region on this support with modeling.select_face and modeling.draw_face_circle/rectangle/polyline; push/pull the region.".into()),
+        }).collect());
+    }
     let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
         return Ok(vec![SelectableSubobjectInfo {
             reference: SelectableSubobjectRef::Entity { element_id },
@@ -3794,6 +3801,22 @@ fn validate_subobject_refs(world: &World, refs: &[SelectableSubobjectRef]) -> Re
             SelectableSubobjectRef::Entity { .. } => {}
             SelectableSubobjectRef::Handle { .. } => {}
             SelectableSubobjectRef::Face { face, .. } => {
+                if let Some(body) =
+                    entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>()
+                {
+                    if body
+                        .surfaces
+                        .iter()
+                        .any(|surface| surface.reference.as_ref() == Some(face))
+                    {
+                        continue;
+                    }
+                    return Err(format!(
+                        "Element {} has no surface '{}'",
+                        eid.0,
+                        face.label()
+                    ));
+                }
                 let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
                     return Err(format!("Element {} has no selectable faces", eid.0));
                 };

@@ -2,13 +2,14 @@
 //! geometry when that geometry changes; it never replaces the authored entity.
 use super::{bsp_csg::CsgTriangle, snapshots::ray_triangle_intersection};
 use crate::{
-    capability_registry::{FaceHitCandidate, FaceId},
+    capability_registry::{FaceHitCandidate, FaceId, GeneratedFaceRef},
     plugins::identity::ElementId,
 };
 use bevy::prelude::*;
 
 #[derive(Clone, Debug)]
 pub struct PlanarSurface {
+    pub reference: Option<GeneratedFaceRef>,
     pub normal: Vec3,
     pub origin: Vec3,
     pub triangles: Vec<[Vec3; 3]>,
@@ -35,6 +36,7 @@ impl PlanarBody {
                 surface.triangles.push(triangle.vertices);
             } else {
                 surfaces.push(PlanarSurface {
+                    reference: None,
                     normal: triangle.normal,
                     origin,
                     triangles: vec![triangle.vertices],
@@ -64,7 +66,7 @@ impl PlanarBody {
                         element_id,
                         distance,
                         face_id: FaceId(index as u32),
-                        generated_face_ref: None,
+                        generated_face_ref: surface.reference.clone(),
                         normal: surface.normal,
                         centroid: surface.origin,
                     })

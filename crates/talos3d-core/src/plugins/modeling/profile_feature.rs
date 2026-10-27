@@ -467,12 +467,17 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
 
     fn apply_to(&self, world: &mut World) {
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            world.entity_mut(entity).insert((
-                self.feature.clone(),
-                self.rotation,
-                NeedsEvaluation,
-                Visibility::Visible,
-            ));
+            if world.get::<FaceProfileFeature>(entity) != Some(&self.feature)
+                || world.get::<ShapeRotation>(entity) != Some(&self.rotation)
+                || world.get::<EvaluatedFeature>(entity).is_none()
+            {
+                world.entity_mut(entity).insert((
+                    self.feature.clone(),
+                    self.rotation,
+                    NeedsEvaluation,
+                    Visibility::Visible,
+                ));
+            }
         } else {
             world.spawn((
                 self.element_id,
@@ -1053,12 +1058,145 @@ pub fn evaluate_profile_on_triangles(
     } else {
         BooleanOp::Union
     };
-    let result = bsp_csg::boolean(base, &triangles, op);
+    // Evaluate near the sketch origin to avoid world-offset cancellation in
+    // the f32 splitting planes, then conform edge subdivisions for a closed shell.
+    let shift = feature.anchor_origin;
+    let local = |ts: &[bsp_csg::CsgTriangle]| {
+        ts.iter()
+            .map(|t| {
+                bsp_csg::CsgTriangle::new(
+                    t.vertices[0] - shift,
+                    t.vertices[1] - shift,
+                    t.vertices[2] - shift,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut result = conform_feature_result(bsp_csg::boolean(&local(base), &local(&triangles), op));
+    for vertex in &mut result.vertices {
+        *vertex += shift;
+    }
+
     EvaluatedFeature {
         vertices: result.vertices,
         normals: result.normals,
         indices: result.indices,
     }
+}
+
+/// BSP splits neighbouring triangles independently. Split every output boundary
+/// at the shared vertices before triangulating so T-junctions cannot become
+/// open mesh edges. This bounded operation runs on edited features only.
+fn conform_feature_result(result: bsp_csg::CsgResult) -> bsp_csg::CsgResult {
+    const EPS: f32 = 0.00001;
+    let mut points: Vec<Vec3> = Vec::new();
+    let mut mapped = Vec::with_capacity(result.vertices.len());
+    for &p in &result.vertices {
+        let index = points
+            .iter()
+            .position(|q| q.distance_squared(p) < EPS * EPS)
+            .unwrap_or_else(|| {
+                points.push(p);
+                points.len() - 1
+            });
+        mapped.push(index);
+    }
+    let mut vertices = Vec::new();
+    let mut normals = Vec::new();
+    let mut indices = Vec::new();
+    for tri in result.indices.chunks_exact(3) {
+        let t = [
+            points[mapped[tri[0] as usize]],
+            points[mapped[tri[1] as usize]],
+            points[mapped[tri[2] as usize]],
+        ];
+        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+        if normal == Vec3::ZERO {
+            continue;
+        }
+        let mut ring = Vec::new();
+        for i in 0..3 {
+            let (a, b) = (t[i], t[(i + 1) % 3]);
+            let edge = b - a;
+            let length = edge.length_squared();
+            ring.push(a);
+            let mut splits: Vec<_> = points
+                .iter()
+                .filter_map(|&p| {
+                    let f = (p - a).dot(edge) / length;
+                    (f > 0.
+                        && f < 1.
+                        && p.distance_squared(a + f * edge) < EPS * EPS
+                        && p.distance_squared(a) > EPS * EPS
+                        && p.distance_squared(b) > EPS * EPS)
+                        .then_some((f, p))
+                })
+                .collect();
+            splits.sort_by(|a, b| a.0.total_cmp(&b.0));
+            ring.extend(splits.into_iter().map(|(_, p)| p));
+        }
+        if ring.len() == 3 {
+            let start = vertices.len() as u32;
+            vertices.extend(t);
+            normals.extend([normal; 3]);
+            indices.extend([start, start + 1, start + 2]);
+        } else {
+            let centre = (t[0] + t[1] + t[2]) / 3.;
+            for i in 0..ring.len() {
+                let start = vertices.len() as u32;
+                vertices.extend([centre, ring[i], ring[(i + 1) % ring.len()]]);
+                normals.extend([normal; 3]);
+                indices.extend([start, start + 1, start + 2]);
+            }
+        }
+    }
+    // Subdivision at a nearly collinear BSP vertex can produce a coincident
+    // opposite-wound sliver pair. Cancel the pair, rather than retaining an
+    // internal sheet with four or six incidences on the same edge.
+    let mut unique = std::collections::BTreeMap::<[[i64; 3]; 3], ([Vec3; 3], i32)>::new();
+    for t in vertices.chunks_exact(3) {
+        let ordered = t
+            .iter()
+            .map(|p| {
+                [
+                    (p.x / EPS).round() as i64,
+                    (p.y / EPS).round() as i64,
+                    (p.z / EPS).round() as i64,
+                ]
+            })
+            .collect::<Vec<_>>();
+        let mut key = [ordered[0], ordered[1], ordered[2]];
+        key.sort();
+        if key[0] == key[1] || key[1] == key[2] {
+            continue;
+        }
+        let sign =
+            if (ordered[0] < ordered[1]) ^ (ordered[1] < ordered[2]) ^ (ordered[0] < ordered[2]) {
+                1
+            } else {
+                -1
+            };
+        unique
+            .entry(key)
+            .and_modify(|entry| entry.1 += sign)
+            .or_insert(([t[0], t[1], t[2]], sign));
+    }
+    let mut out = bsp_csg::CsgResult {
+        vertices: Vec::new(),
+        normals: Vec::new(),
+        indices: Vec::new(),
+    };
+    for (_, (t, count)) in unique {
+        if count == 0 {
+            continue;
+        }
+        let start = out.vertices.len() as u32;
+        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+        out.vertices.extend(t);
+        out.normals.extend([normal; 3]);
+        out.indices.extend([start, start + 1, start + 2]);
+    }
+    out
 }
 
 fn get_entity_triangles(world: &World, entity: Entity) -> Option<Vec<bsp_csg::CsgTriangle>> {

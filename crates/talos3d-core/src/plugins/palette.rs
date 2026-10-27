@@ -69,6 +69,12 @@ impl PaletteCommandEntry {
 }
 
 fn toggle_palette(world: &mut World) {
+    if world
+        .get_resource::<crate::plugins::input_ownership::InputOwnership>()
+        .is_some_and(|owner| !owner.is_idle())
+    {
+        return;
+    }
     // Cmd/Ctrl+K is dispatched through the unified keymap (core.show_command_palette).
     // `/` remains a palette-local quick toggle.
     let open_shortcut = {

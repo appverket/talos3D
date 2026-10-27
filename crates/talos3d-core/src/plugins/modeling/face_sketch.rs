@@ -52,8 +52,14 @@ pub fn register(app: &mut App) {
             "inspect_faces" => json!({"element_id":{"type":"integer"}}),
             "select_face" => json!({"element_id":{"type":"integer"},"face_id":{"type":"integer"}}),
             "set_face_depth" => json!({"element_id":{"type":"integer"},"depth":{"type":"number"}}),
+            "draw_face_circle" => {
+                json!({"element_id":{"type":"integer"},"face_id":{"type":"integer"},"centre":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"radius":{"type":"number","exclusiveMinimum":0}})
+            }
+            "draw_face_rectangle" => {
+                json!({"element_id":{"type":"integer"},"face_id":{"type":"integer"},"a":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"b":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2}})
+            }
             _ => {
-                json!({"element_id":{"type":"integer"},"face_id":{"type":"integer"},"centre":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"radius":{"type":"number","exclusiveMinimum":0},"a":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"b":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"points":{"type":"array","items":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2}}})
+                json!({"element_id":{"type":"integer"},"face_id":{"type":"integer"},"points":{"type":"array","minItems":2,"maxItems":257,"items":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2}}})
             }
         };
         app.register_command(
@@ -84,6 +90,8 @@ pub fn register(app: &mut App) {
 }
 
 pub fn select_hit(world: &mut World, hit: FaceHitCandidate) {
+    world.init_resource::<SubobjectSelection>();
+    world.init_resource::<DrawingPlane>();
     world
         .resource_mut::<FaceEditContext>()
         .enter(hit.entity, hit.element_id);
@@ -145,8 +153,23 @@ fn inspect_faces(world: &mut World, args: &Value) -> Result<CommandResult, Strin
                 .and_then(|b| b.surfaces.get(i))
                 .map(|f| f.origin)
                 .unwrap_or(vertices[0]);
+            let (origin, normal) = if i == 0 {
+                if let Some(f) = world.get::<super::profile_feature::FaceProfileFeature>(entity) {
+                    let n = world
+                        .get::<super::primitives::ShapeRotation>(entity)
+                        .copied()
+                        .unwrap_or_default()
+                        .0
+                        * Vec3::Y;
+                    (f.anchor_origin + n * f.depth, n)
+                } else {
+                    (origin, normal)
+                }
+            } else {
+                (origin, normal)
+            };
             let plane = DrawingPlane::from_face(origin, normal);
-            faces.push(json!({"face_id":i,"origin":plane.origin.to_array(),"normal":plane.normal.to_array(),"u_axis":plane.tangent.to_array(),"v_axis":plane.bitangent.to_array(),"next_command":"modeling.select_face"}));
+            faces.push(json!({"face_id":i,"surface_ref":world.get::<PlanarBody>(entity).and_then(|b|b.surfaces.get(i)).and_then(|s|s.reference.clone()),"origin":plane.origin.to_array(),"normal":plane.normal.to_array(),"boundary":vertices.iter().map(|p|plane.project_to_2d(*p).to_array()).collect::<Vec<_>>(),"u_axis":plane.tangent.to_array(),"v_axis":plane.bitangent.to_array(),"next_command":"modeling.select_face"}));
         }
     }
     Ok(CommandResult {
@@ -184,7 +207,14 @@ fn select_face(world: &mut World, args: &Value) -> Result<CommandResult, String>
         .map(|f| f.origin)
         .unwrap_or(vertices[0]);
     let feature = world.get::<super::profile_feature::FaceProfileFeature>(entity);
-    let generated_face_ref = feature.and_then(|f| f.generated_face_ref(face));
+    let generated_face_ref = feature
+        .and_then(|f| f.generated_face_ref(face))
+        .or_else(|| {
+            world
+                .get::<PlanarBody>(entity)
+                .and_then(|b| b.surfaces.get(face.0 as usize))
+                .and_then(|s| s.reference.clone())
+        });
     let normal = if feature.is_some() && face == FaceId(0) {
         world
             .get::<super::primitives::ShapeRotation>(entity)
@@ -195,6 +225,10 @@ fn select_face(world: &mut World, args: &Value) -> Result<CommandResult, String>
     } else {
         normal
     };
+    let centroid = feature
+        .filter(|_| face == FaceId(0))
+        .map(|f| f.anchor_origin + normal * f.depth)
+        .unwrap_or(centroid);
     select_hit(
         world,
         FaceHitCandidate {
@@ -215,6 +249,9 @@ fn select_face(world: &mut World, args: &Value) -> Result<CommandResult, String>
     })
 }
 fn prepare(world: &mut World, args: &Value, shape: FaceSketchShape) -> Result<bool, String> {
+    if args.get("element_id").is_some() && args.get("face_id").is_none() {
+        return Err("Supply face_id with the support element_id".into());
+    }
     if args.get("face_id").is_some() {
         select_face(world, args)?;
     }
@@ -397,6 +434,7 @@ pub fn commit_profile(world: &mut World, profile: Profile2d) -> Result<CommandRe
         rotation,
         selected.generated_face_ref,
     );
+    crate::plugins::face_edit::consume_drawing_completion_click(world);
     enqueue_create_world_entity(world, snapshot.into());
     *world.resource_mut::<FaceDrawingContext>() = FaceDrawingContext::default();
     world.resource_mut::<PendingFaceRegion>().0 = Some(id);
@@ -525,6 +563,10 @@ mod tests {
             let eval = evaluate_profile_on_triangles(&base, &snap.feature, snap.rotation.0);
             let result = triangles(&eval);
             volumes.push(volume(&result));
+            assert!(
+                super::super::semantics::body_summary_from_triangles(&result).is_closed_manifold,
+                "open shell at depth {depth}"
+            );
             let ray = Ray3d::new(Vec3::new(0., 0., 2.), Dir3::NEG_Z);
             let hit = result.iter().any(|t| {
                 ray_triangle_intersection(ray, t.vertices[0], t.vertices[1], t.vertices[2])

@@ -2976,7 +2976,7 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().resource::<GroupEditContext>().stack,
-            vec![ElementId(30), ElementId(20)]
+            vec![ElementId(30)]
         );
     }
 
@@ -3024,11 +3024,9 @@ mod tests {
             app.world().resource::<GroupEditContext>().stack,
             vec![ElementId(30)]
         );
-        let roof = find_entity_by_element_id_readonly(app.world(), ElementId(20)).unwrap();
-        assert!(
-            app.world().get::<Selected>(roof).is_some(),
-            "a third click selects the child; it does not consume another pair"
-        );
+        let face = app.world().resource::<FaceEditContext>();
+        assert_eq!(face.element_id, Some(ElementId(10)));
+        assert!(face.selected_face.is_some(),"the selected group's face stays selected; a third click must not descend another group");
     }
 
     #[test]
@@ -3081,10 +3079,13 @@ mod tests {
         move_to(&mut app, Vec2::new(400.0, 300.0));
         queue_native_edges(&mut app, window, &[Pressed, Released]);
         app.update();
-        assert!(
-            app.world().resource::<GroupEditContext>().is_root(),
-            "distant clicks on the same aggregate are not a double-click"
+        assert_eq!(
+            app.world().resource::<GroupEditContext>().stack,
+            vec![ElementId(30)]
         );
+        let face = app.world().resource::<FaceEditContext>();
+        assert_eq!(face.element_id, Some(ElementId(10)));
+        assert!(face.selected_face.is_some(),"clicking another position on an already selected group directly selects the face, independently of double-click pairing");
     }
 
     #[test]

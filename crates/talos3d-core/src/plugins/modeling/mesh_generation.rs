@@ -132,6 +132,7 @@ impl Plugin for ModelingMeshPlugin {
                     spawn_evaluated_csg_meshes,
                     spawn_evaluated_fillet_meshes,
                     spawn_evaluated_feature_meshes,
+                    sync_face_region_outlines,
                     spawn_evaluated_mirror_meshes,
                     spawn_evaluated_array_meshes,
                     draw_polylines,
@@ -434,6 +435,98 @@ fn spawn_evaluated_feature_meshes(
     #[cfg(feature = "perf-stats")]
     if regenerated > 0 {
         add_mesh_regen_count(&mut perf_stats, regenerated);
+    }
+}
+
+/// Disposable retained outline: no per-frame tessellation or gizmo emission.
+#[derive(Component)]
+struct FaceRegionOutline {
+    entity: Entity,
+    mesh: Handle<Mesh>,
+}
+
+fn sync_face_region_outlines(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut material: Local<Option<Handle<StandardMaterial>>>,
+    query: Query<
+        (
+            Entity,
+            &super::profile_feature::FaceProfileFeature,
+            Option<&ShapeRotation>,
+            Option<&FaceRegionOutline>,
+        ),
+        Or<(
+            Changed<super::profile_feature::FaceProfileFeature>,
+            Changed<ShapeRotation>,
+        )>,
+    >,
+) {
+    for (entity, feature, rotation, existing) in &query {
+        if feature.depth.abs() > 1e-6 {
+            if let Some(outline) = existing {
+                commands
+                    .entity(outline.entity)
+                    .try_insert(Visibility::Hidden);
+            }
+            continue;
+        }
+        let rotation = rotation.copied().unwrap_or_default().0;
+        let points = feature.profile.tessellate(64);
+        let mut positions = Vec::new();
+        let count = if points.len() == 2 { 1 } else { points.len() };
+        for i in 0..count {
+            for p in [points[i], points[(i + 1) % points.len()]] {
+                positions.push(
+                    (feature.anchor_origin + rotation * Vec3::new(p.x, 0.0002, p.y)).to_array(),
+                );
+            }
+        }
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::LineList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_NORMAL,
+            vec![(rotation * Vec3::Y).to_array(); positions.len()],
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        if let Some(outline) = existing {
+            if let Some(mut asset) = meshes.get_mut(&outline.mesh) {
+                *asset = mesh;
+            }
+            commands
+                .entity(outline.entity)
+                .try_insert(Visibility::Inherited);
+        } else {
+            let mat = material
+                .get_or_insert_with(|| {
+                    materials.add(StandardMaterial {
+                        base_color: Color::srgb(0.12, 0.14, 0.17),
+                        unlit: true,
+                        cull_mode: None,
+                        ..Default::default()
+                    })
+                })
+                .clone();
+            let handle = meshes.add(mesh);
+            let child = commands
+                .spawn((
+                    Mesh3d(handle.clone()),
+                    MeshMaterial3d(mat),
+                    Transform::IDENTITY,
+                    Visibility::Inherited,
+                    ChildOf(entity),
+                    bevy::light::NotShadowCaster,
+                    bevy::light::NotShadowReceiver,
+                ))
+                .id();
+            commands.entity(entity).insert(FaceRegionOutline {
+                entity: child,
+                mesh: handle,
+            });
+        }
     }
 }
 

@@ -7,6 +7,8 @@ finish). Drawing and snapping stay on the selected plane. The new region stays
 selected; **G** starts push/pull through the shared transform tool. Positive
 depth adds material, zero is flush, negative depth cuts, and a cut extending
 through the supporting body opens a hole. A line without area cannot extrude.
+The transform measurement is a relative distance in metres: `0.4` pulls 400 mm,
+then `-0.4` returns to flush. The agent depth command sets absolute depth.
 
 The support object keeps its authored type and identity. A circle is four
 analytic quarter arcs in a `face_profile_feature`, with parent identity, anchor,
@@ -19,7 +21,8 @@ representation. Subsequent regions form an ordered feature dependency chain.
 Discover these commands through `list_commands`, then use `invoke_command`:
 
 1. `modeling.inspect_faces` with `element_id` returns planar face IDs and their
-   world-space drawing frames (`origin`, `u_axis`, `v_axis`, `normal`).
+   world-space drawing frames (`origin`, `u_axis`, `v_axis`, `normal`), boundary
+   coordinates and capability-owned semantic surface references.
 2. `modeling.select_face` with `element_id` and `face_id` selects the same face as
    a pointer click. Reinspect faces after topology changes; face IDs are derived.
 3. `modeling.draw_face_circle` with `centre: [u,v]` and `radius`, or
@@ -45,7 +48,10 @@ Architecture supplies a derived `PlanarBody` when the wall mesh regenerates,
 including recovered top profiles and existing openings. Picking tests only the
 selected candidate body. The stipple uses the existing Bevy material/shader and
 one cached mesh; it does not emit per-pixel CPU marks. Shape previews use bounded
-Bevy gizmos. No per-edge scene raycasts are used for the selected outline.
+Bevy gizmos. Flush region boundaries use retained line meshes that are rebuilt
+only when authored geometry changes. No per-edge scene raycasts are used for
+the selected outline. Boolean evaluation conforms shared triangle boundaries
+and cancels opposite-wound slivers before publishing the derived closed shell.
 
 Regression coverage exercises pointer input with snaps displaced off a tilted
 plane, undo/redo, analytic circle radius, native snapshot round trips and

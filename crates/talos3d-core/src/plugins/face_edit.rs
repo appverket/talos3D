@@ -257,9 +257,23 @@ pub struct HoveredFace {
 /// on press and used on release, rather than re-querying hover at release time.
 #[derive(Resource, Default, Debug, Clone)]
 struct PressCapture {
+    ignore_until_release: bool,
     face_hit: Option<FaceHitCandidate>,
     cursor_screen: Option<Vec2>,
     shift_held: bool,
+}
+
+/// A drawing completion owns both halves of its final pointer gesture.
+pub(crate) fn consume_drawing_completion_click(world: &mut World) {
+    let pressed = world
+        .get_resource::<ButtonInput<MouseButton>>()
+        .is_some_and(|buttons| buttons.pressed(MouseButton::Left));
+    if let Some(mut capture) = world.get_resource_mut::<PressCapture>() {
+        *capture = PressCapture {
+            ignore_until_release: pressed,
+            ..Default::default()
+        };
+    }
 }
 
 #[derive(Resource, Default, Debug, Clone)]
@@ -344,6 +358,12 @@ fn handle_face_click(
     ownership: Res<InputOwnership>,
     edge_press: Res<EdgePressCapture>,
 ) {
+    if press_capture.ignore_until_release {
+        if mouse_buttons.just_released(MouseButton::Left) {
+            press_capture.ignore_until_release = false;
+        }
+        return;
+    }
     if !ownership.is_idle() {
         return;
     }
@@ -469,6 +489,7 @@ fn generated_face_bounding_edge_refs(
     // API path. It records stable generated refs for the common primitive face
     // families and lets the Model API provide full evaluated topology details.
     let count = match face_ref {
+        GeneratedFaceRef::CapabilitySurface { .. } => 0,
         GeneratedFaceRef::BoxFace { .. } => 4,
         GeneratedFaceRef::PlaneFace => 4,
         GeneratedFaceRef::CylinderTop | GeneratedFaceRef::CylinderBottom => 16,

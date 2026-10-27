@@ -15084,3 +15084,37 @@ fn named_view_updates_preserve_saved_camera_for_omitted_and_partial_fields() {
         before
     );
 }
+
+#[cfg(feature = "model-api")]
+#[test]
+fn capability_face_refs_are_agent_discoverable_and_selectable() {
+    use crate::plugins::modeling::{bsp_csg::CsgTriangle, planar_body::PlanarBody};
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+    world.insert_resource(registry);
+    let mut body = PlanarBody::from_triangles(vec![CsgTriangle::new(Vec3::ZERO, Vec3::X, Vec3::Y)]);
+    let face = GeneratedFaceRef::CapabilitySurface {
+        key: "fixture/exterior".into(),
+    };
+    body.surfaces[0].reference = Some(face.clone());
+    world.spawn((
+        ElementId(1),
+        body,
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+    ));
+    let listed = handle_list_subobjects(&mut world, 1).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].reference,
+        SelectableSubobjectRef::Face {
+            element_id: 1,
+            face
+        }
+    );
+    validate_subobject_refs(&world, &[listed[0].reference.clone()]).unwrap();
+}
