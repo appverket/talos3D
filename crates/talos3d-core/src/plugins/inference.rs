@@ -345,14 +345,33 @@ pub(crate) fn update_inference(world: &mut World) {
             cursor.surface_normal,
         )
     };
-    let owner = hovered.filter(|id| {
-        world.get_resource::<TransformState>().is_none_or(|state| {
-            !state
-                .initial_snapshots
-                .iter()
-                .any(|(_, s)| s.element_id() == *id)
-        })
+    // A face feature renders its supporting body too. During its push/pull,
+    // exclude the moving operand but keep the unchanged parent's edges available.
+    let support = world
+        .get_resource::<crate::plugins::face_edit::PushPullContext>()
+        .and_then(|context| context.active_face.as_ref())
+        .and_then(|pp| {
+            world
+                .get::<crate::plugins::modeling::profile_feature::FaceProfileFeature>(pp.entity)
+                .map(|feature| (pp.element_id, feature.parent))
+        });
+    let owner = hovered.and_then(|id| {
+        if let Some((_, parent)) = support.filter(|(feature, _)| *feature == id) {
+            return Some(parent);
+        }
+        world
+            .get_resource::<TransformState>()
+            .is_none_or(|state| {
+                !state
+                    .initial_snapshots
+                    .iter()
+                    .any(|(_, s)| s.element_id() == id)
+            })
+            .then_some(id)
     });
+    // A hit on the moving feature is not a stationary surface target. Only its
+    // cached support edges may be used; other scene faces remain valid targets.
+    let stationary_surface = hovered == owner;
     let keys = world.resource::<ButtonInput<KeyCode>>().clone();
     let now = world
         .get_resource::<Time>()
@@ -389,7 +408,12 @@ pub(crate) fn update_inference(world: &mut World) {
             engine.segments.clear();
             if engine.cage.edges().is_empty() && !engine.cage.declined() {
                 if let Some(entity) = engine.cached_entity {
-                    if let (Some(registry), Ok(entity)) = (
+                    if let Some(body) =
+                        world.get::<crate::plugins::modeling::planar_body::PlanarBody>(entity)
+                    {
+                        engine.segments =
+                            body.inference_boundary_segments(4096).unwrap_or_default();
+                    } else if let (Some(registry), Ok(entity)) = (
                         world.get_resource::<crate::capability_registry::CapabilityRegistry>(),
                         world.get_entity(entity),
                     ) {
@@ -544,7 +568,9 @@ pub(crate) fn update_inference(world: &mut World) {
                     edge: Some((start, end)),
                     owner,
                 });
-            } else if let Some(point) = surface.filter(|p| allowed(*p) && owner.is_some()) {
+            } else if let Some(point) =
+                surface.filter(|p| stationary_surface && allowed(*p) && owner.is_some())
+            {
                 resolved = point;
                 kind = SnapKind::OnFace;
                 label = "On face".into();

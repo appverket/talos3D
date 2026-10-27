@@ -319,3 +319,125 @@ fn inferred_move_is_the_presented_shared_plan_and_undoable_commit() {
         Vec3::ZERO
     );
 }
+
+#[test]
+fn push_pull_support_edge_inference_matches_live_preview_commit_and_undo() {
+    use crate::capability_registry::{FaceId, GeneratedFaceRef};
+    use crate::plugins::{
+        cursor::DrawingPlane,
+        modeling::{
+            face_sketch::{shape_profile, FaceSketchShape},
+            profile_feature::{
+                FaceProfileFeature, FaceProfileFeatureFactory, FaceProfileFeatureSnapshot,
+            },
+        },
+        snap::SnapKind,
+    };
+    let mut world = fixture();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(FaceProfileFeatureFactory);
+    world.init_resource::<DrawingPlane>();
+    world.init_resource::<Messages<ApplyEntityChangesCommand>>();
+    let original: BoxedEntity = FaceProfileFeatureSnapshot {
+        element_id: ElementId(2),
+        feature: FaceProfileFeature {
+            parent: ElementId(1),
+            anchor_origin: Vec3::X * 0.5,
+            depth: 1.5,
+            profile: shape_profile(
+                FaceSketchShape::Rectangle,
+                Vec2::splat(-0.2),
+                Vec2::splat(0.2),
+            )
+            .unwrap(),
+            support_face: None,
+        },
+        rotation: ShapeRotation(Quat::from_rotation_z(-std::f32::consts::FRAC_PI_2)),
+    }
+    .into();
+    original.apply_to(&mut world);
+    let entity = find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap();
+    world.entity_mut(entity).insert(Selected);
+    world.resource_mut::<TransformState>().initial_snapshots = vec![(entity, original.clone())];
+    world.resource_mut::<TransformState>().numeric_buffer = None;
+    // Deliberately displaced grab point: inference aligns the face, not this point.
+    world.resource_mut::<TransformState>().initial_cursor = Some(Vec3::new(8., 3., -4.));
+    world.resource_mut::<TransformState>().axis = AxisConstraint::Custom(Vec3::X);
+    world.resource_mut::<PushPullContext>().active_face = Some(PushPullFace {
+        entity,
+        element_id: ElementId(2),
+        face_id: FaceId(0),
+        generated_face_ref: Some(GeneratedFaceRef::FeatureCap),
+        normal: Vec3::X,
+        feature_parent: None,
+        feature_anchor_origin: None,
+        drag_plane: DrawingPlane::from_face(Vec3::X * 2., Vec3::Z),
+        initial_cursor_screen: None,
+        screen_normal: None,
+        live_csg: None,
+    });
+    // The visible combined body belongs to feature 2, but this edge belongs to
+    // its fixed, hidden supporting box. The target lies off the extrusion axis.
+    let raw = Vec3::new(0.52, 0.5, 0.2);
+    *world.resource_mut::<CursorWorldPos>() = CursorWorldPos {
+        raw: Some(raw),
+        snapped: Some(raw),
+        hovered_element_id: Some(ElementId(2)),
+        surface_point: Some(Vec3::new(0.5, 0.5, 0.2)),
+        surface_normal: Some(Vec3::X),
+        ..Default::default()
+    };
+    *world.resource_mut::<SnapResult>() = SnapResult {
+        raw_position: Some(raw),
+        position: Some(raw),
+        kind: SnapKind::Grid,
+        ..Default::default()
+    };
+    crate::plugins::inference::update_inference(&mut world);
+    assert_eq!(world.resource::<SnapResult>().kind, SnapKind::OnEdge);
+    assert!((world.resource::<SnapResult>().position.unwrap().x - 0.5).abs() < 1e-6);
+    update_transform_preview(&mut world);
+    let presented = world.resource::<ActiveTransformPreview>().snapshots[0].clone();
+    assert!(world.get::<FaceProfileFeature>(entity).unwrap().depth.abs() < 1e-6);
+    assert_eq!(
+        capture_snapshot(&world, ElementId(2)).as_ref(),
+        Some(&presented)
+    );
+    // Repeating frames must not move the fixed target or accumulate depth.
+    update_transform_preview(&mut world);
+    assert!(world.get::<FaceProfileFeature>(entity).unwrap().depth.abs() < 1e-6);
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Enter);
+    confirm_transform(&mut world);
+    let commands: Vec<_> = world
+        .resource_mut::<Messages<ApplyEntityChangesCommand>>()
+        .drain()
+        .collect();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].after, vec![presented.clone()]);
+    for command in commands {
+        crate::plugins::commands::enqueue_apply_entity_changes(&mut world, command);
+    }
+    drain(&mut world);
+    assert_eq!(
+        capture_snapshot(&world, ElementId(2)).as_ref(),
+        Some(&presented)
+    );
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    drain(&mut world);
+    assert_eq!(
+        capture_snapshot(&world, ElementId(2)).as_ref(),
+        Some(&original)
+    );
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    drain(&mut world);
+    assert_eq!(
+        capture_snapshot(&world, ElementId(2)).as_ref(),
+        Some(&presented)
+    );
+    assert!(world
+        .get::<BoxPrimitive>(find_entity_by_element_id_readonly(&world, ElementId(1)).unwrap())
+        .is_some());
+}

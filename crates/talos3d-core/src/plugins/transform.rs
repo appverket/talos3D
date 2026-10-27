@@ -1730,6 +1730,18 @@ fn push_pull_distance(
         return Some(value);
     }
 
+    // Geometric inference sets the moving face's plane, irrespective of where
+    // the cursor grabbed it or which side of its screen projection the target is.
+    // The drag-plane origin is the current face centroid frozen at gesture start.
+    let snap = world.resource::<SnapResult>();
+    if !matches!(
+        snap.kind,
+        crate::plugins::snap::SnapKind::None | crate::plugins::snap::SnapKind::Grid
+    ) {
+        if let Some(target) = snap.position.filter(|point| point.is_finite()) {
+            return Some((target - pp.drag_plane.origin).dot(pp.normal));
+        }
+    }
     let initial_cursor = state.initial_cursor?;
     let current_cursor = current_transform_cursor(world)?;
     let world_distance = (current_cursor - initial_cursor).dot(pp.normal);

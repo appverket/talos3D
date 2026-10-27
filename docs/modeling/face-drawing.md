@@ -17,6 +17,13 @@ through the supporting body opens a hole. A line without area cannot extrude.
 The transform measurement is a relative distance in metres: `0.4` pulls 400 mm,
 then `-0.4` returns to flush. The agent depth command sets absolute depth.
 
+For depth alignment, start **G**, hover a fixed edge until the **On edge**
+inference appears, then click to confirm. The moving face aligns to the target
+point along its normal, even when the edge is laterally offset. A supporting
+face boundary returns the region flush; a farther target can set a through-cut.
+The moving region is excluded as its own snap target, while the unchanged
+support body remains available. Numeric entry overrides inference.
+
 The support object keeps its authored type and identity. A circle is four
 analytic quarter arcs in a `face_profile_feature`, with parent identity, anchor,
 orientation and signed depth. Its mesh is a disposable evaluation cache. Native

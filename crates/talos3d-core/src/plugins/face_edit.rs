@@ -911,6 +911,12 @@ fn handle_push_pull_shortcut(world: &mut World) {
         entity_mut.insert(Selected);
     }
 
+    // The selected-face record can survive earlier push/pull edits. Re-resolve
+    // its current plane once at gesture start instead of retaining the old cap.
+    let face_centroid = face_vertices_for_entity(world, pp_entity, selected_face.face_id)
+        .filter(|vertices| !vertices.is_empty())
+        .map(|vertices| vertices.iter().copied().sum::<Vec3>() / vertices.len() as f32)
+        .unwrap_or(selected_face.centroid);
     let face_normal = selected_face.normal;
     let face_id = selected_face.face_id;
     let generated_face_ref = selected_face.generated_face_ref.clone();
@@ -926,20 +932,14 @@ fn handle_push_pull_shortcut(world: &mut World) {
     let camera_transform = active_camera
         .as_ref()
         .map(|(_, transform)| transform.compute_transform());
-    let drag_plane =
-        build_push_pull_drag_plane(camera_transform, selected_face.centroid, face_normal);
+    let drag_plane = build_push_pull_drag_plane(camera_transform, face_centroid, face_normal);
     let initial_cursor_screen = active_camera
         .as_ref()
         .and_then(|_| viewport_cursor_position(world));
     let screen_normal = active_camera
         .as_ref()
         .and_then(|(camera, camera_transform)| {
-            projected_face_normal_screen(
-                camera,
-                camera_transform,
-                selected_face.centroid,
-                face_normal,
-            )
+            projected_face_normal_screen(camera, camera_transform, face_centroid, face_normal)
         });
 
     // Install the drag plane as the active DrawingPlane
