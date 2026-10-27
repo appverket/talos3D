@@ -2,8 +2,8 @@
 
 - agent: codex
 - created: 2026-10-27
-- branch: codex/bevy020-inference-ux
-- task-id: TALOS-prssrtbo
+- branch: codex/native-model-performance
+- task-id: TALOS-yytglont
 - target base: main
-- summary: Repair and verify viewport inference after Bevy 0.20
-- status: awaiting-merge
+- summary: Disable default bloom and investigate native large-model performance after Bevy 0.20.
+- status: active
