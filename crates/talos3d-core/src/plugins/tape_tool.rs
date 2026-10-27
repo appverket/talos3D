@@ -259,19 +259,38 @@ fn cleanup_tape_tool(mut commands: Commands) {
     commands.remove_resource::<TapePreview>();
 }
 
+// Preserve semantic edge identity: starting on an edge measures perpendicular
+// to that edge, while exact points and directional guides start a free tape.
+fn shared_tape_hover(world: &World) -> Option<TapeHoverTarget> {
+    let snap = world.get_resource::<SnapResult>()?;
+    let point = snap.target?;
+    let engine = world.get_resource::<crate::plugins::inference::InferenceEngine>()?;
+    if snap.kind == crate::plugins::snap::SnapKind::OnEdge {
+        let (start, end) = engine.hovered_edge()?;
+        let edge_direction = (end - start).try_normalize()?;
+        let surface_normal = world.get_resource::<CursorWorldPos>()?.surface_normal?;
+        let perpendicular_direction = surface_normal.cross(edge_direction).try_normalize()?;
+        return Some(TapeHoverTarget::Edge(TapeEdgeTarget {
+            start,
+            end,
+            point,
+            constraint: TapeEdgeConstraint {
+                edge_start: start,
+                edge_end: end,
+                edge_direction,
+                surface_normal,
+                perpendicular_direction,
+            },
+        }));
+    }
+    Some(TapeHoverTarget::Control(TapeControlTarget {
+        point,
+        label: engine.best_label()?.to_string(),
+    }))
+}
+
 fn update_tape_preview(world: &mut World) {
-    let shared = world
-        .get_resource::<crate::plugins::inference::InferenceEngine>()
-        .and_then(|engine| engine.best_label())
-        .map(str::to_string)
-        .zip(
-            world
-                .get_resource::<SnapResult>()
-                .and_then(|snap| snap.target),
-        );
-    let hover = shared
-        .map(|(label, point)| TapeHoverTarget::Control(TapeControlTarget { point, label }))
-        .or_else(|| resolve_tape_hover(world));
+    let hover = shared_tape_hover(world).or_else(|| resolve_tape_hover(world));
     let raw_point = current_tape_cursor_point(world);
     let cursor_point = hover.as_ref().map(TapeHoverTarget::point).or(raw_point);
     let axis_lock = world
@@ -1058,6 +1077,64 @@ mod tests {
         identity::ElementId,
         modeling::group::{GroupEditContext, GroupFrame, GroupMembers},
     };
+
+    #[test]
+    fn shared_inferred_edge_keeps_perpendicular_tape_preview() {
+        use crate::plugins::{
+            cursor::DrawingPlane,
+            inference::{update_inference, InferenceEngine},
+            input_ownership::InputOwnership,
+            modeling::primitives::BoxPrimitive,
+            snap::SnapKind,
+            transform::TransformState,
+        };
+        let mut world = World::new();
+        world.init_resource::<InferenceEngine>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<InputOwnership>();
+        world.init_resource::<TransformState>();
+        world.init_resource::<DrawingPlane>();
+        world.init_resource::<TapePreview>();
+        world.init_resource::<TapeToolState>();
+        world.insert_resource(State::new(ActiveTool::Tape));
+        let point = Vec3::new(0.3, 1.0, 1.0);
+        world.insert_resource(CursorWorldPos {
+            raw: Some(point),
+            snapped: Some(point),
+            surface_point: Some(point),
+            surface_normal: Some(Vec3::Y),
+            hovered_element_id: Some(ElementId(9)),
+            ..default()
+        });
+        world.insert_resource(SnapResult {
+            raw_position: Some(point),
+            position: Some(point),
+            kind: SnapKind::Grid,
+            ..default()
+        });
+        world.spawn((
+            ElementId(9),
+            BoxPrimitive {
+                centre: Vec3::ZERO,
+                half_extents: Vec3::ONE,
+            },
+        ));
+        update_inference(&mut world);
+        assert_eq!(world.resource::<SnapResult>().kind, SnapKind::OnEdge);
+        update_tape_preview(&mut world);
+        let start = tape_start_from_hover(world.resource::<TapePreview>().hover.as_ref().unwrap());
+        assert!(matches!(start.mode, TapeStartMode::Edge(_)));
+        world.resource_mut::<TapeToolState>().start = Some(start);
+        *world.resource_mut::<SnapResult>() = SnapResult {
+            position: Some(point + Vec3::Z),
+            ..default()
+        };
+        world.resource_mut::<CursorWorldPos>().snapped = Some(point + Vec3::Z);
+        update_tape_preview(&mut world);
+        let measurement = world.resource::<TapePreview>().measurement.unwrap();
+        assert_eq!(measurement.mode, TapeMeasureMode::PerpendicularToEdge);
+        assert!((measurement.distance() - 1.0).abs() < 1e-5);
+    }
 
     fn tape_group_visibility_world() -> (World, ElementId, ElementId, ElementId, ElementId) {
         let mut world = World::new();

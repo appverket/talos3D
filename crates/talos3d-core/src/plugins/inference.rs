@@ -134,6 +134,9 @@ impl InferenceEngine {
             .or(self.candidates.first())
             .and_then(|c| c.snap_position)
     }
+    pub(crate) fn hovered_edge(&self) -> Option<(Vec3, Vec3)> {
+        self.pending.as_ref()?.0.edge
+    }
     pub fn best_label(&self) -> Option<&str> {
         (!self.feedback.is_empty()).then_some(self.feedback.as_str())
     }
