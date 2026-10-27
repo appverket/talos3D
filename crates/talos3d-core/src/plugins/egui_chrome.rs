@@ -7,7 +7,76 @@ use bevy_egui::{
     EguiPrimaryContextPass, PrimaryEguiContext,
 };
 
-pub use bevy_egui::input::EguiWantsInput;
+/// Aggregate input claims for Talos3D's manually driven primary egui pass.
+/// egui 0.36's raw capture query assumes `Context::run_ui` published its root
+/// rectangle. Our split pass owns that rectangle, so normalize at this bridge.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct EguiWantsInput {
+    is_pointer_over_area: bool,
+    wants_pointer_input: bool,
+    is_using_pointer: bool,
+    wants_keyboard_input: bool,
+    is_popup_open: bool,
+}
+
+impl EguiWantsInput {
+    pub fn is_pointer_over_area(&self) -> bool {
+        self.is_pointer_over_area
+    }
+    pub fn wants_pointer_input(&self) -> bool {
+        self.wants_pointer_input
+    }
+    pub fn is_using_pointer(&self) -> bool {
+        self.is_using_pointer
+    }
+    pub fn wants_keyboard_input(&self) -> bool {
+        self.wants_keyboard_input
+    }
+    pub fn is_popup_open(&self) -> bool {
+        self.is_popup_open
+    }
+    pub fn wants_any_pointer_input(&self) -> bool {
+        self.is_pointer_over_area
+            || self.wants_pointer_input
+            || self.is_using_pointer
+            || self.is_popup_open
+    }
+    pub fn wants_any_keyboard_input(&self) -> bool {
+        self.wants_keyboard_input || self.is_popup_open
+    }
+    pub fn wants_any_input(&self) -> bool {
+        self.wants_any_pointer_input() || self.wants_any_keyboard_input()
+    }
+}
+
+fn primary_egui_input_claims(ctx: &egui::Context) -> EguiWantsInput {
+    let is_pointer_over_area = ctx
+        .input(|input| input.pointer.interact_pos())
+        .and_then(|pos| ctx.layer_id_at(pos).map(|layer| (pos, layer)))
+        .is_some_and(|(pos, layer)| {
+            layer.order != egui::Order::Background || !remaining_available_rect(ctx).contains(pos)
+        });
+    let is_using_pointer = ctx.egui_is_using_pointer();
+    EguiWantsInput {
+        is_pointer_over_area,
+        wants_pointer_input: is_using_pointer
+            || (is_pointer_over_area && !ctx.input(|input| input.pointer.any_down())),
+        is_using_pointer,
+        wants_keyboard_input: ctx.egui_wants_keyboard_input(),
+        is_popup_open: ctx.any_popup_open(),
+    }
+}
+
+fn sync_primary_egui_input_claims(
+    mut contexts: Query<&mut EguiContext, With<PrimaryEguiContext>>,
+    mut claims: ResMut<EguiWantsInput>,
+) {
+    *claims = contexts
+        .iter_mut()
+        .next()
+        .map(|mut context| primary_egui_input_claims(context.get_mut()))
+        .unwrap_or_default();
+}
 
 use crate::capability_registry::{CapabilityActivation, CapabilityRegistry};
 use crate::curation::{NominationQueue, SourceRegistry};
@@ -547,6 +616,7 @@ impl Plugin for EguiChromePlugin {
         .init_resource::<ApplicationBuildInfo>()
         .init_resource::<MenuBarState>()
         .init_resource::<ChromeInputCapture>()
+        .init_resource::<EguiWantsInput>()
         .init_resource::<ToolbarDragState>()
         .init_resource::<ViewportContextMenu>()
         .init_resource::<MaterialsWindowState>()
@@ -564,6 +634,7 @@ impl Plugin for EguiChromePlugin {
             (
                 sync_definition_selection_context,
                 draw_egui_chrome.in_set(EguiChromeSystems),
+                sync_primary_egui_input_claims.in_set(EguiChromeSystems),
             )
                 .chain(),
         );
@@ -799,7 +870,10 @@ fn restrict_egui_context_map_to_primary_window(
 
 #[cfg(test)]
 mod primary_egui_pass_tests {
-    use super::{install_primary_egui_pass, remaining_available_rect, show_top_level_panel};
+    use super::{
+        install_primary_egui_pass, primary_egui_input_claims, remaining_available_rect,
+        show_top_level_panel,
+    };
     use bevy::prelude::*;
     use bevy_egui::{
         egui, EguiContext, EguiContextSettings, EguiFullOutput, EguiPrimaryContextPass,
@@ -859,6 +933,78 @@ mod primary_egui_pass_tests {
         let drawn = app.world().resource::<DrawnPasses>();
         assert!(drawn.update.is_some());
         assert_eq!(drawn.update, drawn.primary_context_pass);
+    }
+
+    #[test]
+    fn manual_panels_leave_viewport_pointer_available_and_capture_chrome() {
+        let ctx = egui::Context::default();
+        for pointer in [
+            egui::pos2(400.0, 300.0),
+            egui::pos2(40.0, 15.0),
+            egui::pos2(50.0, 200.0),
+            egui::pos2(400.0, 300.0),
+        ] {
+            // Two frames exercise both current-pass and prior-pass hit testing.
+            for _ in 0..2 {
+                ctx.begin_pass(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events: vec![egui::Event::PointerMoved(pointer)],
+                    ..Default::default()
+                });
+                show_top_level_panel(egui::Panel::top("probe_top").exact_size(30.0), &ctx, |_| {});
+                show_top_level_panel(
+                    egui::Panel::left("probe_left").exact_size(100.0),
+                    &ctx,
+                    |_| {},
+                );
+                let viewport = remaining_available_rect(&ctx).contains(pointer);
+                assert_eq!(
+                    primary_egui_input_claims(&ctx).is_pointer_over_area(),
+                    !viewport,
+                    "pointer {pointer:?}"
+                );
+                assert_eq!(
+                    primary_egui_input_claims(&ctx).wants_pointer_input(),
+                    !viewport,
+                    "pointer {pointer:?}"
+                );
+                ctx.end_pass().drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn floating_window_keeps_pointer_capture_inside_remaining_viewport() {
+        let ctx = egui::Context::default();
+        for frame in 0..3 {
+            ctx.begin_pass(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events: vec![egui::Event::PointerMoved(egui::pos2(350.0, 250.0))],
+                ..Default::default()
+            });
+            show_top_level_panel(egui::Panel::top("probe_top").exact_size(30.0), &ctx, |_| {});
+            egui::Window::new("Floating properties")
+                .fixed_pos(egui::pos2(300.0, 200.0))
+                .fixed_size(egui::vec2(200.0, 150.0))
+                .show(&ctx, |ui| {
+                    ui.button("Action").clicked();
+                });
+            assert!(remaining_available_rect(&ctx).contains(egui::pos2(350.0, 250.0)));
+            // egui registers a newly created floating area on its first pass.
+            if frame > 0 {
+                assert!(
+                    primary_egui_input_claims(&ctx).wants_any_pointer_input(),
+                    "frame {frame}"
+                );
+            }
+            ctx.end_pass().drop_without_applying_deltas();
+        }
     }
 
     #[test]
@@ -2456,8 +2602,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             .map(|pos| egui::pos2(pos.x, pos.y))
         });
     if let Some(pos) = secondary_clicked_in_viewport {
-        let chrome_owns_pointer =
-            ctx.is_pointer_over_egui() || ctx.egui_wants_pointer_input() || ctx.any_popup_open();
+        let chrome_owns_pointer = primary_egui_input_claims(&ctx).wants_any_pointer_input();
         if available.contains(pos)
             && !chrome_owns_pointer
             && !crate::plugins::camera::orbit_modifier_pressed(&data.keys)
@@ -2489,10 +2634,8 @@ fn publish_chrome_input_capture(
     capture: &mut ChromeInputCapture,
     viewport_context_menu_open: bool,
 ) {
-    let pointer_claimed = ctx.is_pointer_over_egui()
-        || ctx.egui_wants_pointer_input()
-        || ctx.any_popup_open()
-        || viewport_context_menu_open;
+    let pointer_claimed =
+        primary_egui_input_claims(ctx).wants_any_pointer_input() || viewport_context_menu_open;
     let keyboard_claimed =
         ctx.egui_wants_keyboard_input() || ctx.any_popup_open() || viewport_context_menu_open;
     let claim = ctx.input(|input| ChromeInputFrameClaim {

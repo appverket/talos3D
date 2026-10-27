@@ -6,4 +6,4 @@
 - task-id: TALOS-prssrtbo
 - target base: main
 - summary: Repair and verify viewport inference after Bevy 0.20
-- status: active
+- status: awaiting-merge

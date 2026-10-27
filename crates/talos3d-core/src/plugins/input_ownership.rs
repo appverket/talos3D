@@ -19,7 +19,7 @@ use super::{
 /// GUI integration contract for new systems:
 ///
 /// - Egui/chrome producers publish aggregate claims only. Use
-///   `bevy_egui::EguiWantsInput` for ordinary egui state and
+///   `egui_chrome::EguiWantsInput` for normalized primary egui state and
 ///   `ChromeInputCapture` only for Talos3D chrome semantics that egui does not
 ///   model, such as the viewport context menu and same-drag release ownership.
 /// - Viewport consumers must read `InputOwnership`, not rescan egui layers,

@@ -271,3 +271,24 @@ Reviewed and deliberately not adopted:
 Both `vendor/bevy_pbr` repairs (directional-light priority and StandardMaterial
 clip planes) are still absent upstream in 0.20.0 and were rebased; see
 `vendor/bevy_pbr/PATCHES.md`.
+
+### Manual-pass pointer capture after 0.20
+
+The native inference check exposed a gap in egui 0.36's manual-pass API:
+`Context::is_pointer_over_egui` assumes `run_ui` published its root available
+rectangle; `begin_pass`/`end_pass` callers cannot publish that private field.
+Without it, the background layer claims the entire viewport.
+
+`egui_chrome::EguiWantsInput` normalizes the primary context once per chrome
+pass, using the existing remaining panel rectangle for background hit testing
+and egui's own layer, drag, popup and keyboard state. Viewport consumers still
+read aggregate resources; they do not scan widgets or reinterpret geometry.
+Chrome's same-drag release ownership stays in `ChromeInputCapture`.
+
+The desired upstream repair is a public way for manual-pass callers to publish
+root available/minimum rectangles (or a root-Ui lifecycle that publishes them).
+A vendor patch is not carried because this repository deliberately disallows
+egui vendoring. Once upstream exposes the manual-root contract, publish the
+rectangle there and retire this adapter in favor of the upstream input resource.
+Regression coverage must keep viewport input free, chrome and floating windows
+interactive, and gesture release ownership intact.
