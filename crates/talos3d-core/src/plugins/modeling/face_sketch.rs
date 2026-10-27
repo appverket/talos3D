@@ -587,6 +587,51 @@ mod tests {
         assert_eq!(base[0].vertices, original[0].vertices);
     }
     #[test]
+    fn rectangle_after_circular_cut_preserves_closed_shell() {
+        let host = BoxPrimitive {
+            centre: Vec3::new(13.058414, 1.1, -8.157),
+            half_extents: Vec3::new(0.115, 1.1, 0.9338),
+        };
+        let base =
+            bsp_csg::triangles_from_editable_mesh(&host.to_editable_mesh(Quat::IDENTITY).unwrap());
+        let rotation = Quat::from_xyzw(0.5, 0.5, 0.5, -0.5);
+        let mut circle = make_face_profile_feature_snapshot(
+            ElementId(2),
+            ElementId(1),
+            shape_profile(
+                FaceSketchShape::Circle,
+                Vec2::ZERO,
+                Vec2::new(0.2348976, 0.),
+            )
+            .unwrap(),
+            Vec3::new(13.173414, 1.1434436, -8.098276),
+            rotation,
+            None,
+        );
+        circle.feature.depth = -0.3;
+        let cut = triangles(&evaluate_profile_on_triangles(
+            &base,
+            &circle.feature,
+            rotation,
+        ));
+        let mut rectangle = make_face_profile_feature_snapshot(
+            ElementId(3),
+            ElementId(2),
+            Profile2d::rectangle(0.3, 0.3),
+            Vec3::new(13.173414, 0.35, -8.740799),
+            rotation,
+            None,
+        );
+        rectangle.feature.depth = 0.1;
+        let result = triangles(&evaluate_profile_on_triangles(
+            &cut,
+            &rectangle.feature,
+            rotation,
+        ));
+        assert!(super::super::semantics::body_summary_from_triangles(&result).is_closed_manifold);
+    }
+
+    #[test]
     fn circle_rejects_zero_radius_and_rectangle_is_plane_local() {
         assert!(shape_profile(FaceSketchShape::Circle, Vec2::ZERO, Vec2::ZERO).is_err());
         let profile = shape_profile(

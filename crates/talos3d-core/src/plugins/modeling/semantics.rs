@@ -295,7 +295,9 @@ pub fn body_summary_from_triangles(triangles: &[CsgTriangle]) -> EvaluatedBodySu
 }
 
 fn quantize_vec3(value: Vec3) -> [u32; 3] {
-    const SCALE: f32 = 10_000.0;
+    // Match the 10 micrometre welding tolerance of evaluated face features.
+    // Coarser bins merge distinct short edges after successive Boolean edits.
+    const SCALE: f32 = 100_000.0;
     [
         (value.x * SCALE).round().to_bits(),
         (value.y * SCALE).round().to_bits(),
