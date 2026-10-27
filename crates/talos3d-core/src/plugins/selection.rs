@@ -1927,6 +1927,7 @@ struct BoxSelectContext<'w, 's> {
     // space than the projected entities, so nothing ever matched.
     camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<OrbitCamera>>,
     box_state: ResMut<'w, BoxSelectState>,
+    pointer_events: Res<'w, SelectionPointerEvents>,
     selected_query: Query<'w, 's, Entity, With<Selected>>,
     ownership: Res<'w, InputOwnership>,
     handle_state: Res<'w, HandleInteractionState>,
@@ -1954,7 +1955,20 @@ fn handle_box_select(mut cx: BoxSelectContext) {
     let Ok(window) = cx.window_query.single() else {
         return;
     };
-    let Some(cursor_position) = cursor_window_position(window) else {
+    // Native motion and both button edges can arrive in a single frame. Use
+    // captured event positions instead of the final folded button/cursor state.
+    let press_position = cx
+        .pointer_events
+        .edges
+        .iter()
+        .find_map(|(state, p)| (*state == ButtonState::Pressed).then_some(*p));
+    let release_position = cx
+        .pointer_events
+        .edges
+        .iter()
+        .rev()
+        .find_map(|(state, p)| (*state == ButtonState::Released).then_some(*p));
+    let Some(cursor_position) = release_position.or_else(|| cursor_window_position(window)) else {
         if cx.mouse_buttons.just_released(MouseButton::Left) {
             clear_pending_box_select_click(&mut cx.box_state);
         }
@@ -1972,12 +1986,14 @@ fn handle_box_select(mut cx: BoxSelectContext) {
     // while the button is still held and movement crosses the drag threshold.
     // Release before that is a plain click; a later press must never complete a
     // stale rectangle from an earlier interaction.
-    if left_just_pressed && !cx.handle_state.captures_pointer() {
-        start_box_select_candidate(&mut cx.box_state, cursor_position);
+    if (left_just_pressed || press_position.is_some()) && !cx.handle_state.captures_pointer() {
+        start_box_select_candidate(&mut cx.box_state, press_position.unwrap_or(cursor_position));
     }
 
     if let Some(start) = cx.box_state.drag_start {
-        if left_pressed && (cursor_position - start).length() > BOX_SELECT_DRAG_THRESHOLD {
+        if (left_pressed || left_just_released)
+            && (cursor_position - start).length() > BOX_SELECT_DRAG_THRESHOLD
+        {
             cx.box_state.is_dragging = true;
         }
 
@@ -3121,6 +3137,18 @@ mod tests {
         assert!(app.world().get::<Selected>(feature).is_none());
         let group = find_entity_by_element_id_readonly(app.world(), ElementId(30)).unwrap();
         assert!(app.world().get::<Selected>(group).is_some());
+    }
+
+    #[test]
+    fn native_drag_coalesced_into_one_frame_still_selects_the_region() {
+        let (mut app, window, feature) = marquee_app(false);
+        queue_native_cursor(&mut app, window, Vec2::new(330., 230.));
+        queue_native_edges(&mut app, window, &[ButtonState::Pressed]);
+        queue_native_cursor(&mut app, window, Vec2::new(470., 370.));
+        queue_native_edges(&mut app, window, &[ButtonState::Released]);
+        app.update();
+        assert!(app.world().resource::<BoxSelectState>().just_completed);
+        assert!(app.world().get::<Selected>(feature).is_some());
     }
 
     #[test]
