@@ -311,14 +311,30 @@ fn selected_node_ids(world: &mut World, nodes: &[OutlinerNode]) -> Vec<u64> {
     {
         selected.insert(entity);
     }
-    nodes
+    let mut ids: Vec<u64> = nodes
         .iter()
         .filter(|node| {
             node.select_entity
                 .is_some_and(|entity| selected.contains(&entity))
         })
         .map(|node| node.node_id)
-        .collect()
+        .collect();
+    // A double-click can enter an aggregate and remove its Selected marker in
+    // one frame. Reveal that edit location even when no child has been picked.
+    if ids.is_empty() {
+        let active = world
+            .get_resource::<OccurrenceEditContext>()
+            .and_then(|context| context.stack.last().copied())
+            .or_else(|| {
+                world
+                    .get_resource::<GroupEditContext>()
+                    .and_then(|context| context.current_group())
+            });
+        if let Some(id) = active.filter(|id| nodes.iter().any(|node| node.node_id == id.0)) {
+            ids.push(id.0);
+        }
+    }
+    ids
 }
 
 /// When the selection changes, expand whatever is collapsed above it and queue a
@@ -1480,6 +1496,47 @@ mod tests {
         assert_eq!(
             node_for(&tree, 3).unwrap().edit_context,
             OutlinerEditContext::Outside
+        );
+    }
+
+    #[test]
+    fn entering_a_collapsed_aggregate_reveals_it_without_a_selected_child() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            GroupMembers {
+                name: "Outer".into(),
+                member_ids: vec![ElementId(2)],
+                frame: default(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            ElementId(2),
+            GroupMembers {
+                name: "Inner".into(),
+                member_ids: vec![],
+                frame: default(),
+                linked_model: None,
+            },
+        ));
+        build(&mut world);
+        world
+            .resource_mut::<OutlinerWindowState>()
+            .collapsed
+            .insert(1);
+        let mut context = GroupEditContext::default();
+        context.enter(ElementId(1));
+        context.enter(ElementId(2));
+        world.insert_resource(context);
+        build_outliner_tree(&mut world);
+        assert!(!world
+            .resource::<OutlinerWindowState>()
+            .collapsed
+            .contains(&1));
+        assert_eq!(
+            world.resource::<OutlinerWindowState>().pending_reveal,
+            Some(2)
         );
     }
 
