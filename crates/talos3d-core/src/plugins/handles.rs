@@ -122,7 +122,15 @@ fn configure_handle_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
 }
 
 pub fn arm_move_handles(world: &mut World) -> Result<(), String> {
-    if !world.resource::<InputOwnership>().is_idle() {
+    // This is an explicit command (including toolbar/menu clicks), not a raw
+    // viewport gesture. UI capture may initiate it, but must not hide an
+    // existing modal operation underneath the pointer's chrome ownership.
+    if world.resource::<InputOwnership>().is_modal()
+        || !world.resource::<TransformState>().is_idle()
+        || world
+            .resource::<HandleInteractionState>()
+            .property_drag_active()
+    {
         return Err("Input is owned by another system".to_string());
     }
 
@@ -1483,6 +1491,34 @@ mod tests {
             material_assignment: None,
         }
         .into()
+    }
+
+    #[test]
+    fn move_command_from_chrome_arms_handles_without_releasing_ui_capture() {
+        let mut world = World::new();
+        world.insert_resource(InputOwnership::UiCapture);
+        world.init_resource::<TransformState>();
+        world.init_resource::<HandleInteractionState>();
+        world.init_resource::<HandleContext>();
+        world.init_resource::<StatusBarData>();
+        world.spawn(Selected);
+
+        arm_move_handles(&mut world).expect("toolbar Move command");
+        assert_eq!(
+            world.resource::<HandleContext>().display_mode,
+            HandleDisplayMode::Move
+        );
+        assert!(world.resource::<InputOwnership>().is_ui_capture());
+
+        // Chrome owns the pointer while a transform remains active beneath it.
+        // A toolbar command must not clear/re-arm that ongoing gesture.
+        world.resource_mut::<TransformState>().mode = TransformMode::Moving;
+        assert!(arm_move_handles(&mut world).is_err());
+        world.resource_mut::<TransformState>().mode = TransformMode::Idle;
+        world.insert_resource(InputOwnership::Modal(
+            crate::plugins::input_ownership::ModalKind::HandleDrag,
+        ));
+        assert!(arm_move_handles(&mut world).is_err());
     }
 
     #[test]
