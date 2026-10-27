@@ -730,7 +730,7 @@ impl AuthoredEntityFactory for ClipPlaneFactory {
         draw_plane_gizmo(node, gizmos, color);
     }
 
-    fn hit_test(&self, _world: &World, _ray: bevy::math::Ray3d) -> Option<HitCandidate> {
+    fn hit_test(&self, _world: &World, _ray: bevy::shape::Ray3d) -> Option<HitCandidate> {
         // Infinite planes are not directly clickable via ray-cast in MVP.
         None
     }

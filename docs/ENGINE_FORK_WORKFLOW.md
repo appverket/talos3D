@@ -211,3 +211,63 @@ engine facilities but do not replace Talos3D authored models, Definition
 libraries, command history, or persistence. They may be adopted for
 presentation-only composition where they do not introduce a second semantic
 lifecycle.
+
+## Bevy 0.20 Audit
+
+The 2026-10-08 release moves direct Bevy requirements to `0.20.0`, `bevy_egui`
+to `0.43.1` and egui to `0.36`. Bevy 0.20 requires Rust 1.97.1. Every
+composition that builds `talos3d-core` (Core, Architecture, Naval, Apps and the
+standalone infra catalog/project clients) carries the `vendor/bevy_pbr` patch,
+because Core sets the StandardMaterial clip-plane fields that only the patched
+crate defines.
+
+Engine changes that alter Talos3D usage:
+
+- **egui pass ownership.** `bevy_egui` 0.42 removed single-pass mode. Talos3D
+  chrome, tools and overlays still draw from ordered `Update` systems, because
+  input ownership, viewport insets and export capture read the chrome result in
+  the same frame. `EguiChromePlugin` marks the primary context
+  `run_manually` (the documented bevy_egui contract), begins its pass in
+  `EguiPreUpdateSet::BeginPass` and ends it in `EguiPostUpdateSet::EndPass`.
+  Systems registered in `EguiPrimaryContextPass` run inside that same pass just
+  before it ends; previously they never ran in Talos3D apps. Moving the whole
+  chrome into `EguiPrimaryContextPass` is a separate scheduling change, not an
+  engine-upgrade side effect.
+- **Top-level panels.** egui 0.36 removed Context-level panels and
+  `Context::available_rect`. `egui_chrome::show_top_level_panel` and
+  `remaining_available_rect` carry the unclaimed root area for the current pass
+  so panels drawn by separate systems still stack. Use them for every
+  top-level `egui::Panel`.
+- **WESL shaders.** Bevy's shaders and its preprocessor moved to WESL. Custom
+  material shaders use `import` and `constants::MATERIAL_BIND_GROUP`, are
+  `.wesl` files and load with `Shader::from_wesl`. Shader errors appear only at
+  runtime: a successful compile is not evidence that a shader still loads.
+- **Screen-space transmission is opt-in.** `RenderPipelinePlugin` adds
+  `ScreenSpaceTransmission` to every `Camera3d`, so glass and other
+  transmissive materials render the same in the viewport, previews and exports.
+- **Tonemapping `None` became a full bypass.** Talos3D's "None" setting (and the
+  Drafting preset) maps to Bevy `Tonemapping::Linear`, which keeps the identity
+  curve with exposure and dither as before.
+- **Shapes and rays moved.** Primitives, bounding volumes and `Ray3d` live in
+  `bevy::shape`. glam's `Mat4` camera constructors are deprecated; use
+  `bevy::math::proj` for projections and `Transform::looking_at` for views.
+- **egui texture deltas.** Dropping an unapplied `FullOutput` is a debug
+  assertion in egui 0.36. Tests that run an egui pass themselves must call
+  `drop_without_applying_deltas`.
+
+Reviewed and deliberately not adopted:
+
+- The upstream `PanOrbitCamera` does not replace Talos3D's orbit camera, whose
+  presets, projection modes and MCP control are part of the authored view
+  state. Reconsider it only if it can be driven by the same camera state.
+- `RenderDebugOverlayPlugin` (F1/F2) ships only with `render_dev_tools`, which
+  Talos3D does not enable, so it cannot claim Talos3D shortcuts.
+- `chain_weak` now orders some built-in schedules. Talos3D orders its systems
+  against its own sets rather than Bevy internals; add explicit `.after(...)`
+  if a future system depends on internal engine order.
+- BSN `Ready`, Feathers widgets and retained UI rendering do not replace egui
+  chrome or the authored model lifecycle.
+
+Both `vendor/bevy_pbr` repairs (directional-light priority and StandardMaterial
+clip planes) are still absent upstream in 0.20.0 and were rebased; see
+`vendor/bevy_pbr/PATCHES.md`.

@@ -479,7 +479,7 @@ impl AuthoredEntityFactory for MirrorFactory {
         }
     }
 
-    fn hit_test(&self, world: &World, ray: bevy::math::Ray3d) -> Option<HitCandidate> {
+    fn hit_test(&self, world: &World, ray: bevy::shape::Ray3d) -> Option<HitCandidate> {
         use crate::plugins::modeling::primitive_trait::ray_aabb_intersection;
 
         let mut best: Option<HitCandidate> = None;

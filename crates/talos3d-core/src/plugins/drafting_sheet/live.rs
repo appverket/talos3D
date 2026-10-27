@@ -817,7 +817,9 @@ mod tests {
         let mut cache = DrawingSceneLiveCache::default();
         let entity = Entity::from_bits(7);
         let first = Handle::<Mesh>::default().id();
-        let second = AssetId::<Mesh>::invalid();
+        let second = AssetId::<Mesh>::Uuid {
+            uuid: bevy::asset::uuid::Uuid::from_u128(7),
+        };
 
         assert!(cache.observe_mesh_handle(entity, first));
         assert!(!cache.observe_mesh_handle(entity, first));

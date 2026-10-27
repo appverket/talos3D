@@ -16,7 +16,7 @@ webgl2 = ["bevy/webgl2"]
 
 [dependencies]
 web-time = "1.1"
-bevy = { version = "0.19.1", default-features = false, features = [
+bevy = { version = "0.20.0", default-features = false, features = [
     "bevy_anti_alias",
     "bevy_asset",
     "bevy_core_pipeline",
@@ -45,7 +45,7 @@ serde = { version = "1", features = ["derive"] }
 # exactly; the default fast parser can shift a persisted f64 by a final bit.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 rfd = "0.17"
-bevy_egui = "0.40.1"
+bevy_egui = "0.43.1"
 rmcp = { version = "=1.3.0", default-features = false, features = ["server", "macros"], optional = true }
 serde_yaml = { version = "0.9", optional = true }
 tokio = { version = "1", features = ["sync", "macros", "time"], optional = true }

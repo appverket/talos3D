@@ -1,4 +1,4 @@
-use bevy::{math::Ray3d, prelude::*};
+use bevy::{prelude::*, shape::Ray3d};
 
 use crate::{
     authored_entity::{

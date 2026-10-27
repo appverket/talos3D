@@ -276,12 +276,17 @@ pub fn sheet_view_from_active_camera(
 // ─── View-proj construction ──────────────────────────────────────────────
 
 fn build_view_proj(view: &SheetView) -> (Mat4, Vec3, Vec3) {
-    let view_matrix = Mat4::look_at_rh(view.eye, view.target, view.up);
+    // The view matrix is the inverse of the eye's world transform.
+    let view_matrix = Transform::from_translation(view.eye)
+        .looking_at(view.target, view.up)
+        .to_matrix()
+        .inverse();
     let half_h = view.ortho_height_m * 0.5;
     let half_w = half_h * view.aspect;
     // A comfortable orthographic depth range — large enough that geometry
     // at a normal architectural scene distance fits without clipping.
-    let proj = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, -10_000.0, 10_000.0);
+    let proj =
+        bevy::math::proj::orthographic(-half_w, half_w, -half_h, half_h, -10_000.0, 10_000.0);
     let camera_forward = (view.target - view.eye)
         .try_normalize()
         .unwrap_or(Vec3::NEG_Z);

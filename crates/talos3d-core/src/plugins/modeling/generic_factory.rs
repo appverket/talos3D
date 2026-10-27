@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use bevy::{ecs::world::EntityRef, math::Ray3d, prelude::*};
+use bevy::{ecs::world::EntityRef, prelude::*, shape::Ray3d};
 use serde_json::Value;
 
 use crate::{

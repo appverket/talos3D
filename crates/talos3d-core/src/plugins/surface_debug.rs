@@ -216,9 +216,7 @@ mod tests {
         let mesh = app
             .world_mut()
             .resource_mut::<Assets<Mesh>>()
-            .add(Mesh::from(bevy::math::primitives::Cuboid::new(
-                1.0, 1.0, 1.0,
-            )));
+            .add(Mesh::from(bevy::shape::Cuboid::new(1.0, 1.0, 1.0)));
         let mut entity = app
             .world_mut()
             .spawn((Mesh3d(mesh), MeshMaterial3d(handle)));

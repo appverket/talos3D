@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
 use bevy_egui::{
-    egui, input::WindowToEguiContextMap, EguiContexts, EguiGlobalSettings, EguiPlugin,
-    EguiPreUpdateSet, PrimaryEguiContext,
+    egui, input::WindowToEguiContextMap, EguiContext, EguiContextSettings, EguiContexts,
+    EguiFullOutput, EguiGlobalSettings, EguiInput, EguiPlugin, EguiPostUpdateSet, EguiPreUpdateSet,
+    EguiPrimaryContextPass, PrimaryEguiContext,
 };
 
 pub use bevy_egui::input::EguiWantsInput;
@@ -98,18 +99,55 @@ const CAMERA_VERTICAL_SLIDER_HEIGHT: f32 = 120.0;
 #[cfg(feature = "perf-stats")]
 const PERF_OVERLAY_WIDTH: f32 = 260.0;
 
-fn remaining_available_rect(ctx: &egui::Context) -> egui::Rect {
-    #[allow(deprecated)]
-    ctx.available_rect()
+/// Root area not yet claimed by a top-level panel in the current egui pass.
+///
+/// egui 0.36 shows top-level panels inside a root `Ui` instead of on the
+/// `Context`. Talos3D draws panels from several systems in one pass, so the
+/// remaining root area is carried in pass-scoped context data.
+#[derive(Clone, Copy)]
+struct TopLevelPanelArea {
+    pass_nr: u64,
+    remaining: egui::Rect,
+    shown: u64,
 }
 
-fn show_top_level_panel<R>(
+fn top_level_panel_area_id() -> egui::Id {
+    egui::Id::new("talos3d_top_level_panel_area")
+}
+
+fn top_level_panel_area(ctx: &egui::Context) -> TopLevelPanelArea {
+    let pass_nr = ctx.cumulative_pass_nr();
+    ctx.data(|data| data.get_temp::<TopLevelPanelArea>(top_level_panel_area_id()))
+        .filter(|area| area.pass_nr == pass_nr)
+        .unwrap_or(TopLevelPanelArea {
+            pass_nr,
+            remaining: ctx.content_rect(),
+            shown: 0,
+        })
+}
+
+pub(crate) fn remaining_available_rect(ctx: &egui::Context) -> egui::Rect {
+    top_level_panel_area(ctx).remaining
+}
+
+pub(crate) fn show_top_level_panel<R>(
     panel: egui::Panel,
     ctx: &egui::Context,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
-    #[allow(deprecated)]
-    panel.show(ctx, add_contents)
+    let mut area = top_level_panel_area(ctx);
+    let mut root = egui::Ui::new(
+        ctx.clone(),
+        top_level_panel_area_id().with(area.shown),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(area.remaining),
+    );
+    let response = panel.show(&mut root, add_contents);
+    area.remaining = root.available_rect_before_wrap();
+    area.shown += 1;
+    ctx.data_mut(|data| data.insert_temp(top_level_panel_area_id(), area));
+    response
 }
 
 struct MenuSubmenuSpec {
@@ -492,8 +530,6 @@ pub struct EguiChromeSystems;
 impl Plugin for EguiChromePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(EguiPlugin {
-            #[allow(deprecated)]
-            enable_multipass_for_primary_context: false,
             // Disable bindless textures — not yet supported on Metal
             // (see https://github.com/bevyengine/bevy/issues/18149)
             bindless_mode_array_size: None,
@@ -531,6 +567,7 @@ impl Plugin for EguiChromePlugin {
             )
                 .chain(),
         );
+        install_primary_egui_pass(app);
     }
 }
 
@@ -657,6 +694,77 @@ impl ChromeInputCapture {
     }
 }
 
+/// The primary egui context whose pass Talos3D has begun and not yet ended.
+///
+/// bevy_egui 0.42 removed single-pass mode. Talos3D chrome, tools and overlays
+/// draw from ordered `Update` systems (input ownership and viewport insets
+/// read their results in the same frame), so the primary pass is driven
+/// manually around `Update`, as `EguiContextSettings::run_manually` documents.
+/// `EguiPrimaryContextPass` systems still run inside that pass.
+#[derive(Resource, Default)]
+struct PrimaryEguiPass(Option<Entity>);
+
+fn install_primary_egui_pass(app: &mut App) {
+    app.init_resource::<PrimaryEguiPass>()
+        .add_observer(run_primary_egui_context_manually)
+        .add_systems(
+            PreUpdate,
+            begin_primary_egui_pass.in_set(EguiPreUpdateSet::BeginPass),
+        )
+        .add_systems(
+            PostUpdate,
+            end_primary_egui_pass.in_set(EguiPostUpdateSet::EndPass),
+        );
+}
+
+fn run_primary_egui_context_manually(
+    added: On<Add<PrimaryEguiContext>>,
+    mut settings: Query<&mut EguiContextSettings>,
+) {
+    if let Ok(mut settings) = settings.get_mut(added.entity) {
+        settings.run_manually = true;
+    }
+}
+
+fn begin_primary_egui_pass(
+    mut pass: ResMut<PrimaryEguiPass>,
+    mut contexts: Query<(Entity, &mut EguiContext, &mut EguiInput), With<PrimaryEguiContext>>,
+) {
+    pass.0 = contexts
+        .iter_mut()
+        .next()
+        .map(|(entity, mut context, mut input)| {
+            context.get_mut().begin_pass(input.take());
+            entity
+        });
+}
+
+fn end_primary_egui_pass(world: &mut World) {
+    let Some(entity) = world.resource_mut::<PrimaryEguiPass>().0.take() else {
+        return;
+    };
+    // A context despawned mid-frame has no pass left to end.
+    if !world
+        .get_entity(entity)
+        .is_ok_and(|entity| entity.contains::<EguiContext>())
+    {
+        return;
+    }
+    let _ = world.try_run_schedule(EguiPrimaryContextPass);
+    let Ok(mut entity) = world.get_entity_mut(entity) else {
+        return;
+    };
+    let Some(output) = entity
+        .get_mut::<EguiContext>()
+        .map(|mut context| context.get_mut().end_pass())
+    else {
+        return;
+    };
+    if let Some(mut full_output) = entity.get_mut::<EguiFullOutput>() {
+        **full_output = Some(output);
+    }
+}
+
 fn restrict_egui_context_map_to_primary_window(
     mut map: ResMut<WindowToEguiContextMap>,
     primary_window: Query<Entity, With<PrimaryWindow>>,
@@ -687,6 +795,100 @@ fn restrict_egui_context_map_to_primary_window(
         .entry(window_entity)
         .or_default()
         .insert(context_entity);
+}
+
+#[cfg(test)]
+mod primary_egui_pass_tests {
+    use super::{install_primary_egui_pass, remaining_available_rect, show_top_level_panel};
+    use bevy::prelude::*;
+    use bevy_egui::{
+        egui, EguiContext, EguiContextSettings, EguiFullOutput, EguiPrimaryContextPass,
+        PrimaryEguiContext,
+    };
+
+    #[derive(Resource, Default)]
+    struct DrawnPasses {
+        update: Option<u64>,
+        primary_context_pass: Option<u64>,
+    }
+
+    fn draw_label(ctx: &egui::Context) -> u64 {
+        egui::Area::new(egui::Id::new("pass_probe")).show(ctx, |ui| ui.label("probe"));
+        ctx.cumulative_pass_nr()
+    }
+
+    #[test]
+    fn update_and_primary_context_pass_systems_draw_into_one_pass() {
+        let mut app = App::new();
+        app.init_resource::<DrawnPasses>();
+        install_primary_egui_pass(&mut app);
+        app.add_systems(
+            Update,
+            |mut contexts: Query<&mut EguiContext, With<PrimaryEguiContext>>,
+             mut drawn: ResMut<DrawnPasses>| {
+                drawn.update = contexts
+                    .single_mut()
+                    .ok()
+                    .map(|mut c| draw_label(c.get_mut()));
+            },
+        )
+        .add_systems(
+            EguiPrimaryContextPass,
+            |mut contexts: Query<&mut EguiContext, With<PrimaryEguiContext>>,
+             mut drawn: ResMut<DrawnPasses>| {
+                drawn.primary_context_pass = contexts
+                    .single_mut()
+                    .ok()
+                    .map(|mut c| draw_label(c.get_mut()));
+            },
+        );
+        let context = app.world_mut().spawn(PrimaryEguiContext).id();
+
+        app.update();
+
+        let mut entity = app.world_mut().entity_mut(context);
+        assert!(entity.get::<EguiContextSettings>().unwrap().run_manually);
+        let output = entity
+            .get_mut::<EguiFullOutput>()
+            .unwrap()
+            .0
+            .take()
+            .unwrap();
+        assert!(!output.shapes.is_empty());
+        output.drop_without_applying_deltas();
+        let drawn = app.world().resource::<DrawnPasses>();
+        assert!(drawn.update.is_some());
+        assert_eq!(drawn.update, drawn.primary_context_pass);
+    }
+
+    #[test]
+    fn top_level_panels_from_separate_calls_share_one_pass_area() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+
+        ctx.begin_pass(input());
+        assert_eq!(remaining_available_rect(&ctx), screen);
+        show_top_level_panel(egui::Panel::top("probe_top").exact_size(30.0), &ctx, |_| {});
+        let after_top = remaining_available_rect(&ctx);
+        show_top_level_panel(
+            egui::Panel::left("probe_left").exact_size(100.0),
+            &ctx,
+            |_| {},
+        );
+        let after_left = remaining_available_rect(&ctx);
+        ctx.end_pass().drop_without_applying_deltas();
+
+        assert!(after_top.min.y >= 30.0 && after_top.max == screen.max);
+        assert!(after_left.min.x >= 100.0 && after_left.min.y == after_top.min.y);
+
+        ctx.begin_pass(input());
+        assert_eq!(remaining_available_rect(&ctx), screen);
+        ctx.end_pass().drop_without_applying_deltas();
+    }
 }
 
 #[cfg(test)]
@@ -1803,8 +2005,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         data.menu_bar_state.visible = !data.menu_bar_state.visible;
     }
     if data.keys.just_pressed(KeyCode::Escape) {
-        #[allow(deprecated)]
-        ctx.memory_mut(|memory| memory.close_all_popups());
+        egui::Popup::close_all(&ctx);
     }
 
     if data.viewport_export_state.ui_suppressed() {

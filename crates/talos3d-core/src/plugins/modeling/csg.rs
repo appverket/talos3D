@@ -344,7 +344,7 @@ impl AuthoredEntityFactory for CsgFactory {
         }
     }
 
-    fn hit_test(&self, world: &World, ray: bevy::math::Ray3d) -> Option<HitCandidate> {
+    fn hit_test(&self, world: &World, ray: bevy::shape::Ray3d) -> Option<HitCandidate> {
         use crate::plugins::modeling::primitive_trait::ray_aabb_intersection;
 
         let mut best: Option<HitCandidate> = None;
@@ -514,7 +514,7 @@ fn try_get_primitive_triangles<P: crate::plugins::modeling::primitive_trait::Pri
 ///
 /// Uses `+X` as the ray direction (arbitrary; any fixed direction works).
 pub fn point_inside_mesh(point: Vec3, triangles: &[bsp_csg::CsgTriangle]) -> bool {
-    let ray = bevy::math::Ray3d {
+    let ray = bevy::shape::Ray3d {
         origin: point,
         direction: bevy::math::Dir3::X,
     };
@@ -598,7 +598,7 @@ fn get_entity_triangles(world: &World, entity: Entity) -> Option<Vec<bsp_csg::Cs
 pub fn csg_face_hit_test(
     world: &World,
     csg_entity: Entity,
-    ray: bevy::math::Ray3d,
+    ray: bevy::shape::Ray3d,
 ) -> Option<FaceHitCandidate> {
     let csg_node = world.get::<CsgNode>(csg_entity)?.clone();
 
@@ -661,7 +661,7 @@ pub fn csg_face_hit_test(
 fn face_hit_test_entity(
     world: &World,
     entity: Entity,
-    ray: bevy::math::Ray3d,
+    ray: bevy::shape::Ray3d,
 ) -> Option<FaceHitCandidate> {
     // If this operand is itself a CsgNode, recurse
     if world.get::<CsgNode>(entity).is_some() {
@@ -736,7 +736,7 @@ fn face_hit_test_primitive<P: crate::plugins::modeling::primitive_trait::Primiti
     entity: Entity,
     element_id: ElementId,
     rotation: bevy::math::Quat,
-    ray: bevy::math::Ray3d,
+    ray: bevy::shape::Ray3d,
 ) -> Option<FaceHitCandidate> {
     let primitive = entity_ref.get::<P>()?;
     let mesh = primitive.to_editable_mesh(rotation)?;

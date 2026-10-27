@@ -23,6 +23,7 @@ use crate::{
             draw_definition_3d_preview, DefinitionPreviewScene, DefinitionPreviewTarget,
             PendingPreviewClick,
         },
+        egui_chrome::{remaining_available_rect, show_top_level_panel},
         history::{apply_pending_history_commands, EditorCommand, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         materials::{material_assignment_from_value, MaterialRegistry},
@@ -78,20 +79,6 @@ const DEFINITION_EDITOR_WINDOW: AssetBrowserWindow = AssetBrowserWindow {
     max_size: INSPECTOR_WINDOW_MAX_SIZE,
     constrain_with_margin: true,
 };
-
-fn remaining_available_rect(ctx: &egui::Context) -> egui::Rect {
-    #[allow(deprecated)]
-    ctx.available_rect()
-}
-
-fn show_top_level_panel<R>(
-    panel: egui::Panel,
-    ctx: &egui::Context,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> egui::InnerResponse<R> {
-    #[allow(deprecated)]
-    panel.show(ctx, add_contents)
-}
 
 #[derive(Debug, Clone)]
 struct DefinitionListEntry {
@@ -4780,7 +4767,7 @@ fn draw_material_chip(
     current: Option<&str>,
     material_registry: &MaterialRegistry,
     pending: &mut PendingCommandInvocations,
-    salt: impl std::hash::Hash,
+    salt: impl egui::AsIdSalt,
     on_assign: impl FnOnce(&str),
 ) {
     // Resolve display name and swatch color for the current binding.

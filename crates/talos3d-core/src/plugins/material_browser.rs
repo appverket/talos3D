@@ -758,7 +758,7 @@ fn draw_material_editor(
     });
 }
 
-fn form_grid(id: impl std::hash::Hash, ui: &mut egui::Ui, add_rows: impl FnOnce(&mut egui::Ui)) {
+fn form_grid(id: impl egui::AsIdSalt, ui: &mut egui::Ui, add_rows: impl FnOnce(&mut egui::Ui)) {
     egui::Grid::new(id)
         .num_columns(2)
         .spacing([12.0, 6.0])

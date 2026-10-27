@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use crate::plugins::authoring_guidance::AuthoringGuidance;
 use crate::plugins::document_properties::DocumentProperties;
+use crate::plugins::egui_chrome::show_top_level_panel;
 
 pub const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 440.0;
 pub const ASSISTANT_PANEL_MIN_WIDTH: f32 = 360.0;
@@ -1310,15 +1311,6 @@ fn assistant_panel_id() -> egui::Id {
     egui::Id::new(ASSISTANT_PANEL_ID)
 }
 
-fn show_top_level_panel<R>(
-    panel: egui::Panel,
-    ctx: &egui::Context,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> egui::InnerResponse<R> {
-    #[allow(deprecated)]
-    panel.show(ctx, add_contents)
-}
-
 fn assistant_panel_rect(ctx: &egui::Context, width: f32) -> egui::Rect {
     let content_rect = ctx.content_rect();
     let clamped_width = clamp_assistant_panel_width(width, assistant_panel_max_width(ctx));
@@ -1336,14 +1328,14 @@ fn seed_assistant_panel_state(ctx: &egui::Context, width: f32) {
     ctx.data_mut(|data| {
         data.insert_persisted(
             assistant_panel_id(),
-            egui::containers::panel::PanelState { rect },
+            egui::containers::panel::PanelState { outer_rect: rect },
         );
     });
 }
 
 fn assistant_panel_width_from_ctx(ctx: &egui::Context) -> Option<f32> {
     egui::containers::panel::PanelState::load(ctx, assistant_panel_id())
-        .map(|panel_state| panel_state.rect.width())
+        .map(|panel_state| panel_state.outer_rect.width())
 }
 
 pub(crate) fn clamp_assistant_panel_width(width: f32, max_width: f32) -> f32 {
@@ -2546,7 +2538,7 @@ mod tests {
                 data.insert_persisted(
                     assistant_panel_id(),
                     egui::containers::panel::PanelState {
-                        rect: egui::Rect::from_min_max(
+                        outer_rect: egui::Rect::from_min_max(
                             egui::pos2(0.0, 0.0),
                             egui::pos2(4000.0, 1200.0),
                         ),

@@ -11,7 +11,7 @@ use bevy::{
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     pbr::{
         ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel,
-        ScreenSpaceReflections,
+        ScreenSpaceReflections, ScreenSpaceTransmission,
     },
     post_process::bloom::Bloom,
     prelude::*,
@@ -93,7 +93,9 @@ impl RenderTonemapping {
 
     fn to_bevy(self) -> Tonemapping {
         match self {
-            Self::None => Tonemapping::None,
+            // Bevy 0.20 `None` bypasses exposure and dither; `Linear` keeps
+            // the identity tone curve Talos3D has always meant by "None".
+            Self::None => Tonemapping::Linear,
             Self::Reinhard => Tonemapping::Reinhard,
             Self::ReinhardLuminance => Tonemapping::ReinhardLuminance,
             Self::AcesFitted => Tonemapping::AcesFitted,
@@ -310,6 +312,7 @@ pub struct RenderPipelinePlugin;
 impl Plugin for RenderPipelinePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(DrawingSceneLivePlugin)
+            .add_observer(enable_camera_transmission)
             .init_resource::<RenderSettings>()
             .init_resource::<RenderPipelineSetupState>()
             .init_resource::<SurfaceMaterialOverrideCache>()
@@ -1241,6 +1244,21 @@ fn ssao_quality(level: u8) -> ScreenSpaceAmbientOcclusionQualityLevel {
     }
 }
 
+/// Bevy 0.20 made screen-space transmission opt-in. Every Talos3D 3D view
+/// (viewport, previews, exports) renders the same materials, so transmissive
+/// materials such as glass keep transmitting in all of them.
+fn enable_camera_transmission(
+    added: On<Add<Camera3d>>,
+    cameras: Query<(), Without<ScreenSpaceTransmission>>,
+    mut commands: Commands,
+) {
+    if cameras.contains(added.entity) {
+        commands
+            .entity(added.entity)
+            .insert(ScreenSpaceTransmission::default());
+    }
+}
+
 fn sync_camera_msaa(commands: &mut Commands, camera: Entity, settings: &RenderSettings) {
     commands
         .entity(camera)
@@ -1260,6 +1278,7 @@ fn sync_ssao_component(commands: &mut Commands, camera: Entity, settings: &Rende
         commands.entity(camera).insert(ScreenSpaceAmbientOcclusion {
             quality_level: ssao_quality(settings.ambient_occlusion_quality),
             constant_object_thickness: settings.ssao_constant_object_thickness,
+            ..default()
         });
     } else {
         commands
@@ -1716,6 +1735,26 @@ impl FeatureEdgeState {
 
 #[cfg(test)]
 mod tests {
+    use super::{enable_camera_transmission, RenderTonemapping};
+    use bevy::{core_pipeline::tonemapping::Tonemapping, pbr::ScreenSpaceTransmission};
+
+    #[test]
+    fn every_3d_camera_keeps_screen_space_transmission() {
+        let mut app = App::new();
+        app.add_observer(enable_camera_transmission);
+        let camera = app.world_mut().spawn(Camera3d::default()).id();
+        app.update();
+        assert!(app
+            .world()
+            .entity(camera)
+            .contains::<ScreenSpaceTransmission>());
+    }
+
+    #[test]
+    fn none_tonemapping_keeps_identity_curve_with_exposure() {
+        assert_eq!(RenderTonemapping::None.to_bevy(), Tonemapping::Linear);
+    }
+
     use super::*;
     use crate::plugins::ui::StatusBarData;
     use bevy::render::render_resource::Face;
@@ -1878,7 +1917,7 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().get::<Tonemapping>(main),
-            Some(&Tonemapping::None)
+            Some(&Tonemapping::Linear)
         );
         assert_eq!(
             app.world().get::<Tonemapping>(preview),

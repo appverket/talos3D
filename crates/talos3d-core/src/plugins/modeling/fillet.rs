@@ -300,7 +300,7 @@ impl AuthoredEntityFactory for FilletFactory {
             .unwrap_or(0)
     }
 
-    fn hit_test(&self, world: &World, ray: bevy::math::Ray3d) -> Option<HitCandidate> {
+    fn hit_test(&self, world: &World, ray: bevy::shape::Ray3d) -> Option<HitCandidate> {
         evaluated_fillet_hit_test(world, ray, false)
     }
 
@@ -543,7 +543,7 @@ impl AuthoredEntityFactory for ChamferFactory {
             .unwrap_or(0)
     }
 
-    fn hit_test(&self, world: &World, ray: bevy::math::Ray3d) -> Option<HitCandidate> {
+    fn hit_test(&self, world: &World, ray: bevy::shape::Ray3d) -> Option<HitCandidate> {
         evaluated_fillet_hit_test(world, ray, true)
     }
 
@@ -578,7 +578,7 @@ fn restore_source_visibility(world: &mut World, owner: ElementId, source_id: Ele
 
 fn evaluated_fillet_hit_test(
     world: &World,
-    ray: bevy::math::Ray3d,
+    ray: bevy::shape::Ray3d,
     chamfer_only: bool,
 ) -> Option<HitCandidate> {
     let mut best: Option<HitCandidate> = None;

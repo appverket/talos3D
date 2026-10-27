@@ -8,7 +8,7 @@ use crate::plugins::{
     transform::ActiveTransformPreview,
 };
 use bevy::render::{
-    renderer::render_system, view::ExtractedWindows, Extract, ExtractSchedule, Render, RenderApp,
+    renderer::render_system, view::ExtractedWindow, Extract, ExtractSchedule, Render, RenderApp,
     RenderSystems,
 };
 use std::sync::{Arc, Mutex};
@@ -60,7 +60,6 @@ struct RenderStamp {
     sequence: u64,
     index: usize,
     started: Instant,
-    primary: Entity,
     had_surface: bool,
 }
 
@@ -198,13 +197,12 @@ fn record_main_frame(world: &mut World) {
         trace.samples.push(UxDragTraceSample { index, ..sample });
         index
     };
-    if let Ok(primary) = primary_window_entity(world) {
+    if primary_window_entity(world).is_ok() {
         world.resource_mut::<TraceState>().frame = Some(RenderStamp {
             shared,
             sequence: stamp.sequence,
             index,
             started: stamp.started,
-            primary,
             had_surface: false,
         });
     }
@@ -216,19 +214,21 @@ fn extract_trace(mut commands: Commands, state: Extract<Res<TraceState>>) {
         commands.remove_resource::<RenderStamp>();
     }
 }
-fn before_present(stamp: Option<ResMut<RenderStamp>>, windows: Res<ExtractedWindows>) {
+// Bevy 0.20 extracts windows as render-world entities carrying `PrimaryWindow`.
+type PrimaryExtractedWindow<'w, 's> = Query<'w, 's, &'static ExtractedWindow, With<PrimaryWindow>>;
+fn before_present(stamp: Option<ResMut<RenderStamp>>, window: PrimaryExtractedWindow) {
     if let Some(mut stamp) = stamp {
-        stamp.had_surface = windows
-            .get(&stamp.primary)
-            .is_some_and(|w| w.swap_chain_texture.is_some());
+        stamp.had_surface = window
+            .single()
+            .is_ok_and(|w| w.swap_chain_texture.is_some());
     }
 }
-fn after_present(stamp: Option<Res<RenderStamp>>, windows: Res<ExtractedWindows>) {
+fn after_present(stamp: Option<Res<RenderStamp>>, window: PrimaryExtractedWindow) {
     let Some(stamp) = stamp else { return };
     if !stamp.had_surface
-        || !windows
-            .get(&stamp.primary)
-            .is_some_and(|w| w.swap_chain_texture.is_none())
+        || !window
+            .single()
+            .is_ok_and(|w| w.swap_chain_texture.is_none())
     {
         return;
     }

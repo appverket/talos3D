@@ -1400,7 +1400,7 @@ mod tests {
         let registry = CommandRegistry::default();
         // Prime the window geometry before requesting the scroll, as in the app.
         for _ in 0..2 {
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -1418,7 +1418,8 @@ mod tests {
                         &registry,
                     );
                 },
-            );
+            )
+            .drop_without_applying_deltas();
         }
         state.pending_reveal = Some(target_id);
         let output = ctx.run_ui(
@@ -1450,6 +1451,7 @@ mod tests {
             "the actual egui draw must include the revealed row inside the scroll clip"
         );
         assert_eq!(state.pending_reveal, None);
+        output.drop_without_applying_deltas();
     }
 
     /// The entered group is a different fact from the selection, and the tree is

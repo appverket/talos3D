@@ -143,8 +143,8 @@ impl Plugin for SubobjectOverlayPlugin {
         load_internal_asset!(
             app,
             FACE_STIPPLE_SHADER,
-            "face_stipple.wgsl",
-            Shader::from_wgsl
+            "face_stipple.wesl",
+            Shader::from_wesl
         );
         app.add_plugins(MaterialPlugin::<FaceStippleMaterial>::default())
             .init_resource::<FaceStippleOverlay>()

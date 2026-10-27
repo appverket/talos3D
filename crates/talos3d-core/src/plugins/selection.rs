@@ -2856,7 +2856,11 @@ mod tests {
         app.world_mut().spawn((
             Camera {
                 computed: ComputedCameraValues {
-                    clip_from_view: Mat4::perspective_infinite_reverse_rh(1.0, 800.0 / 600.0, 0.1),
+                    clip_from_view: bevy::math::proj::perspective_infinite_reverse(
+                        1.0,
+                        800.0 / 600.0,
+                        0.1,
+                    ),
                     target_info: Some(RenderTargetInfo {
                         physical_size: UVec2::new(800, 600),
                         scale_factor: 1.0,
