@@ -468,6 +468,14 @@ pub fn dispatch_command_shortcuts(
         if chord.primary != primary || chord.shift != shift || chord.alt != alt {
             continue;
         }
+        if face_editing
+            && matches!(chord.key, KeyCode::KeyL | KeyCode::KeyC | KeyCode::KeyP)
+            && !primary
+            && !alt
+            && !shift
+        {
+            continue;
+        }
         let allowed = match binding.context {
             ShortcutContext::Global | ShortcutContext::Tool => true,
             ShortcutContext::Select => in_select && transform_idle && !face_editing,

@@ -11,7 +11,6 @@ use crate::{
     },
     plugins::{
         camera::OrbitCamera,
-        commands::CreateEntityCommand,
         cursor::{
             cursor_window_position as mapped_cursor_window_position, CursorWorldPos, DrawingPlane,
         },
@@ -22,7 +21,7 @@ use crate::{
             selected_edges, EdgePickSystems, EdgePressCapture, EdgeSelectionPlugin, HoveredEdge,
         },
         egui_chrome::{ChromeInputCapture, EguiWantsInput},
-        identity::{ElementId, ElementIdAllocator},
+        identity::ElementId,
         input_ownership::{InputOwnership, InputPhase},
         modeling::{
             csg::{csg_face_hit_test, CsgNode, CsgParentMap},
@@ -31,11 +30,9 @@ use crate::{
             },
             profile::{Profile2d, ProfileExtrusion, ProfileRevolve, ProfileSegment, ProfileSweep},
             profile_feature::{
-                face_profile_feature_hit_test, feature_face_vertices,
-                make_face_profile_feature_snapshot, EvaluatedFeature, FaceProfileFeature,
+                face_profile_feature_hit_test, feature_face_vertices, FaceProfileFeature,
             },
             semantics::semantic_push_pull_affordance,
-            snapshots::ray_triangle_intersection,
         },
         scene_ray,
         selection::Selected,
@@ -64,6 +61,12 @@ pub struct FaceEditPlugin;
 
 impl Plugin for FaceEditPlugin {
     fn build(&self, app: &mut App) {
+        crate::plugins::modeling::face_sketch::register(app);
+        app.add_systems(
+            Update,
+            crate::plugins::modeling::face_sketch::select_pending_region
+                .after(crate::plugins::history::HistorySet::Apply),
+        );
         // Subobject picking and subobject highlighting are the two halves of
         // face editing that the mode cannot be used without, so they compose
         // here rather than needing separate registration in every app binary.
@@ -366,6 +369,10 @@ fn handle_face_click(
     // This makes small-face selection reliable: a few pixels of drift between
     // press and release don't lose the target.
     if mouse_buttons.just_released(MouseButton::Left) {
+        // Drawing commits on press; its release must not clear the new region.
+        if press_capture.cursor_screen.is_none() {
+            return;
+        }
         let release_cursor = window_query.single().ok().and_then(Window::cursor_position);
         let moved_too_far = match (press_capture.cursor_screen, release_cursor) {
             (Some(press), Some(release)) => press.distance(release) > FACE_CLICK_SLOP_PX,
@@ -426,7 +433,7 @@ fn face_click_count(tracker: &mut FaceClickTracker, hit: &FaceHitCandidate, now:
     tracker.click_count
 }
 
-fn face_selection_refs(
+pub(crate) fn face_selection_refs(
     element_id: ElementId,
     hit: &FaceHitCandidate,
     click_count: u8,
@@ -639,91 +646,16 @@ fn draw_face_outline(gizmos: &mut Gizmos, verts: &[Vec3], color: Color) {
     }
 }
 
-fn active_camera_position(world: &World) -> Option<Vec3> {
-    let mut camera_query = world
-        .try_query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()
-        .unwrap();
-    camera_query
-        .iter(world)
-        .find(|(camera, _)| camera.is_active)
-        .or_else(|| camera_query.iter(world).next())
-        .map(|(_, transform)| transform.translation())
-}
-
-fn feature_edge_is_visible(
-    world: &World,
-    entity: Entity,
-    edge_midpoint: Vec3,
-    camera_position: Vec3,
-) -> bool {
-    let Ok(entity_ref) = world.get_entity(entity) else {
-        return true;
-    };
-    let Some(evaluated) = entity_ref.get::<EvaluatedFeature>() else {
-        return true;
-    };
-
-    let to_midpoint = edge_midpoint - camera_position;
-    let max_distance = to_midpoint.length();
-    if max_distance <= 1e-5 {
-        return true;
-    }
-    let Ok(direction) = Dir3::new(to_midpoint) else {
-        return true;
-    };
-    let ray = Ray3d::new(camera_position, direction);
-    let visibility_epsilon = 0.01f32.max(max_distance * 1e-3);
-    let mut nearest_hit = f32::INFINITY;
-
-    for tri in evaluated.indices.chunks(3) {
-        if tri.len() != 3 {
-            continue;
-        }
-        let v0 = evaluated.vertices[tri[0] as usize];
-        let v1 = evaluated.vertices[tri[1] as usize];
-        let v2 = evaluated.vertices[tri[2] as usize];
-        if let Some(distance) = ray_triangle_intersection(ray, v0, v1, v2) {
-            nearest_hit = nearest_hit.min(distance);
-        }
-    }
-
-    nearest_hit >= max_distance - visibility_epsilon
-}
-
+// Bevy's batched, depth-tested line pass handles visibility. Do not cast a
+// ray per outline edge every frame (a circular sketch has many sampled edges).
 fn draw_face_outline_for_entity(
-    world: &World,
+    _world: &World,
     gizmos: &mut Gizmos,
-    entity: Entity,
+    _entity: Entity,
     verts: &[Vec3],
     color: Color,
 ) {
-    let n = verts.len();
-    if n < 2 {
-        return;
-    }
-
-    let camera_position = world
-        .get_entity(entity)
-        .ok()
-        .is_some_and(|entity_ref| entity_ref.get::<FaceProfileFeature>().is_some())
-        .then(|| active_camera_position(world))
-        .flatten();
-
-    if camera_position.is_none() {
-        draw_face_outline(gizmos, verts, color);
-        return;
-    }
-
-    for i in 0..n {
-        let start = verts[i];
-        let end = verts[(i + 1) % n];
-        let visible = camera_position.is_none_or(|camera_position| {
-            feature_edge_is_visible(world, entity, (start + end) * 0.5, camera_position)
-        });
-        if visible {
-            gizmos.line(start, end, color);
-        }
-    }
+    draw_face_outline(gizmos, verts, color);
 }
 
 /// Get the world-space vertex positions of a face for any entity type.
@@ -736,6 +668,10 @@ pub(crate) fn face_vertices_for_entity(
 
     if entity_ref.get::<FaceProfileFeature>().is_some() {
         return feature_face_vertices(world, entity, face_id);
+    }
+
+    if let Some(body) = entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>() {
+        return body.boundary(face_id);
     }
 
     // EditableMesh path
@@ -1111,7 +1047,22 @@ fn update_face_edit_status(world: &mut World) {
     parts.push("Face editing".to_string());
     if drawing.active {
         let n = drawing.points.len();
-        let mode = if drawing.arc_mode { "arc" } else { "line" };
+        let shape = world.resource::<crate::plugins::modeling::face_sketch::FaceSketchShape>();
+        let mode = match shape {
+            crate::plugins::modeling::face_sketch::FaceSketchShape::Circle => {
+                "circle: centre, radius"
+            }
+            crate::plugins::modeling::face_sketch::FaceSketchShape::Rectangle => {
+                "rectangle: opposite corners"
+            }
+            _ => {
+                if drawing.arc_mode {
+                    "arc"
+                } else {
+                    "line"
+                }
+            }
+        };
         if n >= 3 {
             parts.push(format!(
                 "Drawing ({mode}) {n} pts · close near start · A: arc · Enter to finish · Esc to cancel"
@@ -1140,7 +1091,7 @@ fn update_face_edit_status(world: &mut World) {
         let push_pull_hint =
             selected_face_push_pull_affordance(world, &face_context, selected).status_hint();
         parts.push(format!(
-            "Face {label} selected · {push_pull_hint} · L: draw on face"
+            "Face {label} selected · {push_pull_hint} · L: lines · C: circle · P: rectangle on face"
         ));
     } else if let Some(hit) = &hovered.hit {
         let label = hit
@@ -1178,6 +1129,7 @@ fn handle_face_drawing_start(
     keys: Res<ButtonInput<KeyCode>>,
     face_context: Res<FaceEditContext>,
     mut drawing: ResMut<FaceDrawingContext>,
+    mut shape: ResMut<crate::plugins::modeling::face_sketch::FaceSketchShape>,
     ownership: Res<InputOwnership>,
 ) {
     if !ownership.is_idle() || drawing.active {
@@ -1186,7 +1138,18 @@ fn handle_face_drawing_start(
     if face_context.selected_face.is_none() {
         return;
     }
-    if keys.just_pressed(KeyCode::KeyL) {
+    if keys.just_pressed(KeyCode::KeyL)
+        || keys.just_pressed(KeyCode::KeyC)
+        || keys.just_pressed(KeyCode::KeyP)
+    {
+        use crate::plugins::modeling::face_sketch::FaceSketchShape;
+        *shape = if keys.just_pressed(KeyCode::KeyC) {
+            FaceSketchShape::Circle
+        } else if keys.just_pressed(KeyCode::KeyP) {
+            FaceSketchShape::Rectangle
+        } else {
+            FaceSketchShape::Polyline
+        };
         drawing.active = true;
         drawing.points.clear();
         drawing.segment_is_arc.clear();
@@ -1226,7 +1189,7 @@ fn handle_face_drawing_input(world: &mut World) {
         && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
     {
         let n = world.resource::<FaceDrawingContext>().points.len();
-        if n >= 3 {
+        if n >= 2 {
             finish_face_drawing(world);
         }
         return;
@@ -1239,7 +1202,34 @@ fn handle_face_drawing_input(world: &mut World) {
             return;
         };
 
+        // A snap elsewhere in space must never release the support-plane constraint.
+        let plane = world.resource::<DrawingPlane>().clone();
+        let cursor_pos = plane.to_world(plane.project_to_2d(cursor_pos));
+        let shape = *world.resource::<crate::plugins::modeling::face_sketch::FaceSketchShape>();
         let points_clone = world.resource::<FaceDrawingContext>().points.clone();
+        if shape != crate::plugins::modeling::face_sketch::FaceSketchShape::Polyline {
+            if let Some(first) = points_clone.first() {
+                let result = crate::plugins::modeling::face_sketch::shape_profile(
+                    shape,
+                    plane.project_to_2d(*first),
+                    plane.project_to_2d(cursor_pos),
+                )
+                .and_then(|profile| {
+                    crate::plugins::modeling::face_sketch::commit_profile(world, profile)
+                });
+                if let Err(error) = result {
+                    world
+                        .resource_mut::<StatusBarData>()
+                        .set_feedback(error, 3.);
+                }
+            } else {
+                world
+                    .resource_mut::<FaceDrawingContext>()
+                    .points
+                    .push(cursor_pos);
+            }
+            return;
+        }
 
         // Check for close
         if points_clone.len() >= 3 {
@@ -1283,7 +1273,7 @@ fn finish_face_drawing(world: &mut World) {
     let drawing = world.resource::<FaceDrawingContext>().clone();
     let plane = world.resource::<DrawingPlane>().clone();
 
-    if drawing.points.len() < 3 {
+    if drawing.points.len() < 2 {
         let mut d = world.resource_mut::<FaceDrawingContext>();
         d.active = false;
         d.points.clear();
@@ -1315,75 +1305,10 @@ fn finish_face_drawing(world: &mut World) {
         .collect();
     let profile = Profile2d { start, segments };
 
-    let (pmin, pmax) = profile.bounds_2d();
-    let mid_2d = (pmin + pmax) * 0.5;
-    let centred_profile = profile.translated(-mid_2d);
-
-    let centre_on_plane = plane.to_world(mid_2d);
-
-    // Build rotation from the drawing plane's tangent frame.
-    // local X → plane.tangent, local Y → plane.normal, local Z → plane.bitangent
-    let rotation = Quat::from_mat3(&Mat3::from_cols(
-        plane.tangent,
-        plane.normal,
-        plane.bitangent,
-    ));
-
-    let element_id = world.resource::<ElementIdAllocator>().next_id();
-    let parent_element_id = world
-        .resource::<FaceEditContext>()
-        .element_id
-        .unwrap_or(ElementId(0));
-    let support_face = world
-        .resource::<FaceEditContext>()
-        .selected_face
-        .as_ref()
-        .and_then(|face| face.generated_face_ref.clone());
-    let snapshot = make_face_profile_feature_snapshot(
-        element_id,
-        parent_element_id,
-        centred_profile,
-        centre_on_plane,
-        rotation,
-        support_face,
-    );
-
-    // Apply immediately so the entity exists this frame
-    use crate::authored_entity::AuthoredEntity;
-    snapshot.apply_to(world);
-
-    // Find the new entity
-    let new_entity = {
-        let mut q = world.query::<(Entity, &ElementId)>();
-        q.iter(world)
-            .find(|(_, eid)| **eid == element_id)
-            .map(|(e, _)| e)
-    };
-
-    // Send command for undo/redo
-    world
-        .resource_mut::<Messages<CreateEntityCommand>>()
-        .write(CreateEntityCommand {
-            snapshot: snapshot.into(),
-        });
-
-    // Clear drawing state
-    {
-        let mut d = world.resource_mut::<FaceDrawingContext>();
-        d.active = false;
-        d.points.clear();
-        d.segment_is_arc.clear();
-        d.arc_mode = false;
-    }
-
-    // Exit face-edit on the original entity, select the new one.
-    // The user can double-click it to face-edit and push/pull to adjust height.
-    world.resource_mut::<FaceEditContext>().exit();
-
-    if let Some(new_entity) = new_entity {
-        if let Ok(mut e) = world.get_entity_mut(new_entity) {
-            e.insert(Selected);
-        }
+    if let Err(error) = crate::plugins::modeling::face_sketch::commit_profile(world, profile) {
+        world
+            .resource_mut::<StatusBarData>()
+            .set_feedback(error, 3.);
     }
 }
 
@@ -1391,6 +1316,8 @@ fn finish_face_drawing(world: &mut World) {
 fn draw_face_drawing_preview(
     drawing: Res<FaceDrawingContext>,
     cursor_world_pos: Res<CursorWorldPos>,
+    shape: Res<crate::plugins::modeling::face_sketch::FaceSketchShape>,
+    plane: Res<DrawingPlane>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     mut gizmos: Gizmos,
 ) {
@@ -1406,6 +1333,27 @@ fn draw_face_drawing_preview(
     let Some(cursor_pos) = cursor_world_pos.snapped else {
         return;
     };
+
+    let cursor_pos = plane.to_world(plane.project_to_2d(cursor_pos));
+    if *shape != crate::plugins::modeling::face_sketch::FaceSketchShape::Polyline {
+        if let Some(first) = drawing.points.first() {
+            if let Ok(profile) = crate::plugins::modeling::face_sketch::shape_profile(
+                *shape,
+                plane.project_to_2d(*first),
+                plane.project_to_2d(cursor_pos),
+            ) {
+                let points = profile.tessellate(64);
+                for i in 0..points.len() {
+                    gizmos.line(
+                        plane.to_world(points[i]),
+                        plane.to_world(points[(i + 1) % points.len()]),
+                        DRAWING_PREVIEW_COLOR,
+                    );
+                }
+            }
+        }
+        return;
+    }
 
     // Line from last point to cursor
     if let Some(&last) = drawing.points.last() {
@@ -1440,5 +1388,91 @@ fn draw_face_drawing_preview(
             0.04,
             DRAWING_PREVIEW_COLOR,
         );
+    }
+}
+
+#[cfg(test)]
+mod face_sketch_interaction_tests {
+    use super::*;
+    use crate::plugins::{
+        commands::find_entity_by_element_id_readonly,
+        history::{apply_pending_history_commands_for_test, History, PendingCommandQueue},
+        identity::ElementIdAllocator,
+        modeling::{
+            face_sketch::{select_hit, select_pending_region, FaceSketchShape, PendingFaceRegion},
+            profile_feature::{FaceProfileFeature, FaceProfileFeatureFactory},
+        },
+    };
+
+    #[test]
+    fn pointer_circle_projects_off_plane_snaps_and_undo_redo_preserves_authored_region() {
+        let mut world = World::new();
+        world.init_resource::<ChromeInputCapture>();
+        world.init_resource::<EguiWantsInput>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<FaceEditContext>();
+        world.init_resource::<DrawingPlane>();
+        world.init_resource::<SubobjectSelection>();
+        world.init_resource::<FaceDrawingContext>();
+        world.init_resource::<PendingFaceRegion>();
+        world.init_resource::<PendingCommandQueue>();
+        world.init_resource::<History>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<ElementIdAllocator>();
+        world.init_resource::<CursorWorldPos>();
+        world.init_resource::<StatusBarData>();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(FaceProfileFeatureFactory);
+        world.insert_resource(registry);
+        let host_id = ElementId(100);
+        let host = world.spawn(host_id).id();
+        let normal = Vec3::new(1., 0.4, 0.7).normalize();
+        let origin = Vec3::new(10., 2., 3.);
+        select_hit(
+            &mut world,
+            FaceHitCandidate {
+                entity: host,
+                element_id: host_id,
+                distance: 0.,
+                face_id: FaceId(0),
+                generated_face_ref: None,
+                normal,
+                centroid: origin,
+            },
+        );
+        let plane = world.resource::<DrawingPlane>().clone();
+        world.insert_resource(FaceSketchShape::Circle);
+        world.resource_mut::<FaceDrawingContext>().active = true;
+        for point in [Vec2::new(0.4, 0.3), Vec2::new(0.6, 0.3)] {
+            world.resource_mut::<ButtonInput<MouseButton>>().reset_all();
+            world
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Left);
+            world.resource_mut::<CursorWorldPos>().snapped =
+                Some(plane.to_world(point) + normal * 5.);
+            handle_face_drawing_input(&mut world);
+        }
+        let id = world.resource::<PendingFaceRegion>().0.unwrap();
+        apply_pending_history_commands_for_test(&mut world);
+        select_pending_region(&mut world);
+        let entity = find_entity_by_element_id_readonly(&world, id).unwrap();
+        let feature = world.get::<FaceProfileFeature>(entity).unwrap().clone();
+        assert_eq!(feature.parent, host_id);
+        assert_eq!(feature.depth, 0.);
+        assert!((feature.anchor_origin - plane.to_world(Vec2::new(0.4, 0.3))).length() < 1e-5);
+        for p in feature.profile.tessellate(64) {
+            assert!((p.length() - 0.2).abs() < 1e-5);
+        }
+        assert_eq!(world.resource::<FaceEditContext>().element_id, Some(id));
+        assert!(world.resource::<FaceEditContext>().selected_face.is_some());
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands_for_test(&mut world);
+        assert!(find_entity_by_element_id_readonly(&world, id).is_none());
+        assert!(world.get_entity(host).is_ok());
+        world.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands_for_test(&mut world);
+        let restored = find_entity_by_element_id_readonly(&world, id).unwrap();
+        assert_eq!(world.get::<FaceProfileFeature>(restored), Some(&feature));
     }
 }

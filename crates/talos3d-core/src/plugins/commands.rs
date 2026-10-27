@@ -695,6 +695,16 @@ pub(crate) fn enqueue_create_triangle_mesh(
 }
 
 pub fn enqueue_create_boxed_entity(world: &mut World, snapshot: BoxedEntity) {
+    enqueue_create_entity_in_frame(world, snapshot, true);
+}
+
+/// Create a snapshot already authored in world coordinates while retaining
+/// the same atomic container membership and undo semantics as local creation.
+pub fn enqueue_create_world_entity(world: &mut World, snapshot: BoxedEntity) {
+    enqueue_create_entity_in_frame(world, snapshot, false);
+}
+
+fn enqueue_create_entity_in_frame(world: &mut World, snapshot: BoxedEntity, local: bool) {
     // The edit-context resource is absent in minimal worlds (e.g. unit tests that
     // don't add the selection plugin); treat that as "at root" (identity frame).
     let edit_context = world
@@ -705,7 +715,7 @@ pub fn enqueue_create_boxed_entity(world: &mut World, snapshot: BoxedEntity) {
     // Drawing metadata may reference model entities but never participates in
     // model/group transforms or geometry ownership. This also fixes the same
     // latent boundary violation for dimensions and section planes.
-    let snapshot = if is_drawing_metadata {
+    let snapshot = if is_drawing_metadata || !local {
         snapshot
     } else {
         let frame = active_authoring_frame(world, &edit_context);

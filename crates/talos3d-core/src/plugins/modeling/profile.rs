@@ -372,15 +372,11 @@ fn tessellate_arc(from: Vec2, to: Vec2, bulge: f32, segments_per_circle: u32) ->
     }
 
     let mid = (from + to) * 0.5;
-    let sagitta = bulge * chord_len * 0.5;
     let perp = Vec2::new(-chord.y, chord.x).normalize();
-    let apex = mid + perp * sagitta;
-
-    // Compute arc center from endpoints and bulge.
+    // A positive bulge is a counter-clockwise sweep. The centre lies to
+    // the left of the chord for a minor arc, and to its right for a major arc.
     let radius = chord_len * (1.0 + bulge * bulge) / (4.0 * bulge.abs());
-    let center_offset = radius - sagitta.abs();
-    let center_dir = if bulge > 0.0 { -perp } else { perp };
-    let center = apex + center_dir * center_offset;
+    let center = mid + perp * (chord_len * (1.0 - bulge * bulge) / (4.0 * bulge));
 
     // Start and end angles.
     let start_angle = (from - center).to_angle();

@@ -231,6 +231,7 @@ struct BoxSelectState {
 
 #[derive(Resource, Default)]
 struct SelectionPressCapture {
+    face: Option<crate::capability_registry::FaceHitCandidate>,
     entity: Option<Entity>,
     cursor_screen: Option<Vec2>,
     additive: bool,
@@ -564,7 +565,30 @@ fn capture_selection_press(
     } else {
         resolve_selection_click_target(world, raw_hit_entity).entity
     };
+    let face =
+        if !additive && !step_out && target.is_some_and(|e| world.get::<Selected>(e).is_some()) {
+            raw_hit_entity.and_then(|entity| {
+                if world.get::<GeneratedOccurrencePart>(entity).is_some() {
+                    return None;
+                }
+                let registry = world.get_resource::<CapabilityRegistry>()?;
+                let entity_ref = world.get_entity(entity).ok()?;
+                let factory = registry
+                    .factories()
+                    .iter()
+                    .find(|f| f.allows_automatic_face_edit(&entity_ref))?;
+                let mut cameras =
+                    world.try_query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()?;
+                let (camera, transform) = cameras.iter(world).next()?;
+                let ray =
+                    crate::plugins::scene_ray::pick_ray_at(camera, transform, cursor_position)?;
+                factory.hit_test_face(world, entity, ray)
+            })
+        } else {
+            None
+        };
     let mut press_capture = world.resource_mut::<SelectionPressCapture>();
+    press_capture.face = face;
     press_capture.entity = target;
     press_capture.cursor_screen = Some(cursor_position);
     press_capture.additive = additive;
@@ -585,6 +609,7 @@ fn complete_selection_release(world: &mut World, cursor_position: Vec2, now: f64
         .unwrap_or(false);
     let additive_selection = press_capture.additive;
     let hit_entity = press_capture.entity.take();
+    let face = press_capture.face.take();
     let step_out = std::mem::take(&mut press_capture.step_out);
     press_capture.cursor_screen = None;
     press_capture.additive = false;
@@ -599,6 +624,12 @@ fn complete_selection_release(world: &mut World, cursor_position: Vec2, now: f64
 
     if step_out {
         step_out_selection(world);
+    } else if let Some(face) = face {
+        if let Some(group) = hit_entity.filter(|e| world.get::<GroupMembers>(*e).is_some()) {
+            enter_edit_context_for_entity(world, group);
+        }
+        crate::plugins::modeling::face_sketch::select_hit(world, face);
+        world.resource_mut::<DoubleClickTracker>().last_click_entity = None;
     } else {
         complete_selection_click(world, hit_entity, additive_selection, now);
     }

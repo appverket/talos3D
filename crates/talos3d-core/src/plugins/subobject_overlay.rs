@@ -167,7 +167,15 @@ fn sync_selected_face_stipple(world: &mut World) {
         return;
     };
 
-    let Some(vertices) = face_vertices_for_entity(world, render_entity, face_id) else {
+    let surface = world
+        .get::<crate::plugins::modeling::planar_body::PlanarBody>(render_entity)
+        .and_then(|body| body.surfaces.get(face_id.0 as usize));
+    let triangles = surface.map(|s| s.triangles.clone());
+    let Some(vertices) = triangles
+        .as_ref()
+        .map(|t| t.iter().flatten().copied().collect())
+        .or_else(|| face_vertices_for_entity(world, render_entity, face_id))
+    else {
         clear_face_stipple(world);
         return;
     };
@@ -181,7 +189,27 @@ fn sync_selected_face_stipple(world: &mut World) {
         return;
     }
 
-    let Some(mesh) = face_stipple_mesh(&vertices, normal) else {
+    let Some(mesh) = (if let Some(triangles) = triangles {
+        let positions: Vec<[f32; 3]> = triangles
+            .iter()
+            .flatten()
+            .map(|v| (*v + normal * FACE_STIPPLE_SURFACE_OFFSET).to_array())
+            .collect();
+        let indices: Vec<u32> = (0..positions.len() as u32).collect();
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_NORMAL,
+            vec![normal.to_array(); positions.len()],
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_indices(bevy::mesh::Indices::U32(indices));
+        Some(mesh)
+    } else {
+        face_stipple_mesh(&vertices, normal)
+    }) else {
         clear_face_stipple(world);
         return;
     };

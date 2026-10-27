@@ -9,9 +9,8 @@ use crate::{
     plugins::{
         identity::ElementId,
         modeling::{
-            bsp_csg::{self, BooleanOp, CsgTriangle},
+            bsp_csg::{self, CsgTriangle},
             csg::{CsgNode, EvaluatedCsg},
-            primitive_trait::Primitive,
             primitives::{
                 BoxPrimitive, CylinderPrimitive, PlanePrimitive, ShapeRotation, SpherePrimitive,
             },
@@ -107,6 +106,11 @@ pub fn geometry_semantics_for_snapshot(
         }),
         "face_profile_feature" => geometry_semantics_for_feature(world, snapshot),
         "csg" => geometry_semantics_for_csg(world, snapshot),
+        _ if entity_ref_by_element_id(world, snapshot.element_id())
+            .is_some_and(|entity| entity.contains::<super::planar_body::PlanarBody>()) =>
+        {
+            geometry_semantics_for_solid_root(world, snapshot)
+        }
         _ => None,
     }
 }
@@ -369,11 +373,15 @@ fn primitive_or_evaluated_triangles(
     entity_ref: &EntityRef,
     include_attached_features: bool,
 ) -> Option<Vec<CsgTriangle>> {
-    let mut base = primitive_triangles(entity_ref).or_else(|| {
-        entity_ref
-            .get::<EvaluatedCsg>()
-            .map(|evaluated| indexed_triangles_to_csg(&evaluated.vertices, &evaluated.indices))
-    })?;
+    let mut base = entity_ref
+        .get::<super::planar_body::PlanarBody>()
+        .map(|b| b.triangles.clone())
+        .or_else(|| primitive_triangles(entity_ref))
+        .or_else(|| {
+            entity_ref
+                .get::<EvaluatedCsg>()
+                .map(|evaluated| indexed_triangles_to_csg(&evaluated.vertices, &evaluated.indices))
+        })?;
 
     if include_attached_features {
         let element_id = entity_ref.get::<ElementId>().copied()?;
@@ -382,28 +390,27 @@ fn primitive_or_evaluated_triangles(
         else {
             return Some(base);
         };
-        let mut features = feature_query
+        let mut pending = feature_query
             .iter(world)
-            .filter(|(_, feature, _)| feature.parent == element_id)
-            .map(|(feature_id, feature, rotation)| {
-                (
-                    *feature_id,
-                    feature.clone(),
-                    rotation.copied().unwrap_or_default(),
-                )
-            })
+            .map(|(id, f, r)| (*id, f.clone(), r.copied().unwrap_or_default()))
             .collect::<Vec<_>>();
-        features.sort_by_key(|(feature_id, _, _)| feature_id.0);
+        pending.sort_by_key(|(id, _, _)| id.0);
+        let mut reached = std::collections::HashSet::from([element_id]);
+        let mut features = Vec::new();
+        while let Some(index) = pending
+            .iter()
+            .position(|(_, f, _)| reached.contains(&f.parent))
+        {
+            let next = pending.remove(index);
+            reached.insert(next.0);
+            features.push(next);
+        }
         for (_, feature, rotation) in features {
-            let operand = feature.current_operand(rotation.0);
-            let operand_mesh = operand.to_editable_mesh(rotation.0)?;
-            let operand_tris = bsp_csg::triangles_from_editable_mesh(&operand_mesh);
-            let op = if feature.depth < 0.0 {
-                BooleanOp::Difference
-            } else {
-                BooleanOp::Union
-            };
-            let result = bsp_csg::boolean(&base, &operand_tris, op);
+            if feature.depth.abs() < 1e-6 {
+                continue;
+            }
+            let result =
+                super::profile_feature::evaluate_profile_on_triangles(&base, &feature, rotation.0);
             base = indexed_triangles_to_csg(&result.vertices, &result.indices);
         }
     }

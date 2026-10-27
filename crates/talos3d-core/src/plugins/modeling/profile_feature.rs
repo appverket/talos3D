@@ -31,8 +31,7 @@ use crate::{
     },
 };
 
-const DEFAULT_FEATURE_DEPTH: f32 = 0.02;
-const MIN_FEATURE_DEPTH: f32 = 0.005;
+const DEFAULT_FEATURE_DEPTH: f32 = 0.0;
 const FEATURE_SELECTION_SURFACE_EPSILON: f32 = 0.001;
 
 fn parse_optional_rotation(value: Option<&Value>) -> Result<Quat, String> {
@@ -56,6 +55,59 @@ fn canonicalize_feature_profile(profile: Profile2d) -> Profile2d {
     } else {
         profile.reversed()
     }
+}
+
+/// Shared validation for commands, pointer tools and persisted feature edits.
+pub fn validate_face_profile(profile: &Profile2d, depth: f32) -> Result<(), String> {
+    if !depth.is_finite()
+        || !profile.start.is_finite()
+        || profile.segments.is_empty()
+        || profile.segments.len() > 256
+    {
+        return Err("A face profile needs finite coordinates and 1–256 segments".into());
+    }
+    for segment in &profile.segments {
+        if !segment.endpoint().is_finite()
+            || matches!(segment, ProfileSegment::ArcTo { bulge, .. } if !bulge.is_finite())
+        {
+            return Err("Profile coordinates and arcs must be finite".into());
+        }
+    }
+    let mut points = profile.tessellate(64);
+    if points.len() > 2 && points[0].distance_squared(*points.last().unwrap()) < 1e-10 {
+        points.pop();
+    }
+    let area = (0..points.len())
+        .map(|i| points[i].perp_dot(points[(i + 1) % points.len()]))
+        .sum::<f32>()
+        .abs()
+        * 0.5;
+    if depth.abs() > 1e-6 && (points.len() < 3 || area < 1e-8) {
+        return Err("Close a nondegenerate planar region before push/pull".into());
+    }
+    // Reject crossing contours before BSP/triangulation. Work is bounded and
+    // performed only at authored edits, never in an idle frame.
+    for i in 0..points.len() {
+        for j in i + 2..points.len() {
+            if i == 0 && j + 1 == points.len() {
+                continue;
+            }
+            let (a, b, c, d) = (
+                points[i],
+                points[(i + 1) % points.len()],
+                points[j],
+                points[(j + 1) % points.len()],
+            );
+            let ab = b - a;
+            let cd = d - c;
+            if ab.perp_dot(c - a) * ab.perp_dot(d - a) < -1e-12
+                && cd.perp_dot(a - c) * cd.perp_dot(b - c) < -1e-12
+            {
+                return Err("Profile must not cross itself".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,7 +156,7 @@ impl FaceProfileFeature {
         ProfileExtrusion {
             centre: self.anchor_origin + rotation * Vec3::Y * (self.depth * 0.5),
             profile: self.profile.clone(),
-            height: self.depth.abs().max(MIN_FEATURE_DEPTH),
+            height: self.depth.abs(),
         }
     }
 
@@ -171,11 +223,9 @@ impl FaceProfileFeature {
         match feature_face_id.0 {
             0 => {
                 let extrusion_axis = rotation * Vec3::Y;
-                if self.depth >= 0.0 {
-                    extrusion_axis
-                } else {
-                    -extrusion_axis
-                }
+                // A recess floor faces outwards too; signed depth always uses
+                // the original support normal on both sides of zero.
+                extrusion_axis
             }
             side_face if side_face >= 2 => {
                 let mut normal = mesh_normal.normalize_or_zero();
@@ -269,6 +319,9 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
     }
 
     fn push_pull(&self, face_id: FaceId, distance: f32) -> Option<BoxedEntity> {
+        if !distance.is_finite() || validate_face_profile(&self.feature.profile, 1.).is_err() {
+            return None;
+        }
         match face_id.0 {
             0 => Some(
                 Self {
@@ -288,6 +341,9 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
     }
 
     fn push_pull_affordance(&self, face_id: FaceId) -> PushPullAffordance {
+        if validate_face_profile(&self.feature.profile, 1.).is_err() {
+            return PushPullAffordance::Blocked(PushPullBlockReason::UnsupportedFace);
+        }
         match self.feature.generated_face_ref(face_id) {
             Some(GeneratedFaceRef::FeatureCap) => PushPullAffordance::Allowed,
             Some(
@@ -340,7 +396,16 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
         let mut snapshot = self.clone();
         match property_name {
-            "depth" => snapshot.feature.depth = scalar_from_json(value)?,
+            "depth" => {
+                let depth = scalar_from_json(value)?;
+                if !depth.is_finite() {
+                    return Err("Depth must be finite".into());
+                }
+                if depth.abs() > 1e-6 && validate_face_profile(&self.feature.profile, 1.).is_err() {
+                    return Err("Close a planar region before push/pull".into());
+                }
+                snapshot.feature.depth = depth;
+            }
             "anchor_origin" => snapshot.feature.anchor_origin = vec3_from_json(value)?,
             "profile" => {
                 snapshot.feature.profile = serde_json::from_value(value.clone())
@@ -353,6 +418,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
                 ))
             }
         }
+        validate_face_profile(&snapshot.feature.profile, snapshot.feature.depth)?;
         Ok(snapshot.into())
     }
 
@@ -417,6 +483,22 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
             ));
         }
         if let Some(parent_entity) = find_entity_by_element_id(world, self.feature.parent) {
+            if let Some(layer) = world
+                .get::<crate::plugins::layers::LayerAssignment>(parent_entity)
+                .cloned()
+            {
+                if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+                    world.entity_mut(entity).insert(layer);
+                }
+            }
+            if let Some(material) = world
+                .get::<MeshMaterial3d<StandardMaterial>>(parent_entity)
+                .cloned()
+            {
+                if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+                    world.entity_mut(entity).insert(material);
+                }
+            }
             world.entity_mut(parent_entity).insert((
                 FeatureOperand {
                     owner: self.element_id,
@@ -488,6 +570,10 @@ impl From<FaceProfileFeatureSnapshot> for BoxedEntity {
 pub struct FaceProfileFeatureFactory;
 
 impl AuthoredEntityFactory for FaceProfileFeatureFactory {
+    fn allows_automatic_face_edit(&self, entity_ref: &bevy::ecs::world::EntityRef) -> bool {
+        entity_ref.contains::<FaceProfileFeature>()
+    }
+
     fn type_name(&self) -> &'static str {
         "face_profile_feature"
     }
@@ -522,9 +608,11 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
         let profile: Profile2d =
             serde_json::from_value(data.get("profile").cloned().ok_or("Missing profile")?)
                 .map_err(|e| format!("Invalid profile: {e}"))?;
+        validate_face_profile(&profile, depth)?;
         let rotation = parse_optional_rotation(data.get("rotation"))?;
         let support_face = data
             .get("support_face")
+            .filter(|v| !v.is_null())
             .cloned()
             .map(serde_json::from_value)
             .transpose()
@@ -571,9 +659,11 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
         let profile: Profile2d =
             serde_json::from_value(request.get("profile").cloned().ok_or("Missing profile")?)
                 .map_err(|e| format!("Invalid profile: {e}"))?;
+        validate_face_profile(&profile, depth)?;
         let rotation = parse_optional_rotation(request.get("rotation"))?;
         let support_face = request
             .get("support_face")
+            .filter(|v| !v.is_null())
             .cloned()
             .map(serde_json::from_value)
             .transpose()
@@ -741,6 +831,32 @@ pub fn feature_face_vertices(world: &World, entity: Entity, face_id: FaceId) -> 
         .get::<ShapeRotation>()
         .copied()
         .unwrap_or_default();
+    if feature.depth.abs() < 1e-6 {
+        if face_id != FaceId(0) {
+            return None;
+        }
+        return Some(
+            feature
+                .profile
+                .tessellate(64)
+                .iter()
+                .map(|p| feature.anchor_origin + rotation.0 * Vec3::new(p.x, 0., p.y))
+                .collect(),
+        );
+    }
+    if face_id == FaceId(0) && feature.depth < 0. {
+        if let Some(evaluated) = world.get::<EvaluatedFeature>(entity) {
+            let normal = rotation.0 * Vec3::Y;
+            let origin = feature.anchor_origin + normal * feature.depth;
+            let cap_exists = evaluated.indices.chunks_exact(3).any(|t| {
+                t.iter()
+                    .all(|&i| (evaluated.vertices[i as usize] - origin).dot(normal).abs() < 1e-4)
+            });
+            if !cap_exists {
+                return None;
+            }
+        }
+    }
     let operand = feature.current_operand(rotation.0);
     let mesh = operand.to_editable_mesh(rotation.0)?;
     let operand_face_id = feature.operand_face_for_feature_face(face_id)?;
@@ -764,6 +880,31 @@ pub fn face_profile_feature_hit_test(
         .get::<ShapeRotation>()
         .copied()
         .unwrap_or_default();
+    if feature.depth.abs() < 1e-6 {
+        let vertices = feature_face_vertices(world, entity, FaceId(0))?;
+        let points = feature.profile.tessellate(64);
+        let tris = super::triangulate::ear_clip_triangulate(&points);
+        let distance = tris
+            .iter()
+            .filter_map(|t| {
+                ray_triangle_intersection(
+                    ray,
+                    vertices[t[0] as usize],
+                    vertices[t[1] as usize],
+                    vertices[t[2] as usize],
+                )
+            })
+            .min_by(f32::total_cmp)?;
+        return Some(FaceHitCandidate {
+            entity,
+            element_id,
+            distance,
+            face_id: FaceId(0),
+            generated_face_ref: Some(GeneratedFaceRef::FeatureCap),
+            normal: rotation.0 * Vec3::Y,
+            centroid: feature.anchor_origin,
+        });
+    }
     let operand = feature.current_operand(rotation.0);
     let mesh = operand.to_editable_mesh(rotation.0)?;
 
@@ -796,6 +937,13 @@ pub fn face_profile_feature_hit_test(
     }
 
     let (distance, feature_face_id, operand_face_id) = best?;
+    if world.get::<EvaluatedFeature>(entity).is_some() {
+        let surface_distance = evaluated_feature_hit_distance(world, entity, ray)?;
+        if (surface_distance - distance).abs() > FEATURE_SELECTION_SURFACE_EPSILON {
+            return None;
+        }
+    }
+
     let operand_face = &mesh.faces[operand_face_id.0 as usize];
     let centroid = mesh.face_centroid(operand_face_id.0);
     let normal = feature.canonical_face_normal(
@@ -865,32 +1013,59 @@ pub fn evaluate_face_profile_features(
         let Some(parent_tris) = get_entity_triangles(world, parent_entity) else {
             continue;
         };
-        let operand = feature.current_operand(rotation.copied().unwrap_or_default().0);
-        let Some(operand_mesh) = operand.to_editable_mesh(rotation.copied().unwrap_or_default().0)
-        else {
-            continue;
-        };
-        let operand_tris = bsp_csg::triangles_from_editable_mesh(&operand_mesh);
-        let op = if feature.depth < 0.0 {
-            BooleanOp::Difference
-        } else {
-            BooleanOp::Union
-        };
-        let result = bsp_csg::boolean(&parent_tris, &operand_tris, op);
-        commands.entity(entity).try_insert((
-            EvaluatedFeature {
-                vertices: result.vertices,
-                normals: result.normals,
-                indices: result.indices,
-            },
-            NeedsMesh,
-        ));
+        let result = evaluate_profile_on_triangles(
+            &parent_tris,
+            feature,
+            rotation.copied().unwrap_or_default().0,
+        );
+        commands.entity(entity).try_insert((result, NeedsMesh));
         commands.entity(entity).remove::<NeedsEvaluation>();
+    }
+}
+
+/// Shared evaluator for live meshes and agent geometry inspection. At zero the
+/// host is exactly unchanged; no epsilon-thick solid is fabricated.
+pub fn evaluate_profile_on_triangles(
+    base: &[bsp_csg::CsgTriangle],
+    feature: &FaceProfileFeature,
+    rotation: Quat,
+) -> EvaluatedFeature {
+    let unchanged = || {
+        let vertices: Vec<Vec3> = base.iter().flat_map(|t| t.vertices).collect();
+        let normals = base.iter().flat_map(|t| [t.normal; 3]).collect();
+        let indices = (0..vertices.len() as u32).collect();
+        EvaluatedFeature {
+            vertices,
+            normals,
+            indices,
+        }
+    };
+    if feature.depth.abs() < 1e-6 {
+        return unchanged();
+    }
+    let operand = feature.current_operand(rotation);
+    let Some(mesh) = operand.to_editable_mesh(rotation) else {
+        return unchanged();
+    };
+    let triangles = bsp_csg::triangles_from_editable_mesh(&mesh);
+    let op = if feature.depth < 0. {
+        BooleanOp::Difference
+    } else {
+        BooleanOp::Union
+    };
+    let result = bsp_csg::boolean(base, &triangles, op);
+    EvaluatedFeature {
+        vertices: result.vertices,
+        normals: result.normals,
+        indices: result.indices,
     }
 }
 
 fn get_entity_triangles(world: &World, entity: Entity) -> Option<Vec<bsp_csg::CsgTriangle>> {
     let entity_ref = world.get_entity(entity).ok()?;
+    if let Some(body) = entity_ref.get::<super::planar_body::PlanarBody>() {
+        return Some(body.triangles.clone());
+    }
     try_get_primitive_triangles::<crate::plugins::modeling::primitives::BoxPrimitive>(&entity_ref)
         .or_else(|| {
             try_get_primitive_triangles::<crate::plugins::modeling::primitives::CylinderPrimitive>(
@@ -1015,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_cap_normal_tracks_negative_extrusion_axis() {
+    fn recess_cap_normal_keeps_support_orientation() {
         let feature = FaceProfileFeature {
             parent: ElementId(1),
             anchor_origin: Vec3::ZERO,
@@ -1025,7 +1200,7 @@ mod tests {
         };
         let rotation = Quat::from_rotation_y(0.29) * Quat::from_rotation_x(0.13);
         let normal = feature.canonical_face_normal(rotation, FaceId(0), Vec3::ZERO, Vec3::Y);
-        assert!(normal.abs_diff_eq(-(rotation * Vec3::Y), 1e-6));
+        assert!(normal.abs_diff_eq(rotation * Vec3::Y, 1e-6));
     }
 
     #[test]
