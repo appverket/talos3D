@@ -7,6 +7,8 @@ use crate::{
 };
 use bevy::prelude::*;
 
+pub(crate) const PLANAR_SURFACE_DISTANCE_TOLERANCE: f32 = 0.0001;
+
 #[derive(Clone, Debug)]
 pub struct PlanarSurface {
     pub reference: Option<GeneratedFaceRef>,
@@ -31,7 +33,7 @@ impl PlanarBody {
             let origin = triangle.vertices[0];
             if let Some(surface) = surfaces.iter_mut().find(|s| {
                 s.normal.dot(triangle.normal) > 0.99999
-                    && s.normal.dot(origin - s.origin).abs() < 0.0001
+                    && s.normal.dot(origin - s.origin).abs() < PLANAR_SURFACE_DISTANCE_TOLERANCE
             }) {
                 surface.triangles.push(triangle.vertices);
             } else {

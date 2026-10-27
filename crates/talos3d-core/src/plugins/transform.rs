@@ -1754,9 +1754,18 @@ fn push_pull_distance(
                         .flatten()
                 })
             {
-                return Some(
-                    (target - feature.feature.anchor_origin).dot(pp.normal) - feature.feature.depth,
-                );
+                let depth = (target - feature.feature.anchor_origin).dot(pp.normal);
+                // Recovered planar boundaries can differ slightly from their
+                // authored support plane. Use the same coplanarity tolerance
+                // as PlanarBody; explicit numeric entry remains exact above.
+                let depth = if depth.abs()
+                    <= crate::plugins::modeling::planar_body::PLANAR_SURFACE_DISTANCE_TOLERANCE
+                {
+                    0.0
+                } else {
+                    depth
+                };
+                return Some(depth - feature.feature.depth);
             }
             return Some((target - pp.drag_plane.origin).dot(pp.normal));
         }

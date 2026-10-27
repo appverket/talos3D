@@ -399,6 +399,13 @@ fn push_pull_support_edge_inference_matches_live_preview_commit_and_undo() {
     crate::plugins::inference::update_inference(&mut world);
     assert_eq!(world.resource::<SnapResult>().kind, SnapKind::OnEdge);
     assert!((world.resource::<SnapResult>().position.unwrap().x - 0.5).abs() < 1e-6);
+    // Imported coplanar boundary vertices can carry small coordinate residue.
+    world
+        .resource_mut::<SnapResult>()
+        .position
+        .as_mut()
+        .unwrap()
+        .x += 0.00002;
     update_transform_preview(&mut world);
     let presented = world.resource::<ActiveTransformPreview>().snapshots[0].clone();
     assert_eq!(world.get::<FaceProfileFeature>(entity).unwrap().depth, 0.0);
