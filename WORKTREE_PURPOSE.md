@@ -6,4 +6,4 @@
 - task-id: TALOS-czkhgugt
 - target base: origin/main
 - summary: Semantic, agent-first face selection, planar profiles and signed push/pull; verify recovered wall.
-- status: active
+- status: awaiting-merge

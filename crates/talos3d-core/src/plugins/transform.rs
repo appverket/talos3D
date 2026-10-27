@@ -396,7 +396,19 @@ fn activate_pending_transform(world: &mut World) {
     }
 }
 
+#[derive(Resource, Default)]
+struct TransformKeyboardCursor(
+    bevy::ecs::message::MessageCursor<bevy::input::keyboard::KeyboardInput>,
+);
+
 fn handle_transform_input(world: &mut World) {
+    world.init_resource::<TransformKeyboardCursor>();
+    let native_events = world.resource_scope(|world, mut cursor: Mut<TransformKeyboardCursor>| {
+        world
+            .get_resource::<Messages<bevy::input::keyboard::KeyboardInput>>()
+            .map(|events| cursor.0.read(events).cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    });
     if !world.resource::<InputOwnership>().is_modal() {
         return;
     }
@@ -406,36 +418,34 @@ fn handle_transform_input(world: &mut World) {
     // Preserve native text order and keyboard-layout meaning (e.g. Swedish
     // minus lives on the physical Slash key). ButtonInput folds repeated keys
     // in one frame and cannot represent a typed measurement faithfully.
-    let native: Vec<KeyCode> = world
-        .get_resource::<Messages<bevy::input::keyboard::KeyboardInput>>()
-        .map(|events| {
-            events
-                .iter_current_update_messages()
-                .filter(|event| event.state == bevy::input::ButtonState::Pressed)
-                .map(|event| {
-                    if let bevy::input::keyboard::Key::Character(text) = &event.logical_key {
-                        match text.as_str() {
-                            "0" => KeyCode::Digit0,
-                            "1" => KeyCode::Digit1,
-                            "2" => KeyCode::Digit2,
-                            "3" => KeyCode::Digit3,
-                            "4" => KeyCode::Digit4,
-                            "5" => KeyCode::Digit5,
-                            "6" => KeyCode::Digit6,
-                            "7" => KeyCode::Digit7,
-                            "8" => KeyCode::Digit8,
-                            "9" => KeyCode::Digit9,
-                            "-" => KeyCode::Minus,
-                            "." | "," => KeyCode::Period,
-                            _ => event.key_code,
-                        }
-                    } else {
-                        event.key_code
-                    }
-                })
-                .collect()
+    let native: Vec<KeyCode> = native_events
+        .iter()
+        .filter(|event| event.state == bevy::input::ButtonState::Pressed)
+        .map(|event| {
+            let text = event.text.as_deref().or_else(|| {
+                if let bevy::input::keyboard::Key::Character(text) = &event.logical_key {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            });
+            match text {
+                Some("0") => KeyCode::Digit0,
+                Some("1") => KeyCode::Digit1,
+                Some("2") => KeyCode::Digit2,
+                Some("3") => KeyCode::Digit3,
+                Some("4") => KeyCode::Digit4,
+                Some("5") => KeyCode::Digit5,
+                Some("6") => KeyCode::Digit6,
+                Some("7") => KeyCode::Digit7,
+                Some("8") => KeyCode::Digit8,
+                Some("9") => KeyCode::Digit9,
+                Some("-") => KeyCode::Minus,
+                Some(".") | Some(",") => KeyCode::Period,
+                _ => event.key_code,
+            }
         })
-        .unwrap_or_default();
+        .collect();
     let just_pressed: Vec<KeyCode> = if native.is_empty() {
         keys.get_just_pressed().copied().collect()
     } else {
@@ -3302,6 +3312,13 @@ mod tests {
                     window: Entity::PLACEHOLDER,
                 });
         }
+        // Winit may deliver input before the message buffers advance in First.
+        world.resource_mut::<Messages<KeyboardInput>>().update();
+        handle_transform_input(&mut world);
+        assert_eq!(
+            world.resource::<TransformState>().numeric_buffer.as_deref(),
+            Some("-0.400")
+        );
         handle_transform_input(&mut world);
         assert_eq!(
             world.resource::<TransformState>().numeric_buffer.as_deref(),
