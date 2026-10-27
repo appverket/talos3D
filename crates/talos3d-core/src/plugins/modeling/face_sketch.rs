@@ -248,6 +248,20 @@ fn select_face(world: &mut World, args: &Value) -> Result<CommandResult, String>
         ..Default::default()
     })
 }
+/// Route ordinary drawing commands through the same selected-face interaction.
+pub(super) fn begin_on_selected_face(
+    world: &mut World,
+    shape: FaceSketchShape,
+) -> Result<bool, String> {
+    if !world
+        .get_resource::<FaceEditContext>()
+        .is_some_and(|face| face.selected_face.is_some())
+    {
+        return Ok(false);
+    }
+    prepare(world, &json!({}), shape)
+}
+
 fn prepare(world: &mut World, args: &Value, shape: FaceSketchShape) -> Result<bool, String> {
     if args.get("element_id").is_some() && args.get("face_id").is_none() {
         return Err("Supply face_id with the support element_id".into());
@@ -262,6 +276,11 @@ fn prepare(world: &mut World, args: &Value, shape: FaceSketchShape) -> Result<bo
     let interactive =
         args.get("centre").is_none() && args.get("a").is_none() && args.get("points").is_none();
     if interactive {
+        if let Some(mut next) =
+            world.get_resource_mut::<NextState<crate::plugins::tools::ActiveTool>>()
+        {
+            next.set(crate::plugins::tools::ActiveTool::Select);
+        }
         *world.resource_mut::<FaceDrawingContext>() = FaceDrawingContext {
             active: true,
             ..Default::default()
@@ -527,6 +546,55 @@ mod tests {
             .sum::<f32>()
             .abs()
     }
+    #[test]
+    fn ordinary_drawing_commands_reuse_selected_face_interaction() {
+        use crate::plugins::tools::ActiveTool;
+        let mut world = World::new();
+        world.init_resource::<FaceEditContext>();
+        world.init_resource::<FaceDrawingContext>();
+        world.init_resource::<FaceSketchShape>();
+        world.init_resource::<NextState<ActiveTool>>();
+        // Without a selected face, the existing free drawing tool still applies.
+        super::super::execute_create_plane(&mut world, &json!({})).unwrap();
+        assert!(!world.resource::<FaceDrawingContext>().active);
+        assert!(matches!(
+            world.resource::<NextState<ActiveTool>>(),
+            NextState::Pending(ActiveTool::PlacePlane)
+        ));
+        world.resource_mut::<FaceEditContext>().selected_face = Some(SelectedFace {
+            face_id: FaceId(0),
+            generated_face_ref: None,
+            normal: Vec3::X,
+            centroid: Vec3::new(3., 2., 1.),
+        });
+        for (handler, shape) in [
+            (
+                super::super::execute_create_plane as CommandHandler,
+                FaceSketchShape::Rectangle,
+            ),
+            (
+                super::super::execute_create_polyline as CommandHandler,
+                FaceSketchShape::Polyline,
+            ),
+            (circle as CommandHandler, FaceSketchShape::Circle),
+        ] {
+            handler(&mut world, &json!({})).unwrap();
+            assert!(world.resource::<FaceDrawingContext>().active);
+            assert_eq!(*world.resource::<FaceSketchShape>(), shape);
+            assert!(matches!(
+                world.resource::<NextState<ActiveTool>>(),
+                NextState::Pending(ActiveTool::Select)
+            ));
+            let face = world
+                .resource::<FaceEditContext>()
+                .selected_face
+                .as_ref()
+                .unwrap();
+            assert_eq!(face.normal, Vec3::X);
+            assert_eq!(face.centroid, Vec3::new(3., 2., 1.));
+        }
+    }
+
     #[test]
     fn analytic_circle_round_trip_and_signed_evaluation_preserve_host() {
         let host = BoxPrimitive {

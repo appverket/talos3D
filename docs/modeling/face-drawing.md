@@ -3,6 +3,11 @@
 With Select active, enter each enclosing group in order, then select the
 individual solid/component. Click its planar face to select the face. A selected
 group never allows face selection through its boundary.
+
+Use **Create → On Face → Draw Circle on Face**, **Draw Rectangle on Face**,
+or **Draw Lines on Face**. The ordinary Create Plane and Create Polyline commands
+also draw on the selected face when one is active. Floor Plan tools create Draft
+annotations and are separate from solid face modeling.
 The selected face has a GPU stipple overlay. Press **C** for a circle (centre,
 radius), **P** for a rectangle (opposite corners), or **L** for lines (Enter to
 finish). Drawing and snapping stay on the selected plane. The new region stays

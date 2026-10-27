@@ -287,6 +287,14 @@ const EDIT_MENU_GROUPS: &[MenuSubmenuSpec] = &[
 
 const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
+        label: "On Face",
+        command_ids: &[
+            "modeling.draw_face_circle",
+            "modeling.draw_face_rectangle",
+            "modeling.draw_face_polyline",
+        ],
+    },
+    MenuSubmenuSpec {
         label: "Primitives",
         command_ids: &[
             "modeling.create_box",

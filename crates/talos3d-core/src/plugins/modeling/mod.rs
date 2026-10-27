@@ -990,10 +990,16 @@ fn execute_create_sphere(world: &mut World, _: &Value) -> Result<CommandResult, 
 }
 
 fn execute_create_plane(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    if face_sketch::begin_on_selected_face(world, face_sketch::FaceSketchShape::Rectangle)? {
+        return Ok(CommandResult::empty());
+    }
     activate_tool_command(world, ActiveTool::PlacePlane)
 }
 
 fn execute_create_polyline(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    if face_sketch::begin_on_selected_face(world, face_sketch::FaceSketchShape::Polyline)? {
+        return Ok(CommandResult::empty());
+    }
     activate_tool_command(world, ActiveTool::PlacePolyline)
 }
 
