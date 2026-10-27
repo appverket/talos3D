@@ -62,8 +62,14 @@ highlights its contents; the status bar keeps the selected object's name and
 active group path visible even while a tool or handle hint is shown. Highlights
 are temporary and excluded from clean viewport exports.
 
-Double-click a group to enter it; Escape returns to its parent. Click an Outliner
-row to select that exact object. Ctrl/Cmd-click in the viewport selects the
+Double-click a group to enter it; Escape exits one level and selects the group
+you left. A plain click outside the current selection box selects its enclosing
+group; repeat to climb the hierarchy and clear selection at the top. Outside
+clicks also leave face editing. Shift-click retains additive selection.
+
+Viewport selections reveal their Outliner row: containing branches expand and
+the panel scrolls to the selected object. Click an Outliner row to select that
+exact object. Ctrl/Cmd-click in the viewport selects the
 individual authored object through its containing groups. Generated Definition
 parts still select their owning occurrence.
 

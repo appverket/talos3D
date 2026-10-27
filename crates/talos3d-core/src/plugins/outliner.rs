@@ -128,6 +128,8 @@ pub struct OutlinerWindowState {
     /// would yank rows out from under the cursor mid-click; the clicked row is
     /// on screen already, so there is nothing to reveal.
     selection_from_panel: bool,
+    /// A viewport click also reveals an unchanged selection after manual folding.
+    reveal_requested: bool,
 }
 
 /// A pending selection change produced by a click on an outliner row.
@@ -217,6 +219,11 @@ pub fn build_outliner_tree(world: &mut World) {
         .map(|state| state.visible)
         .unwrap_or(false);
     if !visible {
+        if let Some(mut state) = world.get_resource_mut::<OutlinerWindowState>() {
+            state.last_selection.clear();
+            state.pending_reveal = None;
+            state.selection_from_panel = false;
+        }
         if let Some(mut tree) = world.get_resource_mut::<OutlinerTree>() {
             tree.clear();
         }
@@ -271,6 +278,12 @@ fn mark_edit_context(world: &World, nodes: &mut [OutlinerNode]) {
     if let Some(context) = world.get_resource::<OccurrenceEditContext>() {
         stack.extend(&context.stack);
     }
+    if let Some(id) = world
+        .get_resource::<crate::plugins::face_edit::FaceEditContext>()
+        .and_then(|context| context.element_id)
+    {
+        stack.push(id);
+    }
     let Some(active) = stack.last() else {
         return;
     };
@@ -288,10 +301,16 @@ fn mark_edit_context(world: &World, nodes: &mut [OutlinerNode]) {
 
 /// `node_id`s of rows whose entity is currently selected, in row order.
 fn selected_node_ids(world: &mut World, nodes: &[OutlinerNode]) -> Vec<u64> {
-    let selected: HashSet<Entity> = world
+    let mut selected: HashSet<Entity> = world
         .query_filtered::<Entity, With<Selected>>()
         .iter(world)
         .collect();
+    if let Some(entity) = world
+        .get_resource::<crate::plugins::face_edit::FaceEditContext>()
+        .and_then(|context| context.entity)
+    {
+        selected.insert(entity);
+    }
     nodes
         .iter()
         .filter(|node| {
@@ -306,13 +325,34 @@ fn selected_node_ids(world: &mut World, nodes: &[OutlinerNode]) -> Vec<u64> {
 /// scroll so the row is actually on screen. Without this a selection made in the
 /// viewport can sit inside a collapsed branch, or hundreds of rows away, and the
 /// panel looks like it simply did not respond.
+pub(crate) fn request_selection_reveal(world: &mut World) {
+    if let Some(mut state) = world.get_resource_mut::<OutlinerWindowState>() {
+        state.reveal_requested = true;
+    }
+}
+
 fn reveal_selection_if_changed(world: &mut World, nodes: &[OutlinerNode], selected: Vec<u64>) {
-    let Some(state) = world.get_resource::<OutlinerWindowState>() else {
+    let Some(mut state) = world.get_resource_mut::<OutlinerWindowState>() else {
         return;
     };
-    if state.last_selection == selected {
+    // Consume the origin even for a no-op panel click. Otherwise it suppresses
+    // the *next* viewport selection instead of the panel action that set it.
+    let from_panel = std::mem::take(&mut state.selection_from_panel);
+    let requested = std::mem::take(&mut state.reveal_requested);
+    if from_panel && !requested {
+        state.last_selection = selected;
+        state.pending_reveal = None;
         return;
     }
+    if state.last_selection == selected && !requested {
+        return;
+    }
+    let previous: HashSet<u64> = state.last_selection.iter().copied().collect();
+    let focus = selected
+        .iter()
+        .find(|id| !previous.contains(id))
+        .or_else(|| selected.first())
+        .copied();
 
     let index_of: HashMap<u64, usize> = nodes
         .iter()
@@ -332,14 +372,10 @@ fn reveal_selection_if_changed(world: &mut World, nodes: &[OutlinerNode], select
     }
 
     let mut state = world.resource_mut::<OutlinerWindowState>();
-    if std::mem::take(&mut state.selection_from_panel) {
-        state.last_selection = selected;
-        return;
-    }
     for node_id in expand {
         state.collapsed.remove(&node_id);
     }
-    state.pending_reveal = selected.first().copied();
+    state.pending_reveal = focus;
     state.last_selection = selected;
 }
 
@@ -1225,6 +1261,179 @@ mod tests {
         let state = world.resource::<OutlinerWindowState>();
         assert_eq!(state.pending_reveal, None, "no second reveal");
         assert!(state.collapsed.contains(&3), "user's collapse respected");
+    }
+
+    #[test]
+    fn no_op_panel_click_does_not_suppress_next_external_selection() {
+        let mut world = World::new();
+        let first = world.spawn((ElementId(1), Selected)).id();
+        let second = world.spawn(ElementId(2)).id();
+        build(&mut world);
+        world.resource_mut::<OutlinerWindowState>().pending_reveal = None;
+        world
+            .resource_mut::<OutlinerWindowState>()
+            .selection_from_panel = true;
+        build_outliner_tree(&mut world); // clicked the already-selected row
+        world.entity_mut(first).remove::<Selected>();
+        world.entity_mut(second).insert(Selected);
+        build_outliner_tree(&mut world);
+        assert_eq!(
+            world.resource::<OutlinerWindowState>().pending_reveal,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn reopening_panel_and_reclicking_selection_reveal_folded_ancestors() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            GroupMembers {
+                name: "Parent".into(),
+                member_ids: vec![ElementId(2)],
+                frame: default(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((ElementId(2), Selected));
+        build(&mut world);
+        world
+            .resource_mut::<OutlinerWindowState>()
+            .collapsed
+            .insert(1);
+        request_selection_reveal(&mut world);
+        build_outliner_tree(&mut world);
+        assert!(!world
+            .resource::<OutlinerWindowState>()
+            .collapsed
+            .contains(&1));
+        world
+            .resource_mut::<OutlinerWindowState>()
+            .collapsed
+            .insert(1);
+        world.resource_mut::<OutlinerWindowState>().visible = false;
+        build_outliner_tree(&mut world);
+        world.resource_mut::<OutlinerWindowState>().visible = true;
+        build_outliner_tree(&mut world);
+        assert!(!world
+            .resource::<OutlinerWindowState>()
+            .collapsed
+            .contains(&1));
+        assert_eq!(
+            world.resource::<OutlinerWindowState>().pending_reveal,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn additive_selection_reveals_the_new_row_and_face_editing_reveals_its_object() {
+        let mut world = World::new();
+        world.spawn((ElementId(1), Selected));
+        let second = world.spawn(ElementId(2)).id();
+        build(&mut world);
+        world.entity_mut(second).insert(Selected);
+        build_outliner_tree(&mut world);
+        assert_eq!(
+            world.resource::<OutlinerWindowState>().pending_reveal,
+            Some(2)
+        );
+        for id in [1, 2] {
+            let entity =
+                crate::plugins::commands::find_entity_by_element_id_readonly(&world, ElementId(id))
+                    .unwrap();
+            world.entity_mut(entity).remove::<Selected>();
+        }
+        let mut face = crate::plugins::face_edit::FaceEditContext::default();
+        face.enter(second, ElementId(2));
+        world.insert_resource(face);
+        build_outliner_tree(&mut world);
+        assert_eq!(
+            world.resource::<OutlinerWindowState>().pending_reveal,
+            Some(2)
+        );
+        assert_eq!(
+            node_for(world.resource::<OutlinerTree>(), 2)
+                .unwrap()
+                .edit_context,
+            OutlinerEditContext::Active
+        );
+    }
+
+    #[test]
+    fn egui_draw_reveals_a_selected_row_beyond_the_virtualized_first_page() {
+        let mut world = World::new();
+        for id in 1..=300 {
+            world.spawn((
+                ElementId(id),
+                GroupMembers {
+                    name: format!("Group {id:03}"),
+                    member_ids: vec![],
+                    frame: default(),
+                    linked_model: None,
+                },
+            ));
+        }
+        let tree = build(&mut world);
+        let target = tree.nodes.last().unwrap();
+        let target_id = target.node_id;
+        let label = target.label.clone();
+        let selected = HashSet::from([target.select_entity.unwrap()]);
+        let mut state = world.resource::<OutlinerWindowState>().clone();
+        let ctx = egui::Context::default();
+        let mut pending = PendingCommandInvocations::default();
+        let registry = CommandRegistry::default();
+        // Prime the window geometry before requesting the scroll, as in the app.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    draw_outliner_window(
+                        ui.ctx(),
+                        &mut state,
+                        &tree,
+                        &selected,
+                        &mut pending,
+                        &registry,
+                    );
+                },
+            );
+        }
+        state.pending_reveal = Some(target_id);
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                draw_outliner_window(
+                    ui.ctx(),
+                    &mut state,
+                    &tree,
+                    &selected,
+                    &mut pending,
+                    &registry,
+                );
+            },
+        );
+        assert!(
+            output.shapes.iter().any(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) =>
+                    text.galley.job.text.contains(&label)
+                        && shape.clip_rect.intersects(text.visual_bounding_rect()),
+                _ => false,
+            }),
+            "the actual egui draw must include the revealed row inside the scroll clip"
+        );
+        assert_eq!(state.pending_reveal, None);
     }
 
     /// The entered group is a different fact from the selection, and the tree is

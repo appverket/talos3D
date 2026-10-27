@@ -83,6 +83,8 @@ impl Plugin for FaceEditPlugin {
                         .run_if(face_edit_active)
                         .run_if(not_drawing),
                     handle_face_click
+                        .after(update_hovered_face)
+                        .before(crate::plugins::selection::SelectionInputSystems::Click)
                         .in_set(InputPhase::ToolInput)
                         // The edge picker resolves first and flags the pointer
                         // event it owns, so a click that landed on an edge does
@@ -91,6 +93,7 @@ impl Plugin for FaceEditPlugin {
                         .run_if(face_edit_active)
                         .run_if(not_drawing),
                     handle_face_escape
+                        .after(crate::plugins::selection::SelectionInputSystems::Escape)
                         .in_set(InputPhase::ToolInput)
                         .run_if(face_edit_active)
                         .run_if(not_drawing),
@@ -484,36 +487,35 @@ fn generated_face_bounding_edge_refs(
         .collect()
 }
 
-fn handle_face_escape(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut face_context: ResMut<FaceEditContext>,
-    mut commands: Commands,
-    ownership: Res<InputOwnership>,
-) {
-    if !ownership.is_idle() {
+/// Clear presentation-only state when the edited solid's context is left.
+pub(crate) fn clear_face_edit_transients(world: &mut World) {
+    if let Some(mut drawing) = world.get_resource_mut::<FaceDrawingContext>() {
+        *drawing = FaceDrawingContext::default();
+    }
+    if let Some(mut hover) = world.get_resource_mut::<HoveredFace>() {
+        *hover = HoveredFace::default();
+    }
+    if let Some(mut press) = world.get_resource_mut::<PressCapture>() {
+        *press = PressCapture::default();
+    }
+    if let Some(mut tracker) = world.get_resource_mut::<FaceClickTracker>() {
+        *tracker = FaceClickTracker::default();
+    }
+}
+
+fn handle_face_escape(world: &mut World) {
+    if !world.resource::<InputOwnership>().is_idle()
+        || !world
+            .resource::<ButtonInput<KeyCode>>()
+            .just_pressed(KeyCode::Escape)
+    {
         return;
     }
-
-    if !keys.just_pressed(KeyCode::Escape) {
-        return;
-    }
-
-    if face_context.selected_face.is_some() {
-        // First Escape: deselect the face
-        face_context.selected_face = None;
+    if world.resource::<FaceEditContext>().selected_face.is_some() {
+        world.resource_mut::<FaceEditContext>().selected_face = None;
+        world.resource_mut::<SubobjectSelection>().refs.clear();
     } else {
-        // Second Escape: exit face edit mode, re-select the entity
-        let entity = face_context.entity;
-        face_context.exit();
-        if let Some(entity) = entity {
-            // The entity may have been despawned (e.g. by a line tool split).
-            // Use queue_handled to avoid panicking on stale entity IDs.
-            commands.queue(move |world: &mut World| {
-                if let Ok(mut e) = world.get_entity_mut(entity) {
-                    e.insert(Selected);
-                }
-            });
-        }
+        crate::plugins::selection::exit_edit_context(world);
     }
 }
 

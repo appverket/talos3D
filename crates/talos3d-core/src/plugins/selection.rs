@@ -10,7 +10,7 @@ use bevy_egui::{egui, EguiContexts};
 
 use crate::{
     authored_entity::{EntityBounds, EntityScope},
-    capability_registry::{CapabilityRegistry, HitCandidate},
+    capability_registry::{CapabilityRegistry, HitCandidate, SubobjectSelection},
     plugins::{
         camera::{orbit_modifier_pressed, pan_modifier_pressed, OrbitCamera},
         command_registry::{
@@ -87,6 +87,12 @@ type BoxSelectOccurrenceOwnerQueryItem = (
     Has<GroupEditMuted>,
 );
 type GroupMembershipQueryItem = (Entity, &'static ElementId, &'static GroupMembers);
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SelectionInputSystems {
+    Click,
+    Escape,
+}
 
 pub struct SelectionPlugin;
 
@@ -179,7 +185,7 @@ impl Plugin for SelectionPlugin {
                 (
                     (
                         handle_box_select,
-                        handle_selection_click,
+                        handle_selection_click.in_set(SelectionInputSystems::Click),
                         draw_box_select_rect,
                     )
                         .chain()
@@ -190,6 +196,7 @@ impl Plugin for SelectionPlugin {
                         .before(handle_box_select)
                         .before(handle_selection_click),
                     handle_group_escape
+                        .in_set(SelectionInputSystems::Escape)
                         .in_set(InputPhase::ToolInput)
                         .run_if(in_state(ActiveTool::Select)),
                     handle_delete_shortcut
@@ -197,7 +204,9 @@ impl Plugin for SelectionPlugin {
                         .run_if(in_state(ActiveTool::Select)),
                     include_backfaces_for_selection_picking,
                     update_selection_status,
-                    update_group_edit_muting,
+                    update_group_edit_muting
+                        .after(SelectionInputSystems::Click)
+                        .after(SelectionInputSystems::Escape),
                     draw_selected_outlines
                         .after(TransformVisualSystems::PreviewUpdate)
                         .before(TransformVisualSystems::PreviewDraw),
@@ -225,6 +234,7 @@ struct SelectionPressCapture {
     entity: Option<Entity>,
     cursor_screen: Option<Vec2>,
     additive: bool,
+    step_out: bool,
 }
 
 #[derive(Component)]
@@ -483,17 +493,10 @@ fn handle_selection_click(world: &mut World) {
     let handle_is_busy = world.resource::<HandleInteractionState>().is_busy();
     let box_dragging = world.resource::<BoxSelectState>().is_dragging;
     let box_just_completed = world.resource::<BoxSelectState>().just_completed;
-    let face_editing = world.resource::<FaceEditContext>().is_active();
     let keys = world.resource::<ButtonInput<KeyCode>>();
     let nav_held = orbit_modifier_pressed(keys) || pan_modifier_pressed(keys);
 
-    if !ownership.is_idle()
-        || handle_is_busy
-        || box_dragging
-        || box_just_completed
-        || face_editing
-        || nav_held
-    {
+    if !ownership.is_idle() || handle_is_busy || box_dragging || box_just_completed || nav_held {
         cancel_selection_click(world);
         return;
     }
@@ -503,10 +506,6 @@ fn handle_selection_click(world: &mut World) {
     // resolution repeats after descent; no new per-frame picking path is added.
     let mut cached_hit: Option<(Vec2, Option<Entity>)> = None;
     for (state, position) in edges {
-        if world.resource::<FaceEditContext>().is_active() {
-            cancel_selection_click(world);
-            break;
-        }
         match state {
             ButtonState::Pressed => {
                 let raw_hit = if let Some((_, hit)) = cached_hit.filter(|(p, _)| *p == position) {
@@ -551,11 +550,25 @@ fn capture_selection_press(
             tracker.last_click_entity = None;
         }
     }
-    let target = resolve_selection_click_target(world, raw_hit_entity).entity;
+    let step_out = !additive
+        && !individual_selection_requested(world)
+        && click_is_outside_selection(world, raw_hit_entity, cursor_position);
+    // Face/edge picking owns clicks inside the edited solid. Only a click
+    // outside it belongs to object-level navigation.
+    if world.resource::<FaceEditContext>().is_active() && !step_out {
+        cancel_selection_click(world);
+        return None;
+    }
+    let target = if step_out {
+        None
+    } else {
+        resolve_selection_click_target(world, raw_hit_entity).entity
+    };
     let mut press_capture = world.resource_mut::<SelectionPressCapture>();
     press_capture.entity = target;
     press_capture.cursor_screen = Some(cursor_position);
     press_capture.additive = additive;
+    press_capture.step_out = step_out;
     target
 }
 
@@ -572,6 +585,7 @@ fn complete_selection_release(world: &mut World, cursor_position: Vec2, now: f64
         .unwrap_or(false);
     let additive_selection = press_capture.additive;
     let hit_entity = press_capture.entity.take();
+    let step_out = std::mem::take(&mut press_capture.step_out);
     press_capture.cursor_screen = None;
     press_capture.additive = false;
 
@@ -583,7 +597,11 @@ fn complete_selection_release(world: &mut World, cursor_position: Vec2, now: f64
         .resource_mut::<DoubleClickTracker>()
         .last_click_position = Some(cursor_position);
 
-    complete_selection_click(world, hit_entity, additive_selection, now);
+    if step_out {
+        step_out_selection(world);
+    } else {
+        complete_selection_click(world, hit_entity, additive_selection, now);
+    }
 }
 
 /// Complete one press/release click as a single interaction transaction.
@@ -630,6 +648,143 @@ fn complete_selection_click(
     }
 
     handle_completed_double_click(world, hit_entity, now);
+    crate::plugins::outliner::request_selection_reveal(world);
+}
+
+/// The object whose selection box bounds a plain click. An entered aggregate
+/// remains the subject even when descent has cleared its Selected marker.
+fn selection_subject(world: &mut World) -> Option<Entity> {
+    if let Some(entity) = world.resource::<FaceEditContext>().entity {
+        return Some(entity);
+    }
+    let selected: Vec<Entity> = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .collect();
+    match selected.as_slice() {
+        [entity] => return Some(*entity),
+        [] => {}
+        _ => return None,
+    }
+    let id = world
+        .get_resource::<OccurrenceEditContext>()
+        .and_then(|context| context.current_occurrence())
+        .or_else(|| world.resource::<GroupEditContext>().current_group())?;
+    find_entity_by_element_id_readonly(world, id)
+}
+
+fn click_is_outside_selection(world: &mut World, hit: Option<Entity>, position: Vec2) -> bool {
+    let Some(subject) = selection_subject(world) else {
+        return false;
+    };
+    // Match the selection box, including gaps between an assembly's parts.
+    // Reuse authored bounds and Bevy's camera ray; no additional scene raycast,
+    // per-frame geometry walk, or separate hierarchy is introduced.
+    let ray = world
+        .query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()
+        .iter(world)
+        .next()
+        .and_then(|(camera, transform)| {
+            crate::plugins::scene_ray::pick_ray_at(camera, transform, position)
+        });
+    if let (Some(ray), Some(members)) = (ray, world.get::<GroupMembers>(subject)) {
+        if !members.frame.is_identity() && world.contains_resource::<CapabilityRegistry>() {
+            if let Some(bounds) =
+                crate::plugins::modeling::group::compute_group_bounds_in_frame_from_world(
+                    world,
+                    &members.member_ids,
+                    &members.frame,
+                )
+            {
+                let inverse = members.frame.rotation.inverse();
+                let local_ray = Ray3d::new(
+                    inverse * (ray.origin - members.frame.translation),
+                    Dir3::new_unchecked(inverse * *ray.direction),
+                );
+                return ray_aabb_intersection(local_ray, bounds.min, bounds.max).is_none();
+            }
+        }
+    }
+    let bounds = world
+        .get_resource::<CapabilityRegistry>()
+        .and_then(|registry| {
+            world
+                .get_entity(subject)
+                .ok()
+                .and_then(|entity| registry.capture_snapshot(&entity, world))
+                .and_then(|snapshot| snapshot.bounds())
+        });
+    if let (Some(bounds), Some(ray)) = (bounds, ray) {
+        return ray_aabb_intersection(ray, bounds.min, bounds.max).is_none();
+    }
+    !hit.is_some_and(|hit| {
+        let hit = redirect_selection_proxy_to_target(world, hit);
+        if hit == subject {
+            return true;
+        }
+        let subject_id = world.get::<ElementId>(subject).copied();
+        let hit_id = world
+            .get::<GeneratedOccurrencePart>(hit)
+            .map(|part| part.owner)
+            .or_else(|| world.get::<ElementId>(hit).copied());
+        subject_id.is_some()
+            && (subject_id == hit_id
+                || world.get::<GroupMembers>(subject).is_some()
+                    && hit_id.is_some_and(|id| {
+                        collect_group_members_recursive(world, subject_id.unwrap()).contains(&id)
+                    }))
+    })
+}
+
+/// Step to the enclosing authored aggregate without selecting the geometry
+/// behind the click. Context exit is shared with Escape and the model command.
+fn step_out_selection(world: &mut World) {
+    if world.resource::<FaceEditContext>().is_active() {
+        exit_edit_context(world);
+        return;
+    }
+    let selected: Vec<Entity> = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .collect();
+    if let [subject] = selected.as_slice() {
+        let parent = world
+            .get::<GeneratedOccurrencePart>(*subject)
+            .map(|part| part.owner)
+            .or_else(|| {
+                world
+                    .get::<ElementId>(*subject)
+                    .and_then(|id| find_group_for_member(world, *id))
+            });
+        // Pop only the contexts that would exclude the parent selection.
+        if let Some(parent) = parent {
+            if world
+                .get_resource::<OccurrenceEditContext>()
+                .is_some_and(|context| context.stack.contains(&parent))
+            {
+                exit_edit_context(world);
+            }
+            while world.resource::<GroupEditContext>().stack.contains(&parent) {
+                exit_edit_context(world);
+            }
+        }
+        // exit_edit_context may have reselected the exited aggregate.
+        let remaining: Vec<Entity> = world
+            .query_filtered::<Entity, With<Selected>>()
+            .iter(world)
+            .collect();
+        for entity in remaining {
+            world.entity_mut(entity).remove::<Selected>();
+        }
+        if let Some(parent) = parent.and_then(|id| find_entity_by_element_id_readonly(world, id)) {
+            world.entity_mut(parent).insert(Selected);
+        }
+    } else {
+        exit_edit_context(world);
+    }
+    world.insert_resource(PivotPoint::default());
+    world.resource_mut::<DoubleClickTracker>().last_click_entity = None;
+    crate::plugins::outliner::request_selection_reveal(world);
 }
 
 fn resolve_generated_part_for_selection(
@@ -737,6 +892,21 @@ struct SelectionClickTarget {
     entity: Option<Entity>,
 }
 
+fn individual_selection_requested(world: &World) -> bool {
+    world
+        .get_resource::<ButtonInput<KeyCode>>()
+        .is_some_and(|keys| {
+            [
+                KeyCode::ControlLeft,
+                KeyCode::ControlRight,
+                KeyCode::SuperLeft,
+                KeyCode::SuperRight,
+            ]
+            .iter()
+            .any(|key| keys.pressed(*key))
+        })
+}
+
 fn resolve_selection_click_target(
     world: &mut World,
     hit_entity: Option<Entity>,
@@ -766,18 +936,7 @@ fn resolve_selection_click_target(
 
     // Ctrl/Cmd-click addresses the actual authored object through nested groups.
     // Generated occurrence parts still resolve to their stable authored owner.
-    let individual = world
-        .get_resource::<ButtonInput<KeyCode>>()
-        .is_some_and(|keys| {
-            [
-                KeyCode::ControlLeft,
-                KeyCode::ControlRight,
-                KeyCode::SuperLeft,
-                KeyCode::SuperRight,
-            ]
-            .iter()
-            .any(|key| keys.pressed(*key))
-        });
+    let individual = individual_selection_requested(world);
     if individual {
         let eligible = resolve_entity_for_selection(world, entity).is_some();
         return SelectionClickTarget {
@@ -822,9 +981,8 @@ fn resolve_selection_click_target(
         };
     }
 
-    // Geometry outside an entered group is reference context only. It must not
-    // implicitly pop the edit stack or become selectable; Escape is the explicit
-    // and deterministic way back to the parent context.
+    // Outside geometry is never selected through an active context. The
+    // accepted pointer release navigates out instead (see step_out_selection).
     SelectionClickTarget::default()
 }
 
@@ -969,6 +1127,16 @@ pub(crate) fn exit_edit_context(world: &mut World) -> &'static str {
     let occurrence_active = world
         .get_resource::<OccurrenceEditContext>()
         .is_some_and(|context| !context.is_root());
+    let exited_entity = world
+        .get_resource::<FaceEditContext>()
+        .and_then(|context| context.entity)
+        .or_else(|| {
+            let id = world
+                .get_resource::<OccurrenceEditContext>()
+                .and_then(|context| context.current_occurrence())
+                .or_else(|| world.resource::<GroupEditContext>().current_group())?;
+            find_entity_by_element_id_readonly(world, id)
+        });
     let exited = if world
         .get_resource::<FaceEditContext>()
         .is_some_and(|context| context.is_active())
@@ -993,7 +1161,20 @@ pub(crate) fn exit_edit_context(world: &mut World) -> &'static str {
     for entity in selected {
         world.entity_mut(entity).remove::<Selected>();
     }
+    if let Some(entity) = exited_entity {
+        if let Ok(mut entity) = world.get_entity_mut(entity) {
+            entity.insert(Selected);
+        }
+    }
+    if exited == "face" {
+        crate::plugins::face_edit::clear_face_edit_transients(world);
+    }
+    if let Some(mut selection) = world.get_resource_mut::<SubobjectSelection>() {
+        selection.refs.clear();
+    }
+    world.insert_resource(PivotPoint::default());
     world.resource_mut::<DoubleClickTracker>().last_click_entity = None;
+    crate::plugins::outliner::request_selection_reveal(world);
     exited
 }
 
@@ -2726,6 +2907,20 @@ mod tests {
         }
     }
 
+    fn queue_native_cursor(app: &mut App, window: Entity, position: Vec2) {
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .set_cursor_position(Some(position));
+        app.world_mut()
+            .resource_mut::<Messages<WindowEvent>>()
+            .write(WindowEvent::CursorMoved(bevy::window::CursorMoved {
+                window,
+                position,
+                delta: None,
+            }));
+    }
+
     #[test]
     fn native_same_frame_double_click_enters_exactly_one_group() {
         use bevy::input::ButtonState::{Pressed, Released};
@@ -3152,42 +3347,203 @@ mod tests {
     }
 
     #[test]
-    fn outside_click_cannot_select_or_exit_an_entered_group() {
-        let mut world = World::new();
-        world.insert_resource(LayerRegistry::default());
-        world.insert_resource(OccurrenceEditContext::default());
-        world.insert_resource(FaceEditContext::default());
-        world.insert_resource(DoubleClickTracker::default());
+    fn native_outside_click_climbs_nested_selection_and_clears_at_root() {
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        let roof = find_entity_by_element_id_readonly(app.world(), ElementId(20)).unwrap();
+        let house = find_entity_by_element_id_readonly(app.world(), ElementId(30)).unwrap();
+        // Reproduce a nested selection reached through viewport descent.
+        app.world_mut()
+            .resource_mut::<GroupEditContext>()
+            .enter(ElementId(30));
+        app.world_mut().entity_mut(roof).insert(Selected);
+        queue_native_cursor(&mut app, window, Vec2::new(790.0, 590.0));
+        queue_native_edges(&mut app, window, &[Pressed]);
+        app.update();
+        assert!(
+            app.world().get::<Selected>(roof).is_some(),
+            "press must not navigate"
+        );
+        queue_native_edges(&mut app, window, &[Released]);
+        app.update();
+        assert!(app.world().get::<Selected>(house).is_some());
+        assert!(app.world().get::<Selected>(roof).is_none());
+        assert!(app.world().resource::<GroupEditContext>().is_root());
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        app.update();
+        assert!(app.world().get::<Selected>(house).is_none());
+    }
 
-        let child_id = ElementId(10);
-        let group_id = ElementId(20);
-        let outside_id = ElementId(30);
-        world.spawn(child_id);
-        let group = world
-            .spawn((
-                group_id,
-                GroupMembers {
-                    name: "Active group".to_string(),
-                    member_ids: vec![child_id],
-                    frame: Default::default(),
-                    linked_model: None,
+    #[test]
+    fn native_outside_click_exits_face_editing_and_clears_subobjects() {
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        let solid = find_entity_by_element_id_readonly(app.world(), ElementId(10)).unwrap();
+        app.world_mut().insert_resource(SubobjectSelection {
+            refs: vec![crate::capability_registry::SelectableSubobjectRef::Face {
+                element_id: 10,
+                face: crate::capability_registry::GeneratedFaceRef::BoxFace {
+                    axis: 0,
+                    positive: true,
                 },
+            }],
+        });
+        app.world_mut()
+            .resource_mut::<FaceEditContext>()
+            .enter(solid, ElementId(10));
+        app.world_mut()
+            .insert_resource(crate::plugins::face_edit::FaceDrawingContext {
+                active: true,
+                points: vec![Vec3::ZERO],
+                ..Default::default()
+            });
+        // A drag that began outside must not dismiss face editing.
+        queue_native_cursor(&mut app, window, Vec2::new(790.0, 590.0));
+        queue_native_edges(&mut app, window, &[Pressed]);
+        app.update();
+        queue_native_cursor(&mut app, window, Vec2::new(700.0, 500.0));
+        queue_native_edges(&mut app, window, &[Released]);
+        app.update();
+        assert!(app.world().resource::<FaceEditContext>().is_active());
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        app.update();
+        assert!(!app.world().resource::<FaceEditContext>().is_active());
+        assert!(app.world().get::<Selected>(solid).is_some());
+        assert!(app.world().resource::<SubobjectSelection>().refs.is_empty());
+        assert!(
+            !app.world()
+                .resource::<crate::plugins::face_edit::FaceDrawingContext>()
+                .active
+        );
+    }
+
+    #[test]
+    fn native_click_inside_assembly_bounds_preserves_context_and_shift_is_additive() {
+        use crate::plugins::modeling::{group::GroupFactory, primitives::BoxPrimitive};
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_factory(GroupFactory);
+        let solid = find_entity_by_element_id_readonly(app.world(), ElementId(10)).unwrap();
+        // A gap between two pieces still lies inside the selected bounding box.
+        app.world_mut()
+            .get_mut::<BoxPrimitive>(solid)
+            .unwrap()
+            .centre
+            .x = -1.0;
+        app.world_mut().spawn((
+            ElementId(11),
+            BoxPrimitive {
+                centre: Vec3::X,
+                half_extents: Vec3::splat(0.25),
+            },
+        ));
+        let roof = find_entity_by_element_id_readonly(app.world(), ElementId(20)).unwrap();
+        app.world_mut()
+            .get_mut::<GroupMembers>(roof)
+            .unwrap()
+            .member_ids
+            .push(ElementId(11));
+        app.world_mut()
+            .resource_mut::<GroupEditContext>()
+            .enter(ElementId(30));
+        app.world_mut()
+            .resource_mut::<GroupEditContext>()
+            .enter(ElementId(20));
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        app.update();
+        assert_eq!(
+            app.world().resource::<GroupEditContext>().stack,
+            vec![ElementId(30), ElementId(20)]
+        );
+        queue_native_cursor(&mut app, window, Vec2::new(790.0, 590.0));
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        app.update();
+        assert_eq!(app.world().resource::<GroupEditContext>().stack.len(), 2);
+    }
+
+    #[test]
+    fn native_command_click_can_select_another_object_without_stepping_out() {
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        let unrelated = app.world_mut().spawn((ElementId(40), Selected)).id();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::SuperLeft);
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        app.update();
+        let solid = find_entity_by_element_id_readonly(app.world(), ElementId(10)).unwrap();
+        assert!(app.world().get::<Selected>(solid).is_some());
+        assert!(app.world().get::<Selected>(unrelated).is_none());
+    }
+
+    #[test]
+    fn native_outside_click_matches_the_rotated_group_selection_box() {
+        use crate::plugins::modeling::{group::GroupFactory, primitives::BoxPrimitive};
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_factory(GroupFactory);
+        let solid = find_entity_by_element_id_readonly(app.world(), ElementId(10)).unwrap();
+        let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        app.world_mut()
+            .get_mut::<BoxPrimitive>(solid)
+            .unwrap()
+            .half_extents = Vec3::new(1.5, 0.1, 0.1);
+        app.world_mut()
+            .entity_mut(solid)
+            .insert((ShapeRotation(rotation), Mesh3d(Handle::default())));
+        let roof = find_entity_by_element_id_readonly(app.world(), ElementId(20)).unwrap();
+        app.world_mut()
+            .get_mut::<GroupMembers>(roof)
+            .unwrap()
+            .frame
+            .rotation = rotation;
+        app.world_mut().entity_mut(roof).insert(Selected);
+        let position = {
+            let world = app.world_mut();
+            let (camera, transform) = world
+                .query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()
+                .single(world)
+                .unwrap();
+            camera
+                .world_to_viewport(transform, Vec3::new(0.9, -0.9, 0.0))
+                .unwrap()
+        };
+        queue_native_cursor(&mut app, window, position);
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        app.update();
+        let house = find_entity_by_element_id_readonly(app.world(), ElementId(30)).unwrap();
+        assert!(
+            app.world().get::<Selected>(house).is_some(),
+            "outside oriented box, inside its world AABB"
+        );
+    }
+
+    #[test]
+    fn native_outside_click_exits_occurrence_without_selecting_background() {
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        let owner = app
+            .world_mut()
+            .spawn((
+                ElementId(50),
+                OccurrenceIdentity::new(DefinitionId("compound".into()), 1),
             ))
             .id();
-        let outside = world.spawn((outside_id, GroupEditMuted)).id();
-        let mut context = GroupEditContext::default();
-        context.enter(group_id);
-        world.insert_resource(context);
-
-        assert!(resolve_entity_for_selection(&world, outside).is_none());
-        assert!(resolve_selection_click_target(&mut world, Some(outside))
-            .entity
-            .is_none());
-        complete_selection_click(&mut world, None, false, 1.0);
-
-        assert_eq!(world.resource::<GroupEditContext>().stack, vec![group_id]);
-        assert!(world.get::<Selected>(outside).is_none());
-        assert!(world.get::<Selected>(group).is_none());
+        app.world_mut()
+            .resource_mut::<OccurrenceEditContext>()
+            .enter(ElementId(50));
+        queue_native_cursor(&mut app, window, Vec2::new(790.0, 590.0));
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        app.update();
+        assert!(app.world().resource::<OccurrenceEditContext>().is_root());
+        assert!(app.world().get::<Selected>(owner).is_some());
     }
 
     #[test]
