@@ -276,7 +276,7 @@ fn corrupt_retained_bytes_refuse_load_before_replacing_live_model() {
     let before = get_entity_snapshot(&world, plan.created_ids()[0]).unwrap();
     let path = temp_json_path("foreign-corrupt-source").with_extension("talos3d");
     handle_save_project(&mut world, path.to_str().unwrap()).unwrap();
-    let mut json: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut json: Value = crate::plugins::project_codec::decode(&fs::read(&path).unwrap()).unwrap();
     let sources = json["foreign_sources"].as_object_mut().unwrap();
     sources.values_mut().next().unwrap()["bytes"][0] = json!(0);
     fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
@@ -381,11 +381,12 @@ fn source_link_integrity_and_subset_export_keep_only_referenced_artifacts() {
             .unwrap()
             .contains("asset migration")
     );
-    let exported: Value = serde_json::from_slice(&subset).unwrap();
+    let exported: Value = crate::plugins::project_codec::decode(&subset).unwrap();
     assert_eq!(exported["foreign_sources"].as_object().unwrap().len(), 1);
     let path = temp_json_path("foreign-missing-source").with_extension("talos3d");
     handle_save_project(&mut world, path.to_str().unwrap()).unwrap();
-    let mut project: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut project: Value =
+        crate::plugins::project_codec::decode(&fs::read(&path).unwrap()).unwrap();
     project.as_object_mut().unwrap().remove("foreign_sources");
     fs::write(&path, serde_json::to_vec(&project).unwrap()).unwrap();
     let original = get_entity_snapshot(&world, id).unwrap();

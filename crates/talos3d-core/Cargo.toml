@@ -68,6 +68,8 @@ uuid = { version = "1", features = ["serde"] }
 # Lightweight pure-Rust expression evaluator for AuthoringScript ArgExpr::Expr.
 # Supports arithmetic, tan/sin/cos/sqrt/pi, and variable contexts (PP82/Change-4).
 evalexpr = "11"
+rmp-serde = "1"
+flate2 = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rmcp = { version = "=1.3.0", default-features = false, features = ["transport-io", "transport-streamable-http-server"], optional = true }

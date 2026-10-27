@@ -6,4 +6,4 @@
 - task-id: TALOS-kwbsbbrc
 - target base: main
 - summary: Lossless compact project storage, legacy compatibility, and large-model load verification.
-- status: active
+- status: awaiting-merge

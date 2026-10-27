@@ -75,6 +75,7 @@ pub mod parametric_mcp;
 pub mod perf_stats;
 pub mod persistence;
 pub mod procedural_session_mcp;
+pub mod project_codec;
 pub mod promotion;
 pub mod promotion_world;
 pub mod property_edit;

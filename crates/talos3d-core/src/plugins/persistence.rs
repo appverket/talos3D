@@ -543,7 +543,7 @@ pub fn open_recent_project(world: &mut World, path: PathBuf) -> Result<PathBuf, 
 /// explicitly saves it.
 pub fn recover_project_from_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
     let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-    let project: ProjectFile = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let project: ProjectFile = crate::plugins::project_codec::decode(&bytes)?;
     let recovery = recovery_record_from_disk(&path)
         .ok_or_else(|| format!("'{}' is not a recovery project", path.display()))?;
     load_project(world, project)?;
@@ -732,16 +732,21 @@ pub fn new_document(world: &mut World) {
 /// and its pending operation durably, then call `acknowledge_project_bytes`.
 pub fn capture_project_bytes(world: &mut World) -> Result<Vec<u8>, String> {
     let project = build_project_file(world)?;
-    // Registries contain HashMaps whose iteration order can change even when
-    // authored content is unchanged. Stable bytes are essential both for blob
-    // hashes and for acknowledging a delayed local save without an autosave loop.
+    // Keep the object-form JSON transport contract for existing shell clients.
+    // Stable bytes remain essential for delayed-save acknowledgements.
     let mut value = serde_json::to_value(&project).map_err(|e| e.to_string())?;
     value.sort_all_objects();
-    serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())
+    serde_json::to_vec(&value).map_err(|e| e.to_string())
+}
+
+/// Compact native-file representation of the same complete authored snapshot.
+/// Existing shell snapshot clients retain object-form JSON through capture_project_bytes.
+pub fn capture_project_file_bytes(world: &mut World) -> Result<Vec<u8>, String> {
+    crate::plugins::project_codec::encode(&build_project_file(world)?)
 }
 
 pub fn open_project_bytes(world: &mut World, bytes: &[u8]) -> Result<(), String> {
-    let project: ProjectFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    let project: ProjectFile = crate::plugins::project_codec::decode(bytes)?;
     load_project(world, project)?;
     world.resource_mut::<DocumentState>().reset();
     crate::plugins::command_registry::frame_camera_on_document_open(world);
@@ -780,7 +785,7 @@ pub fn install_project_library(
     {
         return Err("Invalid library revision".into());
     }
-    let project: ProjectFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    let project: ProjectFile = crate::plugins::project_codec::decode(bytes)?;
     if project.version != PROJECT_FILE_VERSION {
         return Err("Unsupported project version".into());
     }
@@ -861,7 +866,7 @@ pub fn install_project_library(
     // the document's own sidecars or changes already placed occurrences.
     after.extensions.0.insert(
         format!("library_payload_{revision}"),
-        serde_json::from_slice(bytes).map_err(|e| e.to_string())?,
+        crate::plugins::project_codec::decode(bytes)?,
     );
     world
         .resource_mut::<PendingCommandQueue>()
@@ -940,7 +945,7 @@ impl crate::plugins::history::EditorCommand for InstallLibrary {
 }
 
 fn save_to_path(world: &mut World, path: &Path) -> Result<(), String> {
-    let bytes = capture_project_bytes(world)?;
+    let bytes = capture_project_file_bytes(world)?;
     let key = path.to_string_lossy().into_owned();
     world.resource::<Storage>().0.save(&bytes, &key)?;
 
@@ -958,11 +963,10 @@ fn save_to_path(world: &mut World, path: &Path) -> Result<(), String> {
 fn load_from_path(world: &mut World, path: &Path) -> Result<(), String> {
     let started = web_time::Instant::now();
     let key = path.to_string_lossy().into_owned();
-    let contents = String::from_utf8(world.resource::<Storage>().0.load(&key)?)
-        .map_err(|error| error.to_string())?;
+    let contents = world.resource::<Storage>().0.load(&key)?;
     let bytes = contents.len();
     let read_elapsed = started.elapsed();
-    let project: ProjectFile = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
+    let project: ProjectFile = crate::plugins::project_codec::decode(&contents)?;
     // The parsed project owns its data. Release the potentially large source
     // buffer before restoring entities and building their derived geometry.
     drop(contents);
@@ -1110,24 +1114,7 @@ fn scan_recovery_files() -> Vec<RecoveryFile> {
 }
 
 fn atomic_write_local(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let temporary = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .map(|extension| extension.to_string_lossy())
-            .unwrap_or_default()
-    ));
-    fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-    match fs::rename(&temporary, path) {
-        Ok(()) => Ok(()),
-        Err(_) if path.exists() => {
-            fs::remove_file(path).map_err(|error| error.to_string())?;
-            fs::rename(temporary, path).map_err(|error| error.to_string())
-        }
-        Err(error) => Err(error.to_string()),
-    }
+    crate::plugins::storage::atomic_write_file(path, bytes)
 }
 
 fn new_recovery_id() -> String {
@@ -1193,7 +1180,7 @@ fn write_recovery_autosave(world: &mut World) -> Result<PathBuf, String> {
     };
     let recovery_path = recovery_project_path(&recovery_id)?;
     let saved_at_unix_ms = unix_time_ms();
-    let bytes = serde_json::to_vec_pretty(&project).map_err(|error| error.to_string())?;
+    let bytes = crate::plugins::project_codec::encode(&project)?;
     atomic_write_local(&recovery_path, &bytes)?;
 
     let record = RecoveryFile {
@@ -1549,7 +1536,7 @@ pub(crate) fn serialize_entity_records_as_project(
         corpus_gaps: None,
         entities,
     };
-    serde_json::to_vec_pretty(&project).map_err(|error| error.to_string())
+    serde_json::to_vec(&project).map_err(|error| error.to_string())
 }
 
 fn referenced_hidden_objects(
@@ -1671,7 +1658,7 @@ fn collect_layer_refs(value: &Value, layer_names: &mut BTreeSet<String>) {
 pub(crate) fn deserialize_project_entity_records(
     bytes: &[u8],
 ) -> Result<(u64, Vec<PersistedEntityRecord>), String> {
-    let project: ProjectFile = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let project: ProjectFile = crate::plugins::project_codec::decode(bytes)?;
     validate_project_header(
         project.version,
         project.created_by.as_ref(),
@@ -1689,7 +1676,7 @@ pub(crate) struct ProjectEntityRecords {
 pub(crate) fn deserialize_project_entity_records_with_assets(
     bytes: &[u8],
 ) -> Result<ProjectEntityRecords, String> {
-    let project: ProjectFile = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let project: ProjectFile = crate::plugins::project_codec::decode(bytes)?;
     validate_project_header(
         project.version,
         project.created_by.as_ref(),
@@ -1967,13 +1954,13 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     world.resource_mut::<OpaquePersistedEntities>().0 = opaque;
     recognized.sort_by_key(|(snapshot, _)| snapshot_dependency_order(snapshot));
     let mut restored_snapshots = Vec::with_capacity(recognized.len());
-    for (snapshot, semantic) in &recognized {
+    for (snapshot, semantic) in recognized {
         snapshot.apply_to(world);
         if let Some(semantic) = semantic {
-            apply_semantic_sidecars(world, snapshot.element_id(), semantic);
+            apply_semantic_sidecars(world, snapshot.element_id(), &semantic);
         }
-        stamp_authored_entity_dependencies(world, snapshot);
-        restored_snapshots.push(snapshot.clone());
+        stamp_authored_entity_dependencies(world, &snapshot);
+        restored_snapshots.push(snapshot);
     }
     world
         .resource_mut::<ElementIdAllocator>()
@@ -2303,7 +2290,7 @@ mod tests {
             .resource::<AgentSkillRegistry>()
             .private_skills()
             .is_empty());
-        let mut forged: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut forged: serde_json::Value = crate::plugins::project_codec::decode(&bytes).unwrap();
         forged["core.project_agent_skills.v1"][0]["trust_level"] = serde_json::json!("shipped");
         assert!(open_project_bytes(&mut target, &serde_json::to_vec(&forged).unwrap()).is_err());
         assert!(target
@@ -2322,7 +2309,11 @@ mod tests {
             .unwrap();
         source.insert_resource(passages);
         let bytes = capture_project_bytes(&mut source).unwrap();
-        assert!(String::from_utf8_lossy(&bytes).contains("private-A"));
+        assert!(
+            String::from_utf8(crate::plugins::project_codec::to_legacy_json(&bytes).unwrap())
+                .unwrap()
+                .contains("private-A")
+        );
         let mut target = shell_world();
         target.init_resource::<PropertyEditState>();
         target.init_resource::<TransformState>();
@@ -3435,6 +3426,26 @@ mod tests {
             saved.entities.contains(&unknown_record),
             "unknown future entity data must be preserved for save/load portability"
         );
+
+        // The shell snapshot contract remains object JSON, while native saves
+        // use the compact envelope. Both must restore the same opaque content.
+        let legacy = capture_project_bytes(&mut target).unwrap();
+        assert_eq!(legacy[0], b'{');
+        let native = capture_project_file_bytes(&mut target).unwrap();
+        assert_eq!(native[0], b'[');
+        let legacy_value: Value = serde_json::from_slice(&legacy).unwrap();
+        let native_value: Value = crate::plugins::project_codec::decode(&native).unwrap();
+        assert_eq!(legacy_value, native_value);
+        open_project_bytes(&mut target, &native).unwrap();
+        assert_eq!(
+            target.resource::<OpaquePersistedEntities>().0,
+            vec![unknown_record]
+        );
+        assert_eq!(capture_project_bytes(&mut target).unwrap(), legacy);
+
+        let before = capture_project_bytes(&mut target).unwrap();
+        assert!(open_project_bytes(&mut target, &native[..native.len() / 2]).is_err());
+        assert_eq!(capture_project_bytes(&mut target).unwrap(), before);
     }
 
     #[test]
@@ -4227,8 +4238,8 @@ mod tests {
 
         let bytes =
             serialize_entity_records_as_project(&world, 2, entities).expect("linked project saves");
-        let project: ProjectFile =
-            serde_json::from_slice(&bytes).expect("linked project should deserialize");
+        let project: ProjectFile = crate::plugins::project_codec::decode(&bytes)
+            .expect("linked project should deserialize");
         let saved_materials = project
             .materials
             .expect("referenced project material should persist");
@@ -4261,8 +4272,8 @@ mod tests {
         }];
         let bytes = serialize_entity_records_as_project(&world, 2, default_only)
             .expect("linked project saves");
-        let project: ProjectFile =
-            serde_json::from_slice(&bytes).expect("linked project should deserialize");
+        let project: ProjectFile = crate::plugins::project_codec::decode(&bytes)
+            .expect("linked project should deserialize");
         assert!(
             project.layers.is_none(),
             "default-only linked projects should not carry site layer metadata"
@@ -4278,8 +4289,8 @@ mod tests {
         }];
         let bytes = serialize_entity_records_as_project(&world, 2, house_layer)
             .expect("linked project saves");
-        let project: ProjectFile =
-            serde_json::from_slice(&bytes).expect("linked project should deserialize");
+        let project: ProjectFile = crate::plugins::project_codec::decode(&bytes)
+            .expect("linked project should deserialize");
         let saved_layers = project
             .layers
             .expect("referenced non-default layer should persist");
@@ -4344,7 +4355,7 @@ mod tests {
 
         // No Update runs between command application, capture and open.
         let bytes = capture_project_bytes(&mut world).unwrap();
-        let captured: ProjectFile = serde_json::from_slice(&bytes).unwrap();
+        let captured: ProjectFile = crate::plugins::project_codec::decode(&bytes).unwrap();
         let expected = captured.document_properties.unwrap().domain_defaults;
         for key in [
             DIMENSION_ANNOTATIONS_KEY,
@@ -4375,7 +4386,8 @@ mod tests {
             // The normal Update sync also must not remove restored objects.
             sync_drawing_metadata(&mut world);
             let recaptured: ProjectFile =
-                serde_json::from_slice(&capture_project_bytes(&mut world).unwrap()).unwrap();
+                crate::plugins::project_codec::decode(&capture_project_bytes(&mut world).unwrap())
+                    .unwrap();
             assert_eq!(
                 recaptured.document_properties.unwrap().domain_defaults,
                 expected
@@ -4389,7 +4401,8 @@ mod tests {
         world.insert_resource(DocumentProperties::default());
         world.spawn((ElementId(700), dimension.clone()));
         let fresh: ProjectFile =
-            serde_json::from_slice(&capture_project_bytes(&mut world).unwrap()).unwrap();
+            crate::plugins::project_codec::decode(&capture_project_bytes(&mut world).unwrap())
+                .unwrap();
         let metadata = fresh.document_properties.unwrap().domain_defaults;
         assert_eq!(metadata[DIMENSION_ANNOTATIONS_KEY][0]["element_id"], 700);
         assert!(!metadata.contains_key(SECTION_VIEW_METADATA_KEY));

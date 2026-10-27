@@ -5190,7 +5190,7 @@ fn legacy_primitive_record_upgrades_and_loads() {
     // Strip the newer per-record fields to simulate a legacy record
     // inside an otherwise current-version file.
     let mut project: Value =
-        serde_json::from_slice(&fs::read(&path).expect("saved project should read"))
+        crate::plugins::project_codec::decode(&fs::read(&path).expect("saved project should read"))
             .expect("saved project should parse");
     for entity in project["entities"].as_array_mut().expect("entities array") {
         if entity["type"] == json!("sphere") {
@@ -5239,9 +5239,10 @@ fn failed_load_does_not_clear_existing_scene() {
     let mut empty_world = init_model_api_test_world();
     handle_save_project(&mut empty_world, path.to_str().unwrap_or_default())
         .expect("baseline project should save");
-    let mut project: Value =
-        serde_json::from_slice(&fs::read(&path).expect("baseline project should read"))
-            .expect("baseline project should parse");
+    let mut project: Value = crate::plugins::project_codec::decode(
+        &fs::read(&path).expect("baseline project should read"),
+    )
+    .expect("baseline project should parse");
     project["entities"] = json!([{ "type": "scene_light", "data": {} }]);
     fs::write(
         &path,
