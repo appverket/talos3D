@@ -1,9 +1,9 @@
 # Worktree purpose
 
-- agent: claude
+- agent: codex
 - created: 2026-10-27
-- branch: claude/bevy-0.20
-- task-id: TALOS-jtepoljl
+- branch: codex/bevy020-inference-ux
+- task-id: TALOS-prssrtbo
 - target base: main
-- summary: Upgrade Talos3D to Bevy 0.20 / bevy_egui 0.43 / egui 0.36
-- status: awaiting-merge
+- summary: Repair and verify viewport inference after Bevy 0.20
+- status: active
