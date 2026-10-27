@@ -565,28 +565,33 @@ fn capture_selection_press(
     } else {
         resolve_selection_click_target(world, raw_hit_entity).entity
     };
-    let face =
-        if !additive && !step_out && target.is_some_and(|e| world.get::<Selected>(e).is_some()) {
-            raw_hit_entity.and_then(|entity| {
-                if world.get::<GeneratedOccurrencePart>(entity).is_some() {
-                    return None;
-                }
-                let registry = world.get_resource::<CapabilityRegistry>()?;
-                let entity_ref = world.get_entity(entity).ok()?;
-                let factory = registry
-                    .factories()
-                    .iter()
-                    .find(|f| f.allows_automatic_face_edit(&entity_ref))?;
-                let mut cameras =
-                    world.try_query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()?;
-                let (camera, transform) = cameras.iter(world).next()?;
-                let ray =
-                    crate::plugins::scene_ray::pick_ray_at(camera, transform, cursor_position)?;
-                factory.hit_test_face(world, entity, ray)
-            })
-        } else {
-            None
-        };
+    // A selected container does not authorize editing a descendant face.
+    // Resolve group/occurrence boundaries first, then require the actual
+    // hit component itself to have been selected by an earlier click.
+    let face = if !additive
+        && !step_out
+        && target == raw_hit_entity
+        && target.is_some_and(|e| world.get::<Selected>(e).is_some())
+    {
+        raw_hit_entity.and_then(|entity| {
+            if world.get::<GeneratedOccurrencePart>(entity).is_some() {
+                return None;
+            }
+            let registry = world.get_resource::<CapabilityRegistry>()?;
+            let entity_ref = world.get_entity(entity).ok()?;
+            let factory = registry
+                .factories()
+                .iter()
+                .find(|f| f.allows_automatic_face_edit(&entity_ref))?;
+            let mut cameras =
+                world.try_query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()?;
+            let (camera, transform) = cameras.iter(world).next()?;
+            let ray = crate::plugins::scene_ray::pick_ray_at(camera, transform, cursor_position)?;
+            factory.hit_test_face(world, entity, ray)
+        })
+    } else {
+        None
+    };
     let mut press_capture = world.resource_mut::<SelectionPressCapture>();
     press_capture.face = face;
     press_capture.entity = target;
@@ -625,9 +630,6 @@ fn complete_selection_release(world: &mut World, cursor_position: Vec2, now: f64
     if step_out {
         step_out_selection(world);
     } else if let Some(face) = face {
-        if let Some(group) = hit_entity.filter(|e| world.get::<GroupMembers>(*e).is_some()) {
-            enter_edit_context_for_entity(world, group);
-        }
         crate::plugins::modeling::face_sketch::select_hit(world, face);
         world.resource_mut::<DoubleClickTracker>().last_click_entity = None;
     } else {
@@ -2976,7 +2978,52 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().resource::<GroupEditContext>().stack,
-            vec![ElementId(30)]
+            vec![ElementId(30), ElementId(20)]
+        );
+    }
+
+    #[test]
+    fn native_face_selection_requires_descent_to_selected_leaf_component() {
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        for (click, selected, stack) in [
+            (1, Some(30), vec![]),
+            (2, None, vec![ElementId(30)]),
+            (3, Some(20), vec![ElementId(30)]),
+            (4, None, vec![ElementId(30), ElementId(20)]),
+            (5, Some(10), vec![ElementId(30), ElementId(20)]),
+        ] {
+            queue_native_edges(&mut app, window, &[Pressed, Released]);
+            app.update();
+            assert_eq!(
+                app.world().resource::<GroupEditContext>().stack,
+                stack,
+                "click {click}"
+            );
+            assert!(
+                !app.world().resource::<FaceEditContext>().is_active(),
+                "click {click} bypassed a component boundary"
+            );
+            let selected_ids: Vec<_> = app
+                .world_mut()
+                .query_filtered::<&ElementId, With<Selected>>()
+                .iter(app.world())
+                .map(|id| id.0)
+                .collect();
+            assert_eq!(
+                selected_ids,
+                selected.into_iter().collect::<Vec<_>>(),
+                "click {click}"
+            );
+        }
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        app.update();
+        let face = app.world().resource::<FaceEditContext>();
+        assert_eq!(face.element_id, Some(ElementId(10)));
+        assert!(face.selected_face.is_some());
+        assert_eq!(
+            app.world().resource::<GroupEditContext>().stack,
+            vec![ElementId(30), ElementId(20)]
         );
     }
 
@@ -3024,9 +3071,11 @@ mod tests {
             app.world().resource::<GroupEditContext>().stack,
             vec![ElementId(30)]
         );
-        let face = app.world().resource::<FaceEditContext>();
-        assert_eq!(face.element_id, Some(ElementId(10)));
-        assert!(face.selected_face.is_some(),"the selected group's face stays selected; a third click must not descend another group");
+        let roof = find_entity_by_element_id_readonly(app.world(), ElementId(20)).unwrap();
+        assert!(
+            app.world().get::<Selected>(roof).is_some(),
+            "a third click selects the child; it does not consume another pair"
+        );
     }
 
     #[test]
@@ -3079,13 +3128,10 @@ mod tests {
         move_to(&mut app, Vec2::new(400.0, 300.0));
         queue_native_edges(&mut app, window, &[Pressed, Released]);
         app.update();
-        assert_eq!(
-            app.world().resource::<GroupEditContext>().stack,
-            vec![ElementId(30)]
+        assert!(
+            app.world().resource::<GroupEditContext>().is_root(),
+            "distant clicks on the same aggregate are not a double-click"
         );
-        let face = app.world().resource::<FaceEditContext>();
-        assert_eq!(face.element_id, Some(ElementId(10)));
-        assert!(face.selected_face.is_some(),"clicking another position on an already selected group directly selects the face, independently of double-click pairing");
     }
 
     #[test]

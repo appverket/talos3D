@@ -1,6 +1,8 @@
 # Authored face drawing
 
-With Select active, click a solid or group, then click a planar face inside it.
+With Select active, enter each enclosing group in order, then select the
+individual solid/component. Click its planar face to select the face. A selected
+group never allows face selection through its boundary.
 The selected face has a GPU stipple overlay. Press **C** for a circle (centre,
 radius), **P** for a rectangle (opposite corners), or **L** for lines (Enter to
 finish). Drawing and snapping stay on the selected plane. The new region stays
