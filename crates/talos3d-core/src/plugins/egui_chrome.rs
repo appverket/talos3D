@@ -2542,9 +2542,10 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                     data.status_bar_data.tool_name
                 )));
                 ui.separator();
-                // Keep selection identity visible even while handles or toolbar
-                // hover hints occupy the right side of the status bar.
-                ui.add(
+                // Reserve space for coordinates before truncating a deep breadcrumb.
+                let selection_width = (ui.available_width() - 230.0).max(40.0);
+                ui.add_sized(
+                    [selection_width, ui.spacing().interact_size.y],
                     egui::Label::new(
                         egui::RichText::new(&data.status_bar_data.selection_summary)
                             .strong()
@@ -2554,13 +2555,14 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                 )
                 .on_hover_text(&data.status_bar_data.selection_summary);
                 ui.separator();
-                ui.label(coordinates);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(status_hint);
-                    if data.status_bar_data.command_busy() {
-                        ui.spinner();
-                    }
-                });
+                ui.add(egui::Label::new(coordinates).truncate());
+            });
+            ui.horizontal(|ui| {
+                if data.status_bar_data.command_busy() {
+                    ui.spinner();
+                }
+                ui.add(egui::Label::new(&status_hint).truncate())
+                    .on_hover_text(&status_hint);
             });
         },
     );

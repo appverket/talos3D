@@ -1404,6 +1404,32 @@ fn update_selection_status(world: &mut World) {
         }
         entities => format!("{} elements selected", entities.len()),
     };
+    if let Some(context) = world
+        .get_resource::<FaceEditContext>()
+        .filter(|c| c.is_active())
+    {
+        let edge_count = world
+            .get_resource::<SubobjectSelection>()
+            .map(|s| {
+                s.refs
+                    .iter()
+                    .filter(|r| {
+                        matches!(
+                            r,
+                            crate::capability_registry::SelectableSubobjectRef::Edge { .. }
+                        )
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        summary = if edge_count > 0 {
+            format!("{edge_count} edge(s) selected")
+        } else if context.selected_face.is_some() {
+            "Face selected".into()
+        } else {
+            "Select a face or edge".into()
+        };
+    }
     let context = world.resource::<GroupEditContext>();
     if !context.is_root() {
         let labels: Vec<String> = context

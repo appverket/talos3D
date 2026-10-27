@@ -85,6 +85,7 @@ impl Plugin for TransformPlugin {
                 (
                     activate_pending_transform
                         .in_set(InputPhase::ToolInput)
+                        .before(crate::plugins::selection::SelectionInputSystems::Escape)
                         .run_if(in_state(ActiveTool::Select)),
                     handle_transform_input
                         .before(arm_scale_drag_on_mouse_press)
@@ -376,6 +377,16 @@ fn activate_pending_transform(world: &mut World) {
         *world.resource_mut::<ActiveTransformPreview>() = ActiveTransformPreview::default();
         world.resource_mut::<TransformState>().clear();
         world.resource_mut::<StatusBarData>().hint.clear();
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear_just_pressed(KeyCode::Escape);
+        return;
+    }
+
+    // A toolbar/menu release can still own input while the cursor already
+    // lies over the viewport. Retain the pending operation until that owner
+    // releases it, instead of clearing it on a failed activation attempt.
+    if !world.resource::<InputOwnership>().is_idle() {
         return;
     }
 
@@ -3378,6 +3389,35 @@ mod tests {
         state.pending_mode = Some(TransformMode::Scaling);
         assert_eq!(state.pending_mode, Some(TransformMode::Scaling));
         assert!(state.is_idle());
+    }
+
+    #[test]
+    fn menu_transform_waits_for_chrome_and_escape_does_not_exit_component() {
+        let mut world = World::new();
+        world.insert_resource(TransformState {
+            pending_mode: Some(TransformMode::Rotating),
+            ..Default::default()
+        });
+        world.insert_resource(InputOwnership::UiCapture);
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<ActiveTransformPreview>();
+        world.init_resource::<StatusBarData>();
+        activate_pending_transform(&mut world);
+        assert_eq!(
+            world.resource::<TransformState>().pending_mode,
+            Some(TransformMode::Rotating)
+        );
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        activate_pending_transform(&mut world);
+        assert!(!world.resource::<TransformState>().is_pending());
+        assert!(
+            !world
+                .resource::<ButtonInput<KeyCode>>()
+                .just_pressed(KeyCode::Escape),
+            "the same Escape must not reach the later group-exit handler"
+        );
     }
 
     #[test]

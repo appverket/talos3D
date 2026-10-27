@@ -19,6 +19,7 @@ pub mod generic_snapshot;
 pub mod geometry_health;
 pub mod ghost_geometry;
 pub mod group;
+mod group_edit;
 pub mod host_chart;
 pub mod linked_model;
 pub mod mesh_generation;
@@ -1021,6 +1022,25 @@ fn start_transform_or_pend(
     world: &mut World,
     mode: TransformMode,
 ) -> Result<CommandResult, String> {
+    // Menu activation is explicit intent, but its release still belongs to
+    // chrome this frame. Let the existing pending path start the gesture only
+    // after chrome has released input; never turn that release into a commit.
+    if world
+        .resource::<crate::plugins::input_ownership::InputOwnership>()
+        .is_ui_capture()
+        && world.resource::<TransformState>().is_idle()
+    {
+        if world
+            .query_filtered::<Entity, With<crate::plugins::selection::Selected>>()
+            .iter(world)
+            .next()
+            .is_none()
+        {
+            return Err("No selection to transform".into());
+        }
+        world.resource_mut::<TransformState>().pending_mode = Some(mode);
+        return Ok(CommandResult::empty());
+    }
     match start_transform_mode(world, mode) {
         Ok(()) => Ok(CommandResult::empty()),
         Err(msg) if msg.contains("Cursor is not over") => {
@@ -1041,101 +1061,12 @@ fn execute_create_chamfer(world: &mut World, params: &Value) -> Result<CommandRe
 }
 
 fn execute_group(world: &mut World, _: &Value) -> Result<CommandResult, String> {
-    use crate::authored_entity::AuthoredEntity;
-    use crate::plugins::{
-        commands::CreateEntityCommand,
-        identity::{ElementId, ElementIdAllocator},
-        selection::Selected,
-    };
-
-    let selected_ids: Vec<ElementId> = {
-        let mut query = world.query_filtered::<&ElementId, With<Selected>>();
-        query.iter(world).copied().collect()
-    };
-
-    if selected_ids.is_empty() {
-        return Err("No entities selected to group".to_string());
-    }
-
-    let group_id = world.resource::<ElementIdAllocator>().next_id();
-    let cached_bounds = group::compute_group_bounds_from_world(world, &selected_ids);
-    let snapshot = group::GroupSnapshot {
-        element_id: group_id,
-        name: "Group".to_string(),
-        member_ids: selected_ids,
-        frame: group::GroupFrame::default(),
-        composite: None,
-        linked_model: None,
-        cached_bounds,
-    };
-
-    // Apply immediately so the entity exists this frame for selection
-    snapshot.apply_to(world);
-
-    // Deselect members and select the new group
-    let selected_entities: Vec<Entity> = {
-        let mut query = world.query_filtered::<Entity, With<Selected>>();
-        query.iter(world).collect()
-    };
-    let group_entity = {
-        let mut q = world.try_query::<EntityRef>().unwrap();
-        q.iter(world)
-            .find(|e| e.get::<ElementId>().copied() == Some(group_id))
-            .map(|e| e.id())
-    };
-    for entity in &selected_entities {
-        world.entity_mut(*entity).remove::<Selected>();
-    }
-    if let Some(group_entity) = group_entity {
-        world.entity_mut(group_entity).insert(Selected);
-    }
-
-    // Send event for undo/redo history
-    world
-        .resource_mut::<Messages<CreateEntityCommand>>()
-        .write(CreateEntityCommand {
-            snapshot: snapshot.into(),
-        });
-
+    group_edit::group_selection(world)?;
     Ok(CommandResult::empty())
 }
 
 fn execute_ungroup(world: &mut World, _: &Value) -> Result<CommandResult, String> {
-    use crate::plugins::{
-        commands::ResolvedDeleteEntitiesCommand, identity::ElementId, selection::Selected,
-    };
-
-    let group_ids: Vec<ElementId> = {
-        let mut query =
-            world.query_filtered::<(&ElementId, &group::GroupMembers), With<Selected>>();
-        let selected = query
-            .iter(world)
-            .map(|(id, members)| (*id, members.linked_model.is_some()))
-            .collect::<Vec<_>>();
-        let linked = selected
-            .iter()
-            .filter_map(|(id, is_linked)| is_linked.then_some(id.0))
-            .collect::<Vec<_>>();
-        if !linked.is_empty() {
-            return Err(format!(
-                "Cannot ungroup linked model group(s) {:?}. This would break the live link and leave ordinary objects in the parent model; open the linked model to edit it, or use an explicit break-link workflow.",
-                linked
-            ));
-        }
-        selected.into_iter().map(|(id, _)| id).collect()
-    };
-
-    if group_ids.is_empty() {
-        return Err("No groups selected to ungroup".to_string());
-    }
-
-    // Use ResolvedDeleteEntitiesCommand to skip cascade (don't delete members)
-    world
-        .resource_mut::<Messages<ResolvedDeleteEntitiesCommand>>()
-        .write(ResolvedDeleteEntitiesCommand {
-            element_ids: group_ids,
-        });
-
+    group_edit::ungroup_selection(world)?;
     Ok(CommandResult::empty())
 }
 
@@ -1507,4 +1438,26 @@ fn feature_source_from_params(world: &World, params: &Value) -> Result<ElementId
         );
     }
     Ok(selected_ids[0])
+}
+
+#[cfg(test)]
+mod menu_transform_tests {
+    use super::*;
+    use crate::plugins::{input_ownership::InputOwnership, selection::Selected};
+
+    #[test]
+    fn explicit_menu_transform_defers_until_ui_releases_input() {
+        let mut world = World::new();
+        world.insert_resource(InputOwnership::UiCapture);
+        world.init_resource::<TransformState>();
+        assert!(execute_begin_rotate(&mut world, &Value::Null).is_err());
+        world.spawn(Selected);
+        execute_begin_rotate(&mut world, &Value::Null).unwrap();
+        assert_eq!(
+            world.resource::<TransformState>().pending_mode,
+            Some(TransformMode::Rotating)
+        );
+        assert!(world.resource::<TransformState>().is_idle());
+        assert!(world.resource::<InputOwnership>().is_ui_capture());
+    }
 }

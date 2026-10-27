@@ -484,20 +484,67 @@ fn sync_face_region_outlines(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut material: Local<Option<Handle<StandardMaterial>>>,
-    query: Query<
-        (
-            Entity,
-            &super::profile_feature::FaceProfileFeature,
-            Option<&ShapeRotation>,
-            Option<&FaceRegionOutline>,
-        ),
+    query: Query<(
+        Entity,
+        Ref<super::profile_feature::FaceProfileFeature>,
+        Option<Ref<ShapeRotation>>,
+        Option<&FaceRegionOutline>,
+        Option<&super::profile_feature::FeatureOperand>,
+    )>,
+    changed: Query<
+        (),
         Or<(
             Changed<super::profile_feature::FaceProfileFeature>,
             Changed<ShapeRotation>,
+            Changed<super::profile_feature::FeatureOperand>,
         )>,
     >,
+    owners: Query<(
+        Entity,
+        &crate::plugins::identity::ElementId,
+        Option<&super::profile_feature::FeatureOperand>,
+    )>,
+    children: Query<&ChildOf>,
+    mut removed: RemovedComponents<super::profile_feature::FeatureOperand>,
 ) {
-    for (entity, feature, rotation, existing) in &query {
+    let owner_removed = removed.read().count() > 0;
+    if changed.is_empty() && !owner_removed {
+        return;
+    }
+    let owners: std::collections::HashMap<_, _> = owners
+        .iter()
+        .map(|(e, id, operand)| (*id, (e, operand.map(|o| o.owner))))
+        .collect();
+    for (entity, feature, rotation, existing, operand) in &query {
+        // The authored feature can become an invisible operand of a later
+        // feature. Its flush outline belongs on the visible result, without
+        // making the intermediate solid visible or changing authored ownership.
+        let mut render_parent = entity;
+        let mut next = operand.map(|o| o.owner);
+        for _ in 0..64 {
+            let Some(owner) = next.and_then(|id| owners.get(&id)) else {
+                break;
+            };
+            render_parent = owner.0;
+            next = owner.1;
+        }
+        let live = existing.filter(|outline| children.contains(outline.entity));
+        if let Some(outline) = live {
+            if children
+                .get(outline.entity)
+                .is_ok_and(|p| p.parent() != render_parent)
+            {
+                commands
+                    .entity(outline.entity)
+                    .insert(ChildOf(render_parent));
+            }
+            if !feature.is_changed() && !rotation.as_ref().is_some_and(|r| r.is_changed()) {
+                continue;
+            }
+        } else if let Some(outline) = existing {
+            meshes.remove(outline.mesh.id());
+        }
+        let existing = live;
         if feature.depth.abs() > 1e-6 {
             if let Some(outline) = existing {
                 commands
@@ -506,7 +553,7 @@ fn sync_face_region_outlines(
             }
             continue;
         }
-        let rotation = rotation.copied().unwrap_or_default().0;
+        let rotation = rotation.as_ref().map(|r| r.0).unwrap_or(Quat::IDENTITY);
         let points = feature.profile.tessellate(64);
         let mut positions = Vec::new();
         let count = if points.len() == 2 { 1 } else { points.len() };
@@ -551,7 +598,7 @@ fn sync_face_region_outlines(
                     MeshMaterial3d(mat),
                     Transform::IDENTITY,
                     Visibility::Inherited,
-                    ChildOf(entity),
+                    ChildOf(render_parent),
                     bevy::light::NotShadowCaster,
                     bevy::light::NotShadowReceiver,
                 ))
@@ -1096,5 +1143,69 @@ mod pp_199_texture_uv_generation_tests {
         assert_eq!(uvs[1], [4.0, 0.0]);
         assert_eq!(uvs[2], [4.0, 2.0]);
         assert!(uvs.iter().any(|uv| *uv != uvs[0]));
+    }
+}
+
+#[cfg(test)]
+mod face_region_outline_tests {
+    use super::*;
+    use crate::plugins::{
+        identity::ElementId,
+        modeling::{
+            profile::Profile2d,
+            profile_feature::{FaceProfileFeature, FeatureOperand},
+        },
+    };
+
+    #[test]
+    fn earlier_flush_outline_follows_visible_result_and_survives_undo() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .add_systems(Update, sync_face_region_outlines);
+        let first = app
+            .world_mut()
+            .spawn((
+                ElementId(1),
+                FaceProfileFeature {
+                    parent: ElementId(0),
+                    anchor_origin: Vec3::ZERO,
+                    profile: Profile2d::rectangle(1., 1.),
+                    depth: 0.,
+                    support_face: None,
+                },
+            ))
+            .id();
+        app.update();
+        let outline = app.world().get::<FaceRegionOutline>(first).unwrap().entity;
+        let mesh = app
+            .world()
+            .get::<FaceRegionOutline>(first)
+            .unwrap()
+            .mesh
+            .clone();
+        let second = app.world_mut().spawn(ElementId(2)).id();
+        app.world_mut().entity_mut(first).insert(FeatureOperand {
+            owner: ElementId(2),
+        });
+        app.update();
+        assert_eq!(
+            app.world().get::<ChildOf>(outline).unwrap().parent(),
+            second
+        );
+        app.update();
+        assert_eq!(
+            app.world().get::<FaceRegionOutline>(first).unwrap().mesh,
+            mesh
+        );
+        app.world_mut().despawn(second);
+        app.world_mut().entity_mut(first).remove::<FeatureOperand>();
+        app.update();
+        let restored = app.world().get::<FaceRegionOutline>(first).unwrap().entity;
+        assert_eq!(
+            app.world().get::<ChildOf>(restored).unwrap().parent(),
+            first
+        );
+        assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 1);
     }
 }

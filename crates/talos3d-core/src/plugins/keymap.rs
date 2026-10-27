@@ -417,6 +417,47 @@ fn primary_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     }
 }
 
+/// Recover modifier state at each press, rather than at the end of the frame.
+/// A native Cmd+Z press and both releases can all arrive between two renders.
+fn pressed_chords(
+    keys: &ButtonInput<KeyCode>,
+    events: &[bevy::input::keyboard::KeyboardInput],
+) -> Vec<KeyChord> {
+    use bevy::input::ButtonState;
+    let chord = |state: &ButtonInput<KeyCode>, key| KeyChord {
+        key,
+        primary: primary_pressed(state),
+        shift: state.pressed(KeyCode::ShiftLeft) || state.pressed(KeyCode::ShiftRight),
+        alt: state.pressed(KeyCode::AltLeft) || state.pressed(KeyCode::AltRight),
+    };
+    if events.is_empty() {
+        return keys
+            .get_just_pressed()
+            .map(|key| chord(keys, *key))
+            .collect();
+    }
+    let mut state = keys.clone();
+    for event in events.iter().rev().filter(|e| !e.repeat) {
+        match event.state {
+            ButtonState::Pressed => state.release(event.key_code),
+            ButtonState::Released => state.press(event.key_code),
+        }
+    }
+    let mut result = Vec::new();
+    for event in events {
+        match event.state {
+            ButtonState::Pressed => {
+                state.press(event.key_code);
+                if !event.repeat {
+                    result.push(chord(&state, event.key_code));
+                }
+            }
+            ButtonState::Released => state.release(event.key_code),
+        }
+    }
+    result
+}
+
 /// The single dispatch path for command/tool keyboard shortcuts. Reads the
 /// resolved [`Keymap`], matches the pressed chord against the current context,
 /// and queues the command for execution.
@@ -424,6 +465,10 @@ fn primary_pressed(keys: &ButtonInput<KeyCode>) -> bool {
 pub fn dispatch_command_shortcuts(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     keymap: Res<Keymap>,
+    events: Option<Res<Messages<bevy::input::keyboard::KeyboardInput>>>,
+    mut event_cursor: Local<
+        bevy::ecs::message::MessageCursor<bevy::input::keyboard::KeyboardInput>,
+    >,
     chrome_capture: Option<Res<ChromeInputCapture>>,
     egui_wants_input: Option<Res<EguiWantsInput>>,
     ownership: Option<Res<InputOwnership>>,
@@ -432,9 +477,15 @@ pub fn dispatch_command_shortcuts(
     face_edit_context: Option<Res<FaceEditContext>>,
     mut pending: ResMut<PendingCommandInvocations>,
 ) {
+    // Drain even while a modal or text field owns input: shortcuts must never
+    // replay when that owner releases the keyboard.
+    let events = events
+        .map(|events| event_cursor.read(&events).cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
     let Some(keys) = keys else {
         return;
     };
+    let chords = pressed_chords(&keys, &events);
     if chrome_capture
         .map(|capture| capture.wants_any_keyboard_input())
         .unwrap_or(false)
@@ -448,10 +499,6 @@ pub fn dispatch_command_shortcuts(
         return;
     }
 
-    let primary = primary_pressed(&keys);
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-
     let in_select = active_tool
         .map(|tool| *tool.get() == ActiveTool::Select)
         .unwrap_or(true);
@@ -462,10 +509,7 @@ pub fn dispatch_command_shortcuts(
 
     for binding in &keymap.bindings {
         let chord = binding.chord;
-        if !keys.just_pressed(chord.key) {
-            continue;
-        }
-        if chord.primary != primary || chord.shift != shift || chord.alt != alt {
+        if !chords.contains(&chord) {
             continue;
         }
         if face_editing
@@ -473,9 +517,9 @@ pub fn dispatch_command_shortcuts(
                 chord.key,
                 KeyCode::KeyL | KeyCode::KeyC | KeyCode::KeyP | KeyCode::KeyG
             )
-            && !primary
-            && !alt
-            && !shift
+            && !chord.primary
+            && !chord.alt
+            && !chord.shift
         {
             continue;
         }
@@ -548,6 +592,71 @@ mod tests {
             .world()
             .resource::<PendingCommandInvocations>()
             .is_empty());
+    }
+
+    #[test]
+    fn native_shortcut_keeps_modifiers_when_the_whole_chord_arrives_in_one_frame() {
+        use bevy::input::{
+            keyboard::{Key, KeyboardInput},
+            ButtonState,
+        };
+        let primary = if cfg!(target_os = "macos") {
+            KeyCode::SuperLeft
+        } else {
+            KeyCode::ControlLeft
+        };
+        let event = |key_code, state| KeyboardInput {
+            key_code,
+            state,
+            logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        };
+        let events = [
+            event(primary, ButtonState::Pressed),
+            event(KeyCode::KeyZ, ButtonState::Pressed),
+            event(KeyCode::KeyZ, ButtonState::Released),
+            event(primary, ButtonState::Released),
+        ];
+        let result = pressed_chords(&ButtonInput::default(), &events);
+        assert!(result.contains(&KeyChord {
+            key: KeyCode::KeyZ,
+            primary: true,
+            shift: false,
+            alt: false
+        }));
+        assert!(!result.contains(&KeyChord {
+            key: KeyCode::KeyZ,
+            primary: false,
+            shift: false,
+            alt: false
+        }));
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<PendingCommandInvocations>()
+            .add_message::<KeyboardInput>()
+            .insert_resource(Keymap {
+                bindings: descriptor_bindings(&descriptor("core.undo", "Ctrl/Cmd+Z", None)),
+            })
+            .add_systems(Update, dispatch_command_shortcuts);
+        for event in events {
+            app.world_mut().write_message(event);
+        }
+        app.update();
+        assert!(!app
+            .world()
+            .resource::<PendingCommandInvocations>()
+            .is_empty());
+        app.world_mut()
+            .insert_resource(PendingCommandInvocations::default());
+        app.update();
+        assert!(
+            app.world()
+                .resource::<PendingCommandInvocations>()
+                .is_empty(),
+            "no replay next frame"
+        );
     }
 
     #[test]

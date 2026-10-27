@@ -15,7 +15,10 @@ use crate::plugins::{
     drawing_export::{HiddenDuringViewportExport, ViewportExportState},
     face_edit::FaceEditContext,
     identity::ElementId,
-    modeling::{group::GroupMembers, occurrence::GeneratedOccurrencePart},
+    modeling::{
+        group::GroupMembers, occurrence::GeneratedOccurrencePart, primitive_trait::MeshGenerator,
+        primitives::ShapeRotation, profile_feature::FaceProfileFeature,
+    },
     selection::Selected,
     subobject_overlay::FaceStippleMaterial,
     tools::Preview,
@@ -27,6 +30,7 @@ pub(crate) struct SelectedObjectOverlay(pub Entity);
 #[derive(Resource, Default)]
 struct ObjectSelectionOverlayState {
     material: Option<Handle<FaceStippleMaterial>>,
+    feature_meshes: HashMap<Entity, (FaceProfileFeature, Quat, Handle<Mesh>)>,
 }
 
 pub(crate) fn install(app: &mut App) {
@@ -79,7 +83,7 @@ fn sync_object_selection_overlay(world: &mut World) {
             }
         }
     }
-    let desired: HashMap<Entity, (Handle<Mesh>, RenderLayers)> = if selected.is_empty() {
+    let mut desired: HashMap<Entity, (Handle<Mesh>, RenderLayers)> = if selected.is_empty() {
         HashMap::new()
     } else {
         world
@@ -104,6 +108,63 @@ fn sync_object_selection_overlay(world: &mut World) {
             })
             .collect()
     };
+    // Evaluated feature meshes also contain their host. Highlight only the
+    // authored region, retaining its derived mesh until its parameters change.
+    let stale: Vec<_> = world
+        .resource::<ObjectSelectionOverlayState>()
+        .feature_meshes
+        .keys()
+        .filter(|e| !desired.contains_key(e))
+        .copied()
+        .collect();
+    for entity in stale {
+        let (_, _, mesh) = world
+            .resource_mut::<ObjectSelectionOverlayState>()
+            .feature_meshes
+            .remove(&entity)
+            .unwrap();
+        world.resource_mut::<Assets<Mesh>>().remove(mesh.id());
+    }
+    for (entity, (mesh, _)) in &mut desired {
+        let Some(feature) = world.get::<FaceProfileFeature>(*entity).cloned() else {
+            continue;
+        };
+        let rotation = world
+            .get::<ShapeRotation>(*entity)
+            .copied()
+            .unwrap_or_default()
+            .0;
+        let cached = world
+            .resource::<ObjectSelectionOverlayState>()
+            .feature_meshes
+            .get(entity)
+            .cloned();
+        if let Some((old, old_rotation, handle)) = &cached {
+            if old == &feature && *old_rotation == rotation {
+                *mesh = handle.clone();
+                continue;
+            }
+        }
+        let operand = feature.current_operand(rotation);
+        let geometry = operand.to_bevy_mesh(rotation).transformed_by(
+            Transform::from_translation(operand.centre + rotation * Vec3::Y * 0.002)
+                .with_rotation(rotation),
+        );
+        let handle = if let Some((_, _, handle)) = cached {
+            world
+                .resource_mut::<Assets<Mesh>>()
+                .insert(handle.id(), geometry)
+                .expect("retained selection mesh");
+            handle
+        } else {
+            world.resource_mut::<Assets<Mesh>>().add(geometry)
+        };
+        *mesh = handle.clone();
+        world
+            .resource_mut::<ObjectSelectionOverlayState>()
+            .feature_meshes
+            .insert(*entity, (feature, rotation, handle));
+    }
     let existing: HashMap<Entity, Entity> = world
         .query::<(Entity, &SelectedObjectOverlay)>()
         .iter(world)
@@ -168,6 +229,59 @@ fn sync_object_selection_overlay(world: &mut World) {
 mod tests {
     use super::*;
     use bevy::asset::uuid_handle;
+
+    #[test]
+    fn feature_highlight_uses_only_authored_region_and_reuses_its_mesh() {
+        use crate::plugins::modeling::profile::Profile2d;
+        let mut world = World::new();
+        world.init_resource::<ObjectSelectionOverlayState>();
+        world.init_resource::<Assets<FaceStippleMaterial>>();
+        world.init_resource::<Assets<Mesh>>();
+        let wall_mesh = uuid_handle!("1d1b983f-9ccf-4c91-9d87-7cb96977d603");
+        let source = world
+            .spawn((
+                ElementId(1),
+                Selected,
+                Mesh3d(wall_mesh.clone()),
+                FaceProfileFeature {
+                    parent: ElementId(2),
+                    anchor_origin: Vec3::new(3., 4., 5.),
+                    profile: Profile2d::rectangle(1., 1.),
+                    depth: 0.,
+                    support_face: None,
+                },
+                Transform::IDENTITY,
+                Visibility::Visible,
+            ))
+            .id();
+        sync_object_selection_overlay(&mut world);
+        let overlay = world
+            .query_filtered::<Entity, With<SelectedObjectOverlay>>()
+            .single(&world)
+            .unwrap();
+        let mesh = world.get::<Mesh3d>(overlay).unwrap().0.clone();
+        assert_ne!(mesh, wall_mesh);
+        let positions = world
+            .resource::<Assets<Mesh>>()
+            .get(&mesh)
+            .unwrap()
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        assert!(positions
+            .iter()
+            .all(|p| (p[0] - 3.).abs() <= 0.501 && (p[2] - 5.).abs() <= 0.501));
+        sync_object_selection_overlay(&mut world);
+        assert_eq!(world.get::<Mesh3d>(overlay).unwrap().0, mesh);
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), 1);
+        world.get_mut::<FaceProfileFeature>(source).unwrap().depth = 0.4;
+        sync_object_selection_overlay(&mut world);
+        assert_eq!(world.get::<Mesh3d>(overlay).unwrap().0, mesh);
+        world.entity_mut(source).remove::<Selected>();
+        sync_object_selection_overlay(&mut world);
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), 0);
+    }
 
     #[test]
     fn generated_member_selection_highlights_only_that_mesh() {

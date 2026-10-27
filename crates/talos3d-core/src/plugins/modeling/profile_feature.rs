@@ -13,8 +13,7 @@ use crate::{
         PushPullBlockReason,
     },
     capability_registry::{
-        AuthoredEntityFactory, CapabilityRegistry, FaceHitCandidate, FaceId, GeneratedFaceRef,
-        HitCandidate,
+        AuthoredEntityFactory, FaceHitCandidate, FaceId, GeneratedFaceRef, HitCandidate,
     },
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
@@ -616,10 +615,12 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
                 if let Some(previous_parent_entity) =
                     find_entity_by_element_id(world, previous.feature.parent)
                 {
-                    world
-                        .entity_mut(previous_parent_entity)
-                        .remove::<FeatureOperand>()
-                        .insert(Visibility::Visible);
+                    restore_feature_parent(
+                        world,
+                        previous_parent_entity,
+                        previous.feature.parent,
+                        self.element_id,
+                    );
                 }
             }
         }
@@ -628,10 +629,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
 
     fn remove_from(&self, world: &mut World) {
         if let Some(parent_entity) = find_entity_by_element_id(world, self.feature.parent) {
-            world
-                .entity_mut(parent_entity)
-                .remove::<FeatureOperand>()
-                .insert(Visibility::Visible);
+            restore_feature_parent(world, parent_entity, self.feature.parent, self.element_id);
         }
         despawn_by_element_id(world, self.element_id);
     }
@@ -658,6 +656,33 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
         other.type_name() == self.type_name() && other.to_json() == self.to_json()
+    }
+}
+
+/// Removing a copied feature must not expose its source underneath a surviving
+/// feature. The ownership marker and visibility are derived from live authored
+/// dependencies, never an unconditional side effect of deleting one dependent.
+fn restore_feature_parent(
+    world: &mut World,
+    parent_entity: Entity,
+    parent: ElementId,
+    removed: ElementId,
+) {
+    let owner = world
+        .query::<(&ElementId, &FaceProfileFeature)>()
+        .iter(world)
+        .filter(|(id, feature)| **id != removed && feature.parent == parent)
+        .map(|(id, _)| *id)
+        .max();
+    if let Some(owner) = owner {
+        world
+            .entity_mut(parent_entity)
+            .insert((FeatureOperand { owner }, Visibility::Hidden));
+    } else {
+        world
+            .entity_mut(parent_entity)
+            .remove::<FeatureOperand>()
+            .insert(Visibility::Visible);
     }
 }
 
@@ -862,18 +887,6 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             .copied()
             .unwrap_or_default();
 
-        if let Some(parent_entity) = find_entity_by_element_id_readonly(world, feature.parent) {
-            let registry = world.resource::<CapabilityRegistry>();
-            if let Ok(parent_ref) = world.get_entity(parent_entity) {
-                if let Some(parent_snapshot) = registry.capture_snapshot(&parent_ref, world) {
-                    if let Some(parent_factory) = registry.factory_for(parent_snapshot.type_name())
-                    {
-                        parent_factory.draw_selection(world, parent_entity, gizmos, color);
-                    }
-                }
-            }
-        }
-
         feature
             .current_operand(rotation.0)
             .draw_wireframe(gizmos, rotation.0, color);
@@ -891,17 +904,7 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             .copied()
             .unwrap_or_default();
 
-        let parent_lines = find_entity_by_element_id_readonly(world, feature.parent)
-            .and_then(|parent_entity| {
-                let registry = world.resource::<CapabilityRegistry>();
-                let parent_ref = world.get_entity(parent_entity).ok()?;
-                let parent_snapshot = registry.capture_snapshot(&parent_ref, world)?;
-                let parent_factory = registry.factory_for(parent_snapshot.type_name())?;
-                Some(parent_factory.selection_line_count(world, parent_entity))
-            })
-            .unwrap_or(0);
-
-        parent_lines + feature.current_operand(rotation.0).wireframe_line_count()
+        feature.current_operand(rotation.0).wireframe_line_count()
     }
 
     fn hit_test(&self, world: &World, ray: Ray3d) -> Option<HitCandidate> {
@@ -1476,6 +1479,41 @@ mod tests {
             .downcast_ref::<FaceProfileFeatureSnapshot>()
             .unwrap();
         assert!((result.feature.depth + 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn removing_copy_keeps_surviving_features_parent_hidden_and_pickable() {
+        let mut world = World::new();
+        let parent = world.spawn((ElementId(1), Visibility::Visible)).id();
+        let original = FaceProfileFeatureSnapshot {
+            element_id: ElementId(10),
+            feature: FaceProfileFeature {
+                parent: ElementId(1),
+                anchor_origin: Vec3::ZERO,
+                profile: Profile2d::rectangle(1.0, 1.0),
+                depth: 0.0,
+                support_face: None,
+            },
+            rotation: ShapeRotation::default(),
+            display_overrides: None,
+        };
+        original.apply_to(&mut world);
+        let mut copy = original.clone();
+        copy.element_id = ElementId(11);
+        copy.apply_to(&mut world);
+        assert_eq!(
+            world.get::<FeatureOperand>(parent).unwrap().owner,
+            copy.element_id
+        );
+        copy.remove_from(&mut world);
+        assert_eq!(
+            world.get::<FeatureOperand>(parent).unwrap().owner,
+            original.element_id
+        );
+        assert_eq!(world.get::<Visibility>(parent), Some(&Visibility::Hidden));
+        original.remove_from(&mut world);
+        assert!(world.get::<FeatureOperand>(parent).is_none());
+        assert_eq!(world.get::<Visibility>(parent), Some(&Visibility::Visible));
     }
 
     #[test]
