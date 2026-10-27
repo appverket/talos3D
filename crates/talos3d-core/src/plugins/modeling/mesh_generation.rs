@@ -117,6 +117,7 @@ impl Plugin for ModelingMeshPlugin {
         );
 
         app.add_systems(Startup, setup_modeling_materials)
+            .add_systems(PostUpdate, sync_face_feature_materials)
             .add_systems(
                 Update,
                 (
@@ -435,6 +436,39 @@ fn spawn_evaluated_feature_meshes(
     #[cfg(feature = "perf-stats")]
     if regenerated > 0 {
         add_mesh_regen_count(&mut perf_stats, regenerated);
+    }
+}
+
+// Wall/domain materials can arrive after feature snapshots during native load.
+// Propagate only changed material handles; no per-frame geometry traversal.
+fn sync_face_feature_materials(
+    mut commands: Commands,
+    changed: Query<
+        (
+            &crate::plugins::identity::ElementId,
+            &MeshMaterial3d<StandardMaterial>,
+        ),
+        Changed<MeshMaterial3d<StandardMaterial>>,
+    >,
+    features: Query<(
+        Entity,
+        &super::profile_feature::FaceProfileFeature,
+        Option<&MeshMaterial3d<StandardMaterial>>,
+    )>,
+) {
+    let materials: std::collections::HashMap<_, _> = changed
+        .iter()
+        .map(|(id, material)| (*id, material.clone()))
+        .collect();
+    if materials.is_empty() {
+        return;
+    }
+    for (entity, feature, current) in &features {
+        if let Some(material) = materials.get(&feature.parent) {
+            if current.is_none_or(|current| current.0 != material.0) {
+                commands.entity(entity).insert(material.clone());
+            }
+        }
     }
 }
 
@@ -906,6 +940,46 @@ mod pp_098_mesh_generation_cache_tests {
         DefinitionId, DefinitionVersion, GeometryParamsHash, RepresentationKind,
     };
     use crate::plugins::modeling::profile::{Profile2d, ProfileExtrusion};
+
+    #[test]
+    fn loaded_face_feature_inherits_late_host_material() {
+        use super::super::profile_feature::FaceProfileFeature;
+        use crate::plugins::identity::ElementId;
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .add_systems(PostUpdate, sync_face_feature_materials);
+        let material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::from(Color::srgb(0.8, 0.7, 0.6)));
+        let host = app.world_mut().spawn(ElementId(1)).id();
+        let feature = app
+            .world_mut()
+            .spawn((
+                ElementId(2),
+                FaceProfileFeature {
+                    parent: ElementId(1),
+                    anchor_origin: Vec3::ZERO,
+                    profile: Profile2d::rectangle(1.0, 1.0),
+                    depth: -0.3,
+                    support_face: None,
+                },
+                MeshMaterial3d::<StandardMaterial>(Handle::default()),
+            ))
+            .id();
+        app.update();
+        app.world_mut()
+            .entity_mut(host)
+            .insert(MeshMaterial3d(material.clone()));
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(feature)
+                .unwrap()
+                .0,
+            material
+        );
+    }
 
     fn cache_key(id: &str) -> MeshCacheKey {
         MeshCacheKey::new(
