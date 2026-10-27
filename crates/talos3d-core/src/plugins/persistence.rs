@@ -3436,6 +3436,7 @@ mod tests {
         let legacy_value: Value = serde_json::from_slice(&legacy).unwrap();
         let native_value: Value = crate::plugins::project_codec::decode(&native).unwrap();
         assert_eq!(legacy_value, native_value);
+        target.init_resource::<DocumentState>();
         open_project_bytes(&mut target, &native).unwrap();
         assert_eq!(
             target.resource::<OpaquePersistedEntities>().0,
