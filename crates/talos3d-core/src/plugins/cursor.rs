@@ -48,6 +48,7 @@ impl Plugin for CursorPlugin {
                 Update,
                 draw_cursor_crosshair
                     .in_set(CursorSystems::DrawCrosshair)
+                    .after(crate::plugins::snap::SnapSystems::Resolve)
                     .run_if(show_drawing_crosshair),
             );
 
@@ -457,7 +458,8 @@ fn update_cursor_world_pos(
 
     let use_scene_surface_cursor = matches!(
         active_tool.get(),
-        ActiveTool::PlaceDimensionLine
+        ActiveTool::Tape
+            | ActiveTool::PlaceDimensionLine
             | ActiveTool::PlaceGuideLine
             | ActiveTool::PlaceTerrainElevationCurve
             | ActiveTool::PlaceTerrainSpotElevation
@@ -467,12 +469,15 @@ fn update_cursor_world_pos(
     } else {
         drawing_plane.clone()
     };
-    let surface_hit = if use_scene_surface_cursor {
+    let surface_hit = if use_scene_surface_cursor
+        || crate::plugins::inference::supports_tool(active_tool.get())
+    {
         ray_cast_scene_surface(ray, &mut tool_cursor_ray_cast)
     } else {
         None
     };
     let raw_position = surface_hit
+        .filter(|_| use_scene_surface_cursor)
         .map(|(position, _, _)| position)
         .or_else(|| cursor_plane.intersect_ray(ray));
     let Some(raw_position) = raw_position else {

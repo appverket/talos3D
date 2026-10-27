@@ -276,3 +276,46 @@ fn stationary_input_keeps_the_inspectable_candidate_id_stable() {
         .get(original.plan_id())
         .is_some());
 }
+
+#[test]
+fn inferred_move_is_the_presented_shared_plan_and_undoable_commit() {
+    let mut world = fixture();
+    {
+        let mut state = world.resource_mut::<TransformState>();
+        state.axis = AxisConstraint::None;
+        state.numeric_buffer = None;
+    }
+    world.init_resource::<crate::plugins::cursor::DrawingPlane>();
+    let raw = Vec3::new(3.0, 0.0, 0.04);
+    *world.resource_mut::<SnapResult>() = SnapResult {
+        raw_position: Some(raw),
+        position: Some(raw),
+        kind: crate::plugins::snap::SnapKind::Grid,
+        ..Default::default()
+    };
+    world.resource_mut::<CursorWorldPos>().raw = Some(raw);
+    crate::plugins::inference::update_inference(&mut world);
+    update_transform_preview(&mut world);
+    let presented = world.resource::<ActiveTransformPreview>().snapshots.clone();
+    assert_eq!(presented[0].center(), Vec3::X * 3.0);
+    let entity = find_entity_by_element_id_readonly(&world, ElementId(1)).unwrap();
+    assert_eq!(
+        *world.get::<Transform>(entity).unwrap(),
+        presented[0].preview_transform().unwrap()
+    );
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Enter);
+    confirm_transform(&mut world);
+    drain(&mut world);
+    assert_eq!(
+        capture_snapshot(&world, ElementId(1)).as_ref(),
+        Some(&presented[0])
+    );
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    drain(&mut world);
+    assert_eq!(
+        capture_snapshot(&world, ElementId(1)).unwrap().center(),
+        Vec3::ZERO
+    );
+}

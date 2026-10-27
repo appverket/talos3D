@@ -63,6 +63,7 @@ impl Plugin for PolylineToolPlugin {
                     finish_polyline_on_enter,
                     draw_polyline_preview,
                 )
+                    .after(crate::plugins::snap::SnapSystems::Resolve)
                     .run_if(in_state(ActiveTool::PlacePolyline)),
             );
     }
@@ -332,4 +333,12 @@ fn draw_polyline_preview(
     for p in &state.points {
         gizmos.sphere(Isometry3d::from_translation(*p), 0.04, PREVIEW_COLOR);
     }
+}
+
+pub(crate) fn inference_origin(world: &World) -> Option<Vec3> {
+    world
+        .get_resource::<PolylineToolState>()?
+        .points
+        .last()
+        .copied()
 }

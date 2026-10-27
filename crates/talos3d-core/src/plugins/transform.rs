@@ -1574,7 +1574,10 @@ fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>)
         // barely intersects.
         let surface_normal = drafting_move_plane_normal(world);
         let grab_offset = (initial_cursor - moving_plane_origin(world)).dot(surface_normal);
-        let current_cursor = if grab_offset.abs() > 0.05 {
+        let has_inference_target = world
+            .get_resource::<SnapResult>()
+            .is_some_and(|snap| snap.target.is_some());
+        let current_cursor = if grab_offset.abs() > 0.05 && !has_inference_target {
             cursor_on_parallel_plane(world, initial_cursor, surface_normal)
                 .or_else(|| current_transform_cursor(world))?
         } else {

@@ -5,7 +5,7 @@ use bevy::{ecs::world::EntityRef, prelude::*, window::PrimaryWindow};
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 use crate::{
-    authored_entity::{EntityBounds, HandleKind},
+    authored_entity::HandleKind,
     capability_registry::{CapabilityRegistry, SnapPoint},
     plugins::{
         commands::find_entity_by_element_id_readonly,
@@ -27,11 +27,20 @@ const SNAP_MIDPOINT_COLOR: Color = Color::srgb(0.55, 1.0, 0.72);
 const SNAP_CONTROL_COLOR: Color = Color::srgb(1.0, 0.82, 0.28);
 const SNAP_GUIDE_ANCHOR_COLOR: Color = Color::srgb(0.0, 0.86, 0.86);
 const SNAP_GRID_COLOR: Color = Color::srgb(0.4, 1.0, 0.75);
-const SNAP_INDICATOR_RADIUS: f32 = 0.08;
-const SNAP_ENDPOINT_RING_RADIUS: f32 = 0.045;
-const SNAP_HALO_RADIUS: f32 = 0.11;
+
+#[derive(Default, Reflect, bevy::gizmos::config::GizmoConfigGroup)]
+pub(crate) struct InferenceGizmos;
 
 pub struct SnapPlugin;
+
+#[derive(Resource, Default)]
+struct SnapGeometryCache {
+    revision: Option<crate::plugins::history::ModelRevision>,
+    factory_points: Vec<SnapPoint>,
+    initialized: bool,
+    key: Option<(Option<ElementId>, bool, bool, Option<ElementId>)>,
+    points: Vec<SnapPoint>,
+}
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SnapSystems {
@@ -42,6 +51,9 @@ pub enum SnapSystems {
 impl Plugin for SnapPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SnapResult>()
+            .init_resource::<SnapGeometryCache>()
+            .init_gizmo_group::<InferenceGizmos>()
+            .add_systems(Startup, configure_inference_gizmos)
             .init_resource::<SnapDisambiguationState>()
             .configure_sets(
                 Update,
@@ -91,9 +103,15 @@ pub enum SnapKind {
     Midpoint,
     Control,
     GuideAnchor,
+    Center,
+    Origin,
+    OnEdge,
+    OnFace,
+    Intersection,
+    Inference,
 }
 
-fn update_snap_result(world: &mut World) {
+pub(crate) fn update_snap_result(world: &mut World) {
     let raw_position = world.resource::<CursorWorldPos>().raw;
     let Some(raw_position) = raw_position else {
         *world.resource_mut::<SnapResult>() = SnapResult::default();
@@ -101,7 +119,8 @@ fn update_snap_result(world: &mut World) {
     };
 
     let keys = world.resource::<ButtonInput<KeyCode>>();
-    let snapping_disabled = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let snapping_disabled =
+        keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     let cycle_requested = keys.just_pressed(KeyCode::Tab);
     let cursor_world_pos = world.resource::<CursorWorldPos>();
     let mut result = SnapResult {
@@ -131,31 +150,9 @@ fn update_snap_result(world: &mut World) {
     let xray_enabled = world
         .get_resource::<RenderSettings>()
         .is_some_and(|settings| settings.xray_enabled);
-    let group_visibility = SnapGroupVisibility::from_world(world);
     let mut candidates: Vec<(SnapCandidateRank, SnapCandidate)> = Vec::new();
-    let mut snap_points = Vec::new();
-    let registry = world.resource::<CapabilityRegistry>();
-    for factory in registry.factories() {
-        factory.collect_snap_points(world, &mut snap_points);
-    }
-    collect_authored_handle_snap_points(
-        world,
-        &mut snap_points,
-        hovered_element_id,
-        xray_enabled,
-        &group_visibility,
-    );
-
+    let snap_points = cached_snap_points(world, hovered_element_id, xray_enabled);
     for snap_point in snap_points {
-        if !snap_point_is_selectable(
-            world,
-            snap_point.element_id,
-            hovered_element_id,
-            xray_enabled,
-            &group_visibility,
-        ) {
-            continue;
-        }
         let Some(rank) = snap_candidate_rank(&screen_pick, raw_position, snap_point.position)
         else {
             continue;
@@ -204,6 +201,59 @@ fn update_snap_result(world: &mut World) {
     }
 
     *world.resource_mut::<SnapResult>() = result;
+}
+
+fn configure_inference_gizmos(mut config: ResMut<bevy::gizmos::config::GizmoConfigStore>) {
+    let (gizmos, _) = config.config_mut::<InferenceGizmos>();
+    gizmos.line.width = 2.0;
+    gizmos.depth_bias = -0.002;
+}
+
+fn cached_snap_points(world: &mut World, hovered: Option<ElementId>, xray: bool) -> Vec<SnapPoint> {
+    let revision = world
+        .get_resource::<crate::plugins::history::History>()
+        .map(crate::plugins::history::History::revision_token);
+    let moving = !world.resource::<TransformState>().is_idle();
+    let group = world
+        .get_resource::<GroupEditContext>()
+        .and_then(GroupEditContext::current_group);
+    let key = (hovered, xray, moving, group);
+    let visibility_changed = world
+        .get_resource_ref::<crate::plugins::layers::LayerRegistry>()
+        .is_some_and(|r| r.is_changed())
+        || world
+            .get_resource_ref::<crate::plugins::guide_line::GuideLineVisibility>()
+            .is_some_and(|r| r.is_changed());
+    world.resource_scope(|world, mut cache: Mut<SnapGeometryCache>| {
+        let rebuild = !cache.initialized || cache.revision != revision || visibility_changed;
+        if rebuild {
+            cache.factory_points.clear();
+            let registry = world.resource::<CapabilityRegistry>();
+            for factory in registry.factories() {
+                factory.collect_snap_points(world, &mut cache.factory_points);
+            }
+            cache.revision = revision;
+            cache.initialized = true;
+            cache.key = None;
+        }
+        if cache.key != Some(key) {
+            let visibility = SnapGroupVisibility::from_world(world);
+            cache.points = cache
+                .factory_points
+                .iter()
+                .filter(|point| {
+                    snap_point_is_selectable(world, point.element_id, hovered, xray, &visibility)
+                })
+                .take(4096)
+                .cloned()
+                .collect();
+            let mut authored = Vec::new();
+            collect_authored_handle_snap_points(world, &mut authored, hovered, xray, &visibility);
+            cache.points.extend(authored.into_iter().take(4096));
+            cache.key = Some(key);
+        }
+        cache.points.clone()
+    })
 }
 
 fn collect_authored_handle_snap_points(
@@ -296,9 +346,8 @@ fn collect_entity_snap_points(
             label: Some(handle.id),
         });
     }
-    if let Some(bounds) = snapshot.bounds() {
-        collect_bounds_corner_snap_points(bounds, owner, out);
-    }
+    // Bounds corners are not necessarily geometric endpoints (rotated solids, curves).
+    // Actual endpoints and midpoints come from the cached authored topology in inference.
 }
 
 #[derive(Debug, Clone)]
@@ -500,33 +549,18 @@ fn update_snap_disambiguation(
     state.index.min(candidate_count.saturating_sub(1))
 }
 
-fn collect_bounds_corner_snap_points(
-    bounds: EntityBounds,
-    owner: Option<crate::plugins::identity::ElementId>,
-    out: &mut Vec<SnapPoint>,
-) {
-    for (index, position) in bounds.corners().into_iter().enumerate() {
-        out.push(SnapPoint {
-            position,
-            kind: SnapKind::Endpoint,
-            element_id: owner,
-            label: Some(format!("bounds_corner_{index}")),
-        });
-    }
-}
-
 fn authored_handle_snap_kind(kind: HandleKind) -> Option<SnapKind> {
     match kind {
         HandleKind::Vertex => Some(SnapKind::Endpoint),
-        HandleKind::Center => Some(SnapKind::Midpoint),
+        HandleKind::Center => Some(SnapKind::Center),
         HandleKind::Control | HandleKind::Parameter => Some(SnapKind::Control),
     }
 }
 
 fn draw_snap_indicator(
     snap_result: Res<SnapResult>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-    mut gizmos: Gizmos,
+    camera_query: Query<(&Camera, &GlobalTransform), With<crate::plugins::camera::OrbitCamera>>,
+    mut gizmos: Gizmos<InferenceGizmos>,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
     let (Some(raw_position), Some(target)) = (snap_result.raw_position, snap_result.target) else {
@@ -540,136 +574,87 @@ fn draw_snap_indicator(
         &mut gizmos,
         target,
         snap_result.kind,
-        active_snap_camera(camera_query.iter()).map(|(_, transform)| transform),
+        active_snap_camera(camera_query.iter()),
     );
-    for (index, candidate) in snap_result.candidates.iter().enumerate() {
-        if index == snap_result.active_candidate {
-            continue;
-        }
-        draw_diamond_marker(
-            &mut gizmos,
-            candidate.position,
-            SNAP_HALO_RADIUS * 0.75,
-            Color::srgba(1.0, 1.0, 1.0, 0.55),
-        );
-    }
+    // One unambiguous marker; Tab still cycles the bounded candidate list.
     #[cfg(feature = "perf-stats")]
     add_gizmo_line_count(&mut perf_stats, snap_indicator_line_count(snap_result.kind));
 }
 
 fn draw_snap_target(
-    gizmos: &mut Gizmos,
+    gizmos: &mut Gizmos<InferenceGizmos>,
     target: Vec3,
     kind: SnapKind,
-    camera_transform: Option<&GlobalTransform>,
+    camera: Option<(&Camera, &GlobalTransform)>,
 ) {
-    match kind {
-        SnapKind::Endpoint => {
-            draw_endpoint_marker(gizmos, target, camera_transform, SNAP_ENDPOINT_COLOR);
+    let (right, up, radius) = camera.map_or((Vec3::X, Vec3::Z, 0.045), |(camera, transform)| {
+        let right = Vec3::from(transform.right());
+        let up = Vec3::from(transform.up());
+        let pixels_per_metre = camera
+            .world_to_viewport(transform, target)
+            .ok()
+            .zip(camera.world_to_viewport(transform, target + right).ok())
+            .map(|(a, b)| a.distance(b))
+            .unwrap_or(100.0)
+            .max(0.001);
+        (right, up, 6.0 / pixels_per_metre)
+    });
+    let right = right * radius;
+    let up = up * radius;
+    let color = match kind {
+        SnapKind::Endpoint => SNAP_ENDPOINT_COLOR,
+        SnapKind::Midpoint | SnapKind::Center => SNAP_MIDPOINT_COLOR,
+        SnapKind::Control | SnapKind::Origin | SnapKind::Intersection => SNAP_CONTROL_COLOR,
+        SnapKind::GuideAnchor => SNAP_GUIDE_ANCHOR_COLOR,
+        _ => SNAP_GRID_COLOR,
+    };
+    let points = match kind {
+        SnapKind::Endpoint => vec![
+            target - right - up,
+            target + right - up,
+            target + right + up,
+            target - right + up,
+        ],
+        SnapKind::Midpoint => vec![target + up, target - right - up, target + right - up],
+        SnapKind::Control | SnapKind::GuideAnchor | SnapKind::Origin | SnapKind::Intersection => {
+            vec![target + up, target + right, target - up, target - right]
         }
-        SnapKind::Midpoint => {
-            draw_sphere_marker(gizmos, target, SNAP_INDICATOR_RADIUS, SNAP_MIDPOINT_COLOR);
-            draw_diamond_marker(gizmos, target, SNAP_HALO_RADIUS, SNAP_MIDPOINT_COLOR);
-        }
-        SnapKind::Control => {
-            draw_diamond_marker(gizmos, target, SNAP_HALO_RADIUS, SNAP_CONTROL_COLOR);
-            draw_cross_marker(gizmos, target, SNAP_INDICATOR_RADIUS, SNAP_CONTROL_COLOR);
-        }
-        SnapKind::GuideAnchor => {
-            draw_diamond_marker(gizmos, target, SNAP_HALO_RADIUS, SNAP_GUIDE_ANCHOR_COLOR);
-            draw_cross_marker(
-                gizmos,
-                target,
-                SNAP_INDICATOR_RADIUS,
-                SNAP_GUIDE_ANCHOR_COLOR,
-            );
-        }
-        SnapKind::Grid | SnapKind::None => {
-            draw_sphere_marker(gizmos, target, SNAP_INDICATOR_RADIUS, SNAP_GRID_COLOR);
-        }
+        _ => (0..16)
+            .map(|i| {
+                let angle = i as f32 * std::f32::consts::TAU / 16.0;
+                target + right * angle.cos() + up * angle.sin()
+            })
+            .collect(),
+    };
+    for i in 0..points.len() {
+        gizmos.line(points[i], points[(i + 1) % points.len()], color);
+    }
+    if matches!(
+        kind,
+        SnapKind::Center | SnapKind::Intersection | SnapKind::Origin
+    ) {
+        gizmos.line(target - right, target + right, color);
+        gizmos.line(target - up, target + up, color);
     }
 }
 
 #[cfg(feature = "perf-stats")]
 fn snap_indicator_line_count(kind: SnapKind) -> usize {
     match kind {
-        SnapKind::Endpoint => 20,
-        SnapKind::Midpoint => 5,
-        SnapKind::Control => 8,
-        SnapKind::GuideAnchor => 7,
-        SnapKind::Grid | SnapKind::None => 1,
+        SnapKind::Endpoint => 4,
+        SnapKind::Midpoint => 3,
+        SnapKind::Control | SnapKind::GuideAnchor => 4,
+        SnapKind::Origin | SnapKind::Intersection => 6,
+        SnapKind::Center => 18,
+        _ => 16,
     }
 }
-
 fn active_snap_camera<'a>(
-    mut cameras: impl Iterator<Item = (&'a Camera, &'a GlobalTransform)>,
+    cameras: impl Iterator<Item = (&'a Camera, &'a GlobalTransform)>,
 ) -> Option<(&'a Camera, &'a GlobalTransform)> {
-    let first = cameras.next()?;
-    if first.0.is_active {
-        return Some(first);
-    }
-    cameras.find(|(camera, _)| camera.is_active).or(Some(first))
-}
-
-fn draw_endpoint_marker(
-    gizmos: &mut Gizmos,
-    center: Vec3,
-    camera_transform: Option<&GlobalTransform>,
-    color: Color,
-) {
-    let rotation = camera_transform
-        .and_then(|transform| (transform.translation() - center).try_normalize())
-        .map(|normal| Quat::from_rotation_arc(Vec3::Z, normal))
-        .unwrap_or(Quat::IDENTITY);
-    gizmos
-        .circle(
-            Isometry3d::new(center, rotation),
-            SNAP_ENDPOINT_RING_RADIUS,
-            color,
-        )
-        .resolution(20);
-}
-
-fn draw_sphere_marker(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
-    gizmos
-        .sphere(Isometry3d::from_translation(center), radius, color)
-        .resolution(10);
-}
-
-fn draw_diamond_marker(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
-    let half = radius;
-    let corners = [
-        center + Vec3::new(0.0, 0.0, -half),
-        center + Vec3::new(-half, 0.0, 0.0),
-        center + Vec3::new(0.0, 0.0, half),
-        center + Vec3::new(half, 0.0, 0.0),
-    ];
-    draw_loop(gizmos, corners, color);
-}
-
-fn draw_cross_marker(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
-    gizmos.line(
-        center + Vec3::new(-radius, 0.0, 0.0),
-        center + Vec3::new(radius, 0.0, 0.0),
-        color,
-    );
-    gizmos.line(
-        center + Vec3::new(0.0, -radius, 0.0),
-        center + Vec3::new(0.0, radius, 0.0),
-        color,
-    );
-    gizmos.line(
-        center + Vec3::new(0.0, 0.0, -radius),
-        center + Vec3::new(0.0, 0.0, radius),
-        color,
-    );
-}
-
-fn draw_loop(gizmos: &mut Gizmos, corners: [Vec3; 4], color: Color) {
-    for index in 0..corners.len() {
-        let next = (index + 1) % corners.len();
-        gizmos.line(corners[index], corners[next], color);
-    }
+    cameras
+        .filter(|(camera, _)| camera.is_active)
+        .find(|(camera, _)| camera.logical_viewport_rect().is_some())
 }
 
 #[cfg(test)]
@@ -723,7 +708,7 @@ mod tests {
         );
         assert_eq!(
             authored_handle_snap_kind(HandleKind::Center),
-            Some(SnapKind::Midpoint)
+            Some(SnapKind::Center)
         );
         assert_eq!(
             authored_handle_snap_kind(HandleKind::Control),
@@ -733,39 +718,6 @@ mod tests {
             authored_handle_snap_kind(HandleKind::Parameter),
             Some(SnapKind::Control)
         );
-    }
-
-    #[test]
-    fn bounds_corners_are_exposed_as_endpoint_snap_points() {
-        let bounds = EntityBounds {
-            min: Vec3::new(-1.0, 0.0, -2.0),
-            max: Vec3::new(3.0, 4.0, 5.0),
-        };
-        let mut snap_points = Vec::new();
-
-        collect_bounds_corner_snap_points(
-            bounds,
-            Some(crate::plugins::identity::ElementId(1)),
-            &mut snap_points,
-        );
-
-        assert_eq!(snap_points.len(), 8);
-        assert!(snap_points
-            .iter()
-            .all(|snap_point| snap_point.kind == SnapKind::Endpoint));
-        assert!(snap_points
-            .iter()
-            .any(|snap_point| snap_point.position == Vec3::new(-1.0, 0.0, -2.0)));
-        assert!(snap_points
-            .iter()
-            .any(|snap_point| snap_point.position == Vec3::new(3.0, 4.0, 5.0)));
-        assert!(snap_points.iter().all(
-            |snap_point| snap_point.element_id == Some(crate::plugins::identity::ElementId(1))
-        ));
-        assert!(snap_points.iter().all(|snap_point| snap_point
-            .label
-            .as_deref()
-            .is_some_and(|label| label.starts_with("bounds_corner_"))));
     }
 
     #[test]
@@ -898,5 +850,51 @@ mod tests {
         assert!(!visibility.accepts(root_group_id));
         assert!(!visibility.accepts(nested_group_id));
         assert!(visibility.accepts(child_id));
+    }
+    #[test]
+    fn cached_hover_snap_does_not_scale_with_unrelated_scene_entities() {
+        use crate::plugins::modeling::{
+            generic_factory::PrimitiveFactory,
+            primitives::{BoxPrimitive, ShapeRotation},
+        };
+        let mut app = App::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        app.insert_resource(registry)
+            .init_resource::<crate::plugins::layers::LayerRegistry>()
+            .init_resource::<SnapGeometryCache>()
+            .init_resource::<SnapDisambiguationState>()
+            .init_resource::<SnapResult>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<TransformState>()
+            .init_resource::<crate::plugins::history::History>()
+            .insert_resource(CursorWorldPos {
+                raw: Some(Vec3::ONE),
+                snapped: Some(Vec3::ONE),
+                hovered_element_id: Some(ElementId(1)),
+                ..default()
+            })
+            .add_systems(Update, update_snap_result);
+        for i in 1..=10_000 {
+            app.world_mut().spawn((
+                ElementId(i),
+                BoxPrimitive {
+                    centre: Vec3::X * (i - 1) as f32 * 10.0,
+                    half_extents: Vec3::ONE,
+                },
+                ShapeRotation::default(),
+            ));
+        }
+        app.update();
+        assert!(app.world().resource::<SnapGeometryCache>().points.len() < 32);
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            app.update();
+        }
+        eprintln!(
+            "shared snap in 10k-object scene: {:.2} us/frame",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+        assert!(app.world().resource::<SnapResult>().position.is_some());
     }
 }

@@ -261,7 +261,7 @@ fn clear_edge_cage(world: &mut World) {
     }
 }
 
-fn build_edge_cage(world: &World, entity: Entity, element_id: ElementId) -> EdgeCage {
+pub(crate) fn build_edge_cage(world: &World, entity: Entity, element_id: ElementId) -> EdgeCage {
     let mut cage = EdgeCage {
         entity: Some(entity),
         element_id: Some(element_id),
@@ -270,6 +270,14 @@ fn build_edge_cage(world: &World, entity: Entity, element_id: ElementId) -> Edge
     let Ok(entity_ref) = world.get_entity(entity) else {
         return cage;
     };
+    // Decline dense editable bodies before cloning their topology.
+    if entity_ref
+        .get::<crate::plugins::modeling::editable_mesh::EditableMesh>()
+        .is_some_and(|mesh| mesh.half_edges.len() > MAX_PICKABLE_EDGES * 2)
+    {
+        cage.declined = true;
+        return cage;
+    }
     let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
         return cage;
     };

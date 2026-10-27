@@ -2,8 +2,8 @@
 
 - agent: codex
 - created: 2026-10-27
-- branch: codex/selection-outliner
-- task-id: TALOS-uiladcde, TALOS-mfrhgfmq
+- branch: codex/sketchup-inference
+- task-id: TALOS-prssrtbo
 - target base: main
-- summary: Outside-selection context exit and reactive Outliner reveal
-- status: awaiting-merge
+- summary: Shared inference and native viewport guidance
+- status: active

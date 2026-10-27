@@ -22,6 +22,7 @@ impl Plugin for CylinderToolPlugin {
                     handle_cylinder_clicks,
                     draw_cylinder_preview,
                 )
+                    .after(crate::plugins::snap::SnapSystems::Resolve)
                     .run_if(in_state(ActiveTool::PlaceCylinder)),
             );
     }

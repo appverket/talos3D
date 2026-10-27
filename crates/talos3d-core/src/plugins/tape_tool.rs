@@ -260,7 +260,18 @@ fn cleanup_tape_tool(mut commands: Commands) {
 }
 
 fn update_tape_preview(world: &mut World) {
-    let hover = resolve_tape_hover(world);
+    let shared = world
+        .get_resource::<crate::plugins::inference::InferenceEngine>()
+        .and_then(|engine| engine.best_label())
+        .map(str::to_string)
+        .zip(
+            world
+                .get_resource::<SnapResult>()
+                .and_then(|snap| snap.target),
+        );
+    let hover = shared
+        .map(|(label, point)| TapeHoverTarget::Control(TapeControlTarget { point, label }))
+        .or_else(|| resolve_tape_hover(world));
     let raw_point = current_tape_cursor_point(world);
     let cursor_point = hover.as_ref().map(TapeHoverTarget::point).or(raw_point);
     let axis_lock = world
@@ -271,7 +282,18 @@ fn update_tape_preview(world: &mut World) {
         .get_resource::<TapeToolState>()
         .and_then(|state| state.start.clone());
     let measurement = start.as_ref().and_then(|start| {
-        resolve_tape_measurement(start, raw_point, hover.as_ref(), axis_lock, camera_ray)
+        let shared_direction = world.get_resource::<SnapResult>().is_some_and(|snap| {
+            matches!(
+                snap.kind,
+                crate::plugins::snap::SnapKind::Inference
+                    | crate::plugins::snap::SnapKind::Intersection
+            )
+        });
+        if shared_direction && axis_lock.is_none() && matches!(start.mode, TapeStartMode::Control) {
+            tape_measurement_with_mode(start.point, raw_point?, TapeMeasureMode::Free)
+        } else {
+            resolve_tape_measurement(start, raw_point, hover.as_ref(), axis_lock, camera_ray)
+        }
     });
     let inference = measurement.and_then(|measurement| match measurement.mode {
         TapeMeasureMode::AxisLocked(axis) => hover.as_ref().map(|target| TapeInference {
@@ -1283,4 +1305,10 @@ mod tests {
         assert!(!visibility.accepts(nested_group_id));
         assert!(visibility.accepts(child_id));
     }
+}
+
+pub(crate) fn inference_origin(world: &World) -> Option<Vec3> {
+    let state = world.get_resource::<TapeToolState>()?;
+    let start = state.start.as_ref()?;
+    matches!(start.mode, TapeStartMode::Control).then_some(start.point)
 }

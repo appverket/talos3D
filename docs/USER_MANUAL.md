@@ -47,6 +47,15 @@ Fillet and chamfer are currently exposed through the Modeling toolbar, command
 palette, and MCP/automation surfaces rather than a dedicated keyboard shortcut.
 Select one source solid, then run `Create Fillet` or `Create Chamfer`.
 
+## Precision and inference
+
+Hover geometry to see endpoint, midpoint, center, edge and face cues. Pause over
+an edge to reference it while drawing. Hold Shift to keep the inferred direction,
+use arrow keys to lock an axis, and hold Ctrl to temporarily bypass snapping.
+The inferred point feeds the same preview and command as ordinary tool input.
+See [Cursor inference](INFERENCE.md) for the supported tools, axis convention,
+mode cycling, shape cues and current geometry limits.
+
 ## Measuring
 
 The ruler button in the top **Measure** toolbar activates Tape Measure. It is
