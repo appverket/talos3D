@@ -580,6 +580,7 @@ pub(crate) fn update_inference(world: &mut World) {
                 | SnapKind::Control
                 | SnapKind::GuideAnchor
                 | SnapKind::Origin
+                | SnapKind::OnEdge
         );
         let mut guides = Vec::with_capacity(32);
         if let Some(origin) = origin {
@@ -890,6 +891,15 @@ fn draw_inference_visuals(
     engine: Res<InferenceEngine>,
     mut gizmos: Gizmos<crate::plugins::snap::InferenceGizmos>,
 ) {
+    if engine.origin.is_some() || engine.marker.is_some() {
+        // At most four acquired references and one bounded guide. Native gizmos
+        // batch these lines; there are no egui geometry overlays or scene scans.
+        for reference in &engine.references {
+            if let Some((start, end)) = reference.edge {
+                gizmos.line(start, end, MAGENTA);
+            }
+        }
+    }
     let Some(point) = engine.marker else {
         return;
     };
@@ -907,13 +917,6 @@ fn draw_inference_visuals(
                     color,
                 );
             }
-        }
-    }
-    // At most four acquired references and one bounded guide. Native gizmos
-    // batch these lines; there are no egui geometry overlays or scene scans.
-    for reference in &engine.references {
-        if let Some((start, end)) = reference.edge {
-            gizmos.line(start, end, MAGENTA);
         }
     }
 }

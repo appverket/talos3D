@@ -6,4 +6,4 @@
 - task-id: TALOS-prssrtbo
 - target base: main
 - summary: Shared inference and native viewport guidance
-- status: active
+- status: awaiting-merge

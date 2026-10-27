@@ -120,6 +120,36 @@ fn exact_point_wins_over_unlocked_direction() {
     );
 }
 #[test]
+fn on_edge_wins_over_its_acquired_extension() {
+    let mut world = world_at(Vec3::new(0.3, 0.0, 0.0));
+    {
+        let mut state = world.resource_mut::<TransformState>();
+        state.mode = TransformMode::Moving;
+        state.initial_cursor = Some(Vec3::Z);
+    }
+    update_inference(&mut world);
+    point(&mut world, Vec3::new(0.3, 0.0, 0.0));
+    world
+        .resource_mut::<InferenceEngine>()
+        .references
+        .push(Reference {
+            point: Vec3::ZERO,
+            edge: Some((-Vec3::X, Vec3::X)),
+            owner: None,
+        });
+    world.resource_mut::<SnapResult>().kind = SnapKind::OnEdge;
+    update_inference(&mut world);
+    assert_eq!(world.resource::<SnapResult>().kind, SnapKind::OnEdge);
+    assert!(world.resource::<InferenceEngine>().guide.is_none());
+    point(&mut world, Vec3::new(1.3, 0.0, 0.0));
+    update_inference(&mut world);
+    assert_eq!(world.resource::<SnapResult>().kind, SnapKind::Inference);
+    assert_eq!(
+        world.resource::<InferenceEngine>().best_label(),
+        Some("On edge extension")
+    );
+}
+#[test]
 fn acquisition_requires_dwell_and_is_bounded() {
     let mut engine = InferenceEngine::default();
     for i in 0..12 {
