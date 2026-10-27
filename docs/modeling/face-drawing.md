@@ -72,3 +72,40 @@ plane, undo/redo, analytic circle radius, native snapshot round trips and
 positive/zero/recess/through depth evaluation. The Architecture adapter has a
 recovered-wall fixture with a real through-cut ray check. Live verification is
 recorded on the owning issue, TALOS-czkhgugt.
+
+## Editing boundaries
+
+After entering the enclosing groups and selecting the individual component,
+click a boundary edge to select it. **H** (or **Edit → Hide Edge**) hides its
+linework without changing geometry. **Edit → Show Object Edges** restores the
+selected object's hidden edges. These display overrides persist with the
+native authored snapshot and are undoable.
+
+For a supported authored boundary, **G** moves it along its semantic normal.
+You can select a rectangular feature's side face instead. Hover the opposite
+edge for **On edge** inference and confirm to collapse the feature. A negative
+face-profile feature closes its cut when its width reaches zero; a positive
+feature disappears when collapsed. **Delete/Backspace**, or **Edit → Close
+Opening / Erase Feature**, removes the entire owning feature. It does not delete
+an isolated mesh edge or leave an invalid shell. Undo restores the authored
+feature, its dependencies and aggregate membership.
+
+Capabilities can bind generated boundaries to their own semantic objects. The
+Architecture capability binds rectangular opening reveals to the opening's
+width, height, position and sill. Moving a reveal into the opening narrows it;
+reaching the opposite side removes the opening and regenerates the wall.
+Openings with hosted products refuse this operation until that product is
+explicitly edited or removed. Arbitrary mesh edges and ambiguous junctions do
+not acquire invented semantics. Nonrectangular profile features support whole
+feature erasure; freeform boundary deformation is not implemented.
+
+Agents use `list_subobjects` and `expand_subobject_selection` to obtain stable
+references. Invoke `modeling.inspect_boundary` with `reference` to discover its
+owner, target, world-space normal and operation support/refusal. Then call
+`apply_subobject_edit` with that reference, an operation (`move`, `push_pull`,
+`erase`, `hide`, `show`) and parameters. Movement takes signed `distance` in
+metres along the returned normal, or world `delta: [x,y,z]`. The registered
+`modeling.edit_boundary` command offers the same operations. The viewport and
+agent routes use the same representation-owned snapshot plan, including exact
+preview/commit parity and reversible collapse. Edge caches use bounded derived
+topology and retained Bevy line rendering; no scene-wide edge raycasts are added.

@@ -22,8 +22,8 @@ use serde_json::Value;
 use crate::authored_entity::AuthoredEntity;
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::{
-    CapabilityRegistry, FaceId, GeneratedEdgeRef, SelectableSubobjectInfo, SelectableSubobjectRef,
-    SubobjectDisplayOverrides, SubobjectSelection,
+    CapabilityRegistry, FaceId, GeneratedEdgeRef, GeneratedFaceRef, SelectableSubobjectInfo,
+    SelectableSubobjectRef, SubobjectDisplayOverrides, SubobjectSelection,
 };
 #[cfg(feature = "model-api")]
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
@@ -3507,10 +3507,25 @@ fn handle_list_subobjects(
         .get_entity(entity)
         .map_err(|_| format!("Element {element_id} entity is not available"))?;
     if let Some(body) = entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>() {
-        return Ok(body.surfaces.iter().filter_map(|surface| surface.reference.clone()).map(|face| SelectableSubobjectInfo {
-            label:format!("face:{}",face.label()), reference:SelectableSubobjectRef::Face { element_id, face }, owner_element_id:element_id,
-            selectable:true, supports_transform:false, supports_visibility_override:false, hidden:false,
-            unsupported_reason:Some("Draw an authored region on this support with modeling.select_face and modeling.draw_face_circle/rectangle/polyline; push/pull the region.".into()),
+        let display = entity_ref.get::<SubobjectDisplayOverrides>();
+        let mut refs: Vec<_> = body
+            .surfaces
+            .iter()
+            .filter_map(|surface| surface.reference.clone())
+            .map(|face| SelectableSubobjectRef::Face { element_id, face })
+            .collect();
+        refs.extend(
+            body.boundary_edges(4096)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(edge, _, _)| SelectableSubobjectRef::Edge { element_id, edge }),
+        );
+        return Ok(refs.into_iter().map(|reference| {
+            let is_edge=matches!(&reference,SelectableSubobjectRef::Edge{..});
+            let hidden=if let SelectableSubobjectRef::Edge{edge,..}=&reference {display.is_some_and(|o|o.is_edge_hidden(edge))} else {false};
+            let editable=crate::plugins::modeling::boundary_edit::resolve(world,&reference).is_some();
+            SelectableSubobjectInfo { label:reference.label(),reference,owner_element_id:element_id,selectable:!hidden,supports_transform:editable,supports_visibility_override:is_edge,hidden,
+                unsupported_reason:(!editable).then(||"This boundary is generated; edit the owning object's parameters. Supported opening boundaries use modeling.edit_boundary or G; hiding changes display only.".into()) }
         }).collect());
     }
     let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
@@ -3615,12 +3630,54 @@ fn handle_expand_subobject_selection(
     mode: &str,
 ) -> Result<Vec<SelectableSubobjectRef>, String> {
     validate_subobject_refs(world, std::slice::from_ref(&reference))?;
+
     let element_id = reference.element_id();
     let entity = find_entity_by_element_id(world, ElementId(element_id))
         .ok_or_else(|| format!("Element {element_id} not found"))?;
     let entity_ref = world
         .get_entity(entity)
         .map_err(|_| format!("Element {element_id} entity is not available"))?;
+    if let Some(body) = entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>() {
+        let edges = body
+            .boundary_edges(4096)
+            .ok_or("Boundary topology exceeds the interactive limit")?;
+        let adjacent = |edge: &GeneratedEdgeRef| -> Vec<GeneratedFaceRef> {
+            match edge {
+                GeneratedEdgeRef::BetweenFaces { first, second, .. } => {
+                    vec![first.clone(), second.clone()]
+                }
+                GeneratedEdgeRef::BoundaryOfFace { face, .. } => vec![face.clone()],
+                _ => vec![],
+            }
+        };
+        let mut refs = match (&reference, mode) {
+            (SelectableSubobjectRef::Face { face, .. }, "bounding_edges") => edges
+                .iter()
+                .filter(|(edge, _, _)| adjacent(edge).contains(face))
+                .map(|(edge, _, _)| SelectableSubobjectRef::Edge {
+                    element_id,
+                    edge: edge.clone(),
+                })
+                .collect::<Vec<_>>(),
+            (SelectableSubobjectRef::Edge { edge, .. }, "connected_faces") => adjacent(edge)
+                .into_iter()
+                .map(|face| SelectableSubobjectRef::Face { element_id, face })
+                .collect(),
+            (_, "all_connected") => handle_list_subobjects(world, element_id)?
+                .into_iter()
+                .map(|s| s.reference)
+                .collect(),
+            _ => {
+                return Err(
+                    "Use bounding_edges for faces, connected_faces for edges, or all_connected"
+                        .into(),
+                )
+            }
+        };
+        refs.sort_by_key(SelectableSubobjectRef::label);
+        refs.dedup();
+        return Ok(refs);
+    }
     let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
         return Err(format!(
             "Element {element_id} has no evaluated subobject topology to expand"
@@ -3696,6 +3753,33 @@ fn handle_apply_subobject_edit(
     parameters: Value,
 ) -> Result<SubobjectEditResult, String> {
     validate_subobject_refs(world, std::slice::from_ref(&reference))?;
+    if matches!(
+        operation.as_str(),
+        "move" | "push_pull" | "erase" | "delete" | "close" | "hide" | "show"
+    ) && (matches!(operation.as_str(), "hide" | "show")
+        || crate::plugins::modeling::boundary_edit::resolve(world, &reference).is_some())
+    {
+        crate::plugins::modeling::boundary_edit::execute(
+            world,
+            reference.clone(),
+            &operation,
+            &parameters,
+        )?;
+        flush_model_api_write_pipeline(world);
+        let edit_plan_kind = if matches!(operation.as_str(), "hide" | "show") {
+            "generated_edge_display_override"
+        } else {
+            "authored_boundary_plan"
+        };
+        return Ok(SubobjectEditResult {
+            reference,
+            operation,
+            applied: true,
+            edit_plan_kind: edit_plan_kind.into(),
+            unsupported_reason: None,
+        });
+    }
+
     if let SelectableSubobjectRef::Edge { element_id, edge } = &reference {
         if let Some(hidden) = subobject_visibility_target(&operation, &parameters)? {
             apply_edge_visibility_override(world, *element_id, edge.clone(), hidden)?;
@@ -3825,6 +3909,19 @@ fn validate_subobject_refs(world: &World, refs: &[SelectableSubobjectRef]) -> Re
                 }
             }
             SelectableSubobjectRef::Edge { edge, .. } => {
+                if let Some(body) =
+                    entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>()
+                {
+                    if body
+                        .boundary_edges(4096)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|(candidate, _, _)| candidate == edge)
+                    {
+                        continue;
+                    }
+                    return Err(format!("Element {} has no edge '{}'", eid.0, edge.label()));
+                }
                 let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
                     return Err(format!("Element {} has no selectable edges", eid.0));
                 };

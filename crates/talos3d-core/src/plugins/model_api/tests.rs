@@ -15108,7 +15108,7 @@ fn capability_face_refs_are_agent_discoverable_and_selectable() {
         ShapeRotation::default(),
     ));
     let listed = handle_list_subobjects(&mut world, 1).unwrap();
-    assert_eq!(listed.len(), 1);
+    assert_eq!(listed.len(), 4);
     assert_eq!(
         listed[0].reference,
         SelectableSubobjectRef::Face {
@@ -15117,4 +15117,18 @@ fn capability_face_refs_are_agent_discoverable_and_selectable() {
         }
     );
     validate_subobject_refs(&world, &[listed[0].reference.clone()]).unwrap();
+    let edges = handle_expand_subobject_selection(
+        &mut world,
+        listed[0].reference.clone(),
+        "bounding_edges",
+    )
+    .unwrap();
+    assert_eq!(edges.len(), 3);
+    for edge in edges {
+        validate_subobject_refs(&world, &[edge.clone()]).unwrap();
+        assert_eq!(
+            handle_expand_subobject_selection(&mut world, edge, "connected_faces").unwrap(),
+            vec![listed[0].reference.clone()]
+        );
+    }
 }

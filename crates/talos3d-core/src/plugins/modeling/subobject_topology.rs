@@ -83,6 +83,9 @@ pub fn evaluated_subobject_mesh(entity_ref: &EntityRef) -> Option<EditableMesh> 
         .copied()
         .unwrap_or_default()
         .0;
+    if let Some(feature) = entity_ref.get::<super::profile_feature::FaceProfileFeature>() {
+        return feature.current_operand(rotation).to_editable_mesh(rotation);
+    }
     first_primitive!(entity_ref, get, |primitive| primitive
         .to_editable_mesh(rotation))
 }
@@ -92,6 +95,14 @@ pub fn generated_face_ref_for_entity(
     entity_ref: &EntityRef,
     face_id: FaceId,
 ) -> Option<GeneratedFaceRef> {
+    if let Some(feature) = entity_ref.get::<super::profile_feature::FaceProfileFeature>() {
+        let id = if feature.depth < 0. && face_id.0 < 2 {
+            FaceId(1 - face_id.0)
+        } else {
+            face_id
+        };
+        return feature.generated_face_ref(id);
+    }
     entity_ref
         .get::<super::planar_body::PlanarBody>()
         .and_then(|b| b.surfaces.get(face_id.0 as usize))
@@ -108,6 +119,20 @@ pub fn generated_face_ref_for_entity(
 /// Lets viewport caches derived from the body — the pickable edge set, for one —
 /// rebuild on authored change instead of rebuilding every frame.
 pub fn subobject_body_changed(entity_ref: &EntityRef) -> bool {
+    if entity_ref
+        .get_ref::<super::profile_feature::FaceProfileFeature>()
+        .is_some_and(|f| f.is_changed())
+    {
+        return true;
+    }
+
+    if entity_ref
+        .get_ref::<super::planar_body::PlanarBody>()
+        .is_some_and(|b| b.is_changed())
+    {
+        return true;
+    }
+
     if entity_ref
         .get_ref::<EditableMesh>()
         .is_some_and(|mesh| mesh.is_changed())

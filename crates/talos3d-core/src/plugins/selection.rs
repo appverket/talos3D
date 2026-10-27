@@ -1371,9 +1371,11 @@ fn handle_delete_shortcut(
     keys: Res<ButtonInput<KeyCode>>,
     selected_query: Query<&ElementId, With<Selected>>,
     ownership: Res<InputOwnership>,
+    face_context: Option<Res<FaceEditContext>>,
     mut delete_entities_commands: MessageWriter<DeleteEntitiesCommand>,
 ) {
-    if !ownership.is_idle()
+    if face_context.is_some_and(|context| context.is_active())
+        || !ownership.is_idle()
         || (!keys.just_pressed(KeyCode::Delete) && !keys.just_pressed(KeyCode::Backspace))
     {
         return;

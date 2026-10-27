@@ -340,6 +340,7 @@ fn push_pull_support_edge_inference_matches_live_preview_commit_and_undo() {
     world.init_resource::<DrawingPlane>();
     world.init_resource::<Messages<ApplyEntityChangesCommand>>();
     let original: BoxedEntity = FaceProfileFeatureSnapshot {
+        display_overrides: None,
         element_id: ElementId(2),
         feature: FaceProfileFeature {
             parent: ElementId(1),
@@ -449,4 +450,98 @@ fn push_pull_support_edge_inference_matches_live_preview_commit_and_undo() {
     assert!(world
         .get::<BoxPrimitive>(find_entity_by_element_id_readonly(&world, ElementId(1)).unwrap())
         .is_some());
+}
+
+#[test]
+fn boundary_preview_can_collapse_reopen_cancel_commit_and_undo_without_mesh_conversion() {
+    use crate::capability_registry::{
+        FaceId, GeneratedFaceRef, SelectableSubobjectRef, SubobjectSelection,
+    };
+    use crate::plugins::{
+        cursor::DrawingPlane,
+        modeling::{
+            boundary_edit::{self, BoundarySession},
+            profile::Profile2d,
+            profile_feature::{
+                make_face_profile_feature_snapshot, FaceProfileFeature, FaceProfileFeatureFactory,
+            },
+        },
+    };
+    let mut world = fixture();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(FaceProfileFeatureFactory);
+    world.init_resource::<DrawingPlane>();
+    world.init_resource::<FaceEditContext>();
+    world.init_resource::<SubobjectSelection>();
+    let mut feature = make_face_profile_feature_snapshot(
+        ElementId(2),
+        ElementId(1),
+        Profile2d::rectangle(1., 1.),
+        Vec3::ZERO,
+        Quat::IDENTITY,
+        None,
+    );
+    feature.feature.depth = -0.5;
+    let original: BoxedEntity = feature.into();
+    original.apply_to(&mut world);
+    let reference = SelectableSubobjectRef::Face {
+        element_id: 2,
+        face: GeneratedFaceRef::FeatureSideSegment(0),
+    };
+    let binding = boundary_edit::resolve(&world, &reference).unwrap();
+    let entity = find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap();
+    world.resource_mut::<TransformState>().initial_snapshots = vec![(entity, original.clone())];
+    world.resource_mut::<TransformState>().axis = AxisConstraint::Custom(binding.normal);
+    world.resource_mut::<PushPullContext>().active_face = Some(PushPullFace {
+        entity,
+        element_id: ElementId(2),
+        face_id: FaceId(2),
+        generated_face_ref: Some(GeneratedFaceRef::FeatureSideSegment(0)),
+        normal: binding.normal,
+        feature_parent: None,
+        feature_anchor_origin: None,
+        drag_plane: DrawingPlane::from_face(binding.origin, Vec3::Y),
+        initial_cursor_screen: None,
+        screen_normal: None,
+        live_csg: None,
+    });
+    let gesture = boundary_edit::capture(&world, binding.clone()).unwrap();
+    world.insert_resource(BoundarySession(Some(gesture.clone())));
+    // Preview passes through zero and can move back without losing the original.
+    world.resource_mut::<TransformState>().numeric_buffer = Some("1".into());
+    update_transform_preview(&mut world);
+    assert!(find_entity_by_element_id_readonly(&world, ElementId(2)).is_none());
+    world.resource_mut::<TransformState>().numeric_buffer = Some("0.4".into());
+    update_transform_preview(&mut world);
+    let reopened = capture_snapshot(&world, ElementId(2)).unwrap();
+    assert_eq!(reopened.type_name(), "face_profile_feature");
+    assert_ne!(reopened, original);
+    world.resource_mut::<TransformState>().numeric_buffer = Some("1".into());
+    update_transform_preview(&mut world);
+    // Release commits the exact displayed collapse, even if input has changed.
+    world.resource_mut::<TransformState>().numeric_buffer = Some("0.1".into());
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Enter);
+    confirm_transform(&mut world);
+    drain(&mut world);
+    assert!(find_entity_by_element_id_readonly(&world, ElementId(2)).is_none());
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    drain(&mut world);
+    assert_eq!(
+        capture_snapshot(&world, ElementId(2)),
+        Some(original.clone())
+    );
+    let entity = find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap();
+    assert_eq!(world.get::<FaceProfileFeature>(entity).unwrap().depth, -0.5);
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    drain(&mut world);
+    assert!(find_entity_by_element_id_readonly(&world, ElementId(2)).is_none());
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    drain(&mut world);
+    world.insert_resource(BoundarySession(Some(gesture)));
+    boundary_edit::preview(&mut world, 1.).unwrap();
+    boundary_edit::restore(&mut world);
+    assert_eq!(capture_snapshot(&world, ElementId(2)), Some(original));
 }

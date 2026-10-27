@@ -535,6 +535,40 @@ fn update_transform_preview(world: &mut World) {
     if world.resource::<TransformState>().is_idle() {
         return;
     }
+    if world
+        .get_resource::<crate::plugins::modeling::boundary_edit::BoundarySession>()
+        .is_some_and(|s| s.0.is_some())
+    {
+        let state = world.resource::<TransformState>().clone();
+        let pp = world.resource::<PushPullContext>().active_face.clone();
+        let numeric = state
+            .numeric_buffer
+            .as_deref()
+            .and_then(|v| v.parse::<f32>().ok());
+        if let Some(distance) = pp
+            .as_ref()
+            .and_then(|pp| push_pull_distance(world, &state, pp, numeric))
+        {
+            match crate::plugins::modeling::boundary_edit::preview(world, distance) {
+                Ok(after) => {
+                    let mut active = world.resource_mut::<ActiveTransformPreview>();
+                    active.snapshots = after;
+                    active.display_value = Some(distance);
+                }
+                Err(error) => {
+                    crate::plugins::modeling::boundary_edit::restore(world);
+                    world
+                        .resource_mut::<crate::plugins::modeling::boundary_edit::BoundarySession>()
+                        .0
+                        .as_mut()
+                        .unwrap()
+                        .presented = None;
+                    world.resource_mut::<StatusBarData>().hint = error;
+                }
+            }
+        }
+        return;
+    }
     // Modifiers read authored data. Remove last frame's non-rigid presentation
     // before planning so a dependent never becomes its own next-frame base.
     if world.resource::<PushPullContext>().active_face.is_none() {
@@ -944,6 +978,29 @@ fn confirm_transform(world: &mut World) {
         return;
     }
 
+    if let Some(gesture) = world
+        .get_resource::<crate::plugins::modeling::boundary_edit::BoundarySession>()
+        .and_then(|s| s.0.clone())
+    {
+        let Some(plan) = gesture.presented else {
+            return;
+        };
+        let closed = !plan
+            .after
+            .iter()
+            .any(|s| s.element_id() == gesture.binding.target);
+        restore_previews_and_clear_session(world, true);
+        crate::plugins::modeling::boundary_edit::enqueue(world, plan);
+        deselect_all_after_push_pull(world, true);
+        if closed {
+            world.resource_mut::<FaceEditContext>().selected_face = None;
+            world
+                .resource_mut::<crate::capability_registry::SubobjectSelection>()
+                .refs
+                .clear();
+        }
+        return;
+    }
     if world.resource::<PushPullContext>().active_face.is_none() {
         confirm_captured_transform(world);
         return;
@@ -1083,6 +1140,13 @@ fn confirm_captured_transform(world: &mut World) {
 /// from a clean base, restore rigid Transform previews, and clear all transform
 /// session state.
 fn restore_previews_and_clear_session(world: &mut World, was_push_pull: bool) {
+    crate::plugins::modeling::boundary_edit::restore(world);
+    if let Some(mut s) =
+        world.get_resource_mut::<crate::plugins::modeling::boundary_edit::BoundarySession>()
+    {
+        s.0 = None;
+    }
+
     if was_push_pull {
         let live_snapshot_application = world
             .resource::<ActiveTransformPreview>()
@@ -1745,7 +1809,7 @@ fn push_pull_distance(
                 .initial_snapshots
                 .iter()
                 .find_map(|(entity, snapshot)| {
-                    (*entity == pp.entity)
+                    (*entity == pp.entity && !world.get_resource::<crate::plugins::modeling::boundary_edit::BoundarySession>().is_some_and(|s|s.0.is_some()))
                         .then(|| {
                             snapshot.0.as_any().downcast_ref::<
                     crate::plugins::modeling::profile_feature::FaceProfileFeatureSnapshot,

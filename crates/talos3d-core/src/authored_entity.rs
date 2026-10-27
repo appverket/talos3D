@@ -329,6 +329,16 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         PushPullAffordance::Blocked(PushPullBlockReason::UnsupportedFace)
     }
 
+    /// Edit an authored boundary. None erases its owning feature; an empty
+    /// result means a collapsed feature. Implementations own all shape rules.
+    fn edit_boundary(
+        &self,
+        _boundary: &str,
+        _distance: Option<f32>,
+    ) -> Result<Vec<BoxedEntity>, String> {
+        Err("This boundary has no authored edit operation".into())
+    }
+
     fn transform_parent(&self) -> Option<ElementId> {
         None
     }

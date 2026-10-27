@@ -125,6 +125,87 @@ impl PlanarBody {
         Some(boundaries.into_values().collect())
     }
 
+    /// Semantic boundary segments, shared by pointer picking and MCP discovery.
+    /// Cancels tessellation diagonals per surface and names edges by adjacent
+    /// semantic surfaces. Work is bounded and cached by interaction consumers.
+    pub fn boundary_edges(
+        &self,
+        limit: usize,
+    ) -> Option<Vec<(crate::capability_registry::GeneratedEdgeRef, Vec3, Vec3)>> {
+        use crate::capability_registry::GeneratedEdgeRef;
+        use std::collections::BTreeMap;
+        if self.triangles.len() > limit.saturating_mul(4) {
+            return None;
+        }
+        let key = |p: Vec3| p.to_array().map(|v| (v as f64 * 100_000.).round() as i64);
+        let mut all = BTreeMap::new();
+        for (index, surface) in self.surfaces.iter().enumerate() {
+            let face = surface
+                .reference
+                .clone()
+                .unwrap_or(GeneratedFaceRef::CapabilitySurface {
+                    key: format!("planar/{index}"),
+                });
+            let mut edges = BTreeMap::new();
+            for triangle in &surface.triangles {
+                for i in 0..3 {
+                    let (a, b) = (triangle[i], triangle[(i + 1) % 3]);
+                    if !a.is_finite() || !b.is_finite() {
+                        return None;
+                    }
+                    let (ka, kb) = (key(a), key(b));
+                    if ka == kb {
+                        continue;
+                    }
+                    let k = if ka < kb { (ka, kb) } else { (kb, ka) };
+                    let e = edges.entry(k).or_insert((a, b, 0usize));
+                    e.2 += 1;
+                }
+            }
+            for (k, (a, b, count)) in edges {
+                if count != 1 {
+                    continue;
+                }
+                let e = all.entry(k).or_insert((a, b, Vec::new()));
+                if !e.2.contains(&face) {
+                    e.2.push(face.clone());
+                }
+            }
+            if all.len() > limit {
+                return None;
+            }
+        }
+        let mut ordinals = BTreeMap::<String, u32>::new();
+        Some(
+            all.into_values()
+                .map(|(a, b, mut faces)| {
+                    faces.sort_by_key(GeneratedFaceRef::label);
+                    let signature = faces
+                        .iter()
+                        .map(GeneratedFaceRef::label)
+                        .collect::<Vec<_>>()
+                        .join("|");
+                    let ordinal = ordinals.entry(signature).or_default();
+                    let edge_index = *ordinal;
+                    *ordinal += 1;
+                    let edge = if faces.len() > 1 {
+                        GeneratedEdgeRef::BetweenFaces {
+                            first: faces[0].clone(),
+                            second: faces[1].clone(),
+                            edge_index,
+                        }
+                    } else {
+                        GeneratedEdgeRef::BoundaryOfFace {
+                            face: faces[0].clone(),
+                            edge_index,
+                        }
+                    };
+                    (edge, a, b)
+                })
+                .collect(),
+        )
+    }
+
     /// Ordered outer boundary for outline/plane consumers. Overlay consumers use
     /// triangles directly, preserving holes and non-convex boundaries.
     pub fn boundary(&self, face: FaceId) -> Option<Vec<Vec3>> {

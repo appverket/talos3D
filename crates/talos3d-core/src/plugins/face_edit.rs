@@ -62,6 +62,7 @@ pub struct FaceEditPlugin;
 impl Plugin for FaceEditPlugin {
     fn build(&self, app: &mut App) {
         crate::plugins::modeling::face_sketch::register(app);
+        crate::plugins::modeling::boundary_edit::register(app);
         app.add_systems(
             Update,
             crate::plugins::modeling::face_sketch::select_pending_region
@@ -216,6 +217,20 @@ fn selected_face_push_pull_affordance(
     let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
         return PushPullAffordance::Blocked(PushPullBlockReason::UnsupportedFace);
     };
+    if let Some(reference) =
+        selected_face
+            .generated_face_ref
+            .clone()
+            .map(|face| SelectableSubobjectRef::Face {
+                element_id: face_context.element_id.unwrap().0,
+                face,
+            })
+    {
+        if let Some(binding) = crate::plugins::modeling::boundary_edit::resolve(world, &reference) {
+            let _ = binding;
+            return PushPullAffordance::Allowed;
+        }
+    }
     let authored = snapshot.push_pull_affordance(selected_face.face_id);
     if !authored.is_allowed() {
         return authored;
@@ -875,16 +890,49 @@ fn handle_push_pull_shortcut(world: &mut World) {
     if !face_context.is_active() {
         return;
     }
-    let Some(selected_face) = &face_context.selected_face else {
+    use crate::plugins::modeling::boundary_edit::{self, BoundarySession};
+    let reference = boundary_edit::selected_reference(world);
+    let boundary = reference
+        .as_ref()
+        .and_then(|r| boundary_edit::resolve(world, r));
+    let keys = world.resource::<ButtonInput<KeyCode>>();
+    if reference
+        .as_ref()
+        .is_some_and(|r| matches!(r, SelectableSubobjectRef::Edge { .. }))
+        && (keys.just_pressed(KeyCode::Delete)
+            || keys.just_pressed(KeyCode::Backspace)
+            || keys.just_pressed(KeyCode::KeyH))
+    {
+        let op = if keys.just_pressed(KeyCode::KeyH) {
+            "hide"
+        } else {
+            "erase"
+        };
+        if let Err(error) =
+            boundary_edit::execute(world, reference.unwrap(), op, &serde_json::json!({}))
+        {
+            world.resource_mut::<StatusBarData>().hint = error;
+        }
+        return;
+    }
+    let synthetic = boundary.as_ref().map(|b| SelectedFace {
+        face_id: FaceId(0),
+        generated_face_ref: None,
+        normal: b.normal,
+        centroid: b.origin,
+    });
+    let Some(selected_face) = synthetic.as_ref().or(face_context.selected_face.as_ref()) else {
         return;
     };
     let Some(entity) = face_context.entity else {
         return;
     };
-    let affordance = selected_face_push_pull_affordance(world, &face_context, selected_face);
-    if !affordance.is_allowed() {
-        world.resource_mut::<StatusBarData>().hint = affordance.blocked_feedback().to_string();
-        return;
+    if boundary.is_none() {
+        let affordance = selected_face_push_pull_affordance(world, &face_context, selected_face);
+        if !affordance.is_allowed() {
+            world.resource_mut::<StatusBarData>().hint = affordance.blocked_feedback().to_string();
+            return;
+        }
     }
 
     let keys = world.resource::<ButtonInput<KeyCode>>();
@@ -899,12 +947,34 @@ fn handle_push_pull_shortcut(world: &mut World) {
         return;
     }
 
+    let boundary_gesture = match boundary
+        .clone()
+        .map(|b| boundary_edit::capture(world, b))
+        .transpose()
+    {
+        Ok(g) => g,
+        Err(error) => {
+            world.resource_mut::<StatusBarData>().hint = error;
+            return;
+        }
+    };
     // If in CSG face-edit mode, push/pull should target the operand entity.
     let csg_operand_target = face_context.csg_operand_target;
-    let (pp_entity, pp_element_id) = match csg_operand_target {
+    let (mut pp_entity, mut pp_element_id) = match csg_operand_target {
         Some((op_entity, op_id)) => (op_entity, op_id),
         None => (entity, face_context.element_id.unwrap_or(ElementId(0))),
     };
+
+    if let Some(binding) = &boundary {
+        pp_element_id = binding.target;
+        let Some(target) =
+            crate::plugins::commands::find_entity_by_element_id_readonly(world, binding.target)
+        else {
+            return;
+        };
+        pp_entity = target;
+    }
+    world.resource_mut::<BoundarySession>().0 = boundary_gesture;
 
     // Temporarily select the push/pull entity so collect_selected_snapshots finds it
     if let Ok(mut entity_mut) = world.get_entity_mut(pp_entity) {
@@ -913,9 +983,14 @@ fn handle_push_pull_shortcut(world: &mut World) {
 
     // The selected-face record can survive earlier push/pull edits. Re-resolve
     // its current plane once at gesture start instead of retaining the old cap.
-    let face_centroid = face_vertices_for_entity(world, pp_entity, selected_face.face_id)
-        .filter(|vertices| !vertices.is_empty())
-        .map(|vertices| vertices.iter().copied().sum::<Vec3>() / vertices.len() as f32)
+    let face_centroid = boundary
+        .as_ref()
+        .map(|b| b.origin)
+        .or_else(|| {
+            face_vertices_for_entity(world, pp_entity, selected_face.face_id)
+                .filter(|vertices| !vertices.is_empty())
+                .map(|vertices| vertices.iter().copied().sum::<Vec3>() / vertices.len() as f32)
+        })
         .unwrap_or(selected_face.centroid);
     let face_normal = selected_face.normal;
     let face_id = selected_face.face_id;
@@ -945,13 +1020,14 @@ fn handle_push_pull_shortcut(world: &mut World) {
     // Install the drag plane as the active DrawingPlane
     *world.resource_mut::<DrawingPlane>() = drag_plane.clone();
 
-    let (feature_parent, feature_anchor_origin) = if csg_operand_target.is_none() {
-        face_drawn_feature_anchor(world, pp_entity, pp_element_id, selected_face)
-            .map(|(parent_id, anchor_origin)| (Some(parent_id), Some(anchor_origin)))
-            .unwrap_or((None, None))
-    } else {
-        (None, None)
-    };
+    let (feature_parent, feature_anchor_origin) =
+        if csg_operand_target.is_none() && boundary.is_none() {
+            face_drawn_feature_anchor(world, pp_entity, pp_element_id, selected_face)
+                .map(|(parent_id, anchor_origin)| (Some(parent_id), Some(anchor_origin)))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
 
     // Set up push/pull context with the frozen drag plane
     world.resource_mut::<PushPullContext>().active_face = Some(PushPullFace {
@@ -980,6 +1056,7 @@ fn handle_push_pull_shortcut(world: &mut World) {
 
     if result.is_err() {
         // Revert if we couldn't start the transform
+        world.resource_mut::<BoundarySession>().0 = None;
         world.resource_mut::<PushPullContext>().active_face = None;
         if let Ok(mut entity_mut) = world.get_entity_mut(pp_entity) {
             entity_mut.remove::<Selected>();

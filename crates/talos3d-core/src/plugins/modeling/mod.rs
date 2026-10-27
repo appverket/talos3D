@@ -1,6 +1,7 @@
 pub mod array;
 pub mod assembly;
 pub mod bim_material_assignment;
+pub mod boundary_edit;
 pub mod bsp_csg;
 pub mod composite_solid;
 pub mod csg;

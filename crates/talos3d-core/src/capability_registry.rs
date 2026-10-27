@@ -1214,6 +1214,15 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
         None
     }
 
+    /// Resolve a generated boundary to the authored feature that controls it.
+    fn boundary_binding(
+        &self,
+        _world: &World,
+        _reference: &SelectableSubobjectRef,
+    ) -> Option<crate::plugins::modeling::boundary_edit::BoundaryBinding> {
+        None
+    }
+
     fn collect_snap_points(&self, _world: &World, _out: &mut Vec<SnapPoint>) {}
 
     fn collect_inference_geometry(

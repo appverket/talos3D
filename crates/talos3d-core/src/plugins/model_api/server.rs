@@ -7446,7 +7446,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "apply_subobject_edit",
-        description = "Validate a stable subobject ref and attempt an edge/face/handle edit. PP-SUBSEL-1 returns structured unsupported results until representation-specific edit plans land."
+        description = "Edit a stable generated boundary through its authored owner. Rectangular opening reveals and face-profile sides support move/push_pull (parameters.distance in metres along the boundary normal, or delta [x,y,z]); erase/delete/close removes the owning opening or feature. hide/show persist edge visibility only. Unsupported and hosted-product boundaries return an explanation. Use modeling.inspect_boundary via invoke_command to discover the target, axis and capabilities."
     )]
     pub(super) async fn apply_subobject_edit_tool(
         &self,

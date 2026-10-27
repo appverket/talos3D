@@ -270,6 +270,19 @@ pub(crate) fn build_edge_cage(world: &World, entity: Entity, element_id: Element
     let Ok(entity_ref) = world.get_entity(entity) else {
         return cage;
     };
+    if let Some(body) = entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>() {
+        let Some(edges) = body.boundary_edges(MAX_PICKABLE_EDGES) else {
+            cage.declined = true;
+            return cage;
+        };
+        let overrides = entity_ref.get::<SubobjectDisplayOverrides>();
+        cage.edges = edges
+            .into_iter()
+            .filter(|(edge, _, _)| !overrides.is_some_and(|o| o.is_edge_hidden(edge)))
+            .map(|(edge, start, end)| PickableEdge { edge, start, end })
+            .collect();
+        return cage;
+    }
     // Decline dense editable bodies before cloning their topology.
     if entity_ref
         .get::<crate::plugins::modeling::editable_mesh::EditableMesh>()

@@ -325,9 +325,6 @@ fn queue_create_triangle_mesh_commands(world: &mut World) {
 }
 
 fn queue_delete_entities_commands(world: &mut World) {
-    use crate::plugins::modeling::assembly::{AssemblySnapshot, SemanticAssembly};
-    use crate::plugins::modeling::composite_solid::CompositeSolid;
-
     let resolved_from_requests = {
         let commands: Vec<DeleteEntitiesCommand> = world
             .resource_mut::<Messages<DeleteEntitiesCommand>>()
@@ -351,101 +348,11 @@ fn queue_delete_entities_commands(world: &mut World) {
     let history_commands: Vec<Box<dyn EditorCommand>> = commands
         .iter()
         .filter_map(|command| {
-            let registry = world.resource::<CapabilityRegistry>();
-
-            let mut snapshots: Vec<BoxedEntity> = command
-                .element_ids
-                .iter()
-                .filter_map(|element_id| {
-                    let mut q = world.try_query::<EntityRef>().unwrap();
-                    let entity_ref = q.iter(world).find(|entity_ref| {
-                        entity_ref.get::<ElementId>().copied() == Some(*element_id)
-                    })?;
-                    registry.capture_snapshot(&entity_ref, world)
-                })
-                .collect();
-
+            let (snapshots, repair_before, repair_after) =
+                capture_delete_snapshots(world, &command.element_ids);
             if snapshots.is_empty() {
                 return None;
             }
-
-            snapshots.sort_by_key(snapshot_dependency_order);
-
-            // Capture before/after snapshots of surviving aggregates that will
-            // lose members. A delete must never leave a semantic assembly or a
-            // plain authored group pointing at entities that no longer exist.
-            let deleted_ids = &command.element_ids;
-            let mut repair_before = Vec::new();
-            let mut repair_after = Vec::new();
-
-            let mut q = world.try_query::<EntityRef>().unwrap();
-            for entity_ref in q.iter(world) {
-                let Some(eid) = entity_ref.get::<ElementId>() else {
-                    continue;
-                };
-                if deleted_ids.contains(eid) {
-                    continue;
-                }
-
-                if let Some(assembly) = entity_ref.get::<SemanticAssembly>() {
-                    if assembly
-                        .members
-                        .iter()
-                        .any(|member| deleted_ids.contains(&member.target))
-                    {
-                        if let Some(before) = registry.capture_snapshot(&entity_ref, world) {
-                            let mut pruned = assembly.clone();
-                            pruned.members.retain(|m| !deleted_ids.contains(&m.target));
-                            let after = AssemblySnapshot {
-                                element_id: *eid,
-                                assembly: pruned,
-                                refinement_state: entity_ref
-                                    .get::<crate::plugins::refinement::RefinementStateComponent>()
-                                    .map(|component| component.state),
-                                obligations: entity_ref
-                                    .get::<crate::plugins::refinement::ObligationSet>()
-                                    .cloned(),
-                                claim_grounding: entity_ref
-                                    .get::<crate::plugins::refinement::ClaimGrounding>()
-                                    .cloned(),
-                                authoring_provenance: entity_ref
-                                    .get::<crate::plugins::refinement::AuthoringProvenance>()
-                                    .cloned(),
-                            };
-                            repair_before.push(before);
-                            repair_after.push(BoxedEntity::from(after));
-                        }
-                    }
-                }
-
-                if let Some(group) = entity_ref.get::<GroupMembers>() {
-                    if group
-                        .member_ids
-                        .iter()
-                        .any(|member_id| deleted_ids.contains(member_id))
-                    {
-                        if let Some(before) = registry.capture_snapshot(&entity_ref, world) {
-                            let after = GroupSnapshot {
-                                element_id: *eid,
-                                name: group.name.clone(),
-                                member_ids: group
-                                    .member_ids
-                                    .iter()
-                                    .copied()
-                                    .filter(|member_id| !deleted_ids.contains(member_id))
-                                    .collect(),
-                                frame: group.frame,
-                                composite: entity_ref.get::<CompositeSolid>().cloned(),
-                                linked_model: group.linked_model.clone(),
-                                cached_bounds: None,
-                            };
-                            repair_before.push(before);
-                            repair_after.push(BoxedEntity::from(after));
-                        }
-                    }
-                }
-            }
-
             if repair_before.is_empty() {
                 Some(Box::new(DeleteEntitiesHistoryCommand { snapshots }) as Box<dyn EditorCommand>)
             } else {
@@ -462,6 +369,112 @@ fn queue_delete_entities_commands(world: &mut World) {
     for command in history_commands {
         queue.commands.push(command);
     }
+}
+
+/// Shared deletion capture, including repairs to surviving group/assembly membership.
+pub(crate) fn capture_delete_snapshots(
+    world: &World,
+    element_ids: &[ElementId],
+) -> (Vec<BoxedEntity>, Vec<BoxedEntity>, Vec<BoxedEntity>) {
+    use crate::plugins::modeling::{
+        assembly::{AssemblySnapshot, SemanticAssembly},
+        composite_solid::CompositeSolid,
+    };
+    let registry = world.resource::<CapabilityRegistry>();
+
+    let mut snapshots: Vec<BoxedEntity> = element_ids
+        .iter()
+        .filter_map(|element_id| {
+            let mut q = world.try_query::<EntityRef>().unwrap();
+            let entity_ref = q
+                .iter(world)
+                .find(|entity_ref| entity_ref.get::<ElementId>().copied() == Some(*element_id))?;
+            registry.capture_snapshot(&entity_ref, world)
+        })
+        .collect();
+
+    if snapshots.is_empty() {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
+    snapshots.sort_by_key(snapshot_dependency_order);
+
+    // Capture before/after snapshots of surviving aggregates that will
+    // lose members. A delete must never leave a semantic assembly or a
+    // plain authored group pointing at entities that no longer exist.
+    let deleted_ids = &element_ids;
+    let mut repair_before = Vec::new();
+    let mut repair_after = Vec::new();
+
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    for entity_ref in q.iter(world) {
+        let Some(eid) = entity_ref.get::<ElementId>() else {
+            continue;
+        };
+        if deleted_ids.contains(eid) {
+            continue;
+        }
+
+        if let Some(assembly) = entity_ref.get::<SemanticAssembly>() {
+            if assembly
+                .members
+                .iter()
+                .any(|member| deleted_ids.contains(&member.target))
+            {
+                if let Some(before) = registry.capture_snapshot(&entity_ref, world) {
+                    let mut pruned = assembly.clone();
+                    pruned.members.retain(|m| !deleted_ids.contains(&m.target));
+                    let after = AssemblySnapshot {
+                        element_id: *eid,
+                        assembly: pruned,
+                        refinement_state: entity_ref
+                            .get::<crate::plugins::refinement::RefinementStateComponent>()
+                            .map(|component| component.state),
+                        obligations: entity_ref
+                            .get::<crate::plugins::refinement::ObligationSet>()
+                            .cloned(),
+                        claim_grounding: entity_ref
+                            .get::<crate::plugins::refinement::ClaimGrounding>()
+                            .cloned(),
+                        authoring_provenance: entity_ref
+                            .get::<crate::plugins::refinement::AuthoringProvenance>()
+                            .cloned(),
+                    };
+                    repair_before.push(before);
+                    repair_after.push(BoxedEntity::from(after));
+                }
+            }
+        }
+
+        if let Some(group) = entity_ref.get::<GroupMembers>() {
+            if group
+                .member_ids
+                .iter()
+                .any(|member_id| deleted_ids.contains(member_id))
+            {
+                if let Some(before) = registry.capture_snapshot(&entity_ref, world) {
+                    let after = GroupSnapshot {
+                        element_id: *eid,
+                        name: group.name.clone(),
+                        member_ids: group
+                            .member_ids
+                            .iter()
+                            .copied()
+                            .filter(|member_id| !deleted_ids.contains(member_id))
+                            .collect(),
+                        frame: group.frame,
+                        composite: entity_ref.get::<CompositeSolid>().cloned(),
+                        linked_model: group.linked_model.clone(),
+                        cached_bounds: None,
+                    };
+                    repair_before.push(before);
+                    repair_after.push(BoxedEntity::from(after));
+                }
+            }
+        }
+    }
+
+    (snapshots, repair_before, repair_after)
 }
 
 /// Composite command: delete entities + repair surviving aggregate memberships

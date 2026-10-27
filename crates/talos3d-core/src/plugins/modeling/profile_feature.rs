@@ -134,6 +134,7 @@ pub struct EvaluatedFeature {
 
 #[derive(Debug, Clone)]
 pub struct FaceProfileFeatureSnapshot {
+    pub display_overrides: Option<crate::capability_registry::SubobjectDisplayOverrides>,
     pub element_id: ElementId,
     pub feature: FaceProfileFeature,
     pub rotation: ShapeRotation,
@@ -141,7 +142,8 @@ pub struct FaceProfileFeatureSnapshot {
 
 impl PartialEq for FaceProfileFeatureSnapshot {
     fn eq(&self, other: &Self) -> bool {
-        self.element_id == other.element_id
+        self.display_overrides == other.display_overrides
+            && self.element_id == other.element_id
             && self.feature == other.feature
             && self.rotation == other.rotation
     }
@@ -247,7 +249,83 @@ impl FaceProfileFeature {
     }
 }
 
+fn rectangular_side(profile: &Profile2d, index: usize) -> Option<([Vec2; 4], Vec2)> {
+    if profile.segments.len() != 3 || index >= 4 {
+        return None;
+    }
+    let mut points = [profile.start; 4];
+    for (i, seg) in profile.segments.iter().enumerate() {
+        let ProfileSegment::LineTo { to } = seg else {
+            return None;
+        };
+        points[i + 1] = *to;
+    }
+    let edges = std::array::from_fn::<_, 4, _>(|i| points[(i + 1) % 4] - points[i]);
+    for i in 0..4 {
+        if edges[i].length() < 0.0001
+            || edges[i]
+                .normalize()
+                .dot(edges[(i + 1) % 4].normalize())
+                .abs()
+                > 0.0001
+        {
+            return None;
+        }
+    }
+    let orientation = edges[0].perp_dot(edges[1]).signum();
+    let e = edges[index].normalize();
+    Some((points, Vec2::new(e.y, -e.x) * orientation))
+}
+
 impl AuthoredEntity for FaceProfileFeatureSnapshot {
+    fn subobject_display_overrides(
+        &self,
+    ) -> Option<crate::capability_registry::SubobjectDisplayOverrides> {
+        self.display_overrides.clone()
+    }
+    fn set_subobject_display_overrides(
+        &self,
+        value: Option<crate::capability_registry::SubobjectDisplayOverrides>,
+    ) -> Result<BoxedEntity, String> {
+        let mut s = self.clone();
+        s.display_overrides = value;
+        Ok(s.into())
+    }
+    fn edit_boundary(
+        &self,
+        boundary: &str,
+        distance: Option<f32>,
+    ) -> Result<Vec<BoxedEntity>, String> {
+        let Some(distance) = distance else {
+            return Ok(vec![]);
+        };
+        if !distance.is_finite() {
+            return Err("Distance must be finite".into());
+        }
+        let index: usize = boundary
+            .strip_prefix("side/")
+            .and_then(|v| v.parse().ok())
+            .ok_or("Select a straight rectangular profile boundary")?;
+        let (mut points,outward)=rectangular_side(&self.feature.profile,index).ok_or("Boundary movement currently requires a rectangular authored profile; other profiles can be erased as a whole feature")?;
+        let sign = if self.feature.depth < 0. { -1. } else { 1. };
+        let width = -(points[(index + 2) % 4] - points[index]).dot(outward);
+        if width + sign * distance <= 0.0001 {
+            return Ok(vec![]);
+        }
+        points[index] += outward * (sign * distance);
+        points[(index + 1) % 4] += outward * (sign * distance);
+        let mut next = self.clone();
+        next.feature.profile = Profile2d {
+            start: points[0],
+            segments: points[1..]
+                .iter()
+                .map(|p| ProfileSegment::LineTo { to: *p })
+                .collect(),
+        };
+        validate_face_profile(&next.feature.profile, next.feature.depth)?;
+        Ok(vec![next.into()])
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -273,6 +351,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
 
     fn translate_by(&self, delta: Vec3) -> BoxedEntity {
         Self {
+            display_overrides: self.display_overrides.clone(),
             element_id: self.element_id,
             feature: FaceProfileFeature {
                 anchor_origin: self.feature.anchor_origin + delta,
@@ -285,6 +364,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
 
     fn rotate_by(&self, rotation: Quat) -> BoxedEntity {
         Self {
+            display_overrides: self.display_overrides.clone(),
             element_id: self.element_id,
             feature: FaceProfileFeature {
                 anchor_origin: rotation * self.feature.anchor_origin,
@@ -299,6 +379,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
         let operand = self.feature.current_operand(self.rotation.0);
         let scaled_depth = self.feature.depth.signum() * self.feature.depth.abs() * factor.y.abs();
         Self {
+            display_overrides: self.display_overrides.clone(),
             element_id: self.element_id,
             feature: FaceProfileFeature {
                 parent: self.feature.parent,
@@ -325,6 +406,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
         match face_id.0 {
             0 => Some(
                 Self {
+                    display_overrides: self.display_overrides.clone(),
                     element_id: self.element_id,
                     feature: FaceProfileFeature {
                         depth: self.feature.depth + distance,
@@ -449,7 +531,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
     }
 
     fn to_json(&self) -> Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "element_id": self.element_id.0,
             "parent": self.feature.parent.0,
             "anchor_origin": [self.feature.anchor_origin.x, self.feature.anchor_origin.y, self.feature.anchor_origin.z],
@@ -462,7 +544,11 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
                 self.rotation.0.z,
                 self.rotation.0.w
             ],
-        })
+        });
+        if let Some(overrides) = &self.display_overrides {
+            value["display_overrides"] = serde_json::to_value(overrides).unwrap();
+        }
+        value
     }
 
     fn apply_to(&self, world: &mut World) {
@@ -486,6 +572,15 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
                 NeedsEvaluation,
                 Visibility::Visible,
             ));
+        }
+        if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+            if let Some(value) = &self.display_overrides {
+                world.entity_mut(entity).insert(value.clone());
+            } else {
+                world
+                    .entity_mut(entity)
+                    .remove::<crate::capability_registry::SubobjectDisplayOverrides>();
+            }
         }
         if let Some(parent_entity) = find_entity_by_element_id(world, self.feature.parent) {
             if let Some(layer) = world
@@ -575,6 +670,64 @@ impl From<FaceProfileFeatureSnapshot> for BoxedEntity {
 pub struct FaceProfileFeatureFactory;
 
 impl AuthoredEntityFactory for FaceProfileFeatureFactory {
+    fn boundary_binding(
+        &self,
+        world: &World,
+        reference: &crate::capability_registry::SelectableSubobjectRef,
+    ) -> Option<super::boundary_edit::BoundaryBinding> {
+        use crate::capability_registry::{
+            GeneratedEdgeRef as E, GeneratedFaceRef as F, SelectableSubobjectRef as R,
+        };
+        let target = ElementId(reference.element_id());
+        let entity = find_entity_by_element_id_readonly(world, target)?;
+        let feature = world.get::<FaceProfileFeature>(entity)?;
+        let faces: Vec<&F> = match reference {
+            R::Face { face, .. } => vec![face],
+            R::Edge {
+                edge: E::BetweenFaces { first, second, .. },
+                ..
+            } => vec![first, second],
+            R::Edge {
+                edge: E::BoundaryOfFace { face, .. },
+                ..
+            } => vec![face],
+            _ => return None,
+        };
+        let mut sides = faces.into_iter().filter_map(|face| match face {
+            F::FeatureSideSegment(i) | F::FeatureSideArcSegment(i) => Some(*i as usize),
+            F::FeatureSideClosingSegment => Some(feature.profile.segments.len()),
+            _ => None,
+        });
+        let side = sides.next()?;
+        if sides.any(|s| s != side) {
+            return None;
+        }
+        let rotation = world
+            .get::<ShapeRotation>(entity)
+            .copied()
+            .unwrap_or_default()
+            .0;
+        let (origin, normal) = if let Some((p, outward)) = rectangular_side(&feature.profile, side)
+        {
+            let center = (p[side] + p[(side + 1) % 4]) * 0.5;
+            let sign = if feature.depth < 0. { -1. } else { 1. };
+            (
+                feature.anchor_origin
+                    + rotation * Vec3::new(center.x, feature.depth * 0.5, center.y),
+                rotation * Vec3::new(outward.x * sign, 0., outward.y * sign),
+            )
+        } else {
+            (feature.anchor_origin, rotation * Vec3::Y)
+        };
+        Some(super::boundary_edit::BoundaryBinding {
+            owner: target,
+            target,
+            key: format!("side/{side}"),
+            origin,
+            normal,
+        })
+    }
+
     fn allows_automatic_face_edit(&self, entity_ref: &bevy::ecs::world::EntityRef) -> bool {
         entity_ref.contains::<FaceProfileFeature>()
     }
@@ -590,6 +743,9 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
     ) -> Option<BoxedEntity> {
         Some(
             FaceProfileFeatureSnapshot {
+                display_overrides: entity_ref
+                    .get::<crate::capability_registry::SubobjectDisplayOverrides>()
+                    .cloned(),
                 element_id: *entity_ref.get::<ElementId>()?,
                 feature: entity_ref.get::<FaceProfileFeature>()?.clone(),
                 rotation: entity_ref
@@ -628,6 +784,12 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             .map(ElementId)
             .unwrap_or(ElementId(0));
         Ok(FaceProfileFeatureSnapshot {
+            display_overrides: data
+                .get("display_overrides")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| e.to_string())?,
             element_id,
             feature: FaceProfileFeature {
                 parent,
@@ -674,6 +836,7 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             .transpose()
             .map_err(|e| format!("Invalid support_face: {e}"))?;
         Ok(FaceProfileFeatureSnapshot {
+            display_overrides: None,
             element_id,
             feature: FaceProfileFeature {
                 parent,
@@ -817,6 +980,7 @@ pub fn make_face_profile_feature_snapshot(
     support_face: Option<GeneratedFaceRef>,
 ) -> FaceProfileFeatureSnapshot {
     FaceProfileFeatureSnapshot {
+        display_overrides: None,
         element_id,
         feature: FaceProfileFeature {
             parent,
@@ -1303,6 +1467,7 @@ mod tests {
                 support_face: None,
             },
             rotation: ShapeRotation::default(),
+            display_overrides: None,
         };
         let result = snapshot.push_pull(FaceId(0), 0.1).unwrap();
         let result = result
@@ -1373,6 +1538,7 @@ mod tests {
                 support_face: None,
             },
             rotation: ShapeRotation::default(),
+            display_overrides: None,
         };
 
         assert_eq!(

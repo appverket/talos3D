@@ -355,7 +355,15 @@ pub(crate) fn update_inference(world: &mut World) {
                 .get::<crate::plugins::modeling::profile_feature::FaceProfileFeature>(pp.entity)
                 .map(|feature| (pp.element_id, feature.parent))
         });
+    let boundary_owner = world
+        .get_resource::<crate::plugins::modeling::boundary_edit::BoundarySession>()
+        .and_then(|s| s.0.as_ref())
+        .map(|g| g.binding.owner);
     let owner = hovered.and_then(|id| {
+        if boundary_owner == Some(id) {
+            return Some(id);
+        }
+
         if let Some((_, parent)) = support.filter(|(feature, _)| *feature == id) {
             return Some(parent);
         }
@@ -371,7 +379,8 @@ pub(crate) fn update_inference(world: &mut World) {
     });
     // A hit on the moving feature is not a stationary surface target. Only its
     // cached support edges may be used; other scene faces remain valid targets.
-    let stationary_surface = hovered == owner;
+
+    let stationary_surface = hovered == owner && hovered != boundary_owner;
     let keys = world.resource::<ButtonInput<KeyCode>>().clone();
     let now = world
         .get_resource::<Time>()
