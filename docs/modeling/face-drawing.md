@@ -76,8 +76,8 @@ recorded on the owning issue, TALOS-czkhgugt.
 ## Editing boundaries
 
 After entering the enclosing groups and selecting the individual component,
-click a boundary edge to select it. **H** (or **Edit → Hide Edge**) hides its
-linework without changing geometry. **Edit → Show Object Edges** restores the
+click a boundary edge to select it. **H** (or **Edit → More → Hide Edge**) hides its
+linework without changing geometry. **Edit → More → Show Object Edges** restores the
 selected object's hidden edges. These display overrides persist with the
 native authored snapshot and are undoable.
 
@@ -85,7 +85,7 @@ For a supported authored boundary, **G** moves it along its semantic normal.
 You can select a rectangular feature's side face instead. Hover the opposite
 edge for **On edge** inference and confirm to collapse the feature. A negative
 face-profile feature closes its cut when its width reaches zero; a positive
-feature disappears when collapsed. **Delete/Backspace**, or **Edit → Close
+feature disappears when collapsed. **Delete/Backspace**, or **Edit → More → Close
 Opening / Erase Feature**, removes the entire owning feature. It does not delete
 an isolated mesh edge or leave an invalid shell. Undo restores the authored
 feature, its dependencies and aggregate membership.
