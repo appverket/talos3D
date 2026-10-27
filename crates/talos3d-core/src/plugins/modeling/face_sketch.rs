@@ -177,13 +177,13 @@ fn inspect_faces(world: &mut World, args: &Value) -> Result<CommandResult, Strin
         ..Default::default()
     })
 }
-fn select_face(world: &mut World, args: &Value) -> Result<CommandResult, String> {
-    let (entity, id) = target(world, args)?;
-    let face = FaceId(
-        args.get("face_id")
-            .and_then(Value::as_u64)
-            .ok_or("Supply face_id from modeling.inspect_faces")? as u32,
-    );
+/// Shared planar selection geometry for command and native marquee selection.
+pub(crate) fn planar_face_hit(
+    world: &World,
+    entity: Entity,
+    id: ElementId,
+    face: FaceId,
+) -> Result<FaceHitCandidate, String> {
     let vertices = face_vertices_for_entity(world, entity, face)
         .ok_or("Unsupported or missing planar face")?;
     if vertices.len() < 3 {
@@ -229,18 +229,26 @@ fn select_face(world: &mut World, args: &Value) -> Result<CommandResult, String>
         .filter(|_| face == FaceId(0))
         .map(|f| f.anchor_origin + normal * f.depth)
         .unwrap_or(centroid);
-    select_hit(
-        world,
-        FaceHitCandidate {
-            entity,
-            element_id: id,
-            distance: 0.,
-            face_id: face,
-            generated_face_ref,
-            normal,
-            centroid,
-        },
+    Ok(FaceHitCandidate {
+        entity,
+        element_id: id,
+        distance: 0.,
+        face_id: face,
+        generated_face_ref,
+        normal,
+        centroid,
+    })
+}
+
+fn select_face(world: &mut World, args: &Value) -> Result<CommandResult, String> {
+    let (entity, id) = target(world, args)?;
+    let face = FaceId(
+        args.get("face_id")
+            .and_then(Value::as_u64)
+            .ok_or("Supply face_id from modeling.inspect_faces")? as u32,
     );
+    let hit = planar_face_hit(world, entity, id, face)?;
+    select_hit(world, hit);
     Ok(CommandResult {
         output: Some(
             json!({"selected":id.0,"face_id":face.0,"next_commands":["modeling.draw_face_circle","modeling.draw_face_rectangle","modeling.draw_face_polyline"]}),

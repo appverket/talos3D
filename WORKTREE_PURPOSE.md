@@ -2,8 +2,8 @@
 
 - agent: codex
 - created: 2026-10-27
-- branch: codex/extrusion-preview-flicker
+- branch: codex/face-marquee-selection
 - task-id: TALOS-czkhgugt
 - target base: main
-- summary: Stabilize rectangle extrusion preview while preserving semantic edits.
+- summary: Restore drag selection for authored face regions and delayed drags
 - status: awaiting-merge

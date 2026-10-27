@@ -54,9 +54,6 @@ const BOX_SELECT_CROSSING_COLOR: Color = Color::srgba(0.2, 1.0, 0.5, 0.15);
 const BOX_SELECT_WINDOW_BORDER: Color = Color::srgba(0.3, 0.6, 1.0, 0.8);
 const BOX_SELECT_CROSSING_BORDER: Color = Color::srgba(0.3, 1.0, 0.6, 0.8);
 const BOX_SELECT_DRAG_THRESHOLD: f32 = 5.0;
-/// A pending marquee start is dropped (treated as a plain click) if the cursor hasn't
-/// moved past the drag threshold within this many frames of the press.
-const BOX_SELECT_START_GRACE_FRAMES: u32 = 18;
 const SELECTION_CLICK_SLOP_PX: f32 = 6.0;
 const SCREEN_BOUNDS_INTERIOR_MAX_AREA_PX2: f32 = 60.0 * 60.0;
 const SCREEN_BOUNDS_OUTLINE_TOLERANCE_PX: f32 = 8.0;
@@ -72,6 +69,8 @@ type BoxSelectEntityQueryItem = (
     Has<SceneLightNode>,
     Has<GroupEditMuted>,
     Has<OpeningContext>,
+    Option<&'static FaceProfileFeature>,
+    Option<&'static ShapeRotation>,
 );
 type BoxSelectGeneratedOccurrenceQueryItem = (
     Entity,
@@ -90,6 +89,7 @@ type GroupMembershipQueryItem = (Entity, &'static ElementId, &'static GroupMembe
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum SelectionInputSystems {
+    Marquee,
     Click,
     Escape,
 }
@@ -184,7 +184,7 @@ impl Plugin for SelectionPlugin {
                 Update,
                 (
                     (
-                        handle_box_select,
+                        handle_box_select.in_set(SelectionInputSystems::Marquee),
                         handle_selection_click.in_set(SelectionInputSystems::Click),
                         draw_box_select_rect,
                     )
@@ -217,16 +217,17 @@ impl Plugin for SelectionPlugin {
 }
 
 #[derive(Resource, Default)]
-struct BoxSelectState {
+pub(crate) struct BoxSelectState {
     drag_start: Option<Vec2>,
     is_dragging: bool,
     /// Set on the frame a box-drag completes so the click handler skips.
     just_completed: bool,
-    /// Frames a pending start has waited without the cursor moving far enough to be
-    /// a drag. A plain click (especially on trackpads that don't hold the button)
-    /// otherwise leaves `drag_start` pending and any later cursor move would start a
-    /// spurious marquee — so a start that doesn't move promptly is dropped as a click.
-    pending_frames: u32,
+}
+
+impl BoxSelectState {
+    pub(crate) fn owns_pointer(&self) -> bool {
+        self.is_dragging || self.just_completed
+    }
 }
 
 #[derive(Resource, Default)]
@@ -1944,10 +1945,7 @@ struct BoxSelectContext<'w, 's> {
 fn handle_box_select(mut cx: BoxSelectContext) {
     cx.box_state.just_completed = false;
 
-    if !cx.ownership.is_idle()
-        || cx.face_edit_context.is_active()
-        || orbit_modifier_pressed(&cx.keys)
-        || pan_modifier_pressed(&cx.keys)
+    if !cx.ownership.is_idle() || orbit_modifier_pressed(&cx.keys) || pan_modifier_pressed(&cx.keys)
     {
         clear_pending_box_select_click(&mut cx.box_state);
         return;
@@ -1984,15 +1982,6 @@ fn handle_box_select(mut cx: BoxSelectContext) {
         }
 
         let complete = cx.box_state.is_dragging && left_just_released;
-        if !cx.box_state.is_dragging && !complete {
-            // Still just a press that hasn't become a drag — count the wait, and after
-            // the grace window treat it as a click (drop the pending start) so a later
-            // cursor move doesn't begin a spurious marquee.
-            cx.box_state.pending_frames += 1;
-            if cx.box_state.pending_frames > BOX_SELECT_START_GRACE_FRAMES {
-                cx.box_state.drag_start = None;
-            }
-        }
         if complete {
             let end = cursor_position;
             let is_window_select = end.x >= start.x;
@@ -2016,6 +2005,23 @@ fn handle_box_select(mut cx: BoxSelectContext) {
 
             let additive =
                 cx.keys.pressed(KeyCode::ShiftLeft) || cx.keys.pressed(KeyCode::ShiftRight);
+            if let Some(entity) = cx.face_edit_context.entity {
+                // Resolve only the component already entered, once on release.
+                // The shared face selector owns the active plane and subobject refs.
+                cx.commands.queue(move |world: &mut World| {
+                    complete_face_marquee(
+                        world,
+                        entity,
+                        rect_min,
+                        rect_max,
+                        is_window_select,
+                        additive,
+                    );
+                });
+                clear_pending_box_select_click(&mut cx.box_state);
+                cx.box_state.just_completed = true;
+                return;
+            }
             if !additive {
                 for entity in &cx.selected_query {
                     cx.commands.entity(entity).remove::<Selected>();
@@ -2033,6 +2039,8 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                 is_scene_light,
                 is_muted,
                 is_internal_opening,
+                feature,
+                rotation,
             ) in &cx.entity_query
             {
                 if visibility.copied() == Some(Visibility::Hidden) {
@@ -2068,7 +2076,14 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                     continue;
                 };
 
-                let bounds = aabb_to_world_bounds(aabb, global_transform);
+                // An evaluated feature mesh contains the supporting solid. Its
+                // selection extent is the authored operand, not that whole mesh.
+                let bounds = feature
+                    .and_then(|f| {
+                        f.current_operand(rotation.copied().unwrap_or_default().0)
+                            .bounds(rotation.copied().unwrap_or_default().0)
+                    })
+                    .unwrap_or_else(|| aabb_to_world_bounds(aabb, global_transform));
 
                 if entity_screen_bounds_match(
                     &bounds,
@@ -2152,10 +2167,109 @@ fn handle_box_select(mut cx: BoxSelectContext) {
     }
 }
 
+/// Project only the entered component's planar faces at release, never the scene
+/// per frame. A fixed budget keeps imported topology from monopolizing input.
+fn complete_face_marquee(
+    world: &mut World,
+    entity: Entity,
+    rect_min: Vec2,
+    rect_max: Vec2,
+    window_select: bool,
+    additive: bool,
+) {
+    use crate::capability_registry::FaceId;
+    use crate::plugins::{
+        face_edit::face_vertices_for_entity,
+        modeling::{
+            face_sketch::{planar_face_hit, select_hit},
+            planar_body::PlanarBody,
+        },
+    };
+    let Some(id) = world.get::<ElementId>(entity).copied() else {
+        return;
+    };
+    let mut cameras = world.query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>();
+    let Some((camera, transform)) = cameras.iter(world).find(|(c, _)| c.is_active) else {
+        return;
+    };
+    let count = world
+        .get::<FaceProfileFeature>(entity)
+        .map(|f| 2 + f.side_face_count() as usize)
+        .or_else(|| world.get::<PlanarBody>(entity).map(|b| b.surfaces.len()))
+        .unwrap_or(256)
+        .min(4096);
+    let mut hits = Vec::new();
+    let mut vertices_left = 65536usize;
+    for i in 0..count {
+        let face = FaceId(i as u32);
+        let Some(vertices) = face_vertices_for_entity(world, entity, face) else {
+            continue;
+        };
+        if vertices.len() > vertices_left {
+            break;
+        }
+        vertices_left -= vertices.len();
+        let points = vertices
+            .iter()
+            .map(|p| camera.world_to_viewport(transform, *p))
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(points) = points else {
+            continue;
+        };
+        if points.len() < 3 {
+            continue;
+        }
+        let min = points
+            .iter()
+            .copied()
+            .fold(Vec2::splat(f32::INFINITY), Vec2::min);
+        let max = points
+            .iter()
+            .copied()
+            .fold(Vec2::splat(f32::NEG_INFINITY), Vec2::max);
+        let matches = if window_select {
+            min.cmpge(rect_min).all() && max.cmple(rect_max).all()
+        } else {
+            max.cmpge(rect_min).all() && min.cmple(rect_max).all()
+        };
+        if matches {
+            if let Ok(hit) = planar_face_hit(world, entity, id, face) {
+                hits.push(hit);
+            }
+        }
+    }
+    let mut refs = if additive {
+        world.resource::<SubobjectSelection>().refs.clone()
+    } else {
+        Vec::new()
+    };
+    for hit in &hits {
+        for reference in crate::plugins::face_edit::face_selection_refs(id, hit, 1) {
+            if !refs.contains(&reference) {
+                refs.push(reference);
+            }
+        }
+    }
+    // Face editing has one active drawing/push-pull plane. Do not silently
+    // retain an invisible multi-face selection with an ambiguous operation.
+    if refs.len() > 1 {
+        if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
+            status.hint =
+                "Box contains multiple faces; narrow it to one face for face editing".into();
+        }
+        return;
+    }
+    if refs.len() == 1 && hits.len() == 1 {
+        select_hit(world, hits.remove(0));
+    } else if !additive || !hits.is_empty() {
+        world.resource_mut::<FaceEditContext>().selected_face = None;
+    }
+    world.resource_mut::<SubobjectSelection>().refs = refs;
+}
+
 fn start_box_select_candidate(box_state: &mut BoxSelectState, cursor_position: Vec2) {
     box_state.drag_start = Some(cursor_position);
     box_state.is_dragging = false;
-    box_state.pending_frames = 0;
 }
 
 fn clear_box_select_when_button_idle(
@@ -2173,7 +2287,6 @@ fn clear_box_select_when_button_idle(
 fn clear_pending_box_select_click(box_state: &mut BoxSelectState) {
     box_state.drag_start = None;
     box_state.is_dragging = false;
-    box_state.pending_frames = 0;
 }
 
 #[cfg(test)]
@@ -2355,14 +2468,12 @@ mod tests {
             drag_start: Some(Vec2::new(120.0, 80.0)),
             is_dragging: false,
             just_completed: false,
-            pending_frames: 3,
         };
 
         clear_pending_box_select_click(&mut state);
 
         assert_eq!(state.drag_start, None);
         assert!(!state.is_dragging);
-        assert_eq!(state.pending_frames, 0);
     }
 
     #[test]
@@ -2373,7 +2484,6 @@ mod tests {
         // the same input frame also has `just_released`, the candidate must be
         // cleared so later cursor movement/clicks are not treated as a marquee.
         state.drag_start = Some(Vec2::new(64.0, 64.0));
-        state.pending_frames = 1;
 
         clear_pending_box_select_click(&mut state);
 
@@ -2452,14 +2562,12 @@ mod tests {
             drag_start: Some(Vec2::new(20.0, 30.0)),
             is_dragging: false,
             just_completed: false,
-            pending_frames: 2,
         };
 
         assert!(clear_box_select_when_button_idle(&mut state, false, false));
 
         assert!(state.drag_start.is_none());
         assert!(!state.is_dragging);
-        assert_eq!(state.pending_frames, 0);
     }
 
     #[test]
@@ -2513,14 +2621,12 @@ mod tests {
             drag_start: Some(Vec2::new(20.0, 30.0)),
             is_dragging: true,
             just_completed: false,
-            pending_frames: 9,
         };
 
         start_box_select_candidate(&mut state, Vec2::new(90.0, 110.0));
 
         assert_eq!(state.drag_start, Some(Vec2::new(90.0, 110.0)));
         assert!(!state.is_dragging);
-        assert_eq!(state.pending_frames, 0);
     }
 
     #[test]
@@ -2927,6 +3033,146 @@ mod tests {
         }
         app.update();
         (app, window)
+    }
+
+    fn marquee_app(face_edit: bool) -> (App, Entity, Entity) {
+        use crate::plugins::modeling::profile::Profile2d;
+        let (mut app, window) = native_selection_app();
+        app.init_resource::<SceneLightObjectVisibility>()
+            .init_resource::<SubobjectSelection>()
+            .add_systems(Update, handle_box_select.before(handle_selection_click));
+        let feature = app
+            .world_mut()
+            .spawn((
+                ElementId(40),
+                FaceProfileFeature {
+                    parent: ElementId(10),
+                    anchor_origin: Vec3::ZERO,
+                    profile: Profile2d::rectangle(1., 1.),
+                    depth: 0.,
+                    support_face: None,
+                },
+                ShapeRotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+                GlobalTransform::IDENTITY,
+                // Evaluated wall, far larger than its authored one-metre feature.
+                bevy::camera::primitives::Aabb::from_min_max(Vec3::splat(-10.), Vec3::splat(10.)),
+            ))
+            .id();
+        app.world_mut()
+            .query::<&mut GroupMembers>()
+            .iter_mut(app.world_mut())
+            .find(|g| g.name == "Roof")
+            .unwrap()
+            .member_ids
+            .push(ElementId(40));
+        app.world_mut().resource_mut::<GroupEditContext>().stack =
+            vec![ElementId(30), ElementId(20)];
+        if face_edit {
+            app.world_mut()
+                .resource_mut::<FaceEditContext>()
+                .enter(feature, ElementId(40));
+        }
+        (app, window, feature)
+    }
+
+    fn marquee_drag(app: &mut App, window: Entity, start: Vec2, end: Vec2, hold: usize) {
+        queue_native_cursor(app, window, start);
+        queue_native_edges(app, window, &[ButtonState::Pressed]);
+        app.update();
+        for _ in 0..hold {
+            app.update();
+        }
+        queue_native_cursor(app, window, end);
+        app.update();
+        assert!(
+            app.world().resource::<BoxSelectState>().is_dragging,
+            "held drag must show a rectangle"
+        );
+        queue_native_edges(app, window, &[ButtonState::Released]);
+        app.update();
+        assert!(app.world().resource::<BoxSelectState>().just_completed);
+    }
+
+    #[test]
+    fn delayed_native_marquee_selects_authored_region_not_evaluated_wall_bounds() {
+        let (mut app, window, feature) = marquee_app(false);
+        marquee_drag(
+            &mut app,
+            window,
+            Vec2::new(330., 230.),
+            Vec2::new(470., 370.),
+            90,
+        );
+        assert!(app.world().get::<Selected>(feature).is_some());
+        assert!(!app.world().resource::<FaceEditContext>().is_active());
+        // At root the same rectangle must respect the container boundary.
+        app.world_mut().entity_mut(feature).remove::<Selected>();
+        app.world_mut()
+            .resource_mut::<GroupEditContext>()
+            .stack
+            .clear();
+        marquee_drag(
+            &mut app,
+            window,
+            Vec2::new(330., 230.),
+            Vec2::new(470., 370.),
+            0,
+        );
+        assert!(app.world().get::<Selected>(feature).is_none());
+        let group = find_entity_by_element_id_readonly(app.world(), ElementId(30)).unwrap();
+        assert!(app.world().get::<Selected>(group).is_some());
+    }
+
+    #[test]
+    fn native_face_marquee_selects_cap_using_the_shared_face_command_contract() {
+        use crate::capability_registry::{FaceId, GeneratedFaceRef, SelectableSubobjectRef};
+        let (mut app, window, feature) = marquee_app(true);
+        marquee_drag(
+            &mut app,
+            window,
+            Vec2::new(330., 230.),
+            Vec2::new(470., 370.),
+            90,
+        );
+        let context = app.world().resource::<FaceEditContext>();
+        assert_eq!(context.entity, Some(feature));
+        assert_eq!(context.selected_face.as_ref().unwrap().face_id, FaceId(0));
+        assert_eq!(
+            app.world().resource::<SubobjectSelection>().refs,
+            vec![SelectableSubobjectRef::Face {
+                element_id: 40,
+                face: GeneratedFaceRef::FeatureCap,
+            }]
+        );
+        assert_eq!(
+            app.world().resource::<GroupEditContext>().stack,
+            vec![ElementId(30), ElementId(20)]
+        );
+        // A left-to-right partial box excludes the cap; crossing selects it.
+        marquee_drag(
+            &mut app,
+            window,
+            Vec2::new(400., 230.),
+            Vec2::new(470., 370.),
+            0,
+        );
+        assert!(app.world().resource::<SubobjectSelection>().refs.is_empty());
+        marquee_drag(
+            &mut app,
+            window,
+            Vec2::new(470., 370.),
+            Vec2::new(400., 230.),
+            0,
+        );
+        assert_eq!(
+            app.world()
+                .resource::<FaceEditContext>()
+                .selected_face
+                .as_ref()
+                .unwrap()
+                .face_id,
+            FaceId(0)
+        );
     }
 
     fn queue_native_edges(app: &mut App, window: Entity, states: &[bevy::input::ButtonState]) {

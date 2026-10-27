@@ -87,6 +87,7 @@ impl Plugin for FaceEditPlugin {
                         .run_if(face_edit_active)
                         .run_if(not_drawing),
                     handle_face_click
+                        .after(crate::plugins::selection::SelectionInputSystems::Marquee)
                         .after(update_hovered_face)
                         .before(crate::plugins::selection::SelectionInputSystems::Click)
                         .in_set(InputPhase::ToolInput)
@@ -372,6 +373,7 @@ fn handle_face_click(
     mut subobject_selection: ResMut<SubobjectSelection>,
     ownership: Res<InputOwnership>,
     edge_press: Res<EdgePressCapture>,
+    marquee: Option<Res<crate::plugins::selection::BoxSelectState>>,
 ) {
     if press_capture.ignore_until_release {
         if mouse_buttons.just_released(MouseButton::Left) {
@@ -380,6 +382,12 @@ fn handle_face_click(
         return;
     }
     if !ownership.is_idle() {
+        return;
+    }
+
+    if marquee.is_some_and(|m| m.owns_pointer()) {
+        press_capture.face_hit = None;
+        press_capture.cursor_screen = None;
         return;
     }
 

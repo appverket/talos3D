@@ -8,6 +8,14 @@ Use **Create → On Face → Draw Circle on Face**, **Draw Rectangle on Face**,
 or **Draw Lines on Face**. The ordinary Create Plane and Create Polyline commands
 also draw on the selected face when one is active. Floor Plan tools create Draft
 annotations and are separate from solid face modeling.
+With Select active, drag a selection rectangle around a region: left to right
+requires full containment; right to left selects intersecting bounds. Hold Shift
+to add to the selection. You may hold the mouse still before dragging. At object
+level this selects the authored region (not its entire evaluated support mesh);
+in face-edit mode it selects faces only within the component already entered.
+A single selected face is ready for drawing or **G** push/pull. Face editing currently has one active plane; a box matching several faces asks
+you to narrow the selection. Object-level box selection supports multiple objects.
+
 The selected face has a GPU stipple overlay. Press **C** for a circle (centre,
 radius), **P** for a rectangle (opposite corners), or **L** for lines (Enter to
 finish). Drawing and snapping stay on the selected plane. The new region stays
