@@ -39,7 +39,11 @@ an exact point while locked projects that point onto the guide. Numeric transfor
 entry and explicit transform constraints remain authoritative.
 
 Draft tools only accept points and directions on their authored Draft plane.
-Draft Rectangle also infers a square. Analytic tangent points are available from
+Modeling Polyline and primitive placement also retain their existing drawing
+plane, so an axis lock normal to that plane is unavailable; use the intended
+drawing plane for these tools. This preserves closed-polyline profile creation
+without silently projecting a 3D preview into a different committed shape.
+Move and free Tape support 3D targets. Draft Rectangle also infers a square. Analytic tangent points are available from
 an external coplanar point to an authored cylinder's cap circles; arbitrary
 imported curves do not claim analytic tangency. Such curves still expose their
 available authored topology. This is not a claim of complete SketchUp parity.
