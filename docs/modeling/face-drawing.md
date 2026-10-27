@@ -22,7 +22,13 @@ inference appears, then click to confirm. The moving face aligns to the target
 point along its normal, even when the edge is laterally offset. A supporting
 face boundary returns the region flush; a farther target can set a through-cut.
 The moving region is excluded as its own snap target, while the unchanged
-support body remains available. Numeric entry overrides inference.
+support body remains available. Numeric entry overrides inference. Hold **Ctrl**
+to bypass inference during a gesture, for example when a guide on the wall keeps
+the region flush. Move away from the guide to resume free depth adjustment.
+
+Cursor picking keeps the nearest visible evaluated feature as an occluder. It
+does not look through the extrusion to snap to unrelated background geometry;
+the inference layer resolves the fixed support without targeting the moving cap.
 
 The support object keeps its authored type and identity. A circle is four
 analytic quarter arcs in a `face_profile_feature`, with parent identity, anchor,

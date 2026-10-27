@@ -16,7 +16,7 @@ use crate::plugins::{
     identity::ElementId,
     input_ownership::{InputOwnership, InputPhase},
     layers::{LayerAssignment, LayerRegistry},
-    modeling::{occurrence::GeneratedOccurrencePart, profile_feature::FaceProfileFeature},
+    modeling::occurrence::GeneratedOccurrencePart,
     tools::ActiveTool,
 };
 
@@ -90,7 +90,6 @@ struct ToolCursorRayCast<'w, 's> {
     layer_assignment_query: Query<'w, 's, Option<&'static LayerAssignment>>,
     element_layer_query: Query<'w, 's, (&'static ElementId, Option<&'static LayerAssignment>)>,
     layer_registry: Res<'w, LayerRegistry>,
-    face_profile_feature_query: Query<'w, 's, (), With<FaceProfileFeature>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -523,15 +522,18 @@ fn ray_cast_scene_surface(
         layer_assignment_query,
         element_layer_query,
         layer_registry,
-        face_profile_feature_query,
     } = ray_cast;
 
     ray_cast
         .cast_ray(
             ray,
             &MeshRayCastSettings::default().with_filter(&|entity| {
+                // Evaluated face features are the visible surface, including
+                // their supporting body. Keep that nearest hit: inference
+                // resolves its fixed support and rejects the moving cap. A
+                // blanket exclusion instead exposes unrelated geometry behind
+                // the preview and makes push/pull jump to that geometry.
                 scene_surface_selectable(entity, mesh_selectable_query, generated_part_query)
-                    && !face_profile_feature_query.contains(entity)
                     && visibility_query
                         .get(entity)
                         .map_or(true, |visibility| *visibility != Visibility::Hidden)
@@ -546,6 +548,71 @@ fn ray_cast_scene_surface(
         )
         .first()
         .map(|(entity, hit)| (hit.point, *entity, hit.normal))
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use crate::plugins::modeling::{profile::Profile2d, profile_feature::FaceProfileFeature};
+    use bevy::{camera::primitives::Aabb, ecs::system::SystemState};
+
+    #[test]
+    fn visible_feature_occludes_background_in_the_real_cursor_ray_path() {
+        bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<LayerRegistry>();
+        let mesh = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::new(1., 1., 1.));
+        let visible = ViewVisibility::VISIBLE;
+        let spawn = |world: &mut World, id, z| {
+            world
+                .spawn((
+                    ElementId(id),
+                    Mesh3d(mesh.clone()),
+                    GlobalTransform::from_translation(Vec3::Z * z),
+                    Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5)),
+                    Visibility::Visible,
+                    InheritedVisibility::VISIBLE,
+                    visible,
+                ))
+                .id()
+        };
+        let background = spawn(&mut world, 1, -2.);
+        let feature = spawn(&mut world, 2, 0.);
+        world.entity_mut(feature).insert(FaceProfileFeature {
+            parent: ElementId(1),
+            anchor_origin: Vec3::ZERO,
+            profile: Profile2d::rectangle(1., 1.),
+            depth: 1.,
+            support_face: None,
+        });
+        let mut state = SystemState::<ToolCursorRayCast>::new(&mut world);
+        let ray = Ray3d::new(Vec3::Z * 5., Dir3::NEG_Z);
+        // This must remain the feature as it moves: the background must never
+        // become an OnFace target merely because the foreground is a feature.
+        for z in [0., 0.2, -0.2, 0.5, 0.] {
+            world
+                .entity_mut(feature)
+                .insert(GlobalTransform::from_translation(Vec3::Z * z));
+            let mut cursor = state.get_mut(&mut world).unwrap();
+            let (point, hit, _) = ray_cast_scene_surface(ray, &mut cursor).unwrap();
+            assert_eq!(hit, feature);
+            assert_eq!(
+                resolve_surface_owner_element_id(hit, &cursor),
+                Some(ElementId(2))
+            );
+            assert!((point.z - (z + 0.5)).abs() < 1e-5);
+        }
+        world.entity_mut(feature).insert(Visibility::Hidden);
+        assert_eq!(
+            ray_cast_scene_surface(ray, &mut state.get_mut(&mut world).unwrap())
+                .unwrap()
+                .1,
+            background
+        );
+    }
 }
 
 fn scene_surface_selectable(

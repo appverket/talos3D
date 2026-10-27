@@ -2,8 +2,8 @@
 
 - agent: codex
 - created: 2026-10-27
-- branch: codex/hosted-boundary-resize
+- branch: codex/extrusion-preview-flicker
 - task-id: TALOS-czkhgugt
 - target base: main
-- summary: Resize filled opening boundaries through the shared hosted layout plan.
-- status: active
+- summary: Stabilize rectangle extrusion preview while preserving semantic edits.
+- status: awaiting-merge
