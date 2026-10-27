@@ -554,6 +554,7 @@ fn update_transform_preview(world: &mut World) {
                     let mut active = world.resource_mut::<ActiveTransformPreview>();
                     active.snapshots = after;
                     active.display_value = Some(distance);
+                    active.refusal = None;
                 }
                 Err(error) => {
                     crate::plugins::modeling::boundary_edit::restore(world);
@@ -563,6 +564,7 @@ fn update_transform_preview(world: &mut World) {
                         .as_mut()
                         .unwrap()
                         .presented = None;
+                    world.resource_mut::<ActiveTransformPreview>().refusal = Some(error.clone());
                     world.resource_mut::<StatusBarData>().hint = error;
                 }
             }

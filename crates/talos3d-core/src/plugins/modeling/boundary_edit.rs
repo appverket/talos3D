@@ -6,7 +6,10 @@ use crate::{
         command_registry::{
             CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
         },
-        commands::{capture_delete_snapshots, find_entity_by_element_id_readonly},
+        commands::{
+            capture_delete_snapshots, find_entity_by_element_id_readonly, prepare_entity_changes,
+            ApplyEntityChangesCommand,
+        },
         history::{EditorCommand, PendingCommandQueue},
         identity::ElementId,
     },
@@ -33,6 +36,7 @@ pub struct BoundaryGesture {
     pub original: BoxedEntity,
     pub deletion: BoundaryPlan,
     pub presented: Option<BoundaryPlan>,
+    pub presented_distance: Option<f32>,
 }
 #[derive(Resource, Default)]
 pub struct BoundaryFeedback(pub Option<(SelectableSubobjectRef, String)>);
@@ -54,8 +58,8 @@ pub fn capture(world: &World, binding: BoundaryBinding) -> Result<BoundaryGestur
     let original = registry
         .capture_snapshot(&world.entity(entity), world)
         .ok_or("Boundary owner has no authored snapshot")?;
-    // Validate erase semantics before deriving the shared dependency/aggregate repair.
-    original.0.edit_boundary(&binding.key, None)?;
+    // Movement and erasure have separate admissibility (a filled opening may resize
+    // while refusing deletion). Capture dependencies without authorizing erasure.
     let ids = registry.expand_delete_ids(world, &[binding.target]);
     let (mut before, repairs, after) = capture_delete_snapshots(world, &ids);
     before.extend(repairs);
@@ -64,9 +68,14 @@ pub fn capture(world: &World, binding: BoundaryBinding) -> Result<BoundaryGestur
         original,
         deletion: BoundaryPlan { before, after },
         presented: None,
+        presented_distance: None,
     })
 }
-pub fn plan(gesture: &BoundaryGesture, distance: Option<f32>) -> Result<BoundaryPlan, String> {
+pub fn plan(
+    world: &World,
+    gesture: &BoundaryGesture,
+    distance: Option<f32>,
+) -> Result<BoundaryPlan, String> {
     if distance.is_some_and(|v| !v.is_finite()) {
         return Err("Distance must be finite".into());
     }
@@ -77,9 +86,17 @@ pub fn plan(gesture: &BoundaryGesture, distance: Option<f32>) -> Result<Boundary
     if after.is_empty() {
         Ok(gesture.deletion.clone())
     } else {
+        let draft = prepare_entity_changes(
+            world,
+            ApplyEntityChangesCommand {
+                label: "Edit semantic boundary",
+                before: vec![gesture.original.clone()],
+                after,
+            },
+        )?;
         Ok(BoundaryPlan {
-            before: vec![gesture.original.clone()],
-            after,
+            before: draft.before,
+            after: draft.after,
         })
     }
 }
@@ -118,9 +135,12 @@ pub fn enqueue(world: &mut World, plan: BoundaryPlan) {
 }
 pub fn restore(world: &mut World) {
     let current = world
-        .get_resource::<BoundarySession>()
-        .and_then(|s| s.0.as_ref())
-        .and_then(|s| s.presented.clone());
+        .get_resource_mut::<BoundarySession>()
+        .and_then(|mut session| {
+            let gesture = session.0.as_mut()?;
+            gesture.presented_distance = None;
+            gesture.presented.take()
+        });
     if let Some(p) = current {
         present(world, &p.before, &p.after);
     }
@@ -132,21 +152,24 @@ pub fn preview(world: &mut World, distance: f32) -> Result<Vec<BoxedEntity>, Str
         .as_ref()
         .ok_or("No boundary gesture")?
         .clone();
-    let next = plan(&gesture, Some(distance))?;
-    if gesture
-        .presented
-        .as_ref()
-        .is_none_or(|p| p.after != next.after)
-    {
-        restore(world);
-        present(world, &next.after, &next.before);
-        world
-            .resource_mut::<BoundarySession>()
-            .0
-            .as_mut()
-            .unwrap()
-            .presented = Some(next.clone());
+    if gesture.presented_distance == Some(distance) {
+        if let Some(presented) = gesture.presented {
+            return Ok(presented.after);
+        }
     }
+    // Domain modifiers read authored dependents. Restore the complete baseline
+    // before planning, so neither geometry nor undo captures accumulate preview edits.
+    restore(world);
+    let next = plan(world, &gesture, Some(distance))?;
+    present(world, &next.after, &next.before);
+    let session = world
+        .resource_mut::<BoundarySession>()
+        .into_inner()
+        .0
+        .as_mut()
+        .unwrap();
+    session.presented = Some(next.clone());
+    session.presented_distance = Some(distance);
     Ok(next.after)
 }
 pub fn selected_reference(world: &World) -> Option<SelectableSubobjectRef> {
@@ -217,7 +240,7 @@ pub fn execute(
         ),
         _ => return Err(format!("Unsupported boundary operation: {operation}")),
     };
-    let plan = plan(&gesture, distance)?;
+    let plan = plan(world, &gesture, distance)?;
     let result = CommandResult {
         modified: plan.after.iter().map(|s| s.element_id().0).collect(),
         deleted: plan
@@ -271,11 +294,15 @@ fn inspect(world: &mut World, args: &Value) -> Result<CommandResult, String> {
     let r = reference(world, args)?;
     let b = resolve(world, &r).ok_or("No semantic boundary edit for this selection")?;
     let gesture = capture(world, b.clone());
-    let erase_error = gesture.as_ref().err().cloned();
+    let erase_error = gesture
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|g| plan(world, g, None).map(|_| ()))
+        .err();
     let move_error = gesture
         .as_ref()
         .map_err(Clone::clone)
-        .and_then(|g| plan(g, Some(0.)).map(|_| ()))
+        .and_then(|g| plan(world, g, Some(0.)).map(|_| ()))
         .err();
     Ok(CommandResult {
         output: Some(
@@ -303,6 +330,6 @@ pub fn register(app: &mut App) {
         ("hide_edge", "Hide Edge", hide as CommandHandler),
         ("show_edges", "Show Object Edges", show as CommandHandler),
     ] {
-        app.register_command(CommandDescriptor{id:format!("modeling.{id}"),label:label.into(),description:"Edit the authored feature controlled by a selected generated boundary. Move/push_pull uses signed metres along its normal; erase removes the owning opening/region. Hide/show affect display only. Unsupported or hosted-product boundaries return an explanation.".into(),category:CommandCategory::Edit,parameters:Some(json!({"type":"object","properties":{"reference":{"type":"object"},"operation":{"type":"string","enum":["move","push_pull","erase","hide","show"]},"distance":{"type":"number"},"delta":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}}})),default_shortcut:None,icon:None,hint:None,requires_selection:false,show_in_menu:!matches!(id,"edit_boundary"|"inspect_boundary"),version:1,activates_tool:None,capability_id:Some("modeling".into())},handler);
+        app.register_command(CommandDescriptor{id:format!("modeling.{id}"),label:label.into(),description:"Edit the authored feature controlled by a selected generated boundary. Move/push_pull uses signed metres along its normal; erase removes the owning opening/region. Hide/show affect display only. Hosted dependents resize through capability planners; unsupported edits return an explanation.".into(),category:CommandCategory::Edit,parameters:Some(json!({"type":"object","properties":{"reference":{"type":"object"},"operation":{"type":"string","enum":["move","push_pull","erase","hide","show"]},"distance":{"type":"number"},"delta":{"type":"array","items":{"type":"number"},"minItems":3,"maxItems":3}}})),default_shortcut:None,icon:None,hint:None,requires_selection:false,show_in_menu:!matches!(id,"edit_boundary"|"inspect_boundary"),version:1,activates_tool:None,capability_id:Some("modeling".into())},handler);
     }
 }

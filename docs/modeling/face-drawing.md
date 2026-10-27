@@ -94,8 +94,14 @@ Capabilities can bind generated boundaries to their own semantic objects. The
 Architecture capability binds rectangular opening reveals to the opening's
 width, height, position and sill. Moving a reveal into the opening narrows it;
 reaching the opposite side removes the opening and regenerates the wall.
-Openings with hosted products refuse this operation until that product is
-explicitly edited or removed. Arbitrary mesh edges and ambiguous junctions do
+For an opening containing a resizable product, moving a boundary also updates
+its occurrence's Definition overrides, placement, hosting anchors and relation
+in the same plan. The product keeps its identity and uses its authored geometry
+controls; its mesh is not scaled. This is the same hosted-layout planner used by
+ordinary property edits. Preview, commit, undo and agent edits change the opening
+and product together. Unsupported Definition controls, invalid fitting sizes,
+array-managed layouts and overlap return a refusal without partial changes.
+Closing or erasing a filled opening still requires explicit product removal. Arbitrary mesh edges and ambiguous junctions do
 not acquire invented semantics. Nonrectangular profile features support whole
 feature erasure; freeform boundary deformation is not implemented.
 
