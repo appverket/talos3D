@@ -1304,6 +1304,11 @@ fn handle_face_drawing_input(world: &mut World) {
         drawing.points.clear();
         drawing.segment_is_arc.clear();
         drawing.arc_mode = false;
+        // This Escape belongs to the drawing gesture. The face Escape system
+        // may run later in this frame after not_drawing becomes true.
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear_just_pressed(KeyCode::Escape);
         return;
     }
 
@@ -1527,6 +1532,47 @@ mod face_sketch_interaction_tests {
             profile_feature::{FaceProfileFeature, FaceProfileFeatureFactory},
         },
     };
+
+    #[test]
+    fn cancelling_drawing_preserves_the_face_for_the_next_tool() {
+        let mut world = World::new();
+        world.init_resource::<ChromeInputCapture>();
+        world.init_resource::<EguiWantsInput>();
+        world.init_resource::<InputOwnership>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<FaceEditContext>();
+        world.init_resource::<FaceDrawingContext>();
+        world.init_resource::<DrawingPlane>();
+        world.init_resource::<SubobjectSelection>();
+        let entity = world.spawn(ElementId(100)).id();
+        select_hit(
+            &mut world,
+            FaceHitCandidate {
+                entity,
+                element_id: ElementId(100),
+                distance: 0.,
+                face_id: FaceId(0),
+                generated_face_ref: None,
+                normal: Vec3::Y,
+                centroid: Vec3::ZERO,
+            },
+        );
+        world.resource_mut::<FaceDrawingContext>().active = true;
+        world
+            .resource_mut::<FaceDrawingContext>()
+            .points
+            .push(Vec3::ZERO);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        handle_face_drawing_input(&mut world);
+        handle_face_escape(&mut world);
+        assert!(!world.resource::<FaceDrawingContext>().active);
+        assert!(world.resource::<FaceDrawingContext>().points.is_empty());
+        assert!(world.resource::<FaceEditContext>().selected_face.is_some());
+        assert_eq!(world.resource::<FaceEditContext>().entity, Some(entity));
+    }
 
     #[test]
     fn pointer_circle_projects_off_plane_snaps_and_undo_redo_preserves_authored_region() {

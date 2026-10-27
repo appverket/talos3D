@@ -6,4 +6,4 @@
 - task-id: TALOS-zypbnfde
 - target base: main
 - summary: Audit native editing operations and repair conflicting interactions
-- status: active
+- status: awaiting-merge
