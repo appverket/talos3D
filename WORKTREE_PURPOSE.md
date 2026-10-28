@@ -6,4 +6,6 @@
 - task-id: TALOS-zjyscfsf
 - target base: origin/main
 - summary: Inspect grouped guides and repair guide picking and editing affordances.
-- status: active
+- status: awaiting-merge
+- blocker: GitHub authentication expired; pull request and merge await reconnection. Visual confirmation of the successful release build awaits manual Mac unlock.
+- verification: 2177 core tests passed with model-api (6 ignored); Format passed; Clippy completed with existing warnings; Architecture release built.
