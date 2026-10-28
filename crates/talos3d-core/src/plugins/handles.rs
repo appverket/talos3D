@@ -93,7 +93,8 @@ impl Plugin for HandlesPlugin {
                         .in_set(InputPhase::HandleInput)
                         .run_if(in_state(ActiveTool::Select)),
                     update_handle_status.run_if(in_state(ActiveTool::Select)),
-                ),
+                )
+                    .chain(),
             )
             .add_systems(
                 Update,
@@ -621,7 +622,9 @@ fn update_property_handle_drag(world: &mut World) {
     let confirm = {
         let mouse_buttons = world.resource::<ButtonInput<MouseButton>>();
         let keys = world.resource::<ButtonInput<KeyCode>>();
-        mouse_buttons.just_released(MouseButton::Left)
+        // A quick drag may cross the threshold after the release event's
+        // frame. The button's current state still proves the gesture ended.
+        !mouse_buttons.pressed(MouseButton::Left)
             || keys.just_pressed(KeyCode::Enter)
             || keys.just_pressed(KeyCode::NumpadEnter)
     };
@@ -1588,6 +1591,27 @@ mod tests {
             world.get::<GuideLineNode>(entity).unwrap().anchor,
             Vec3::ZERO
         );
+        // Exercise the scheduled pointer-to-preview path when release was
+        // already consumed before the pending press crosses the threshold.
+        let mut window = Window::default();
+        window.set_cursor_position(Some(Vec2::new(100.0, 100.0)));
+        world.spawn((window, PrimaryWindow));
+        world.resource_mut::<ButtonInput<MouseButton>>().clear();
+        world.resource_mut::<HandleInteractionState>().pressed = Some(PendingHandlePress {
+            handle: handles[0].clone(),
+            pressed_cursor_screen: Vec2::ZERO,
+        });
+        let mut schedule = Schedule::default();
+        schedule.add_systems((handle_handle_pointer_input, update_property_handle_drag).chain());
+        schedule.run(&mut world);
+        assert!(!world.resource::<HandleInteractionState>().is_busy());
+        let late_edits: Vec<_> = world
+            .resource_mut::<Messages<ApplyEntityChangesCommand>>()
+            .drain()
+            .collect();
+        assert_eq!(late_edits.len(), 1);
+        assert_eq!(late_edits[0].before[0], before);
+        assert_eq!(late_edits[0].after[0], preview);
     }
 
     #[test]
