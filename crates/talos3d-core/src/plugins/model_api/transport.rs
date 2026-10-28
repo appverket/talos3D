@@ -670,6 +670,7 @@ fn merged_mcp_client_config(
     let server = server
         .as_object_mut()
         .expect("talos3d server was normalized to object");
+    server.insert("type".into(), "http".into());
     server.insert("url".into(), http_url.into());
     if let Some(helper) = headers_helper {
         server.insert("headersHelper".into(), helper.into());
@@ -886,6 +887,7 @@ mod tests {
         let config = merged_mcp_client_config(Some(existing), "http://127.0.0.1:24842/mcp", None)
             .expect("config should merge");
         let server = &config["mcpServers"]["talos3d"];
+        assert_eq!(server["type"], "http");
         assert_eq!(server["url"], "http://127.0.0.1:24842/mcp");
         assert_eq!(server["headers"]["X-Client"], "kept");
         assert!(server.get("headersHelper").is_none());
