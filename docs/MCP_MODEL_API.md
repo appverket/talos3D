@@ -253,6 +253,7 @@ repository-scoped endpoint config with the actual bound port:
 {
   "mcpServers": {
     "talos3d": {
+      "type": "http",
       "url": "http://127.0.0.1:24842/mcp"
     }
   }
@@ -264,6 +265,14 @@ end up committed. They contain discovery facts only, never a pairing grant or
 bearer credential. Set `TALOS3D_MCP_CONFIG_PATHS` to an OS path-list of explicit config
 files when launching from a packaged app or another directory. Set
 `TALOS3D_WRITE_MCP_CONFIG=false` to disable writing local client configs.
+
+Talos3D refreshes only the `url` of an existing `talos3d` entry, so
+client-owned fields on it survive relaunches. When
+`TALOS3D_MCP_HEADERS_HELPER` names a command, Talos3D also writes it as the
+entry's Claude Code `headersHelper`. The helper runs at connect time and prints
+the request headers as JSON; Claude Code passes the endpoint in
+`CLAUDE_CODE_MCP_SERVER_URL`. The config still holds only the helper command,
+never a credential.
 
 ### Access control
 
@@ -289,10 +298,13 @@ establish a named user, delegated agent identity, or independent command
 authorization policy; the local desktop/OS session is the user-presence trust
 boundary.
 
-The app defaults to a generated pairing code. A repeatable local test harness
-may provision a code of at least 32 non-whitespace characters through
-`TALOS3D_MODEL_API_TOKEN`; Talos3D still keeps that value out of logs,
-manifests, discovery configs, and `InstanceInfo`.
+The app defaults to a generated pairing code. A repeatable local test harness,
+or a local development launcher the user invokes, may provision a code of at least
+32 non-whitespace characters through `TALOS3D_MODEL_API_TOKEN`; Talos3D still
+keeps that value out of logs, manifests, discovery configs, and `InstanceInfo`.
+Such a launcher stands in for the in-app handoff: it must generate a fresh code
+per launch, redeem it immediately, and keep the returned bearer in storage only
+the local user can read. The local OS session remains the trust boundary.
 
 This local pairing route is deliberately not presented as production OAuth.
 A shared or remotely reachable Talos3D resource must follow the MCP
