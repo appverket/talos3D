@@ -238,7 +238,7 @@ impl AuthoredEntity for GuideLineSnapshot {
         // and API values and make that convention explicit in the inspector.
         fields.push(property_field_with(
             "length",
-            "Half-length (m; 0 = infinite)",
+            "Half-length (0 = infinite)",
             PropertyValueKind::Scalar,
             Some(PropertyValue::Scalar(self.finite_length.unwrap_or(0.0))),
             true,

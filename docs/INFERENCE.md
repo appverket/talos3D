@@ -73,11 +73,13 @@ itself through nested groups. Alternatively, enter the group first or select
 the guide in the Outliner.
 
 With the guide selected, drag its anchor grip to move it, or edit **anchor** in
-Properties for exact coordinates in metres. Change **direction** to reorient
+Properties for exact coordinates in the document’s display units (usually
+millimetres). Change the unitless **direction** vector to reorient
 it. To put a guide on the horizontal ground plane, both anchor Y and direction
 Y must be zero; direction must remain nonzero. **Label** names a new guide.
-**Half-length (m; 0 = infinite)** limits its reach on each side of the anchor;
-a value of 5 gives a 10 m segment. Infinite guides are displayed for 500 m on
+**Half-length (0 = infinite)** limits its reach on each side of the anchor,
+also in document display units; 5000 in a millimetre document gives a 10 m
+segment. MCP coordinates and lengths remain in metres. Infinite guides are displayed for 500 m on
 each side. These edits use the normal undo history.
 
 Use the anchor and line as snap references while drawing or moving geometry.

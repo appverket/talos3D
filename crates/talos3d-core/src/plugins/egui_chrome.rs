@@ -3600,6 +3600,10 @@ fn format_panel_property_value(
             doc_props.display_unit.from_metres(value.x),
             doc_props.display_unit.from_metres(value.y)
         ),
+        // A direction is dimensionless, unlike an anchor/position vector.
+        crate::authored_entity::PropertyValue::Vec3(value) if field_name == "direction" => {
+            format!("{:.4}, {:.4}, {:.4}", value.x, value.y, value.z)
+        }
         crate::authored_entity::PropertyValue::Vec3(value) => format!(
             "{:.2}, {:.2}, {:.2}",
             doc_props.display_unit.from_metres(value.x),
@@ -3627,6 +3631,10 @@ fn edit_buffer_for_property_value(
             doc_props.display_unit.from_metres(value.x),
             doc_props.display_unit.from_metres(value.y)
         ),
+        // A direction is dimensionless, unlike an anchor/position vector.
+        crate::authored_entity::PropertyValue::Vec3(value) if field_name == "direction" => {
+            format!("{:.4}, {:.4}, {:.4}", value.x, value.y, value.z)
+        }
         crate::authored_entity::PropertyValue::Vec3(value) => format!(
             "{:.2}, {:.2}, {:.2}",
             doc_props.display_unit.from_metres(value.x),
@@ -3655,6 +3663,9 @@ fn parse_panel_property_value(
                 doc_props.display_unit.to_metres(value.x),
                 doc_props.display_unit.to_metres(value.y),
             ))
+        }
+        crate::authored_entity::PropertyValue::Vec3(value) if field_name == "direction" => {
+            crate::authored_entity::PropertyValue::Vec3(value)
         }
         crate::authored_entity::PropertyValue::Vec3(value) => {
             crate::authored_entity::PropertyValue::Vec3(Vec3::new(
@@ -6193,6 +6204,43 @@ fn apply_chrome_visuals(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::{MenuSubmenuSpec, CREATE_MENU_GROUPS, VIEW_MENU_GROUPS};
+
+    #[test]
+    fn guide_inspector_keeps_direction_unitless_and_lengths_in_document_units() {
+        use super::*;
+        use crate::authored_entity::{PropertyValue, PropertyValueKind};
+        use crate::plugins::units::DisplayUnit;
+        let direction = PropertyValue::Vec3(Vec3::new(0.0, -0.2, 0.98));
+        for display_unit in [DisplayUnit::Millimetres, DisplayUnit::Metres] {
+            let doc = DocumentProperties {
+                display_unit,
+                ..default()
+            };
+            let display = format_panel_property_value(&direction, "direction", &doc);
+            let buffer = edit_buffer_for_property_value(&direction, "direction", &doc);
+            assert_eq!(display, "0.0000, -0.2000, 0.9800");
+            assert_eq!(buffer, display);
+            assert_eq!(
+                parse_panel_property_value("direction", PropertyValueKind::Vec3, &buffer, &doc)
+                    .unwrap(),
+                direction
+            );
+        }
+        let doc = DocumentProperties::default();
+        assert_eq!(
+            parse_panel_property_value("anchor", PropertyValueKind::Vec3, "13000, 0, -8000", &doc)
+                .unwrap(),
+            PropertyValue::Vec3(Vec3::new(13.0, 0.0, -8.0))
+        );
+        assert_eq!(
+            parse_panel_property_value("length", PropertyValueKind::Scalar, "5000", &doc).unwrap(),
+            PropertyValue::Scalar(5.0)
+        );
+        assert_eq!(
+            format_panel_property_value(&PropertyValue::Scalar(5.0), "length", &doc),
+            "5000mm"
+        );
+    }
 
     #[test]
     fn renderer_window_does_not_invalidate_settings_without_an_edit() {

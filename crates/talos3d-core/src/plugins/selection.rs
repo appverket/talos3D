@@ -428,13 +428,36 @@ struct SelectionHitTest<'w, 's> {
 /// cannot replay events that belonged to another tool.
 #[derive(Resource, Default)]
 struct SelectionPointerEvents {
-    edges: Vec<(ButtonState, Vec2)>,
+    edges: Vec<(ButtonState, Vec2, SelectionModifiers)>,
     last_position: Option<Vec2>,
+}
+
+#[derive(Clone, Copy)]
+struct SelectionModifiers {
+    additive: bool,
+    individual: bool,
+    navigation: bool,
+}
+
+impl SelectionModifiers {
+    fn from_keys(keys: &ButtonInput<KeyCode>) -> Self {
+        Self {
+            additive: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
+            individual: keys.any_pressed([
+                KeyCode::ControlLeft,
+                KeyCode::ControlRight,
+                KeyCode::SuperLeft,
+                KeyCode::SuperRight,
+            ]),
+            navigation: orbit_modifier_pressed(keys) || pan_modifier_pressed(keys),
+        }
+    }
 }
 
 fn collect_selection_pointer_events(
     mut windows: MessageReader<WindowEvent>,
     mut buttons: MessageReader<MouseButtonInput>,
+    keys: Res<ButtonInput<KeyCode>>,
     primary: Query<(Entity, &Window), With<PrimaryWindow>>,
     mut pointer: ResMut<SelectionPointerEvents>,
     active_tool: Option<Res<State<ActiveTool>>>,
@@ -449,8 +472,27 @@ fn collect_selection_pointer_events(
     };
     let fallback_position = cursor_window_position(window);
     let mut position = pointer.last_position.or(fallback_position);
-    for event in windows.read() {
+    let events: Vec<_> = windows.read().collect();
+    // ButtonInput already contains the END-of-frame keyboard state. Rewind
+    // this ordered batch, then replay it to capture modifiers at each click.
+    // Otherwise Cmd-down/click/Cmd-up between renders becomes a plain click.
+    let mut event_keys = keys.clone();
+    for event in events.iter().rev() {
+        if let WindowEvent::KeyboardInput(event) = event {
+            if event.window == window_id && !event.repeat {
+                match event.state {
+                    ButtonState::Pressed => event_keys.release(event.key_code),
+                    ButtonState::Released => event_keys.press(event.key_code),
+                }
+            }
+        }
+    }
+    for event in events {
         match event {
+            WindowEvent::KeyboardInput(event) if event.window == window_id => match event.state {
+                ButtonState::Pressed => event_keys.press(event.key_code),
+                ButtonState::Released => event_keys.release(event.key_code),
+            },
             WindowEvent::CursorMoved(event) if event.window == window_id => {
                 position = Some(event.position);
             }
@@ -458,7 +500,11 @@ fn collect_selection_pointer_events(
                 if event.window == window_id && event.button == MouseButton::Left =>
             {
                 if let Some(position) = position {
-                    pointer.edges.push((event.state, position));
+                    pointer.edges.push((
+                        event.state,
+                        position,
+                        SelectionModifiers::from_keys(&event_keys),
+                    ));
                 }
             }
             _ => {}
@@ -468,7 +514,9 @@ fn collect_selection_pointer_events(
     for event in buttons.read() {
         if !native_edges && event.window == window_id && event.button == MouseButton::Left {
             if let Some(position) = fallback_position {
-                pointer.edges.push((event.state, position));
+                pointer
+                    .edges
+                    .push((event.state, position, SelectionModifiers::from_keys(&keys)));
             }
         }
     }
@@ -495,19 +543,19 @@ fn handle_selection_click(world: &mut World) {
     let handle_is_busy = world.resource::<HandleInteractionState>().is_busy();
     let box_dragging = world.resource::<BoxSelectState>().is_dragging;
     let box_just_completed = world.resource::<BoxSelectState>().just_completed;
-    let keys = world.resource::<ButtonInput<KeyCode>>();
-    let nav_held = orbit_modifier_pressed(keys) || pan_modifier_pressed(keys);
-
-    if !ownership.is_idle() || handle_is_busy || box_dragging || box_just_completed || nav_held {
+    if !ownership.is_idle() || handle_is_busy || box_dragging || box_just_completed {
         cancel_selection_click(world);
         return;
     }
-    let additive = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let now = world.resource::<Time<Real>>().elapsed_secs_f64();
     // Reuse the physical hit for stationary multi-clicks. Only semantic target
     // resolution repeats after descent; no new per-frame picking path is added.
     let mut cached_hit: Option<(Vec2, Option<Entity>)> = None;
-    for (state, position) in edges {
+    for (state, position, modifiers) in edges {
+        if modifiers.navigation {
+            cancel_selection_click(world);
+            continue;
+        }
         match state {
             ButtonState::Pressed => {
                 let raw_hit = if let Some((_, hit)) = cached_hit.filter(|(p, _)| *p == position) {
@@ -531,7 +579,13 @@ fn handle_selection_click(world: &mut World) {
                     cached_hit = Some((position, hit));
                     hit
                 };
-                capture_selection_press(world, raw_hit, position, additive);
+                capture_selection_press(
+                    world,
+                    raw_hit,
+                    position,
+                    modifiers.additive,
+                    modifiers.individual,
+                );
             }
             ButtonState::Released => complete_selection_release(world, position, now),
         }
@@ -543,6 +597,7 @@ fn capture_selection_press(
     raw_hit_entity: Option<Entity>,
     cursor_position: Vec2,
     additive: bool,
+    individual: bool,
 ) -> Option<Entity> {
     if let Some(mut tracker) = world.get_resource_mut::<DoubleClickTracker>() {
         if tracker
@@ -553,7 +608,7 @@ fn capture_selection_press(
         }
     }
     let step_out = !additive
-        && !individual_selection_requested(world)
+        && !individual
         && click_is_outside_selection(world, raw_hit_entity, cursor_position);
     // Face/edge picking owns clicks inside the edited solid. Only a click
     // outside it belongs to object-level navigation.
@@ -564,7 +619,7 @@ fn capture_selection_press(
     let target = if step_out {
         None
     } else {
-        resolve_selection_click_target(world, raw_hit_entity).entity
+        resolve_selection_click_target_with_individual(world, raw_hit_entity, individual).entity
     };
     // A selected container does not authorize editing a descendant face.
     // Resolve group/occurrence boundaries first, then require the actual
@@ -926,6 +981,7 @@ struct SelectionClickTarget {
     entity: Option<Entity>,
 }
 
+#[cfg(test)]
 fn individual_selection_requested(world: &World) -> bool {
     world
         .get_resource::<ButtonInput<KeyCode>>()
@@ -941,9 +997,19 @@ fn individual_selection_requested(world: &World) -> bool {
         })
 }
 
+#[cfg(test)]
 fn resolve_selection_click_target(
     world: &mut World,
     hit_entity: Option<Entity>,
+) -> SelectionClickTarget {
+    let individual = individual_selection_requested(world);
+    resolve_selection_click_target_with_individual(world, hit_entity, individual)
+}
+
+fn resolve_selection_click_target_with_individual(
+    world: &mut World,
+    hit_entity: Option<Entity>,
+    individual: bool,
 ) -> SelectionClickTarget {
     let Some(hit_entity) = hit_entity else {
         return SelectionClickTarget::default();
@@ -970,7 +1036,6 @@ fn resolve_selection_click_target(
 
     // Ctrl/Cmd-click addresses the actual authored object through nested groups.
     // Generated occurrence parts still resolve to their stable authored owner.
-    let individual = individual_selection_requested(world);
     if individual {
         let eligible = resolve_entity_for_selection(world, entity).is_some();
         return SelectionClickTarget {
@@ -1987,13 +2052,13 @@ fn handle_box_select(mut cx: BoxSelectContext) {
         .pointer_events
         .edges
         .iter()
-        .find_map(|(state, p)| (*state == ButtonState::Pressed).then_some(*p));
+        .find_map(|(state, p, _)| (*state == ButtonState::Pressed).then_some(*p));
     let release_position = cx
         .pointer_events
         .edges
         .iter()
         .rev()
-        .find_map(|(state, p)| (*state == ButtonState::Released).then_some(*p));
+        .find_map(|(state, p, _)| (*state == ButtonState::Released).then_some(*p));
     let Some(cursor_position) = release_position.or_else(|| cursor_window_position(window)) else {
         if cx.mouse_buttons.just_released(MouseButton::Left) {
             clear_pending_box_select_click(&mut cx.box_state);
@@ -3624,7 +3689,8 @@ mod tests {
         assert_eq!(report.rewritten_groups, 2);
 
         let click_wall = |world: &mut World, now| {
-            let target = capture_selection_press(world, Some(wall), Vec2::new(320.0, 240.0), false);
+            let target =
+                capture_selection_press(world, Some(wall), Vec2::new(320.0, 240.0), false, false);
             complete_selection_release(world, Vec2::new(320.0, 240.0), now);
             target
         };
@@ -3703,7 +3769,7 @@ mod tests {
 
         let click_panel = |world: &mut World, now| {
             let target =
-                capture_selection_press(world, Some(panel), Vec2::new(320.0, 240.0), false);
+                capture_selection_press(world, Some(panel), Vec2::new(320.0, 240.0), false, false);
             complete_selection_release(world, Vec2::new(320.0, 240.0), now);
             target
         };
@@ -3848,6 +3914,58 @@ mod tests {
         queue_native_edges(&mut app, window, &[Pressed, Released]);
         app.update();
         assert_eq!(app.world().resource::<GroupEditContext>().stack.len(), 2);
+    }
+
+    fn queue_native_modifier(app: &mut App, window: Entity, key_code: KeyCode, state: ButtonState) {
+        use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+        let event = KeyboardInput {
+            key_code,
+            logical_key: Key::Unidentified(NativeKey::Unidentified),
+            state,
+            text: None,
+            repeat: false,
+            window,
+        };
+        app.world_mut()
+            .write_message(WindowEvent::KeyboardInput(event.clone()));
+        app.world_mut().write_message(event);
+    }
+
+    #[test]
+    fn native_command_click_retains_modifier_released_before_the_frame() {
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        let parent = find_entity_by_element_id_readonly(app.world(), ElementId(30)).unwrap();
+        app.world_mut().entity_mut(parent).insert(Selected);
+        queue_native_modifier(&mut app, window, KeyCode::SuperLeft, Pressed);
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        queue_native_modifier(&mut app, window, KeyCode::SuperLeft, Released);
+        app.update();
+        assert!(!app
+            .world()
+            .resource::<ButtonInput<KeyCode>>()
+            .pressed(KeyCode::SuperLeft));
+        let solid = find_entity_by_element_id_readonly(app.world(), ElementId(10)).unwrap();
+        assert!(app.world().get::<Selected>(solid).is_some());
+        assert!(app.world().get::<Selected>(parent).is_none());
+        // The modifier must not leak into the next ordinary click.
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        app.update();
+        assert!(app.world().get::<Selected>(parent).is_some());
+    }
+
+    #[test]
+    fn native_shift_click_retains_additive_modifier_released_before_the_frame() {
+        use ButtonState::{Pressed, Released};
+        let (mut app, window) = native_selection_app();
+        let unrelated = app.world_mut().spawn((ElementId(40), Selected)).id();
+        queue_native_modifier(&mut app, window, KeyCode::ShiftLeft, Pressed);
+        queue_native_edges(&mut app, window, &[Pressed, Released]);
+        queue_native_modifier(&mut app, window, KeyCode::ShiftLeft, Released);
+        app.update();
+        let parent = find_entity_by_element_id_readonly(app.world(), ElementId(30)).unwrap();
+        assert!(app.world().get::<Selected>(parent).is_some());
+        assert!(app.world().get::<Selected>(unrelated).is_some());
     }
 
     #[test]
