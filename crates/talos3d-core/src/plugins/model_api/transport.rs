@@ -17,6 +17,8 @@ const MODEL_API_MCP_CONFIG_PATHS_ENV: &str = "TALOS3D_MCP_CONFIG_PATHS";
 #[cfg(feature = "model-api")]
 const MODEL_API_WRITE_MCP_CONFIG_ENV: &str = "TALOS3D_WRITE_MCP_CONFIG";
 #[cfg(feature = "model-api")]
+const MODEL_API_MCP_HEADERS_HELPER_ENV: &str = "TALOS3D_MCP_HEADERS_HELPER";
+#[cfg(feature = "model-api")]
 const MODEL_API_MCP_SERVER_NAME: &str = "talos3d";
 #[cfg(feature = "model-api")]
 const MODEL_API_TOKEN_ENV: &str = "TALOS3D_MODEL_API_TOKEN";
@@ -592,7 +594,11 @@ fn write_mcp_client_config(path: &Path, http_url: &str) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.to_string()),
     };
-    let config = merged_mcp_client_config(existing.as_deref(), http_url)?;
+    let headers_helper = env::var(MODEL_API_MCP_HEADERS_HELPER_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let config =
+        merged_mcp_client_config(existing.as_deref(), http_url, headers_helper.as_deref())?;
     let bytes = serde_json::to_vec_pretty(&config)
         .map_err(|error| format!("failed to serialize MCP client config: {error}"))?;
     fs::write(path, [bytes.as_slice(), b"\n"].concat()).map_err(|error| error.to_string())
@@ -632,6 +638,7 @@ fn remove_matching_mcp_client_config(path: &Path, http_url: &str) -> Result<(), 
 fn merged_mcp_client_config(
     existing: Option<&str>,
     http_url: &str,
+    headers_helper: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let mut root = match existing {
         Some(contents) if !contents.trim().is_empty() => {
@@ -650,13 +657,23 @@ fn merged_mcp_client_config(
     if !servers.is_object() {
         *servers = serde_json::json!({});
     }
-    servers
+    // Refresh discovery facts in place so client-owned fields on the entry,
+    // such as auth headers, survive a relaunch.
+    let server = servers
         .as_object_mut()
         .expect("mcpServers was normalized to object")
-        .insert(
-            MODEL_API_MCP_SERVER_NAME.to_string(),
-            serde_json::json!({ "url": http_url }),
-        );
+        .entry(MODEL_API_MCP_SERVER_NAME)
+        .or_insert_with(|| serde_json::json!({}));
+    if !server.is_object() {
+        *server = serde_json::json!({});
+    }
+    let server = server
+        .as_object_mut()
+        .expect("talos3d server was normalized to object");
+    server.insert("url".into(), http_url.into());
+    if let Some(helper) = headers_helper {
+        server.insert("headersHelper".into(), helper.into());
+    }
     Ok(root)
 }
 
@@ -845,7 +862,7 @@ mod tests {
   }
 }"#;
 
-        let config = merged_mcp_client_config(Some(existing), "http://127.0.0.1:24842/mcp")
+        let config = merged_mcp_client_config(Some(existing), "http://127.0.0.1:24842/mcp", None)
             .expect("config should merge");
 
         assert_eq!(
@@ -853,6 +870,36 @@ mod tests {
             "http://127.0.0.1:24842/mcp"
         );
         assert_eq!(config["mcpServers"]["other"]["command"], "other-mcp");
+    }
+
+    #[test]
+    fn mcp_client_config_merge_refreshes_url_and_keeps_client_fields() {
+        let existing = r#"{
+  "mcpServers": {
+    "talos3d": {
+      "url": "http://127.0.0.1:24917/mcp",
+      "headers": { "X-Client": "kept" }
+    }
+  }
+}"#;
+
+        let config = merged_mcp_client_config(Some(existing), "http://127.0.0.1:24842/mcp", None)
+            .expect("config should merge");
+        let server = &config["mcpServers"]["talos3d"];
+        assert_eq!(server["url"], "http://127.0.0.1:24842/mcp");
+        assert_eq!(server["headers"]["X-Client"], "kept");
+        assert!(server.get("headersHelper").is_none());
+
+        let config = merged_mcp_client_config(
+            Some(existing),
+            "http://127.0.0.1:24842/mcp",
+            Some("/opt/talos3d/mcp-auth headers"),
+        )
+        .expect("config should merge");
+        assert_eq!(
+            config["mcpServers"]["talos3d"]["headersHelper"],
+            "/opt/talos3d/mcp-auth headers"
+        );
     }
 
     #[test]

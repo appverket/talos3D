@@ -141,10 +141,15 @@ forms. After UUID version and variant bits, the implementation documents 244
 random bits per secret. The pairing code and bearer are generated independently.
 
 `TALOS3D_MODEL_API_TOKEN` may replace the generated **pairing code** for a
-repeatable local test harness. It must contain at least 32 non-whitespace
-characters. It does not replace the separately generated MCP bearer. This
-override is not an entropy guarantee and should not be used as a production
-credential source.
+repeatable local test harness or a user-invoked local development launcher. It
+must contain at least 32 non-whitespace characters. It does not replace the
+separately generated MCP bearer. This override is not an entropy guarantee and
+should not be used as a production credential source. A launcher that uses it
+must generate a fresh random code per launch, redeem it at once (so a late
+redeemer finds it consumed), and store the bearer only where the local user can
+read it. On macOS, handing the code over through `open --env` exposes it in
+process listings until it is redeemed; if another local process redeems it
+first, the launcher's own redemption fails visibly instead of pairing.
 
 The listener binds to `127.0.0.1` only. The preferred port is configurable; if
 the default port is occupied and no port was explicitly requested, Talos3D asks
