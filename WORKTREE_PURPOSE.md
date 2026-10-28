@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-10-27
-- branch: codex/editing-ui-audit
-- task-id: TALOS-zypbnfde
-- target base: main
-- summary: Audit native editing operations and repair conflicting interactions
-- status: awaiting-merge
+- created: 2026-10-28
+- branch: codex/ground-plane-guide-picking
+- task-id: TALOS-zjyscfsf
+- target base: origin/main
+- summary: Inspect grouped guides and repair guide picking and editing affordances.
+- status: active

@@ -54,6 +54,37 @@ free point-to-point Tape. Tape's explicit axis/perpendicular measurement modes
 retain their existing meaning. Guide and dimension tools retain their own
 host-plane and placement constraints.
 
+## Saved construction guides
+
+Cyan lines with a small cross at their anchor are saved **Guide Line** objects.
+They are independent of the red X / blue Z ground axes and gray grid. Magenta
+lines are temporary inference highlights, including acquired guide references;
+the “On edge” label indicates snapping, not selection.
+
+Press **G** (Create → Guide Line), click an anchor or edge, then drag/click the
+second point. **X/Y/Z** constrain direction; a typed angle followed by Enter
+sets an angle in the current host plane. Guides may lie on faces or tilt in 3D;
+they are not restricted to the ground plane. Press Esc to return to selection.
+
+Guides created while editing a group belong to that group. A normal click on
+any part of such a guide selects its enclosing group, even beyond the building:
+the guide extends there. **Cmd-click** (macOS) / **Ctrl-click** selects the guide
+itself through nested groups. Alternatively, enter the group first or select
+the guide in the Outliner.
+
+With the guide selected, drag its anchor grip to move it, or edit **anchor** in
+Properties for exact coordinates in metres. Change **direction** to reorient
+it. To put a guide on the horizontal ground plane, both anchor Y and direction
+Y must be zero; direction must remain nonzero. **Label** names a new guide.
+**Half-length (m; 0 = infinite)** limits its reach on each side of the anchor;
+a value of 5 gives a 10 m segment. Infinite guides are displayed for 500 m on
+each side. These edits use the normal undo history.
+
+Use the anchor and line as snap references while drawing or moving geometry.
+Hovering the guide can show “On edge”; acquiring it can highlight it magenta.
+**Shift+G** (View → Guide Lines) hides/shows guides and disables/enables their
+picking and snapping. It does not delete them or change the world axes.
+
 ## Implementation and performance
 
 The existing cursor surface ray identifies one visible owner. Its canonical edge

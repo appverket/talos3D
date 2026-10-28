@@ -54,6 +54,8 @@ const PIVOT_COLOR: Color = Color::srgb(0.96, 0.35, 0.8);
 const ROTATE_RING_COLOR: Color = Color::srgb(0.42, 0.95, 0.58);
 const ROTATE_RING_SEGMENTS: usize = 24;
 const MOVE_HANDLE_HINT: &str = "Move: drag a corner or control point · snaps to nearby markers";
+const GUIDE_HANDLE_HINT: &str =
+    "Drag the guide anchor to move · edit anchor/direction in Properties · Shift+G hides guides";
 const COMBINED_HANDLE_HINT: &str =
     "Drag a corner to move · the top grip to lift · the ring grip to rotate · M/R/S to narrow";
 
@@ -642,7 +644,7 @@ fn update_property_handle_drag(world: &mut World) {
 }
 
 fn update_handle_status(
-    selected_query: Query<Entity, With<Selected>>,
+    selected_query: Query<Option<&crate::plugins::guide_line::GuideLineNode>, With<Selected>>,
     handle_context: Res<HandleContext>,
     handle_state: Res<HandleInteractionState>,
     ownership: Res<InputOwnership>,
@@ -672,12 +674,17 @@ fn update_handle_status(
             HandleDisplayMode::Combined | HandleDisplayMode::Move
         )
     {
-        status_bar_data.hint = match handle_context.display_mode {
-            HandleDisplayMode::Combined => COMBINED_HANDLE_HINT.to_string(),
-            _ => MOVE_HANDLE_HINT.to_string(),
+        status_bar_data.hint = if selected_query.iter().all(|guide| guide.is_some()) {
+            GUIDE_HANDLE_HINT.to_string()
+        } else {
+            match handle_context.display_mode {
+                HandleDisplayMode::Combined => COMBINED_HANDLE_HINT.to_string(),
+                _ => MOVE_HANDLE_HINT.to_string(),
+            }
         };
     } else if status_bar_data.hint == MOVE_HANDLE_HINT
         || status_bar_data.hint == COMBINED_HANDLE_HINT
+        || status_bar_data.hint == GUIDE_HANDLE_HINT
     {
         status_bar_data.hint.clear();
     }
@@ -1491,6 +1498,96 @@ mod tests {
             material_assignment: None,
         }
         .into()
+    }
+
+    #[test]
+    fn guide_anchor_display_drag_preview_and_commit_share_the_authored_snapshot() {
+        use crate::plugins::guide_line::{GuideLineFactory, GuideLineNode, GuideLineSnapshot};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(GuideLineFactory);
+        world.insert_resource(registry);
+        world.init_resource::<HandleContext>();
+        world.init_resource::<HandleInteractionState>();
+        world.init_resource::<InputOwnership>();
+        world.init_resource::<StatusBarData>();
+        world.init_resource::<SnapResult>();
+        world.init_resource::<CursorWorldPos>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<Messages<ApplyEntityChangesCommand>>();
+        let before: BoxedEntity = GuideLineSnapshot {
+            element_id: ElementId(1),
+            anchor: Vec3::ZERO,
+            direction: Vec3::Z,
+            finite_length: None,
+            visible: true,
+            label: None,
+        }
+        .into();
+        before.apply_to(&mut world);
+        let entity = world
+            .query_filtered::<Entity, With<GuideLineNode>>()
+            .single(&world)
+            .unwrap();
+        world.entity_mut(entity).insert(Selected);
+        world.run_system_once(update_handle_status).unwrap();
+        assert_eq!(world.resource::<StatusBarData>().hint, GUIDE_HANDLE_HINT);
+        let handles =
+            build_display_handles(entity, &before, HandleDisplayMode::Combined, None, None)
+                .unwrap();
+        assert_eq!(
+            handles.len(),
+            1,
+            "no inert grips at artificial infinite endpoints"
+        );
+        assert_eq!(handles[0].id, "anchor");
+        let target = Vec3::new(2.0, 0.0, 3.0);
+        world.resource_mut::<SnapResult>().position = Some(target);
+        begin_handle_drag(
+            &mut world,
+            PendingHandlePress {
+                handle: handles[0].clone(),
+                pressed_cursor_screen: Vec2::ZERO,
+            },
+        );
+        let preview = world
+            .resource::<HandleInteractionState>()
+            .property_drag
+            .as_ref()
+            .unwrap()
+            .current
+            .clone();
+        assert_eq!(preview, before.translate_by(target));
+        assert_eq!(
+            world.get::<GuideLineNode>(entity).unwrap().anchor,
+            Vec3::ZERO
+        );
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+        update_property_handle_drag(&mut world);
+        let edits: Vec<_> = world
+            .resource_mut::<Messages<ApplyEntityChangesCommand>>()
+            .drain()
+            .collect();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].before[0], before);
+        assert_eq!(edits[0].after[0], preview);
+        assert!(!world
+            .resource::<HandleInteractionState>()
+            .property_drag_active());
+        edits[0].after[0].apply_to(&mut world);
+        assert_eq!(world.get::<GuideLineNode>(entity).unwrap().anchor, target);
+        edits[0].before[0].apply_to(&mut world);
+        assert_eq!(
+            world.get::<GuideLineNode>(entity).unwrap().anchor,
+            Vec3::ZERO
+        );
     }
 
     #[test]
