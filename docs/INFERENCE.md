@@ -54,6 +54,25 @@ free point-to-point Tape. Tape's explicit axis/perpendicular measurement modes
 retain their existing meaning. Guide and dimension tools retain their own
 host-plane and placement constraints.
 
+## Moving a selection
+
+Select the object or assembly, then press **M** or click **Move**. The Move button
+stays highlighted and the corner grips retain a 12-pixel diameter at detail and
+site scales. Drag a grip; release to confirm or press **Esc** to cancel. While
+dragging, **X/Y/Z** constrain the axis and **Shift+X/Y/Z** constrain the plane
+perpendicular to that axis. Type a signed distance in metres for an exact move.
+The status bar lists these controls and the current constraint.
+
+A front elevation uses a plane through the grab point facing the view when the
+drawing plane is edge-on. Axis grips use a view-facing plane containing their
+axis; an axis pointing straight into the view can still be moved numerically.
+Moving outside the viewport retains the last valid preview.
+
+While selecting, hovering a closed assembly does not offer its members' face or
+edge inference. Select the underlying geometry in its editing context before
+using that feedback. During a deliberate Move, stationary geometry remains a
+snap reference, labelled **Snap to surface**; the moving assembly is excluded.
+
 ## Saved construction guides
 
 Cyan lines with a small cross at their anchor are saved **Guide Line** objects.

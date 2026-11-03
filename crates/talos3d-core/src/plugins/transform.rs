@@ -646,6 +646,14 @@ fn update_transform_preview(world: &mut World) {
         }
         return;
     }
+    // Leaving the viewport is not a rejected edit. Retain the last valid
+    // presentation and candidate until input resumes or the user cancels.
+    if world.resource::<TransformState>().mode == TransformMode::Moving
+        && world.resource::<PushPullContext>().active_face.is_none()
+        && current_motion(world).is_none()
+    {
+        return;
+    }
     // A stationary gesture (including a refused candidate) must not rebuild and
     // serialize thousands of members every frame. Revision changes invalidate
     // this cache; commit still checks the captured authored base independently.
@@ -1458,9 +1466,17 @@ fn update_transform_status(world: &mut World) {
     let extra_hint = match state.mode {
         TransformMode::Rotating => " · Ctrl snap 15\u{b0} · X/Y/Z plane",
         TransformMode::Scaling => " · Shift uniform",
+        TransformMode::Moving if !is_push_pull => {
+            " · X/Y/Z axis · Shift+X/Y/Z plane · type distance"
+        }
         _ => "",
     };
-    let mut parts = vec![format!("{hint}{extra_hint} · Enter confirm · Esc cancel")];
+    let confirm_hint = if state.confirm_on_release {
+        "Release confirm"
+    } else {
+        "Enter confirm"
+    };
+    let mut parts = vec![format!("{hint}{extra_hint} · {confirm_hint} · Esc cancel")];
     if let Some(label) = inference.best_label() {
         parts.push(label.to_string());
     }
@@ -1834,50 +1850,77 @@ fn feature_push_pull_snapshot(
 
 fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>) -> Option<Vec3> {
     let initial_cursor = state.initial_cursor?;
-    let constrained_delta = if state.axis == AxisConstraint::Y {
-        // The ground/snap cursor projection carries almost no vertical signal, so a
-        // Y-locked move driven by it is dead. Track the cursor against a camera-facing
-        // vertical plane through the grab point instead, so dragging up/down lifts the
-        // object 1:1 at the grab depth.
-        // Reuse the stationary inference hit (including terrain faces). Do not
-        // ray-cast the model again or discard its height when locking to Y.
-        let cursor_y = world
-            .get_resource::<SnapResult>()
-            .and_then(|snap| snap.target)
-            .map(|point| point.y)
-            .or_else(|| vertical_axis_cursor_y(world, initial_cursor))?;
-        Vec3::new(0.0, cursor_y - initial_cursor.y, 0.0)
-    } else {
-        // Track the cursor on the plane parallel to the active drawing surface
-        // through the GRAB point, not through the surface itself. Grabbing a
-        // handle on an object planted well off the drawing plane (e.g. a
-        // building on terrain) otherwise jumps it by the large in-plane offset
-        // between the elevated handle and where its screen ray crosses the
-        // surface. For objects essentially on the drawing plane we keep the
-        // original snap-aware cursor so grid/marker snapping is unchanged.
-        //
-        // Outside Drafting the surface is the world ground plane, which is the
-        // long-standing behaviour. Inside Drafting it is the Draft plane, so a
-        // drag in an elevation or section Draft resolves in that Draft's plane
-        // instead of against a near-parallel horizontal plane the view ray
-        // barely intersects.
-        let surface_normal = drafting_move_plane_normal(world);
-        let grab_offset = (initial_cursor - moving_plane_origin(world)).dot(surface_normal);
-        let has_inference_target = world
-            .get_resource::<SnapResult>()
-            .is_some_and(|snap| snap.target.is_some());
-        let current_cursor = if grab_offset.abs() > 0.05 && !has_inference_target {
-            cursor_on_parallel_plane(world, initial_cursor, surface_normal)
-                .or_else(|| current_transform_cursor(world))?
-        } else {
-            current_transform_cursor(world)?
-        };
-        apply_move_constraint(current_cursor - initial_cursor, state.axis)
-    };
+    // Explicit axis distances are complete input, even when the pointer is over
+    // chrome or that axis points into the view. Never require a ground hit first.
+    if let Some(value) = numeric_value {
+        if matches!(
+            state.axis,
+            AxisConstraint::X | AxisConstraint::Y | AxisConstraint::Z | AxisConstraint::Custom(_)
+        ) {
+            return Some(numeric_move_delta(state.axis, Vec3::ZERO, value));
+        }
+    }
+    let target = world
+        .get_resource::<SnapResult>()
+        .and_then(|snap| snap.target);
+    let current_cursor = target
+        .or_else(|| move_cursor_on_drag_plane(world, initial_cursor, state.axis))
+        .or_else(|| current_transform_cursor(world))?;
+    let constrained_delta = apply_move_constraint(current_cursor - initial_cursor, state.axis);
+    Some(numeric_value.map_or(constrained_delta, |value| {
+        numeric_move_delta(state.axis, constrained_delta, value)
+    }))
+}
 
-    numeric_value
-        .map(|value| numeric_move_delta(state.axis, constrained_delta, value))
-        .or(Some(constrained_delta))
+/// A bounded camera-ray/plane projection, shared by all move grips and the
+/// semantic preview. In an elevation the ground is edge-on, so use the view
+/// plane through the grab point. Axis drags use a plane containing that axis.
+fn move_drag_plane_normal(preferred: Vec3, view_forward: Vec3, axis: AxisConstraint) -> Vec3 {
+    let axis_direction = match axis {
+        AxisConstraint::X => Some(Vec3::X),
+        AxisConstraint::Y => Some(Vec3::Y),
+        AxisConstraint::Z => Some(Vec3::Z),
+        AxisConstraint::Custom(direction) => direction.try_normalize(),
+        _ => None,
+    };
+    if let Some(direction) = axis_direction {
+        return (view_forward - direction * view_forward.dot(direction))
+            .try_normalize()
+            .unwrap_or(view_forward);
+    }
+    let preferred = match axis {
+        AxisConstraint::PlaneXY => Vec3::Z,
+        AxisConstraint::PlaneXZ => Vec3::Y,
+        AxisConstraint::PlaneYZ => Vec3::X,
+        _ => preferred,
+    };
+    if preferred.dot(view_forward).abs() >= 0.1 {
+        preferred
+    } else {
+        view_forward
+    }
+}
+
+fn move_cursor_on_drag_plane(world: &World, anchor: Vec3, axis: AxisConstraint) -> Option<Vec3> {
+    let mut camera_query = world.try_query_filtered::<&GlobalTransform, With<OrbitCamera>>()?;
+    let camera_transform = camera_query.iter(world).next()?;
+    let normal = move_drag_plane_normal(
+        drafting_move_plane_normal(world),
+        *camera_transform.forward(),
+        axis,
+    );
+    // Preserve grid snapping for a free drag already on its drawing plane.
+    let preferred = drafting_move_plane_normal(world);
+    let plane_origin = active_drafting_plane(world).map_or(Vec3::ZERO, |plane| plane.origin);
+    if axis == AxisConstraint::None
+        && normal == preferred
+        && (anchor - plane_origin).dot(preferred).abs() <= 0.05
+    {
+        if let Some(cursor) = current_transform_cursor(world) {
+            return Some(cursor);
+        }
+    }
+    cursor_on_parallel_plane(world, anchor, normal)
 }
 
 /// Normal of the surface an unconstrained Moving drag resolves against.
@@ -1888,11 +1931,6 @@ fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>)
 /// snapping stack, and 2D authoring already project against.
 pub(crate) fn drafting_move_plane_normal(world: &World) -> Vec3 {
     active_drafting_frame(world).map_or(Vec3::Y, |frame| authoring_drag_plane_normal(&frame))
-}
-
-/// Origin the grab offset is measured from, matching `drafting_move_plane_normal`.
-fn moving_plane_origin(world: &World) -> Vec3 {
-    active_drafting_plane(world).map_or(Vec3::ZERO, |plane| plane.origin)
 }
 
 /// The rotation axis an unconstrained Rotating drag should use inside Drafting.
@@ -1934,32 +1972,6 @@ fn cursor_on_parallel_plane(world: &World, anchor: Vec3, normal: Vec3) -> Option
         .viewport_to_world(camera_transform, viewport_cursor)
         .ok()?;
     scene_ray::project_ray_to_plane(ray, anchor, normal)
-}
-
-/// World-space Y the cursor "points at" on a vertical plane through `anchor` that
-/// faces the camera (its normal is the horizontal component of the camera forward,
-/// so the plane contains world-up). Used to drive vertical-axis (lift) moves, which
-/// the ground-plane cursor projection cannot.
-fn vertical_axis_cursor_y(world: &World, anchor: Vec3) -> Option<f32> {
-    let mut window_query = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
-    let window = window_query.single(world).ok()?;
-    let mut camera_query =
-        world.try_query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()?;
-    let (camera, camera_transform) = camera_query
-        .iter(world)
-        .find(|(camera, _)| camera.is_active)
-        .or_else(|| camera_query.iter(world).next())?;
-    let viewport_cursor = cursor_window_position(window)?;
-    let ray = camera
-        .viewport_to_world(camera_transform, viewport_cursor)
-        .ok()?;
-    let forward = camera_transform.forward();
-    let mut normal = Vec3::new(forward.x, 0.0, forward.z);
-    if normal.length_squared() < 1e-6 {
-        // Near top-down: vertical movement is barely visible; fall back to a stable plane.
-        normal = Vec3::Z;
-    }
-    scene_ray::project_ray_to_plane(ray, anchor, normal.normalize()).map(|hit| hit.y)
 }
 
 fn push_pull_distance(
@@ -2973,6 +2985,7 @@ mod tests {
     use crate::authored_entity::{AuthoredEntity, EntityBounds, HandleInfo, PropertyFieldDef};
     use crate::plugins::modeling::group::{GroupFrame, GroupSnapshot};
     use crate::plugins::tools::Preview;
+    use bevy::camera::CameraProjection;
     use serde_json::Value;
     use std::sync::Mutex;
 
@@ -3059,6 +3072,53 @@ mod tests {
     }
 
     #[test]
+    fn move_plane_is_stable_in_front_pitched_and_perspective_views() {
+        for forward in [Vec3::NEG_Z, Vec3::new(0., -0.25, -1.).normalize()] {
+            for axis in [AxisConstraint::None, AxisConstraint::X, AxisConstraint::Y] {
+                let normal = move_drag_plane_normal(Vec3::Y, forward, axis);
+                let anchor = Vec3::new(0., 8., 0.);
+                for perspective in [false, true] {
+                    let eye = anchor - forward * 20.;
+                    let desired = anchor + Vec3::X * 2.;
+                    let ray = if perspective {
+                        Ray3d::new(eye, Dir3::new(desired - eye).unwrap())
+                    } else {
+                        Ray3d::new(eye + Vec3::X * 2., Dir3::new(forward).unwrap())
+                    };
+                    let hit = scene_ray::project_ray_to_plane(ray, anchor, normal).unwrap();
+                    assert!(hit.is_finite());
+                    let expected = if axis == AxisConstraint::Y {
+                        Vec3::ZERO
+                    } else {
+                        Vec3::X * 2.
+                    };
+                    assert!(apply_move_constraint(hit - anchor, axis).distance(expected) < 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_axis_distance_works_without_any_cursor_or_ground_hit() {
+        let world = World::new();
+        for (axis, direction) in [
+            (AxisConstraint::X, Vec3::X),
+            (AxisConstraint::Y, Vec3::Y),
+            (AxisConstraint::Z, Vec3::Z),
+        ] {
+            let state = TransformState {
+                axis,
+                initial_cursor: Some(Vec3::ZERO),
+                ..default()
+            };
+            assert_eq!(
+                move_delta(&world, &state, Some(-2.5)),
+                Some(direction * -2.5)
+            );
+        }
+    }
+
+    #[test]
     fn vertical_move_uses_surface_inference_without_changing_horizontal_position() {
         let mut world = World::new();
         world.insert_resource(SnapResult {
@@ -3110,10 +3170,26 @@ mod tests {
         world.init_resource::<ElementIdAllocator>();
         #[cfg(feature = "perf-stats")]
         world.init_resource::<PerfStats>();
-        world.insert_resource(CursorWorldPos {
-            raw: Some(Vec3::X * 2.),
-            ..Default::default()
+        world.init_resource::<CursorWorldPos>();
+        world.init_resource::<InputOwnership>();
+        world.init_resource::<TransformState>();
+        let mut window = Window::default();
+        window.resolution.set(800., 600.);
+        window.set_cursor_position(Some(Vec2::new(600., 300.)));
+        world.spawn((window, PrimaryWindow));
+        let mut projection = OrthographicProjection::default_3d();
+        projection.area = Rect::new(-4., -3., 4., 3.);
+        let mut camera = Camera::default();
+        camera.computed.clip_from_view = projection.get_clip_from_view();
+        camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {
+            physical_size: UVec2::new(800, 600),
+            scale_factor: 1.,
         });
+        world.spawn((
+            camera,
+            GlobalTransform::from(Transform::from_xyz(0., 0., 10.)),
+            OrbitCamera::default(),
+        ));
         let mesh: BoxedEntity = TriangleMeshSnapshot {
             element_id: ElementId(2),
             primitive: TriangleMesh {
@@ -3160,16 +3236,16 @@ mod tests {
         let group_entity = find_entity_by_element_id_readonly(&world, ElementId(1)).unwrap();
         let mesh_entity = find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap();
         world.entity_mut(group_entity).insert(Selected);
-        let originals = collect_selected_snapshots(&mut world);
         let start = |world: &mut World| {
-            world.insert_resource(TransformState {
-                mode: TransformMode::Moving,
-                axis: AxisConstraint::X,
-                initial_cursor: Some(Vec3::ZERO),
-                numeric_buffer: Some("2".into()),
-                initial_snapshots: originals.clone(),
-                ..Default::default()
-            })
+            start_transform_mode_with_options(
+                world,
+                TransformMode::Moving,
+                TransformStartOptions {
+                    initial_cursor: Some(Vec3::ZERO),
+                    ..default()
+                },
+            )
+            .unwrap();
         };
         start(&mut world);
         update_transform_preview(&mut world);
@@ -3204,12 +3280,31 @@ mod tests {
             ),
             "stationary frames retain the candidate"
         );
+        let window_entity = world
+            .query_filtered::<Entity, With<PrimaryWindow>>()
+            .single(&world)
+            .unwrap();
+        world
+            .get_mut::<Window>(window_entity)
+            .unwrap()
+            .set_cursor_position(None);
+        update_transform_preview(&mut world);
+        assert_eq!(
+            world.get::<Transform>(mesh_entity).unwrap().translation,
+            Vec3::X * 2.
+        );
+        assert!(world.resource::<ActiveTransformPreview>().refusal.is_none());
+        world
+            .get_mut::<Window>(window_entity)
+            .unwrap()
+            .set_cursor_position(Some(Vec2::new(600., 300.)));
         restore_previews_and_clear_session(&mut world, false);
         assert_eq!(
             *world.get::<Transform>(mesh_entity).unwrap(),
             Transform::IDENTITY
         );
         assert_eq!(capture_snapshot(&world, ElementId(2)), Some(mesh.clone()));
+        *world.resource_mut::<InputOwnership>() = InputOwnership::Idle;
         start(&mut world);
         update_transform_preview(&mut world);
         let captured = world

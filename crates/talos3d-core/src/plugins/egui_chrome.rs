@@ -2036,6 +2036,7 @@ struct ToolbarRenderContext<'a, 'w, 's> {
     drag_state: &'a mut ToolbarDragState,
     selection_count: usize,
     current_tool: &'a str,
+    active_transform_command: Option<&'static str>,
     capability_activation: &'a CapabilityActivation,
 }
 
@@ -2128,6 +2129,7 @@ struct ChromeData<'w, 's> {
     property_panel_data: ResMut<'w, PropertyPanelData>,
     palette_state: ResMut<'w, PaletteState>,
     transform_state: Res<'w, TransformState>,
+    handle_context: Res<'w, crate::plugins::handles::HandleContext>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
     window_query: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
@@ -2273,6 +2275,17 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                 drag_state: &mut data.drag_state,
                 selection_count,
                 current_tool: &current_tool,
+                active_transform_command: if selection_count > 0 && current_tool == "Select" {
+                    use crate::plugins::handles::HandleDisplayMode;
+                    match data.handle_context.display_mode {
+                        HandleDisplayMode::Move => Some("modeling.move"),
+                        HandleDisplayMode::Scale => Some("modeling.scale"),
+                        HandleDisplayMode::Rotate => Some("modeling.rotate"),
+                        HandleDisplayMode::Combined => None,
+                    }
+                } else {
+                    None
+                },
                 capability_activation: &data.capability_activation,
             };
             draw_toolbar_row(&ctx, &mut render, &descriptor_refs, dock, row_idx as u32);
@@ -2308,6 +2321,17 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             drag_state: &mut data.drag_state,
             selection_count,
             current_tool: &current_tool,
+            active_transform_command: if selection_count > 0 && current_tool == "Select" {
+                use crate::plugins::handles::HandleDisplayMode;
+                match data.handle_context.display_mode {
+                    HandleDisplayMode::Move => Some("modeling.move"),
+                    HandleDisplayMode::Scale => Some("modeling.scale"),
+                    HandleDisplayMode::Rotate => Some("modeling.rotate"),
+                    HandleDisplayMode::Combined => None,
+                }
+            } else {
+                None
+            },
             capability_activation: &data.capability_activation,
         };
 
@@ -4025,7 +4049,8 @@ fn draw_toolbar_content(
             };
             ui.with_layout(section_layout, |ui| {
                 for command in available_commands {
-                    let active = command.activates_tool.as_deref() == Some(render.current_tool);
+                    let active = command.activates_tool.as_deref() == Some(render.current_tool)
+                        || render.active_transform_command == Some(command.id.as_str());
                     let image = toolbar_image(render.contexts, render.icon_registry, command);
                     let mut button = if let Some(img) = image {
                         egui::Button::image(img)
@@ -4326,8 +4351,9 @@ fn draw_floating_toolbar(
                             ui.separator();
                         }
                         for command in available_commands {
-                            let active =
-                                command.activates_tool.as_deref() == Some(render.current_tool);
+                            let active = command.activates_tool.as_deref()
+                                == Some(render.current_tool)
+                                || render.active_transform_command == Some(command.id.as_str());
                             let image =
                                 toolbar_image(render.contexts, render.icon_registry, command);
                             let mut button = if let Some(img) = image {

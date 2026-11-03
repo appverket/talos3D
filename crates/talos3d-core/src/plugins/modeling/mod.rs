@@ -636,7 +636,7 @@ impl Plugin for ModelingPlugin {
                     parameters: Some(serde_json::json!({"type":"object"})),
                     default_shortcut: Some("M".to_string()),
                     icon: Some("icon.move".to_string()),
-                    hint: Some("Drag a corner or control point to move".to_string()),
+                    hint: Some("Move (M): drag a grip; X/Y/Z lock axis; Shift+X/Y/Z lock plane".to_string()),
                     requires_selection: true,
                     show_in_menu: true,
                     version: 1,

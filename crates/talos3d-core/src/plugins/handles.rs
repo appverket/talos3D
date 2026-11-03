@@ -31,9 +31,7 @@ use crate::{
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 
-const HANDLE_SCREEN_DIAMETER_PX: f32 = 8.0;
-const HANDLE_MIN_RADIUS_METRES: f32 = 0.035;
-const HANDLE_MAX_RADIUS_METRES: f32 = 0.18;
+const HANDLE_SCREEN_DIAMETER_PX: f32 = 12.0;
 
 const HANDLE_DRAG_THRESHOLD_PX: f32 = 6.0;
 const HANDLE_MOVE_COLOR: Color = Color::srgb(0.95, 0.95, 0.95);
@@ -53,7 +51,8 @@ const HANDLE_HIGHLIGHT_SCALE: f32 = 1.6;
 const PIVOT_COLOR: Color = Color::srgb(0.96, 0.35, 0.8);
 const ROTATE_RING_COLOR: Color = Color::srgb(0.42, 0.95, 0.58);
 const ROTATE_RING_SEGMENTS: usize = 24;
-const MOVE_HANDLE_HINT: &str = "Move: drag a corner or control point · snaps to nearby markers";
+const MOVE_HANDLE_HINT: &str =
+    "Move (M): drag a grip · X/Y/Z lock axis · Shift+X/Y/Z lock plane · type distance · Esc cancel";
 const GUIDE_HANDLE_HINT: &str =
     "Drag the guide anchor to move · edit anchor/direction in Properties · Shift+G hides guides";
 const COMBINED_HANDLE_HINT: &str =
@@ -459,7 +458,16 @@ fn handle_handle_pointer_input(world: &mut World) {
 }
 
 fn begin_handle_drag(world: &mut World, pending: PendingHandlePress) {
-    let Some(cursor_world) = current_cursor_world(world) else {
+    // Transform grips already supply a world-space grab point. A front view
+    // need not intersect the ground plane to start a drag.
+    let cursor_world = current_cursor_world(world).or_else(|| {
+        matches!(
+            pending.handle.interaction,
+            HandleInteraction::Transform { .. }
+        )
+        .then_some(pending.handle.position)
+    });
+    let Some(cursor_world) = cursor_world else {
         return;
     };
     let display_mode = world.resource::<HandleContext>().display_mode;
@@ -1220,7 +1228,7 @@ fn rotate_handles(entity: Entity, position: Vec3) -> Vec<ResolvedHandle> {
 
 /// Combined-gizmo grip that raises/lowers the object along world Y. Placed at the
 /// top-face centre of the bounding box, above the white corner move grips. The Y move
-/// is driven by a camera-facing vertical plane (see `transform::vertical_axis_cursor_y`).
+/// is driven by a camera-facing vertical plane (see `transform::move_drag_plane_normal`).
 fn vertical_lift_handle(entity: Entity, bounds: EntityBounds) -> ResolvedHandle {
     // face_centers()[2] is the +Y face centre (see EntityBounds::face_centers).
     let (top_face, _) = bounds.face_centers()[2];
@@ -1374,8 +1382,11 @@ fn handle_world_radius(
     let diameter = match projection {
         Projection::Perspective(perspective) => {
             let distance = camera_transform
-                .translation()
-                .distance(handle_position)
+                .affine()
+                .inverse()
+                .transform_point3(handle_position)
+                .z
+                .abs()
                 .max(0.001);
             2.0 * distance
                 * (perspective.fov * 0.5).tan()
@@ -1391,7 +1402,8 @@ fn handle_world_radius(
         }
     };
 
-    (diameter * 0.5).clamp(HANDLE_MIN_RADIUS_METRES, HANDLE_MAX_RADIUS_METRES)
+    // Never cap in metres: site-scale views otherwise reduce a grip to a pixel.
+    (diameter * 0.5).max(f32::EPSILON)
 }
 
 fn draw_cube_handle(gizmos: &mut Gizmos<HandleGizmos>, center: Vec3, radius: f32, color: Color) {
@@ -1612,6 +1624,26 @@ mod tests {
         assert_eq!(late_edits.len(), 1);
         assert_eq!(late_edits[0].before[0], before);
         assert_eq!(late_edits[0].after[0], preview);
+    }
+
+    #[test]
+    fn move_grips_keep_their_screen_size_at_site_and_detail_scales() {
+        let mut camera = Camera::default();
+        camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {
+            physical_size: UVec2::new(800, 600),
+            scale_factor: 1.,
+        });
+        for height in [0.5, 50., 1000.] {
+            let mut projection = OrthographicProjection::default_3d();
+            projection.area = Rect::new(-height, -height / 2., height, height / 2.);
+            let radius = handle_world_radius(
+                &camera,
+                &GlobalTransform::IDENTITY,
+                &Projection::Orthographic(projection),
+                Vec3::ZERO,
+            );
+            assert!((radius * 2. / height * 600. - HANDLE_SCREEN_DIAMETER_PX).abs() < 1e-4);
+        }
     }
 
     #[test]

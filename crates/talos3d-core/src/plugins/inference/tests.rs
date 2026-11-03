@@ -185,6 +185,7 @@ fn actual_rotated_topology_supplies_midpoint_and_never_bounds_corner() {
                 half_extents: Vec3::ONE,
             },
             ShapeRotation(rotation),
+            crate::plugins::selection::Selected,
         ))
         .id();
     let cage = build_edge_cage(&world, entity, ElementId(19));
@@ -242,6 +243,7 @@ fn bounded_hover_resolution_benchmark() {
             half_extents: Vec3::ONE,
         },
         ShapeRotation::default(),
+        crate::plugins::selection::Selected,
     ));
     world.resource_mut::<CursorWorldPos>().hovered_element_id = Some(ElementId(19));
     update_inference(&mut world);
@@ -385,4 +387,53 @@ fn muted_context_cannot_occlude_active_boundary_inference() {
         Some(Vec3::Z),
         eye,
     ));
+}
+
+#[test]
+fn aggregate_hover_does_not_offer_member_faces_before_direct_selection() {
+    use crate::plugins::{
+        modeling::group::{GroupEditContext, GroupMembers},
+        selection::Selected,
+    };
+    let surface = Vec3::new(3., 2., 4.);
+    let mut world = world_at(surface);
+    let leaf = world.spawn(ElementId(71)).id();
+    let group = world
+        .spawn((
+            ElementId(72),
+            GroupMembers {
+                member_ids: vec![ElementId(71)],
+                name: "assembly".into(),
+                frame: default(),
+                linked_model: None,
+            },
+            Selected,
+        ))
+        .id();
+    world.resource_mut::<CursorWorldPos>().hovered_element_id = Some(ElementId(71));
+    world.resource_mut::<CursorWorldPos>().surface_point = Some(surface);
+    update_inference(&mut world);
+    assert!(world.resource::<InferenceEngine>().best_label().is_none());
+    assert_ne!(world.resource::<SnapResult>().kind, SnapKind::OnFace);
+    world.entity_mut(leaf).insert(Selected);
+    assert!(
+        !selected_surface_is_addressable(&world),
+        "closed group still owns hit"
+    );
+    world.entity_mut(group).remove::<GroupMembers>();
+    world.init_resource::<GroupEditContext>();
+    update_inference(&mut world);
+    assert_eq!(
+        world.resource::<InferenceEngine>().best_label(),
+        Some("On face")
+    );
+    world.entity_mut(leaf).remove::<Selected>();
+    point(&mut world, surface);
+    world.resource_mut::<TransformState>().mode = TransformMode::Moving;
+    world.resource_mut::<TransformState>().initial_cursor = Some(Vec3::ZERO);
+    update_inference(&mut world);
+    assert_eq!(
+        world.resource::<InferenceEngine>().best_label(),
+        Some("Snap to surface")
+    );
 }

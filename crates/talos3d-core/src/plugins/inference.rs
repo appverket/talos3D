@@ -302,6 +302,32 @@ fn line_point(guide: &Guide, raw: Vec3, view: Option<&View>) -> Vec3 {
     guide.origin + guide.direction * ((dot * w.dot(ray_dir) - w.dot(guide.direction)) / denominator)
 }
 
+fn selected_surface_is_addressable(world: &World) -> bool {
+    let Some(entity) = world
+        .resource::<CursorWorldPos>()
+        .hovered_element_id
+        .and_then(|id| find_entity_by_element_id_readonly(world, id))
+    else {
+        return false;
+    };
+    if world
+        .get_resource::<crate::plugins::face_edit::FaceEditContext>()
+        .is_some_and(|context| context.entity == Some(entity))
+    {
+        return true;
+    }
+    world
+        .get::<crate::plugins::modeling::group::GroupMembers>(entity)
+        .is_none()
+        && world
+            .get::<crate::plugins::modeling::occurrence::OccurrenceIdentity>(entity)
+            .is_none()
+        && world
+            .get::<crate::plugins::selection::Selected>(entity)
+            .is_some()
+        && crate::plugins::selection::resolve_entity_for_selection(world, entity) == Some(entity)
+}
+
 pub(crate) fn update_inference(world: &mut World) {
     let tool = world
         .get_resource::<State<ActiveTool>>()
@@ -320,6 +346,18 @@ pub(crate) fn update_inference(world: &mut World) {
             engine.reset_interaction();
             engine.tool = Some(tool);
         }
+        return;
+    }
+    // Selection has an aggregate boundary. Merely pointing at a member must
+    // not advertise its faces/edges as editable before that geometry is selected.
+    // Deliberate drawing and transform gestures still use stationary surface snaps.
+    if tool == ActiveTool::Select
+        && world
+            .get_resource::<TransformState>()
+            .is_none_or(TransformState::is_idle)
+        && !selected_surface_is_addressable(world)
+    {
+        world.resource_mut::<InferenceEngine>().reset_interaction();
         return;
     }
     let raw = raw.unwrap();
@@ -587,7 +625,12 @@ pub(crate) fn update_inference(world: &mut World) {
             {
                 resolved = point;
                 kind = SnapKind::OnFace;
-                label = "On face".into();
+                label = if tool == ActiveTool::Select && origin.is_some() {
+                    "Snap to surface"
+                } else {
+                    "On face"
+                }
+                .into();
             }
         } else if allowed(resolved) {
             reference = Some(Reference {
