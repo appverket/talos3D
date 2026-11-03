@@ -1496,11 +1496,15 @@ fn menu_submenu<R>(ui: &mut egui::Ui, label: &str, contents: impl FnOnce(&mut eg
 }
 
 fn menu_section_heading(ui: &mut egui::Ui, label: &str) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.add_space(ui.spacing().button_padding.x + MENU_CHECK_GUTTER);
-        ui.label(egui::RichText::new(label).small().color(CHROME_MUTED));
-    });
+    ui.allocate_ui_with_layout(
+        egui::vec2(MENU_ROW_WIDTH, 14.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(ui.spacing().button_padding.x + MENU_CHECK_GUTTER);
+            ui.label(egui::RichText::new(label).small().color(CHROME_MUTED));
+        },
+    );
 }
 
 fn menu_row_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Response {
@@ -1559,7 +1563,7 @@ fn menu_row_button_state(
 /// Descriptors declare shortcuts portably as `Ctrl/Cmd+Shift+O`. Showing that
 /// raw string makes every macOS menu read like a cross-platform cheat sheet, so
 /// collapse it to the native glyphs there and to plain `Ctrl+` elsewhere.
-fn format_shortcut_for_platform(shortcut: &str) -> String {
+pub(crate) fn format_shortcut_for_platform(shortcut: &str) -> String {
     if cfg!(target_os = "macos") {
         shortcut
             .replace("Ctrl/Cmd+", "\u{2318}")
@@ -1923,7 +1927,7 @@ fn draw_about_menu(ui: &mut egui::Ui, build: &ApplicationBuildInfo) {
     ui.hyperlink_to("GitHub repository", "https://github.com/appverket/talos3D");
     ui.hyperlink_to(
         "Model API documentation",
-        "https://github.com/appverket/talos3D/blob/main/talos3d-core/docs/MCP_MODEL_API.md",
+        "https://github.com/appverket/talos3D/blob/main/docs/MCP_MODEL_API.md",
     );
 }
 
