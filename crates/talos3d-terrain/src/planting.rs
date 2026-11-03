@@ -2839,6 +2839,7 @@ mod tests {
             frame: GroupFrame::identity(),
             composite: None,
             linked_model: Some(LinkedModelRef {
+                source_root_is_document: false,
                 path: "source-building.talos3d".to_string(),
                 source_root_id: ElementId(100),
                 source_to_scene_ids: [(100, 1), (101, 2), (102, 3)]
