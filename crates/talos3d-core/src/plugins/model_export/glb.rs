@@ -80,7 +80,7 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
         if local_indices.is_empty() {
             continue;
         }
-        if local_indices.len() % 3 != 0
+        if !local_indices.len().is_multiple_of(3)
             || local_indices.iter().any(|i| *i as usize >= positions.len())
         {
             return Err("Invalid model triangles".into());
@@ -128,7 +128,7 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
                 .normalize_or_zero();
             batch.normals.push(n.to_array());
         }
-        for tri in local_indices.chunks_exact(3) {
+        for tri in local_indices.as_chunks::<3>().0 {
             let [a, b, c] = if determinant < 0.0 {
                 [tri[0], tri[2], tri[1]]
             } else {
@@ -237,10 +237,10 @@ fn encode(batches: BTreeMap<[u32; 6], Batch>) -> Result<Vec<u8>, String> {
     }
     let doc = json!({"asset":{"version":"2.0","generator":"Talos3D"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":primitives}],"materials":materials,"accessors":accessors,"bufferViews":views,"buffers":[{"byteLength":bin.len()}]});
     let mut json = serde_json::to_vec(&doc).map_err(|e| e.to_string())?;
-    while json.len() % 4 != 0 {
+    while !json.len().is_multiple_of(4) {
         json.push(b' ');
     }
-    while bin.len() % 4 != 0 {
+    while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
     let length = 12 + 8 + json.len() + 8 + bin.len();
