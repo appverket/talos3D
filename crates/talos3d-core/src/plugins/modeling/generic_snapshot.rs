@@ -295,6 +295,17 @@ where
         self.primitive.bounds(self.rotation.0)
     }
 
+    fn bounds_in_frame(&self, rotation: Quat) -> Option<EntityBounds> {
+        let center = self.primitive.centre();
+        let offset = rotation * center - center;
+        self.primitive
+            .bounds(rotation * self.rotation.0)
+            .map(|b| EntityBounds {
+                min: b.min + offset,
+                max: b.max + offset,
+            })
+    }
+
     fn snap_segments(&self) -> Vec<(Vec3, Vec3)> {
         self.primitive.wireframe_segments(self.rotation.0)
     }

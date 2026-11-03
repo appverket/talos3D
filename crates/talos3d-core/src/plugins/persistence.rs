@@ -343,7 +343,9 @@ fn current_project_created_by() -> ProjectCreatedBy {
     }
 }
 
-fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSemanticSidecars> {
+pub(crate) fn capture_semantic_sidecars(
+    entity_ref: &EntityRef<'_>,
+) -> Option<PersistedSemanticSidecars> {
     let sidecars = PersistedSemanticSidecars {
         layer_assignment: entity_ref.get::<LayerAssignment>().cloned(),
         quantities: entity_ref
@@ -382,7 +384,7 @@ fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSema
     .then_some(sidecars)
 }
 
-fn apply_semantic_sidecars(
+pub(crate) fn apply_semantic_sidecars(
     world: &mut World,
     element_id: ElementId,
     sidecars: &PersistedSemanticSidecars,
@@ -1561,6 +1563,13 @@ fn referenced_project_layers(
     let mut layer_names = BTreeSet::new();
     for record in entities {
         collect_layer_refs(&record.data, &mut layer_names);
+        if let Some(layer) = record
+            .semantic
+            .as_ref()
+            .and_then(|s| s.layer_assignment.as_ref())
+        {
+            layer_names.insert(layer.layer.clone());
+        }
     }
     layer_names.remove(DEFAULT_LAYER_NAME);
     if layer_names.is_empty() {
@@ -1668,6 +1677,8 @@ pub(crate) fn deserialize_project_entity_records(
 }
 
 pub(crate) struct ProjectEntityRecords {
+    pub layers: Option<LayerRegistry>,
+    pub hidden_objects: BTreeSet<ElementId>,
     pub definitions: Option<DefinitionRegistry>,
     pub entities: Vec<PersistedEntityRecord>,
     pub materials: Option<MaterialRegistry>,
@@ -1691,6 +1702,8 @@ pub(crate) fn deserialize_project_entity_records_with_assets(
         return Err("Linked-model import of retained foreign sources requires an asset migration; open this project normally to preserve its source context".into());
     }
     Ok(ProjectEntityRecords {
+        layers: project.layers,
+        hidden_objects: project.hidden_objects,
         definitions: project.definitions,
         entities: project.entities,
         materials: project.materials,

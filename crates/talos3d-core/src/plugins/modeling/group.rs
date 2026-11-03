@@ -87,6 +87,9 @@ pub fn compose_snapshot_into_frame(snapshot: BoxedEntity, frame: &GroupFrame) ->
     if frame.is_identity() {
         return snapshot;
     }
+    if frame.rotation == Quat::IDENTITY {
+        return snapshot.translate_with_parent(frame.translation);
+    }
     let local_centre = snapshot.center();
     let world_centre = frame.point_to_world(local_centre);
     let rotated = snapshot.rotate_by(frame.rotation);
@@ -1014,14 +1017,22 @@ pub fn compute_group_bounds_from_world(
 }
 
 /// Compute aggregate member bounds in a group's local frame from world-authored
-/// member geometry. Prefer snap/wireframe points where entities expose them so
-/// a rotated linked model gets an object-aligned box instead of an inflated
-/// inverse-transform of each member's world AABB.
+/// member geometry. Reuse mesh bounds caches and capability bounds, never
+/// enumerate snap edges for selection presentation. Rotated raw meshes use
+/// conservative transformed AABBs; capabilities can supply tighter bounds.
 pub fn compute_group_bounds_in_frame_from_world(
     world: &World,
     member_ids: &[ElementId],
     frame: &GroupFrame,
 ) -> Option<EntityBounds> {
+    // Translation does not change orientation. Reuse the authored mesh bounds
+    // cache instead of allocating/deduplicating every mesh edge on every frame.
+    if frame.rotation == Quat::IDENTITY {
+        return compute_group_bounds_from_world(world, member_ids).map(|bounds| EntityBounds {
+            min: bounds.min - frame.translation,
+            max: bounds.max - frame.translation,
+        });
+    }
     let registry = world.resource::<CapabilityRegistry>();
     let element_index = element_entity_index(world);
     let inverse_rotation = frame.rotation.inverse();
@@ -1047,25 +1058,31 @@ pub fn compute_group_bounds_in_frame_from_world(
             continue;
         }
 
-        if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
-            let segments = snapshot.0.snap_segments();
-            if segments.is_empty() {
-                if let Some(bounds) = snapshot.bounds() {
-                    for corner in bounds.corners() {
-                        let local = to_local(corner);
-                        min = min.min(local);
-                        max = max.max(local);
-                        any = true;
-                    }
+        if entity_ref.contains::<super::primitives::TriangleMesh>()
+            && !entity_ref.contains::<super::mesh_generation::DerivedGeometry>()
+        {
+            // Eight cached AABB corners give conservative rotated bounds. This
+            // is deliberately independent of triangle count and snap-edge lists.
+            if let Some(bounds) = super::snapshots::authored_triangle_mesh_bounds(&entity_ref) {
+                for corner in bounds.corners() {
+                    let local = to_local(corner);
+                    min = min.min(local);
+                    max = max.max(local);
+                    any = true;
                 }
-            } else {
-                for (start, end) in segments {
-                    for point in [start, end] {
-                        let local = to_local(point);
-                        min = min.min(local);
-                        max = max.max(local);
-                        any = true;
-                    }
+            }
+        } else if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
+            if let Some(bounds) = snapshot.0.bounds_in_frame(inverse_rotation) {
+                let offset = inverse_rotation * frame.translation;
+                min = min.min(bounds.min - offset);
+                max = max.max(bounds.max - offset);
+                any = true;
+            } else if let Some(bounds) = snapshot.bounds() {
+                for corner in bounds.corners() {
+                    let local = to_local(corner);
+                    min = min.min(local);
+                    max = max.max(local);
+                    any = true;
                 }
             }
         } else if let Some(aabb) = entity_ref.get::<bevy::camera::primitives::Aabb>() {
@@ -1318,6 +1335,42 @@ mod frame_tests {
             .expect("cyclic nested group with a leaf should still have bounds");
         assert!(approx(bounds.min, Vec3::new(9.0, 1.5, -3.0)));
         assert!(approx(bounds.max, Vec3::new(11.0, 2.5, 1.0)));
+    }
+
+    #[test]
+    fn translated_mesh_group_bounds_do_not_require_snapshot_or_edge_capture() {
+        use super::super::primitives::TriangleMesh;
+        let mut world = World::new();
+        // No mesh factory: bounds must use authored cached metadata directly.
+        world.insert_resource(CapabilityRegistry::default());
+        world.spawn((
+            ElementId(1),
+            TriangleMesh {
+                vertices: vec![
+                    Vec3::new(1., 2., 3.),
+                    Vec3::new(4., 5., 6.),
+                    Vec3::new(1., 5., 3.),
+                ],
+                faces: vec![[0, 1, 2]],
+                normals: None,
+                name: None,
+            },
+        ));
+        let frame = GroupFrame {
+            translation: Vec3::Y * 8.,
+            ..Default::default()
+        };
+        let bounds =
+            compute_group_bounds_in_frame_from_world(&world, &[ElementId(1)], &frame).unwrap();
+        assert_eq!(bounds.min, Vec3::new(1., -6., 3.));
+        assert_eq!(bounds.max, Vec3::new(4., -3., 6.));
+        let rotated = GroupFrame {
+            rotation: Quat::from_rotation_y(0.5),
+            ..frame
+        };
+        assert!(
+            compute_group_bounds_in_frame_from_world(&world, &[ElementId(1)], &rotated).is_some()
+        );
     }
 
     #[test]

@@ -169,12 +169,17 @@ Choose **Create > Linked Models > Place Linked Model** and select an existing
 `.talos3d` file to insert it as a live instance in the current model. The source
 can contain loose objects, nested groups, assemblies, or several top-level
 groups; no preparation or **Create Linked Model** extraction is required.
-The complete file is linked without changing it. A document with several roots
-gets one instance container, retaining the source hierarchy inside it.
+The model content is linked without changing the source file. A document with
+several roots gets one instance container, retaining the source hierarchy inside
+it. Source layers and hidden objects keep their visibility; imported layer names
+are scoped to their source file. Source scene lights, including sun and sky
+lights, are excluded because the current document owns the environment.
 
 **Create Linked Model** in a selected group's context menu instead extracts
 that group to a new source file and links the existing group to it. Both paths
-use the same live-link lifecycle.
+use the same live-link lifecycle, visibility preservation, and environment
+exclusion. Existing links refresh once when upgraded to these import rules,
+including groups previously exported from the current document.
 
 After selecting the file, the instance follows the cursor in the shared Move
 placement state, anchored at the source origin. Press **X**, **Y**, or **Z** to

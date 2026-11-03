@@ -19,6 +19,7 @@ use crate::{
         document_state::DocumentState,
         history::{EditorCommand, History, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
+        layers::{LayerRegistry, ObjectVisibility},
         materials::{ensure_builtin_materials, MaterialRegistry, TextureRegistry},
         modeling::{
             definition::DefinitionRegistry,
@@ -33,8 +34,10 @@ use crate::{
             snapshots::{EditableMeshSnapshot, TriangleMeshSnapshot},
         },
         persistence::{
+            apply_semantic_sidecars, capture_semantic_sidecars,
             deserialize_project_entity_records_with_assets, load_project_from_path,
-            serialize_entity_records_as_project, PersistedEntityRecord, ProjectEntityRecords,
+            serialize_entity_records_as_project, PersistedEntityRecord, PersistedSemanticSidecars,
+            ProjectEntityRecords,
         },
         selection::Selected,
         storage::Storage,
@@ -540,6 +543,8 @@ pub(crate) fn finish_linked_placement_gesture(world: &mut World, commit: bool) {
 }
 
 struct CreateLinkedModelInstanceHistoryCommand {
+    sidecars: Vec<(ElementId, PersistedSemanticSidecars)>,
+    hidden: Vec<ElementId>,
     snapshots: Vec<BoxedEntity>,
     instance_root_id: ElementId,
 }
@@ -555,6 +560,12 @@ impl EditorCommand for CreateLinkedModelInstanceHistoryCommand {
             snapshot.apply_to(world);
             stamp_authored_entity_dependencies(world, snapshot);
         }
+        for (id, sidecars) in &self.sidecars {
+            apply_semantic_sidecars(world, *id, sidecars);
+        }
+        if let Some(mut visibility) = world.get_resource_mut::<ObjectVisibility>() {
+            visibility.hidden.extend(self.hidden.iter().copied());
+        }
         select_only(world, self.instance_root_id);
     }
 
@@ -562,6 +573,11 @@ impl EditorCommand for CreateLinkedModelInstanceHistoryCommand {
         self.snapshots.sort_by_key(snapshot_dependency_order);
         for snapshot in self.snapshots.iter().rev() {
             snapshot.remove_from(world);
+        }
+        if let Some(mut visibility) = world.get_resource_mut::<ObjectVisibility>() {
+            for id in &self.hidden {
+                visibility.hidden.remove(id);
+            }
         }
     }
 }
@@ -604,13 +620,30 @@ pub fn execute_create_linked_model(
             content_hash: hash,
         }),
     )?;
-    after.apply_to(world);
+    let mut before_snapshots = vec![before];
+    let mut after_snapshots = vec![after];
+    for id in source_ids.iter().copied().filter(|id| *id != group_id) {
+        if !is_group(world, id) {
+            continue;
+        }
+        let snapshot = capture_snapshot(world, id)?;
+        let group = snapshot.0.as_any().downcast_ref::<GroupSnapshot>().unwrap();
+        let mut cleaned = group.clone();
+        cleaned.member_ids.retain(|id| source_ids.contains(id));
+        if cleaned.member_ids != group.member_ids {
+            before_snapshots.push(snapshot);
+            after_snapshots.push(cleaned.into());
+        }
+    }
+    for snapshot in &after_snapshots {
+        snapshot.apply_to(world);
+    }
     world
         .resource_mut::<Messages<ApplyEntityChangesCommand>>()
         .write(ApplyEntityChangesCommand {
             label: "Create linked model",
-            before: vec![before],
-            after: vec![after.clone()],
+            before: before_snapshots,
+            after: after_snapshots,
         });
     let relationship = linked_model_relationship(world, group_id)?;
 
@@ -788,9 +821,27 @@ pub fn execute_place_linked_model(
         .map(|id| capture_snapshot(world, id))
         .collect::<Result<Vec<_>, _>>()?;
     snapshots.sort_by_key(snapshot_dependency_order);
+    let sidecars = created
+        .iter()
+        .filter_map(|id| {
+            let entity = find_entity(world, *id)?;
+            Some((*id, capture_semantic_sidecars(&world.entity(entity))?))
+        })
+        .collect();
+    let hidden = created
+        .iter()
+        .copied()
+        .filter(|id| {
+            world
+                .get_resource::<ObjectVisibility>()
+                .is_some_and(|v| v.hidden.contains(id))
+        })
+        .collect();
     world
         .resource_mut::<PendingCommandQueue>()
         .push_command(Box::new(CreateLinkedModelInstanceHistoryCommand {
+            sidecars,
+            hidden,
             snapshots,
             instance_root_id: group_id,
         }));
@@ -1136,6 +1187,22 @@ fn build_linked_model_file(
     ids.sort_by_key(|id| id.0);
     ids.dedup();
 
+    let excluded: HashSet<_> = ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            find_entity(world, *id).is_some_and(|entity| {
+                world
+                    .get::<crate::plugins::lighting::SceneLightNode>(entity)
+                    .is_some()
+            })
+        })
+        .collect();
+    ids.retain(|id| !excluded.contains(id));
+    let root_members = root_members
+        .into_iter()
+        .filter(|id| !excluded.contains(id))
+        .collect();
     let source_ids = ids.clone();
     let mut snapshots = ids
         .into_iter()
@@ -1145,11 +1212,17 @@ fn build_linked_model_file(
 
     let mut records = Vec::with_capacity(snapshots.len());
     for snapshot in snapshots {
-        let normalized = normalize_snapshot_for_linked_file(snapshot, group_id, &frame)?;
+        let mut normalized = normalize_snapshot_for_linked_file(snapshot, group_id, &frame)?;
+        if let Some(group) = normalized.0.as_any().downcast_ref::<GroupSnapshot>() {
+            let mut group = group.clone();
+            group.member_ids.retain(|id| !excluded.contains(id));
+            normalized = group.into();
+        }
         records.push(PersistedEntityRecord {
             type_name: normalized.type_name().to_string(),
             data: normalized.to_persisted_json(),
-            semantic: None,
+            semantic: find_entity(world, normalized.element_id())
+                .and_then(|entity| capture_semantic_sidecars(&world.entity(entity))),
         });
     }
     records.sort_by_key(|record| {
@@ -1355,6 +1428,9 @@ fn normalize_snapshot_for_linked_file(
         normalized.mesh.recompute_all_normals();
         return Ok(normalized.into());
     }
+    if frame.rotation == Quat::IDENTITY {
+        return Ok(snapshot.translate_with_parent(-frame.translation));
+    }
     Ok(snapshot
         .translate_by(-frame.translation)
         .rotate_by(inverse_rotation))
@@ -1391,6 +1467,8 @@ fn load_linked_project(
         materials,
         textures,
         definitions,
+        layers,
+        hidden_objects,
     } = deserialize_project_entity_records_with_assets(bytes)?;
     // Source-scoped identities keep host definitions and separate linked files
     // independent, while remaining stable across refresh and save/reload.
@@ -1419,22 +1497,81 @@ fn load_linked_project(
                 .insert(serde_json::from_value(value).map_err(|error| error.to_string())?);
         }
     }
+    let mut imported_layers = LayerRegistry::default();
+    imported_layers.layers.clear();
+    let mut layer_ids = HashMap::new();
+    if let Some(layers) = layers {
+        for (name, mut layer) in layers.layers {
+            let mapped = format!("Linked {} / {}", &namespace[..8], name);
+            layer_ids.insert(name, mapped.clone());
+            layer.name = mapped.clone();
+            imported_layers.layers.insert(mapped, layer);
+        }
+    }
     let registry = world.resource::<CapabilityRegistry>();
     let mut snapshots = Vec::with_capacity(records.len());
+    let mut sidecars = HashMap::new();
+    let mut excluded = HashSet::new();
     for mut record in records {
+        // A linked model contributes model content, not the source document's
+        // sun/sky/scene-light rig. The host document owns its environment.
+        if record.type_name == "scene_light" {
+            if let Some(id) = record.data.get("element_id").and_then(Value::as_u64) {
+                excluded.insert(ElementId(id));
+            }
+            continue;
+        }
+        remap_layer_ids(&mut record.data, &layer_ids);
         remap_definition_ids(&mut record.data, &definition_ids);
         let factory = registry
             .factory_for(&record.type_name)
             .ok_or_else(|| format!("No factory registered for '{}'", record.type_name))?;
-        snapshots.push(factory.from_persisted_json(&record.data)?);
+        let snapshot = factory.from_persisted_json(&record.data)?;
+        if let Some(semantic) = record.semantic {
+            let mut value = serde_json::to_value(semantic).map_err(|e| e.to_string())?;
+            remap_definition_ids(&mut value, &definition_ids);
+            remap_layer_ids(&mut value, &layer_ids);
+            sidecars.insert(snapshot.element_id(), value);
+        }
+        snapshots.push(snapshot);
+    }
+    for snapshot in &mut snapshots {
+        if let Some(group) = snapshot.0.as_any().downcast_ref::<GroupSnapshot>() {
+            let mut group = group.clone();
+            group.member_ids.retain(|id| !excluded.contains(id));
+            *snapshot = group.into();
+        }
     }
     snapshots.sort_by_key(snapshot_dependency_order);
     Ok(LinkedProject {
+        layers: imported_layers,
+        hidden_objects,
+        sidecars,
         snapshots,
         materials,
         textures,
         definitions: imported_definitions,
     })
+}
+
+fn remap_layer_ids(value: &mut Value, ids: &HashMap<String, String>) {
+    match value {
+        Value::Object(values) => {
+            for (key, value) in values {
+                if key == "layer" {
+                    if let Some(mapped) = value.as_str().and_then(|name| ids.get(name)) {
+                        *value = Value::String(mapped.clone());
+                        continue;
+                    }
+                }
+                remap_layer_ids(value, ids);
+            }
+        }
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| remap_layer_ids(value, ids)),
+        _ => {}
+    }
 }
 
 fn remap_definition_ids(value: &mut Value, ids: &HashMap<String, String>) {
@@ -1459,6 +1596,9 @@ fn remap_definition_ids(value: &mut Value, ids: &HashMap<String, String>) {
 }
 
 struct LinkedProject {
+    layers: LayerRegistry,
+    hidden_objects: std::collections::BTreeSet<ElementId>,
+    sidecars: HashMap<ElementId, Value>,
     definitions: DefinitionRegistry,
     snapshots: Vec<BoxedEntity>,
     materials: Option<MaterialRegistry>,
@@ -1573,6 +1713,17 @@ fn apply_linked_snapshots(
             .insert(definition.clone());
     }
     merge_linked_project_assets(world, linked_project.materials, linked_project.textures);
+    if world.get_resource::<LayerRegistry>().is_none() {
+        world.insert_resource(LayerRegistry::default());
+    }
+    for (name, source_layer) in linked_project.layers.layers {
+        let mut registry = world.resource_mut::<LayerRegistry>();
+        registry.ensure_layer(&name);
+        let layer = registry.layers.get_mut(&name).unwrap();
+        layer.visible = source_layer.visible;
+        layer.locked = source_layer.locked;
+        layer.color = source_layer.color;
+    }
     let snapshots = linked_project.snapshots;
     let root = snapshots
         .iter()
@@ -1636,6 +1787,29 @@ fn apply_linked_snapshots(
         stamp_authored_entity_dependencies(world, &composed);
     }
 
+    for (source_id, mut value) in linked_project.sidecars {
+        if let Some(scene_id) = id_map.get(&source_id) {
+            remap_element_ids_in_value(&mut value, None, &id_map);
+            let sidecars: PersistedSemanticSidecars =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            apply_semantic_sidecars(world, *scene_id, &sidecars);
+        }
+    }
+    if world.get_resource::<ObjectVisibility>().is_none() {
+        world.insert_resource(ObjectVisibility::default());
+    }
+    {
+        let mut visibility = world.resource_mut::<ObjectVisibility>();
+        for mapping in &linked.source_to_scene_ids {
+            visibility.hidden.remove(&mapping.scene_id);
+        }
+        visibility.hidden.extend(
+            linked_project
+                .hidden_objects
+                .iter()
+                .filter_map(|id| id_map.get(id).copied()),
+        );
+    }
     linked.content_hash = hash;
     linked.source_to_scene_ids = id_map
         .iter()
@@ -1940,6 +2114,9 @@ fn bump_allocator_past(world: &mut World, ids: &HashSet<ElementId>) {
 
 fn content_hash(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
+    // Import policy is part of the cache identity. Older links refresh once even
+    // when their source bytes have not changed (both extracted and placed links).
+    "linked-model-content-v2".hash(&mut hasher);
     bytes.hash(&mut hasher);
     hasher.finish()
 }
@@ -2073,7 +2250,8 @@ mod tests {
                 PersistedEntityRecord {
                     type_name: snapshot.type_name().to_string(),
                     data: snapshot.to_persisted_json(),
-                    semantic: None,
+                    semantic: find_entity(world, id)
+                        .and_then(|entity| capture_semantic_sidecars(&world.entity(entity))),
                 }
             })
             .collect();
@@ -2092,6 +2270,230 @@ mod tests {
                 .unwrap()
                 .scene_id,
         )
+    }
+
+    #[test]
+    fn extracted_group_links_preserve_visibility_and_upgrade_without_source_edits() {
+        use crate::plugins::{
+            layers::{LayerAssignment, LayerRegistry, ObjectVisibility},
+            lighting::{SceneLightFactory, SceneLightNode, SceneLightSnapshot},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extracted.talos3d");
+        let mut host = test_world();
+        host.resource_mut::<CapabilityRegistry>()
+            .register_factory(SceneLightFactory);
+        let root = spawn_house_group(&mut host);
+        let mut layers = LayerRegistry::default();
+        layers.ensure_layer("Alternative");
+        layers.layers.get_mut("Alternative").unwrap().visible = false;
+        host.insert_resource(layers);
+        let child = find_entity(&host, ElementId(2)).unwrap();
+        host.entity_mut(child)
+            .insert(LayerAssignment::new("Alternative"));
+        host.insert_resource(ObjectVisibility {
+            hidden: [ElementId(1)].into_iter().collect(),
+        });
+        SceneLightSnapshot {
+            element_id: ElementId(4),
+            node: SceneLightNode::default(),
+            translation: Vec3::Y * 30.,
+            rotation: Quat::IDENTITY,
+        }
+        .apply_to(&mut host);
+        let root_entity = find_entity(&host, root).unwrap();
+        host.get_mut::<GroupMembers>(root_entity)
+            .unwrap()
+            .member_ids
+            .push(ElementId(4));
+        execute_create_linked_model(&mut host, &json!({"group_id":root.0, "path":path})).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let records = deserialize_project_entity_records_with_assets(&original_bytes).unwrap();
+        assert!(records
+            .entities
+            .iter()
+            .all(|r| r.type_name != "scene_light"));
+        assert!(!records.layers.unwrap().layers["Alternative"].visible);
+        assert!(records.hidden_objects.contains(&ElementId(1)));
+        assert!(
+            find_entity(&host, ElementId(4)).is_some(),
+            "host environment is retained"
+        );
+        assert!(!group_members(&host, root)
+            .unwrap()
+            .member_ids
+            .contains(&ElementId(4)));
+
+        // Simulate a link cached by the old importer, with unchanged source bytes.
+        let mut legacy_hash = DefaultHasher::new();
+        original_bytes.hash(&mut legacy_hash);
+        host.get_mut::<GroupMembers>(root_entity)
+            .unwrap()
+            .linked_model
+            .as_mut()
+            .unwrap()
+            .content_hash = legacy_hash.finish();
+        assert!(refresh_linked_group(&mut host, root, false)
+            .unwrap()
+            .is_some());
+        assert!(refresh_linked_group(&mut host, root, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        let layer = &host.get::<LayerAssignment>(child).unwrap().layer;
+        assert!(layer.starts_with("Linked "));
+        assert!(!host.resource::<LayerRegistry>().layers[layer].visible);
+        assert!(host
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&ElementId(1)));
+        assert_eq!(host.query::<&SceneLightNode>().iter(&host).count(), 1);
+
+        // The exact same exported file also works when placed into another host.
+        let mut other = test_world();
+        let placed = placed_house(&mut other, &path);
+        let mapped = mapped_id(&other, placed, 2);
+        let layer = &other
+            .get::<LayerAssignment>(find_entity(&other, mapped).unwrap())
+            .unwrap()
+            .layer;
+        assert!(!other.resource::<LayerRegistry>().layers[layer].visible);
+        assert!(other
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&mapped_id(&other, placed, 1)));
+    }
+
+    #[test]
+    fn linked_import_preserves_source_visibility_without_environment_lights() {
+        use crate::plugins::{
+            layers::{LayerAssignment, LayerRegistry, ObjectVisibility},
+            lighting::{SceneLightFactory, SceneLightNode, SceneLightSnapshot},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.talos3d");
+        let mut source = test_world();
+        source
+            .resource_mut::<CapabilityRegistry>()
+            .register_factory(SceneLightFactory);
+        let source_root = spawn_house_group(&mut source);
+        let mut layers = LayerRegistry::default();
+        layers.ensure_layer("Alternative");
+        layers.layers.get_mut("Alternative").unwrap().visible = false;
+        source.insert_resource(layers);
+        let group = find_entity(&source, source_root).unwrap();
+        source.entity_mut(group).insert(LayerAssignment {
+            layer: "Alternative".into(),
+        });
+        source
+            .get_mut::<GroupMembers>(group)
+            .unwrap()
+            .member_ids
+            .push(ElementId(4));
+        let light = SceneLightSnapshot {
+            element_id: ElementId(4),
+            node: SceneLightNode::default(),
+            translation: Vec3::new(30., 40., 50.),
+            rotation: Quat::IDENTITY,
+        };
+        light.apply_to(&mut source);
+        source.insert_resource(ObjectVisibility {
+            hidden: [ElementId(2)].into_iter().collect(),
+        });
+        save_source(&mut source, &path);
+
+        let mut host = test_world();
+        host.resource_mut::<CapabilityRegistry>()
+            .register_factory(SceneLightFactory);
+        let host_light = SceneLightSnapshot {
+            element_id: ElementId(80),
+            ..light.clone()
+        };
+        host_light.apply_to(&mut host);
+        let mut host_layers = LayerRegistry::default();
+        host_layers.ensure_layer("Alternative");
+        host.insert_resource(host_layers);
+        let root = placed_house(&mut host, &path);
+        apply_pending_history_commands_for_test(&mut host);
+        let hidden_id = mapped_id(&host, root, 2);
+        let root_entity = find_entity(&host, root).unwrap();
+        let layer_name = host
+            .get::<LayerAssignment>(root_entity)
+            .unwrap()
+            .layer
+            .clone();
+        assert_ne!(layer_name, "Alternative");
+        assert!(!host.resource::<LayerRegistry>().layers[&layer_name].visible);
+        assert!(host.resource::<LayerRegistry>().layers["Alternative"].visible);
+        assert!(host
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&hidden_id));
+        assert!(!linked_model_relationship(&host, root)
+            .unwrap()
+            .source_to_scene_ids
+            .iter()
+            .any(|mapping| mapping.source_id == 4));
+        assert_eq!(host.query::<&SceneLightNode>().iter(&host).count(), 1);
+
+        host.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands_for_test(&mut host);
+        assert!(!host
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&hidden_id));
+        host.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands_for_test(&mut host);
+        assert!(host
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&hidden_id));
+        assert_eq!(
+            host.get::<LayerAssignment>(find_entity(&host, root).unwrap())
+                .unwrap()
+                .layer,
+            layer_name
+        );
+
+        // A refresh also removes environment content brought in by an older app.
+        let legacy = SceneLightSnapshot {
+            element_id: ElementId(500),
+            ..light
+        };
+        legacy.apply_to(&mut host);
+        let entity = find_entity(&host, root).unwrap();
+        let mut members = host.get_mut::<GroupMembers>(entity).unwrap();
+        members.member_ids.push(ElementId(500));
+        members
+            .linked_model
+            .as_mut()
+            .unwrap()
+            .source_to_scene_ids
+            .push(LinkedModelIdMapping {
+                source_id: ElementId(4),
+                scene_id: ElementId(500),
+            });
+        execute_refresh_linked_models(&mut host, &json!({"group_ids": [root.0], "force": true}))
+            .unwrap();
+        assert!(find_entity(&host, ElementId(500)).is_none());
+        assert!(find_entity(&host, ElementId(80)).is_some());
+        assert_eq!(host.query::<&SceneLightNode>().iter(&host).count(), 1);
+        assert!(!group_members(&host, root)
+            .unwrap()
+            .member_ids
+            .contains(&ElementId(500)));
+        let saved = save_source(&mut host, &dir.path().join("placed.talos3d"));
+        let records = deserialize_project_entity_records_with_assets(&saved).unwrap();
+        assert!(!records.layers.unwrap().layers[&layer_name].visible);
+        assert!(records.hidden_objects.contains(&hidden_id));
+        assert!(records
+            .entities
+            .iter()
+            .filter_map(|r| r.semantic.as_ref())
+            .any(|s| s
+                .layer_assignment
+                .as_ref()
+                .is_some_and(|a| a.layer == layer_name)));
     }
 
     #[test]
@@ -3130,6 +3532,8 @@ mod tests {
         world
             .resource_mut::<PendingCommandQueue>()
             .push_command(Box::new(CreateLinkedModelInstanceHistoryCommand {
+                sidecars: vec![],
+                hidden: vec![],
                 snapshots,
                 instance_root_id: group,
             }));
