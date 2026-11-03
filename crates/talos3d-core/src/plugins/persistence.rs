@@ -1668,6 +1668,7 @@ pub(crate) fn deserialize_project_entity_records(
 }
 
 pub(crate) struct ProjectEntityRecords {
+    pub definitions: Option<DefinitionRegistry>,
     pub entities: Vec<PersistedEntityRecord>,
     pub materials: Option<MaterialRegistry>,
     pub textures: Option<TextureRegistry>,
@@ -1690,6 +1691,7 @@ pub(crate) fn deserialize_project_entity_records_with_assets(
         return Err("Linked-model import of retained foreign sources requires an asset migration; open this project normally to preserve its source context".into());
     }
     Ok(ProjectEntityRecords {
+        definitions: project.definitions,
         entities: project.entities,
         materials: project.materials,
         textures: project.textures,

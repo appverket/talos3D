@@ -1171,6 +1171,11 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
 
     fn capture_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity>;
 
+    /// Capture authored equality/history state without optional derived bounds.
+    fn capture_edit_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity> {
+        self.capture_snapshot(entity_ref, world)
+    }
+
     /// Lightweight display metadata. Geometry-heavy factories should override
     /// this so browsing labels never copies mesh buffers or computes bounds.
     fn display_label(&self, entity_ref: &EntityRef, world: &World) -> Option<String> {
@@ -1583,6 +1588,26 @@ impl CapabilityRegistry {
         let mut derived = None;
         for factory in &self.ordered_factories {
             let Some(snapshot) = factory.capture_snapshot(entity_ref, world) else {
+                continue;
+            };
+            match factory.capture_role(entity_ref, world) {
+                SnapshotCaptureRole::PrimaryAuthored => return Some(snapshot),
+                SnapshotCaptureRole::DerivedGeometry => {
+                    derived.get_or_insert(snapshot);
+                }
+            }
+        }
+        derived
+    }
+
+    pub fn capture_edit_snapshot(
+        &self,
+        entity_ref: &EntityRef,
+        world: &World,
+    ) -> Option<BoxedEntity> {
+        let mut derived = None;
+        for factory in &self.ordered_factories {
+            let Some(snapshot) = factory.capture_edit_snapshot(entity_ref, world) else {
                 continue;
             };
             match factory.capture_role(entity_ref, world) {

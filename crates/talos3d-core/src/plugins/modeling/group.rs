@@ -286,6 +286,10 @@ impl AuthoredEntity for GroupSnapshot {
         // Groups have no geometry preview
     }
 
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        crate::authored_entity::snapshot_fingerprint(self)
+    }
+
     fn box_clone(&self) -> BoxedEntity {
         self.clone().into()
     }
@@ -330,6 +334,25 @@ impl AuthoredEntityFactory for GroupFactory {
         let members = entity_ref.get::<GroupMembers>()?;
         let composite = entity_ref.get::<CompositeSolid>().cloned();
         let cached_bounds = compute_group_bounds_from_world(world, &members.member_ids);
+        Some(
+            GroupSnapshot {
+                element_id,
+                name: members.name.clone(),
+                member_ids: members.member_ids.clone(),
+                frame: members.frame,
+                composite,
+                linked_model: members.linked_model.clone(),
+                cached_bounds,
+            }
+            .into(),
+        )
+    }
+
+    fn capture_edit_snapshot(&self, entity_ref: &EntityRef, _world: &World) -> Option<BoxedEntity> {
+        let element_id = *entity_ref.get::<ElementId>()?;
+        let members = entity_ref.get::<GroupMembers>()?;
+        let composite = entity_ref.get::<CompositeSolid>().cloned();
+        let cached_bounds = None;
         Some(
             GroupSnapshot {
                 element_id,

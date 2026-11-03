@@ -138,6 +138,34 @@ pub struct ActiveTransformPreview {
     pub interaction: Option<(InteractionId, ModelRevision)>,
     pub display_value: Option<f32>,
     pub refusal: Option<String>,
+    #[doc(hidden)]
+    pub last_motion: Option<(TransformMotion, ModelRevision)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[doc(hidden)]
+pub enum TransformMotion {
+    Move(Vec3),
+    Rotate(Quat),
+    Scale(Vec3),
+}
+
+fn current_motion(world: &World) -> Option<TransformMotion> {
+    let state = world.resource::<TransformState>();
+    let numeric = state
+        .numeric_buffer
+        .as_deref()
+        .and_then(|v| v.parse::<f32>().ok());
+    let center = effective_pivot(state, world.resource::<PivotPoint>())?;
+    match state.mode {
+        TransformMode::Moving => move_delta(world, state, numeric).map(TransformMotion::Move),
+        TransformMode::Rotating => rotation_delta(world, state, center, numeric)
+            .map(|v| TransformMotion::Rotate(rotation_quat(state.axis, v))),
+        TransformMode::Scaling => {
+            scale_factor(world, state, center, numeric).map(TransformMotion::Scale)
+        }
+        TransformMode::Idle => None,
+    }
 }
 
 pub type TransformPreviewModifier = fn(&World, &TransformState, &mut Vec<BoxedEntity>);
@@ -207,6 +235,8 @@ pub struct TransformState {
     pub confirm_on_release: bool,
     /// When set, the transform activates as soon as the cursor enters the viewport.
     pub pending_mode: Option<TransformMode>,
+    /// Explicit grab anchor for an insertion gesture started from chrome.
+    pub pending_options: Option<TransformStartOptions>,
 }
 
 impl TransformState {
@@ -231,6 +261,7 @@ impl TransformState {
         self.pivot_override = None;
         self.confirm_on_release = false;
         self.pending_mode = None;
+        self.pending_options = None;
     }
 }
 
@@ -376,6 +407,7 @@ fn activate_pending_transform(world: &mut World) {
         }
         *world.resource_mut::<ActiveTransformPreview>() = ActiveTransformPreview::default();
         world.resource_mut::<TransformState>().clear();
+        crate::plugins::modeling::linked_model::finish_linked_placement_gesture(world, false);
         world.resource_mut::<StatusBarData>().hint.clear();
         world
             .resource_mut::<ButtonInput<KeyCode>>()
@@ -390,10 +422,38 @@ fn activate_pending_transform(world: &mut World) {
         return;
     }
 
+    // File-picker confirmation must not become placement confirmation. Wait
+    // for the native dialog's Enter/mouse press to be released before arming.
+    let keys = world.resource::<ButtonInput<KeyCode>>();
+    if keys.pressed(KeyCode::Enter)
+        || keys.pressed(KeyCode::NumpadEnter)
+        || world
+            .get_resource::<ButtonInput<MouseButton>>()
+            .is_some_and(|buttons| buttons.pressed(MouseButton::Left))
+    {
+        return;
+    }
+
+    if world
+        .get_resource::<crate::plugins::history::PendingCommandQueue>()
+        .is_some_and(|queue| !queue.is_empty())
+    {
+        return;
+    }
+
     // Try to activate — this succeeds once the cursor is over the viewport
     if current_transform_cursor(world).is_some() {
-        world.resource_mut::<TransformState>().pending_mode = None;
-        let _ = start_transform_mode(world, mode);
+        let options = world
+            .resource::<TransformState>()
+            .pending_options
+            .unwrap_or_default();
+        // Native insertion can still be queued for history this frame. Retain
+        // the gesture and anchor until its authored base is committed.
+        if start_transform_mode_with_options(world, mode, options).is_ok() {
+            let mut state = world.resource_mut::<TransformState>();
+            state.pending_mode = None;
+            state.pending_options = None;
+        }
     } else {
         // Show pending status
         let mode_label = match mode {
@@ -586,6 +646,23 @@ fn update_transform_preview(world: &mut World) {
         }
         return;
     }
+    // A stationary gesture (including a refused candidate) must not rebuild and
+    // serialize thousands of members every frame. Revision changes invalidate
+    // this cache; commit still checks the captured authored base independently.
+    if world.resource::<PushPullContext>().active_face.is_none() {
+        if let Some(motion) = current_motion(world) {
+            let key = (motion, world.resource::<History>().revision_token());
+            if world
+                .resource::<ActiveTransformPreview>()
+                .last_motion
+                .as_ref()
+                == Some(&key)
+            {
+                return;
+            }
+            world.resource_mut::<ActiveTransformPreview>().last_motion = Some(key);
+        }
+    }
     // Modifiers read authored data. Remove last frame's non-rigid presentation
     // before planning so a dependent never becomes its own next-frame base.
     if world.resource::<PushPullContext>().active_face.is_none() {
@@ -607,7 +684,19 @@ fn update_transform_preview(world: &mut World) {
     }
     world.resource_mut::<ActiveTransformPreview>().display_value = preview.display_value;
 
-    let live_snapshot_application = preview_requires_snapshot_application(&preview.after);
+    let before = &world.resource::<TransformState>().initial_snapshots;
+    let by_id = before
+        .iter()
+        .map(|(_, s)| (s.element_id(), s))
+        .collect::<HashMap<_, _>>();
+    let live_snapshot_application = preview_requires_snapshot_application(&preview.after)
+        || preview.after.iter().any(|after| {
+            after.type_name() != "group"
+                && !after.0.isolated_snapshot_preview()
+                && by_id.get(&after.element_id()).is_some_and(|before| {
+                    after.0.preview_transform_from(before.0.as_ref()).is_none()
+                })
+        });
     remember_preview_extra_originals(world, &preview.after);
     restore_live_snapshot_preview_on_transition(world, live_snapshot_application);
     {
@@ -665,7 +754,7 @@ fn update_transform_preview(world: &mut World) {
             .iter()
             .zip(preview.after.iter())
             .filter_map(|((entity, before), after)| {
-                let mut transform = after.preview_transform()?;
+                let mut transform = after.0.preview_transform_from(before.0.as_ref())?;
                 if is_scaling {
                     if let Some(scale) = preview_scale(before, after) {
                         transform = transform.with_scale(scale);
@@ -731,31 +820,52 @@ fn restore_captured_presentation(world: &mut World) -> Result<(), String> {
         .map(|s| (s.element_id(), s))
         .collect::<HashMap<_, _>>();
     let mut changed = current_revision != *base;
-    let current_snapshots =
-        capture_snapshot_index(world, originals.iter().map(BoxedEntity::element_id));
+    let mut mismatches = Vec::new();
+    let matching =
+        crate::plugins::authored_edit_plan::matching_snapshot_entities(world, &originals);
+    let current_snapshots = capture_snapshot_index(
+        world,
+        originals
+            .iter()
+            .map(BoxedEntity::element_id)
+            .filter(|id| !matching.contains_key(id)),
+    );
     for before in originals {
         let current_entry = current_snapshots.get(&before.element_id());
         let current = current_entry.map(|(_, snapshot)| snapshot);
-        if current == Some(&before) {
+        if matching.contains_key(&before.element_id()) || current == Some(&before) {
             if let (Some(entity), Some(transform)) = (
-                current_entry.map(|(entity, _)| *entity),
+                matching
+                    .get(&before.element_id())
+                    .copied()
+                    .or_else(|| current_entry.map(|(entity, _)| *entity)),
                 before.preview_transform(),
             ) {
                 world.entity_mut(entity).insert(transform);
             }
-        } else if active.live_snapshot_application
+        } else if (active.live_snapshot_application
+            || before.type_name() == "group"
+            || before.0.isolated_snapshot_preview())
             && current == after.get(&before.element_id()).copied()
         {
             before.apply_to(world);
         } else {
             changed = true;
+            mismatches.push(format!(
+                "{} ({})",
+                before.element_id().0,
+                before.type_name()
+            ));
         }
     }
     world
         .resource_mut::<ActiveTransformPreview>()
         .live_snapshot_application = false;
     if changed {
-        Err("The authored model changed during the gesture; preview again".into())
+        Err(format!(
+            "The authored model changed during the gesture; preview again. Changed: {}",
+            mismatches.join(", ")
+        ))
     } else {
         Ok(())
     }
@@ -897,9 +1007,11 @@ fn restore_live_snapshot_preview_on_transition(
 }
 
 fn preview_requires_snapshot_application(after: &[BoxedEntity]) -> bool {
-    after
-        .iter()
-        .any(|snapshot| snapshot.type_name() != "group" && snapshot.preview_transform().is_none())
+    after.iter().any(|snapshot| {
+        snapshot.type_name() != "group"
+            && !snapshot.0.isolated_snapshot_preview()
+            && snapshot.preview_transform().is_none()
+    })
 }
 
 fn apply_live_snapshot_preview(world: &mut World, after: &[BoxedEntity]) {
@@ -910,8 +1022,29 @@ fn apply_live_snapshot_preview(world: &mut World, after: &[BoxedEntity]) {
         .map(|(_, snapshot)| (snapshot.element_id(), snapshot.clone()))
         .collect::<HashMap<_, _>>();
 
+    let entities = world
+        .query::<(Entity, &ElementId)>()
+        .iter(world)
+        .map(|(entity, id)| (*id, entity))
+        .collect::<HashMap<_, _>>();
     for snapshot in after {
         let previous = before_by_id.get(&snapshot.element_id());
+        // Imported immutable meshes keep their GPU pose even when small hosted
+        // dependents require authored presentation. Both consume this same plan;
+        // never materialize every mesh just because a relation needs updating.
+        if snapshot
+            .0
+            .as_any()
+            .is::<crate::plugins::modeling::snapshots::TranslatedMeshSnapshot>()
+        {
+            if let (Some(previous), Some(entity)) = (previous, entities.get(&snapshot.element_id()))
+            {
+                if let Some(pose) = snapshot.0.preview_transform_from(previous.0.as_ref()) {
+                    world.entity_mut(*entity).insert(pose);
+                    continue;
+                }
+            }
+        }
         snapshot.apply_with_previous(world, previous);
     }
 }
@@ -1138,7 +1271,14 @@ fn confirm_captured_transform(world: &mut World) {
     } else {
         queue_captured_plan(world, plan.plan_id()).map_err(|e| e.to_string())
     };
+    if let Err(error) = &result {
+        warn!("Transform confirmation refused: {error}");
+        world.resource_mut::<StatusBarData>().hint = format!("Edit refused: {error}");
+        world.resource_mut::<ActiveTransformPreview>().last_motion = None;
+        return;
+    }
     restore_previews_and_clear_session(world, false);
+    crate::plugins::modeling::linked_model::finish_linked_placement_gesture(world, true);
     match result {
         Ok(()) => {
             if let Some(value) = active.display_value {
@@ -1259,6 +1399,7 @@ fn cancel_transform(world: &mut World) {
     }
 
     restore_previews_and_clear_session(world, was_push_pull);
+    crate::plugins::modeling::linked_model::finish_linked_placement_gesture(world, false);
 
     // After push/pull cancel, deselect the entity and stay in face edit mode
     deselect_all_after_push_pull(world, was_push_pull);
@@ -1461,12 +1602,26 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
                 })
             } else {
                 let delta = move_delta(world, &state, numeric_value)?;
+                let selected_ids = state
+                    .initial_snapshots
+                    .iter()
+                    .map(|(_, snapshot)| snapshot.element_id())
+                    .collect::<HashSet<_>>();
                 Some(TransformPreview {
                     draft: None,
                     after: state
                         .initial_snapshots
                         .iter()
-                        .map(|(_, snapshot)| translate_preview_snapshot(snapshot, delta))
+                        .map(|(_, snapshot)| {
+                            if snapshot
+                                .transform_parent()
+                                .is_some_and(|id| selected_ids.contains(&id))
+                            {
+                                snapshot.translate_with_parent(delta)
+                            } else {
+                                translate_preview_snapshot(snapshot, delta)
+                            }
+                        })
                         .collect(),
                     display_value: numeric_value.or_else(|| Some(delta.length())),
                 })
@@ -1684,7 +1839,13 @@ fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>)
         // Y-locked move driven by it is dead. Track the cursor against a camera-facing
         // vertical plane through the grab point instead, so dragging up/down lifts the
         // object 1:1 at the grab depth.
-        let cursor_y = vertical_axis_cursor_y(world, initial_cursor)?;
+        // Reuse the stationary inference hit (including terrain faces). Do not
+        // ray-cast the model again or discard its height when locking to Y.
+        let cursor_y = world
+            .get_resource::<SnapResult>()
+            .and_then(|snap| snap.target)
+            .map(|point| point.y)
+            .or_else(|| vertical_axis_cursor_y(world, initial_cursor))?;
         Vec3::new(0.0, cursor_y - initial_cursor.y, 0.0)
     } else {
         // Track the cursor on the plane parallel to the active drawing surface
@@ -2246,7 +2407,10 @@ fn push_snapshot_once(
     seen_ids: &mut HashSet<ElementId>,
 ) {
     if seen_ids.insert(snapshot.element_id()) {
-        out.push((entity, snapshot));
+        out.push((
+            entity,
+            crate::plugins::modeling::snapshots::share_mesh_snapshot(snapshot),
+        ));
     }
 }
 
@@ -2842,6 +3006,232 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_move_translates_children_with_their_selected_parent() {
+        let parent: BoxedEntity = TestRigidSnapshot {
+            element_id: ElementId(1),
+            ..Default::default()
+        }
+        .into();
+        let child: BoxedEntity = TestRigidSnapshot {
+            element_id: ElementId(2),
+            parent: Some(ElementId(1)),
+            ..Default::default()
+        }
+        .into();
+        let mut world = World::new();
+        world.init_resource::<PivotPoint>();
+        world.init_resource::<PushPullContext>();
+        world.insert_resource(SnapResult {
+            position: Some(Vec3::Y * 8.5),
+            target: Some(Vec3::Y * 8.5),
+            ..Default::default()
+        });
+        for (members, expected) in [
+            (vec![parent.clone(), child.clone()], true),
+            (vec![child.clone()], false),
+        ] {
+            world.insert_resource(TransformState {
+                mode: TransformMode::Moving,
+                axis: AxisConstraint::Y,
+                initial_cursor: Some(Vec3::ZERO),
+                initial_snapshots: members
+                    .into_iter()
+                    .map(|s| (Entity::PLACEHOLDER, s))
+                    .collect(),
+                ..Default::default()
+            });
+            let preview = compute_preview(&world).unwrap();
+            let child = preview
+                .after
+                .iter()
+                .find(|s| s.element_id() == ElementId(2))
+                .unwrap();
+            assert_eq!(
+                child
+                    .0
+                    .as_any()
+                    .downcast_ref::<TestRigidSnapshot>()
+                    .unwrap()
+                    .translated_with_parent,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn vertical_move_uses_surface_inference_without_changing_horizontal_position() {
+        let mut world = World::new();
+        world.insert_resource(SnapResult {
+            target: Some(Vec3::new(20.0, 8.5, -30.0)),
+            ..Default::default()
+        });
+        let state = TransformState {
+            mode: TransformMode::Moving,
+            axis: AxisConstraint::Y,
+            initial_cursor: Some(Vec3::new(2.0, 0.0, 3.0)),
+            ..Default::default()
+        };
+        assert_eq!(move_delta(&world, &state, None), Some(Vec3::Y * 8.5));
+        assert_eq!(move_delta(&world, &state, Some(9.0)), Some(Vec3::Y * 9.0));
+    }
+
+    #[test]
+    fn large_linked_mesh_move_presents_shared_plan_cancels_and_undoes() {
+        use crate::plugins::{
+            authored_edit_plan::capture_snapshot,
+            history::{
+                apply_pending_history_commands_for_test as drain, PendingCommandQueue,
+                SemanticEnforcement,
+            },
+            identity::ElementIdAllocator,
+            modeling::{
+                assembly::{RelationFactory, RelationSnapshot, SemanticRelation},
+                group::{GroupFactory, LinkedModelRef},
+                primitives::TriangleMesh,
+                snapshots::{TriangleMeshFactory, TriangleMeshSnapshot},
+            },
+        };
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(TriangleMeshFactory);
+        registry.register_factory(GroupFactory);
+        registry.register_factory(RelationFactory);
+        world.insert_resource(registry);
+        world.init_resource::<PivotPoint>();
+        world.init_resource::<PushPullContext>();
+        world.init_resource::<ActiveTransformPreview>();
+        world.init_resource::<History>();
+        world.init_resource::<AuthoredEditPlanRegistry>();
+        world.init_resource::<SnapResult>();
+        world.init_resource::<StatusBarData>();
+        world.init_resource::<InferenceEngine>();
+        world.init_resource::<PendingCommandQueue>();
+        world.init_resource::<SemanticEnforcement>();
+        world.init_resource::<ElementIdAllocator>();
+        #[cfg(feature = "perf-stats")]
+        world.init_resource::<PerfStats>();
+        world.insert_resource(CursorWorldPos {
+            raw: Some(Vec3::X * 2.),
+            ..Default::default()
+        });
+        let mesh: BoxedEntity = TriangleMeshSnapshot {
+            element_id: ElementId(2),
+            primitive: TriangleMesh {
+                vertices: (0..180_000)
+                    .map(|i| Vec3::new((i % 300) as f32 * 0.01, (i / 300) as f32 * 0.01, 0.))
+                    .collect(),
+                faces: (0..60_000).map(|i| [i * 3, i * 3 + 1, i * 3 + 2]).collect(),
+                normals: None,
+                name: Some("large imported mesh".into()),
+            },
+            layer: None,
+            material_assignment: None,
+            semantic_shadow: None,
+        }
+        .into();
+        mesh.apply_to(&mut world);
+        RelationSnapshot {
+            element_id: ElementId(3),
+            relation: SemanticRelation {
+                relation_type: "test_metadata".into(),
+                source: ElementId(2),
+                target: ElementId(2),
+                parameters: serde_json::Value::Null,
+            },
+        }
+        .apply_to(&mut world);
+        let group: BoxedEntity = GroupSnapshot {
+            element_id: ElementId(1),
+            name: "linked assembly".into(),
+            member_ids: vec![ElementId(2), ElementId(3)],
+            frame: GroupFrame::default(),
+            composite: None,
+            cached_bounds: None,
+            linked_model: Some(LinkedModelRef {
+                path: "fixture.talos3d".into(),
+                source_root_id: ElementId(1),
+                source_root_is_document: true,
+                source_to_scene_ids: vec![],
+                content_hash: 42,
+            }),
+        }
+        .into();
+        group.apply_to(&mut world);
+        let group_entity = find_entity_by_element_id_readonly(&world, ElementId(1)).unwrap();
+        let mesh_entity = find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap();
+        world.entity_mut(group_entity).insert(Selected);
+        let originals = collect_selected_snapshots(&mut world);
+        let start = |world: &mut World| {
+            world.insert_resource(TransformState {
+                mode: TransformMode::Moving,
+                axis: AxisConstraint::X,
+                initial_cursor: Some(Vec3::ZERO),
+                numeric_buffer: Some("2".into()),
+                initial_snapshots: originals.clone(),
+                ..Default::default()
+            })
+        };
+        start(&mut world);
+        update_transform_preview(&mut world);
+        let active = world.resource::<ActiveTransformPreview>();
+        assert!(active.refusal.is_none(), "{:?}", active.refusal);
+        assert!(
+            active.live_snapshot_application,
+            "metadata exercises mixed presentation"
+        );
+        let plan = active
+            .plan
+            .clone()
+            .expect("large selection must fit the registry");
+        assert_eq!(
+            world.get::<Transform>(mesh_entity).unwrap().translation,
+            Vec3::X * 2.
+        );
+        assert_eq!(
+            capture_snapshot(&world, ElementId(2)),
+            Some(mesh.clone()),
+            "GPU preview must not rewrite authored vertices"
+        );
+        update_transform_preview(&mut world);
+        assert!(
+            Arc::ptr_eq(
+                &plan,
+                world
+                    .resource::<ActiveTransformPreview>()
+                    .plan
+                    .as_ref()
+                    .unwrap()
+            ),
+            "stationary frames retain the candidate"
+        );
+        restore_previews_and_clear_session(&mut world, false);
+        assert_eq!(
+            *world.get::<Transform>(mesh_entity).unwrap(),
+            Transform::IDENTITY
+        );
+        assert_eq!(capture_snapshot(&world, ElementId(2)), Some(mesh.clone()));
+        start(&mut world);
+        update_transform_preview(&mut world);
+        let captured = world
+            .resource::<ActiveTransformPreview>()
+            .plan
+            .clone()
+            .unwrap();
+        confirm_captured_transform(&mut world);
+        drain(&mut world);
+        for after in captured.after_snapshots() {
+            assert_eq!(
+                capture_snapshot(&world, after.element_id()).as_ref(),
+                Some(after)
+            );
+        }
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        drain(&mut world);
+        assert_eq!(capture_snapshot(&world, ElementId(2)), Some(mesh));
+        assert_eq!(capture_snapshot(&world, ElementId(1)), Some(group));
+    }
+
+    #[test]
     fn transform_modifier_priority_runs_specialized_contract_first() {
         let mut world = World::new();
         world.insert_resource(ModifierOrder::default());
@@ -3240,6 +3630,18 @@ mod tests {
     #[derive(Clone)]
     struct TestRigidSnapshot {
         element_id: ElementId,
+        parent: Option<ElementId>,
+        translated_with_parent: bool,
+    }
+
+    impl Default for TestRigidSnapshot {
+        fn default() -> Self {
+            Self {
+                element_id: ElementId(0),
+                parent: None,
+                translated_with_parent: false,
+            }
+        }
     }
 
     impl AuthoredEntity for TestRigidSnapshot {
@@ -3265,6 +3667,16 @@ mod tests {
 
         fn translate_by(&self, _delta: Vec3) -> BoxedEntity {
             self.clone().into()
+        }
+
+        fn transform_parent(&self) -> Option<ElementId> {
+            self.parent
+        }
+
+        fn translate_with_parent(&self, _delta: Vec3) -> BoxedEntity {
+            let mut next = self.clone();
+            next.translated_with_parent = true;
+            next.into()
         }
 
         fn rotate_by(&self, _rotation: Quat) -> BoxedEntity {
@@ -3626,6 +4038,7 @@ mod tests {
     fn non_rigid_preview_member_forces_single_snapshot_application_path() {
         let rigid_before: BoxedEntity = TestRigidSnapshot {
             element_id: ElementId(1),
+            ..Default::default()
         }
         .into();
         let non_rigid_before: BoxedEntity = TestPreviewSnapshot {
@@ -3634,6 +4047,7 @@ mod tests {
         .into();
         let rigid_after: BoxedEntity = TestRigidSnapshot {
             element_id: ElementId(1),
+            ..Default::default()
         }
         .into();
         let non_rigid_after: BoxedEntity = TestPreviewSnapshot {
@@ -3671,6 +4085,7 @@ mod tests {
     fn leaving_live_snapshot_preview_restores_originals_before_rigid_preview() {
         let original_occurrence: BoxedEntity = TestRigidSnapshot {
             element_id: ElementId(1),
+            ..Default::default()
         }
         .into();
         let original_dependent: BoxedEntity = TestPreviewSnapshot {
@@ -3713,6 +4128,7 @@ mod tests {
         .into();
         let rigid: BoxedEntity = TestRigidSnapshot {
             element_id: ElementId(1),
+            ..Default::default()
         }
         .into();
 

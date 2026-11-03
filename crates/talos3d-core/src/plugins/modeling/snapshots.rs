@@ -368,6 +368,11 @@ impl AuthoredEntity for PolylineSnapshot {
         Some(Transform::IDENTITY)
     }
 
+    fn preview_transform_from(&self, before: &dyn AuthoredEntity) -> Option<Transform> {
+        let before = before.as_any().downcast_ref::<Self>()?;
+        translated_vertex_pose(&before.primitive.points, &self.primitive.points)
+    }
+
     fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
         draw_polyline_outline(gizmos, &self.primitive, color);
     }
@@ -376,12 +381,185 @@ impl AuthoredEntity for PolylineSnapshot {
         polyline_outline_line_count(&self.primitive)
     }
 
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        crate::authored_entity::snapshot_fingerprint(self)
+    }
+
     fn box_clone(&self) -> BoxedEntity {
         self.clone().into()
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        other.type_name() == self.type_name() && other.to_json() == self.to_json()
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| other == self)
+    }
+}
+
+/// Immutable geometry shared by before/after drag candidates. The offset is a
+/// captured authored edit, not another movement rule; materialization happens
+/// only on commit or explicit snapshot export.
+#[derive(Clone)]
+pub(crate) struct TranslatedMeshSnapshot {
+    source: std::sync::Arc<TriangleMeshSnapshot>,
+    source_hash: blake3::Hash,
+    source_bytes: usize,
+    offset: Vec3,
+    center: Vec3,
+    bounds: Option<EntityBounds>,
+}
+
+pub(crate) fn share_mesh_snapshot(snapshot: BoxedEntity) -> BoxedEntity {
+    let Some(mesh) = snapshot.0.as_any().downcast_ref::<TriangleMeshSnapshot>() else {
+        return snapshot;
+    };
+    let (source_hash, source_bytes) = mesh.plan_fingerprint().expect("native mesh serialization");
+    let shared = TranslatedMeshSnapshot {
+        source: std::sync::Arc::new(mesh.clone()),
+        source_hash,
+        source_bytes,
+        offset: Vec3::ZERO,
+        center: mesh.center(),
+        bounds: mesh.bounds(),
+    };
+    BoxedEntity(Box::new(shared))
+}
+
+impl TranslatedMeshSnapshot {
+    fn materialize(&self) -> TriangleMeshSnapshot {
+        let mut snapshot = (*self.source).clone();
+        for vertex in &mut snapshot.primitive.vertices {
+            *vertex += self.offset;
+        }
+        snapshot
+    }
+    fn matches_native(&self, other: &TriangleMeshSnapshot) -> bool {
+        self.source.element_id == other.element_id
+            && self.source.layer == other.layer
+            && self.source.material_assignment == other.material_assignment
+            && self.source.semantic_shadow == other.semantic_shadow
+            && self.source.primitive.faces == other.primitive.faces
+            && self.source.primitive.normals == other.primitive.normals
+            && self.source.primitive.name == other.primitive.name
+            && self.source.primitive.vertices.len() == other.primitive.vertices.len()
+            && self
+                .source
+                .primitive
+                .vertices
+                .iter()
+                .zip(&other.primitive.vertices)
+                .all(|(a, b)| *a + self.offset == *b)
+    }
+}
+
+impl AuthoredEntity for TranslatedMeshSnapshot {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn type_name(&self) -> &'static str {
+        "triangle_mesh"
+    }
+    fn element_id(&self) -> ElementId {
+        self.source.element_id
+    }
+    fn label(&self) -> String {
+        self.source.label()
+    }
+    fn center(&self) -> Vec3 {
+        self.center + self.offset
+    }
+    fn bounds(&self) -> Option<EntityBounds> {
+        self.bounds.map(|b| EntityBounds {
+            min: b.min + self.offset,
+            max: b.max + self.offset,
+        })
+    }
+    fn translate_by(&self, delta: Vec3) -> BoxedEntity {
+        let mut next = self.clone();
+        next.offset += delta;
+        BoxedEntity(Box::new(next))
+    }
+    fn rotate_by(&self, rotation: Quat) -> BoxedEntity {
+        self.materialize().rotate_by(rotation)
+    }
+    fn scale_by(&self, factor: Vec3, center: Vec3) -> BoxedEntity {
+        self.materialize().scale_by(factor, center)
+    }
+    fn property_fields(&self) -> Vec<PropertyFieldDef> {
+        self.source.property_fields()
+    }
+    fn set_property_json(&self, name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        self.materialize().set_property_json(name, value)
+    }
+    fn handles(&self) -> Vec<HandleInfo> {
+        Vec::new()
+    }
+    fn to_json(&self) -> Value {
+        self.materialize().to_json()
+    }
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        crate::authored_entity::snapshot_fingerprint(&(self.source_hash.as_bytes(), self.offset))
+    }
+    fn plan_retained_assets(&self) -> Vec<(blake3::Hash, usize)> {
+        vec![(self.source_hash, self.source_bytes)]
+    }
+    fn apply_to(&self, world: &mut World) {
+        self.materialize().apply_to(world);
+    }
+    fn remove_from(&self, world: &mut World) {
+        self.source.remove_from(world);
+    }
+    fn preview_transform(&self) -> Option<Transform> {
+        Some(Transform::from_translation(self.offset))
+    }
+    fn preview_transform_from(&self, before: &dyn AuthoredEntity) -> Option<Transform> {
+        if let Some(before) = before.as_any().downcast_ref::<Self>() {
+            if self.source_hash == before.source_hash {
+                return Some(Transform::from_translation(self.offset - before.offset));
+            }
+        }
+        let before = before.as_any().downcast_ref::<TriangleMeshSnapshot>()?;
+        self.source
+            .eq_snapshot(before)
+            .then(|| Transform::from_translation(self.offset))
+    }
+    fn matches_entity(&self, entity: &EntityRef, _world: &World) -> Option<bool> {
+        let Some(mesh) = entity.get::<TriangleMesh>() else {
+            return Some(false);
+        };
+        Some(
+            entity.get::<ElementId>() == Some(&self.source.element_id)
+                && entity.get::<LayerAssignment>().map(|v| &v.layer) == self.source.layer.as_ref()
+                && entity.get::<MaterialAssignment>() == self.source.material_assignment.as_ref()
+                && entity.get::<SemanticShadow>() == self.source.semantic_shadow.as_ref()
+                && mesh.faces == self.source.primitive.faces
+                && mesh.normals == self.source.primitive.normals
+                && mesh.name == self.source.primitive.name
+                && mesh.vertices.len() == self.source.primitive.vertices.len()
+                && mesh
+                    .vertices
+                    .iter()
+                    .zip(&self.source.primitive.vertices)
+                    .all(|(b, a)| *a + self.offset == *b),
+        )
+    }
+    fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) { /* GPU mesh supplies the preview. */
+    }
+    fn box_clone(&self) -> BoxedEntity {
+        BoxedEntity(Box::new(self.clone()))
+    }
+    fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
+        if let Some(other) = other.as_any().downcast_ref::<Self>() {
+            if self.source_hash == other.source_hash {
+                return self.offset == other.offset;
+            }
+            return self.matches_native(&other.materialize());
+        }
+        other
+            .as_any()
+            .downcast_ref::<TriangleMeshSnapshot>()
+            .is_some_and(|other| self.matches_native(other))
     }
 }
 
@@ -639,6 +817,11 @@ impl AuthoredEntity for TriangleMeshSnapshot {
         Some(Transform::IDENTITY)
     }
 
+    fn preview_transform_from(&self, before: &dyn AuthoredEntity) -> Option<Transform> {
+        let before = before.as_any().downcast_ref::<Self>()?;
+        translated_vertex_pose(&before.primitive.vertices, &self.primitive.vertices)
+    }
+
     fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
         draw_triangle_mesh_outline(gizmos, &self.primitive, color);
     }
@@ -647,12 +830,22 @@ impl AuthoredEntity for TriangleMeshSnapshot {
         triangle_mesh_outline_line_count(&self.primitive)
     }
 
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        crate::authored_entity::snapshot_fingerprint(self)
+    }
+
     fn box_clone(&self) -> BoxedEntity {
         self.clone().into()
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        other.type_name() == self.type_name() && other.to_json() == self.to_json()
+        if let Some(other) = other.as_any().downcast_ref::<TranslatedMeshSnapshot>() {
+            return other.matches_native(self);
+        }
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| other == self)
     }
 }
 
@@ -1543,12 +1736,19 @@ impl AuthoredEntity for EditableMeshSnapshot {
         self.mesh.edge_count()
     }
 
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        crate::authored_entity::snapshot_fingerprint(self)
+    }
+
     fn box_clone(&self) -> BoxedEntity {
         self.clone().into()
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        other.type_name() == self.type_name() && other.to_json() == self.to_json()
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| other == self)
     }
 }
 
@@ -2288,4 +2488,18 @@ mod tests {
         let entity_ref = world.entity(entity);
         assert!(entity_ref.contains::<NeedsMesh>());
     }
+}
+
+// Derive presentation from the shared plan's authored vertex correspondence,
+// never from pointer motion (semantic modifiers may change that motion).
+fn translated_vertex_pose(before: &[Vec3], after: &[Vec3]) -> Option<Transform> {
+    if before.len() != after.len() {
+        return None;
+    }
+    let delta = *after.first()? - *before.first()?;
+    before
+        .iter()
+        .zip(after)
+        .all(|(a, b)| (*a + delta).abs_diff_eq(*b, 1e-4))
+        .then(|| Transform::from_translation(delta))
 }

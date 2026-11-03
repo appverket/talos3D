@@ -17,10 +17,11 @@ use crate::{
         command_registry::CommandResult,
         commands::{snapshot_dependency_order, ApplyEntityChangesCommand, CreateEntityCommand},
         document_state::DocumentState,
-        history::{EditorCommand, PendingCommandQueue},
+        history::{EditorCommand, History, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         materials::{ensure_builtin_materials, MaterialRegistry, TextureRegistry},
         modeling::{
+            definition::DefinitionRegistry,
             dependency_graph::stamp_authored_entity_dependencies,
             group::{
                 collect_group_members_recursive, compose_snapshot_into_frame,
@@ -37,7 +38,9 @@ use crate::{
         },
         selection::Selected,
         storage::Storage,
-        transform::{apply_transform_plan_modifiers, TransformMode},
+        transform::{
+            apply_transform_plan_modifiers, TransformMode, TransformStartOptions, TransformState,
+        },
     },
 };
 
@@ -520,6 +523,22 @@ pub fn plan_linked_model_placement(
     })
 }
 
+/// A native file insertion stays cancellable while its shared Move gesture is active.
+#[derive(Resource)]
+struct LinkedPlacementGesture {
+    creation_revision: u64,
+}
+
+pub(crate) fn finish_linked_placement_gesture(world: &mut World, commit: bool) {
+    let Some(gesture) = world.remove_resource::<LinkedPlacementGesture>() else {
+        return;
+    };
+    if !commit && world.resource::<History>().model_revision() == gesture.creation_revision {
+        // Only undo our own just-created instance. Never undo a later external edit.
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+    }
+}
+
 struct CreateLinkedModelInstanceHistoryCommand {
     snapshots: Vec<BoxedEntity>,
     instance_root_id: ElementId,
@@ -721,7 +740,7 @@ pub fn execute_place_linked_model(
     let key = path.to_string_lossy().into_owned();
     let bytes = world.resource::<Storage>().0.load(&key)?;
     let hash = content_hash(&bytes);
-    let mut linked_project = load_linked_project(world, &bytes)?;
+    let mut linked_project = load_linked_project(world, &bytes, &key)?;
     let default_name = path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -1063,7 +1082,23 @@ fn request_linked_model_file(world: &mut World, params: &Value) -> Result<Comman
         move |world, path| {
             if let Some(path) = path {
                 params["path"] = Value::String(path.to_string_lossy().into_owned());
-                if let Err(error) = execute_place_linked_model(world, &params) {
+                let creation_revision = world.resource::<History>().model_revision() + 1;
+                if let Err(error) = execute_place_linked_model(world, &params).map(|result| {
+                    if let Some(root_id) = result
+                        .output
+                        .as_ref()
+                        .and_then(|value| value["root_group_id"].as_u64())
+                    {
+                        world.insert_resource(LinkedPlacementGesture { creation_revision });
+                        let anchor = current_group_frame(world, ElementId(root_id)).translation;
+                        let mut state = world.resource_mut::<TransformState>();
+                        state.pending_mode = Some(TransformMode::Moving);
+                        state.pending_options = Some(TransformStartOptions {
+                            initial_cursor: Some(anchor),
+                            ..Default::default()
+                        });
+                    }
+                }) {
                     if let Some(mut status) =
                         world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
                     {
@@ -1338,7 +1373,7 @@ fn refresh_linked_group(
     if !force && hash == linked.content_hash {
         return Ok(None);
     }
-    let mut linked_project = load_linked_project(world, &bytes)?;
+    let mut linked_project = load_linked_project(world, &bytes, &linked.path)?;
     if linked.source_root_is_document {
         append_document_root(&mut linked_project, linked.source_root_id, "Linked Model")?;
     }
@@ -1346,15 +1381,48 @@ fn refresh_linked_group(
     Ok(Some(hash))
 }
 
-fn load_linked_project(world: &World, bytes: &[u8]) -> Result<LinkedProject, String> {
+fn load_linked_project(
+    world: &World,
+    bytes: &[u8],
+    source_path: &str,
+) -> Result<LinkedProject, String> {
     let ProjectEntityRecords {
         entities: records,
         materials,
         textures,
+        definitions,
     } = deserialize_project_entity_records_with_assets(bytes)?;
+    // Source-scoped identities keep host definitions and separate linked files
+    // independent, while remaining stable across refresh and save/reload.
+    let namespace = blake3::hash(source_path.as_bytes()).to_hex();
+    let definition_ids = definitions
+        .as_ref()
+        .map(|registry| {
+            registry
+                .list()
+                .into_iter()
+                .map(|definition| {
+                    (
+                        definition.id.0.clone(),
+                        format!("linked-{}-{}", &namespace[..16], definition.id.0),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut imported_definitions = DefinitionRegistry::default();
+    if let Some(definitions) = definitions {
+        for definition in definitions.list() {
+            let mut value = serde_json::to_value(definition).map_err(|error| error.to_string())?;
+            remap_definition_ids(&mut value, &definition_ids);
+            imported_definitions
+                .insert(serde_json::from_value(value).map_err(|error| error.to_string())?);
+        }
+    }
     let registry = world.resource::<CapabilityRegistry>();
     let mut snapshots = Vec::with_capacity(records.len());
-    for record in records {
+    for mut record in records {
+        remap_definition_ids(&mut record.data, &definition_ids);
         let factory = registry
             .factory_for(&record.type_name)
             .ok_or_else(|| format!("No factory registered for '{}'", record.type_name))?;
@@ -1365,10 +1433,33 @@ fn load_linked_project(world: &World, bytes: &[u8]) -> Result<LinkedProject, Str
         snapshots,
         materials,
         textures,
+        definitions: imported_definitions,
     })
 }
 
+fn remap_definition_ids(value: &mut Value, ids: &HashMap<String, String>) {
+    match value {
+        Value::String(id) => {
+            if let Some(mapped) = ids.get(id) {
+                *id = mapped.clone();
+            }
+        }
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| remap_definition_ids(value, ids)),
+        Value::Object(values) => {
+            let original = std::mem::take(values);
+            for (key, mut value) in original {
+                remap_definition_ids(&mut value, ids);
+                values.insert(ids.get(&key).cloned().unwrap_or(key), value);
+            }
+        }
+        _ => {}
+    }
+}
+
 struct LinkedProject {
+    definitions: DefinitionRegistry,
     snapshots: Vec<BoxedEntity>,
     materials: Option<MaterialRegistry>,
     textures: Option<TextureRegistry>,
@@ -1473,6 +1564,14 @@ fn apply_linked_snapshots(
     hash: u64,
     linked_project: LinkedProject,
 ) -> Result<(), String> {
+    if world.get_resource::<DefinitionRegistry>().is_none() {
+        world.insert_resource(DefinitionRegistry::default());
+    }
+    for definition in linked_project.definitions.list() {
+        world
+            .resource_mut::<DefinitionRegistry>()
+            .insert(definition.clone());
+    }
     merge_linked_project_assets(world, linked_project.materials, linked_project.textures);
     let snapshots = linked_project.snapshots;
     let root = snapshots
@@ -1712,10 +1811,18 @@ fn remap_element_ids_in_value(
 }
 
 fn is_element_id_key(key: &str) -> bool {
-    matches!(
-        key,
-        "element_id" | "source" | "target" | "source_root_id" | "source_id" | "scene_id"
-    )
+    key.ends_with("_element_id")
+        || matches!(
+            key,
+            "element_id"
+                | "source"
+                | "target"
+                | "source_root_id"
+                | "source_id"
+                | "scene_id"
+                | "host_ref"
+                | "hosted_fill_ref"
+        )
 }
 
 fn is_element_id_array_key(key: &str) -> bool {
@@ -2027,7 +2134,7 @@ mod tests {
 
         let host_path = temp.path().join("host.talos3d");
         let host_bytes = save_source(&mut host, &host_path);
-        let project = load_linked_project(&host, &host_bytes).unwrap();
+        let project = load_linked_project(&host, &host_bytes, "test-house.talos3d").unwrap();
         let mut restored = test_world();
         for snapshot in project.snapshots {
             snapshot.apply_to(&mut restored);
@@ -3010,6 +3117,78 @@ mod tests {
             .scene_id;
         assert!(members.member_ids.contains(&mapped));
         assert_ne!(mapped, ElementId(10));
+    }
+
+    #[test]
+    fn cancelling_native_placement_undoes_only_its_own_creation() {
+        let mut world = test_world();
+        let group = spawn_house_group(&mut world);
+        let snapshots = [ElementId(1), ElementId(2), group]
+            .into_iter()
+            .map(|id| capture_snapshot(&world, id).unwrap())
+            .collect();
+        world
+            .resource_mut::<PendingCommandQueue>()
+            .push_command(Box::new(CreateLinkedModelInstanceHistoryCommand {
+                snapshots,
+                instance_root_id: group,
+            }));
+        apply_pending_history_commands_for_test(&mut world);
+        let creation_revision = world.resource::<History>().model_revision();
+        world.insert_resource(LinkedPlacementGesture { creation_revision });
+        finish_linked_placement_gesture(&mut world, false);
+        apply_pending_history_commands_for_test(&mut world);
+        assert!(find_entity(&world, group).is_none());
+        assert!(find_entity(&world, ElementId(1)).is_none());
+        assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+    }
+
+    #[test]
+    fn linked_opening_and_fill_references_follow_the_instance_mapping() {
+        let mut data = json!({
+            "element_id": 3, "parent_wall_element_id": 2,
+            "opening_feature": { "host_ref": 2, "hosted_fill_ref": 4 },
+            "parameters": {"opening_element_id": 3, "host_element_id": 2},
+            "width": 2.0, "definition_id": "def-source"
+        });
+        let ids = [
+            (ElementId(2), ElementId(102)),
+            (ElementId(3), ElementId(103)),
+            (ElementId(4), ElementId(104)),
+        ]
+        .into_iter()
+        .collect();
+        remap_element_ids_in_value(&mut data, None, &ids);
+        assert_eq!(data["element_id"], 103);
+        assert_eq!(data["parent_wall_element_id"], 102);
+        assert_eq!(data["opening_feature"]["host_ref"], 102);
+        assert_eq!(data["opening_feature"]["hosted_fill_ref"], 104);
+        assert_eq!(data["parameters"]["opening_element_id"], 103);
+        assert_eq!(data["parameters"]["host_element_id"], 102);
+        assert_eq!(data["width"], 2.0);
+        assert_eq!(data["definition_id"], "def-source");
+    }
+
+    #[test]
+    fn linked_definition_scope_remaps_inheritance_occurrences_and_map_keys() {
+        let ids = [(
+            "def-source".to_string(),
+            "linked-site-def-source".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let mut data = json!({"id": "def-source", "base": "def-source",
+            "occurrences": [{"definition_id": "def-source"}],
+            "by_definition": {"def-source": "unchanged"}, "version": 2});
+        remap_definition_ids(&mut data, &ids);
+        assert_eq!(data["id"], "linked-site-def-source");
+        assert_eq!(data["base"], "linked-site-def-source");
+        assert_eq!(
+            data["occurrences"][0]["definition_id"],
+            "linked-site-def-source"
+        );
+        assert_eq!(data["by_definition"]["linked-site-def-source"], "unchanged");
+        assert_eq!(data["version"], 2);
     }
 
     #[test]

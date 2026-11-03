@@ -172,6 +172,10 @@ impl GuideLineSnapshot {
 }
 
 impl AuthoredEntity for GuideLineSnapshot {
+    fn isolated_snapshot_preview(&self) -> bool {
+        true
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

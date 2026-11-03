@@ -439,3 +439,17 @@ fn downgrade_preview_exposes_kernel_loss_manifest_with_planner_context() {
     assert_eq!(world.resource::<History>().revision_token(), base);
     assert_eq!(world.resource::<History>().undo_stack_len(), 0);
 }
+
+#[test]
+fn aggregate_memory_budget_evicts_old_plans_before_entry_count_limit() {
+    let world = world();
+    let first = candidate(&world, None, vec![], vec![snapshot(1, 1.)]);
+    let second = candidate(&world, None, vec![], vec![snapshot(1, 2.)]);
+    let mut registry = AuthoredEditPlanRegistry::with_limits(64, 4096);
+    registry.max_total_bytes = first.retained_bytes.max(second.retained_bytes);
+    let first = registry.publish(first).unwrap();
+    let second = registry.publish(second).unwrap();
+    assert!(registry.get(first.plan_id()).is_none());
+    assert!(registry.get(second.plan_id()).is_some());
+    assert_eq!(registry.plans.len(), 1);
+}

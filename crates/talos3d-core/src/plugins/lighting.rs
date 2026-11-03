@@ -201,6 +201,10 @@ impl SceneLightSnapshot {
 }
 
 impl AuthoredEntity for SceneLightSnapshot {
+    fn isolated_snapshot_preview(&self) -> bool {
+        true
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

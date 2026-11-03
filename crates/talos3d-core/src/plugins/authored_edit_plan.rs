@@ -217,10 +217,7 @@ impl AuthoredEditPlan {
             &plan.created_ids,
             plan.can_commit,
         )?;
-        let encoded = serde_json::to_vec(&plan.content())
-            .map_err(|e| PlanError::InvalidSnapshots(e.to_string()))?;
-        plan.retained_bytes = encoded.len();
-        plan.digest = blake3::hash(&encoded).to_hex().to_string();
+        plan.refresh_fingerprint()?;
         Ok(plan)
     }
 
@@ -236,16 +233,48 @@ impl AuthoredEditPlan {
         super::foreign_source::validate_changes(world, &changes)
             .map_err(PlanError::InvalidSnapshots)?;
         self.source_artifacts = changes;
-        let encoded = serde_json::to_vec(&self.content())
-            .map_err(|e| PlanError::InvalidSnapshots(e.to_string()))?;
-        self.retained_bytes = encoded.len()
+        self.refresh_fingerprint()?;
+        Ok(self)
+    }
+
+    fn refresh_fingerprint(&mut self) -> Result<(), PlanError> {
+        let mut hash = blake3::Hasher::new();
+        let metadata = serde_json::to_vec(&json!({
+            "format":"talos.edit_plan.fingerprint.v2", "base":self.base_model_revision,
+            "context":self.context, "intents":self.semantic_intents,
+            "changes":self.semantic_changes, "refusals":self.semantic_refusals,
+            "can_commit":self.can_commit,
+            "assets":self.source_artifacts.iter().map(|c|c.manifest()).collect::<Vec<_>>()
+        }))
+        .map_err(|e| PlanError::InvalidSnapshots(e.to_string()))?;
+        hash.update(&metadata);
+        let mut bytes = metadata.len();
+        let mut assets = BTreeMap::new();
+        for snapshots in [&self.before_snapshots, &self.after_snapshots] {
+            hash.update(&(snapshots.len() as u64).to_le_bytes());
+            for snapshot in snapshots {
+                let (fingerprint, size) = snapshot
+                    .0
+                    .plan_fingerprint()
+                    .map_err(PlanError::InvalidSnapshots)?;
+                hash.update(snapshot.type_name().as_bytes());
+                hash.update(&[0]);
+                hash.update(fingerprint.as_bytes());
+                bytes += size;
+                for (id, size) in snapshot.0.plan_retained_assets() {
+                    assets.insert(*id.as_bytes(), size);
+                }
+            }
+        }
+        self.retained_bytes = bytes
+            + assets.values().sum::<usize>()
             + self
                 .source_artifacts
                 .iter()
                 .map(|c| c.retained_bytes())
                 .sum::<usize>();
-        self.digest = blake3::hash(&encoded).to_hex().to_string();
-        Ok(self)
+        self.digest = hash.finalize().to_hex().to_string();
+        Ok(())
     }
 
     /// Normalized digest input. Snapshot application order remains captured in
@@ -280,12 +309,19 @@ impl AuthoredEditPlan {
         }
         // Also catch authored changes made by a legacy writer that did not yet
         // advance history. Presentation must restore its transient state first.
+        let matching = matching_snapshot_entities(world, &self.before_snapshots);
         let current = capture_snapshot_index(
             world,
-            self.before_snapshots.iter().map(BoxedEntity::element_id),
+            self.before_snapshots
+                .iter()
+                .map(BoxedEntity::element_id)
+                .filter(|id| !matching.contains_key(id)),
         );
+
         for snapshot in &self.before_snapshots {
-            if current.get(&snapshot.element_id()).map(|(_, s)| s) != Some(snapshot) {
+            if !matching.contains_key(&snapshot.element_id())
+                && current.get(&snapshot.element_id()).map(|(_, s)| s) != Some(snapshot)
+            {
                 return Some(refusal(
                     "The captured before-state no longer matches the model.",
                 ));
@@ -350,8 +386,31 @@ pub(crate) fn capture_snapshot_index(
         .filter(|(_, id)| wanted.contains(id))
         .filter_map(|(entity, id)| {
             registry
-                .capture_snapshot(&world.entity(entity), world)
+                .capture_edit_snapshot(&world.entity(entity), world)
                 .map(|snapshot| (*id, (entity, snapshot)))
+        })
+        .collect()
+}
+
+/// Compare shared large payloads directly against authored ECS components.
+/// Factories still capture other snapshots through their normal contract.
+pub(crate) fn matching_snapshot_entities(
+    world: &World,
+    snapshots: &[BoxedEntity],
+) -> BTreeMap<ElementId, Entity> {
+    let by_id = snapshots
+        .iter()
+        .map(|s| (s.element_id(), s))
+        .collect::<BTreeMap<_, _>>();
+    let Some(mut query) = world.try_query::<(Entity, &ElementId)>() else {
+        return BTreeMap::new();
+    };
+    query
+        .iter(world)
+        .filter_map(|(entity, id)| {
+            let snapshot = by_id.get(id)?;
+            (snapshot.0.matches_entity(&world.entity(entity), world) == Some(true))
+                .then_some((*id, entity))
         })
         .collect()
 }
@@ -360,6 +419,7 @@ struct Interaction {
     base: ModelRevision,
     active: Option<PlanId>,
     originals: BTreeMap<ElementId, BoxedEntity>,
+    original_bytes: usize,
 }
 
 /// At most one candidate per interaction; FIFO eviction bounds both standalone
@@ -372,10 +432,16 @@ pub struct AuthoredEditPlanRegistry {
     order: VecDeque<PlanId>,
     max_entries: usize,
     max_entry_bytes: usize,
+    max_total_bytes: usize,
 }
 impl Default for AuthoredEditPlanRegistry {
     fn default() -> Self {
-        Self::with_limits(64, 4 * 1024 * 1024)
+        // A single imported assembly may hold hundreds of MiB of immutable
+        // meshes. Shared assets count once per plan; total retention is bounded
+        // independently of the number of small candidates.
+        let mut registry = Self::with_limits(64, 512 * 1024 * 1024);
+        registry.max_total_bytes = 512 * 1024 * 1024;
+        registry
     }
 }
 impl AuthoredEditPlanRegistry {
@@ -386,6 +452,9 @@ impl AuthoredEditPlanRegistry {
             order: Default::default(),
             max_entries,
             max_entry_bytes,
+            max_total_bytes: max_entries
+                .saturating_mul(max_entry_bytes)
+                .saturating_mul(2),
         }
     }
     pub fn begin_interaction(&mut self, base: ModelRevision) -> Result<InteractionId, PlanError> {
@@ -410,6 +479,7 @@ impl AuthoredEditPlanRegistry {
                 base,
                 active: None,
                 originals: Default::default(),
+                original_bytes: 0,
             },
         );
         Ok(id)
@@ -432,30 +502,37 @@ impl AuthoredEditPlanRegistry {
             if interaction.base != plan.base_model_revision {
                 return Err(PlanError::Stale);
             }
-            let mut originals = interaction.originals.clone();
+            let mut additions = Vec::new();
+            let mut bytes = interaction.original_bytes;
             for snapshot in &plan.before_snapshots {
-                if originals
-                    .get(&snapshot.element_id())
-                    .is_some_and(|old| old != snapshot)
-                {
-                    return Err(PlanError::InvalidSnapshots(
-                        "interaction before-state changed".into(),
-                    ));
+                if let Some(old) = interaction.originals.get(&snapshot.element_id()) {
+                    if old != snapshot {
+                        return Err(PlanError::InvalidSnapshots(
+                            "interaction before-state changed".into(),
+                        ));
+                    }
+                } else {
+                    bytes += snapshot
+                        .0
+                        .plan_fingerprint()
+                        .map_err(PlanError::InvalidSnapshots)?
+                        .1;
+                    bytes += snapshot
+                        .0
+                        .plan_retained_assets()
+                        .iter()
+                        .map(|(_, size)| size)
+                        .sum::<usize>();
+                    additions.push((snapshot.element_id(), snapshot.clone()));
                 }
-                originals.insert(snapshot.element_id(), snapshot.clone());
             }
-            let bytes = serde_json::to_vec(
-                &originals
-                    .values()
-                    .map(BoxedEntity::to_json)
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(|e| PlanError::InvalidSnapshots(e.to_string()))?
-            .len();
-            if bytes > self.max_entry_bytes {
+            if bytes > self.max_entry_bytes
+                || bytes.saturating_add(plan.retained_bytes) > self.max_total_bytes
+            {
                 return Err(PlanError::Capacity);
             }
-            interaction.originals = originals;
+            interaction.originals.extend(additions);
+            interaction.original_bytes = bytes;
             if let Some(old) = interaction.active.replace(plan.plan_id.clone()) {
                 self.plans.remove(&old);
                 self.order.retain(|p| p != &old);
@@ -475,6 +552,24 @@ impl AuthoredEditPlanRegistry {
         let plan = Arc::new(plan);
         self.order.push_back(plan.plan_id.clone());
         self.plans.insert(plan.plan_id.clone(), plan.clone());
+        while self.plans.values().map(|p| p.retained_bytes).sum::<usize>()
+            + self
+                .interactions
+                .values()
+                .map(|i| i.original_bytes)
+                .sum::<usize>()
+            > self.max_total_bytes
+        {
+            let old = self.order.pop_front().ok_or(PlanError::Capacity)?;
+            if let Some(evicted) = self.plans.remove(&old) {
+                if let Some(id) = &evicted.interaction_id {
+                    self.interactions.remove(id);
+                }
+            }
+        }
+        if !self.plans.contains_key(plan.plan_id()) {
+            return Err(PlanError::Capacity);
+        }
         Ok(plan)
     }
     pub fn get(&self, id: &PlanId) -> Option<Arc<AuthoredEditPlan>> {

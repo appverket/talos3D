@@ -407,6 +407,26 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         Vec::new()
     }
     fn to_json(&self) -> Value;
+
+    /// Fingerprint immutable authored content without constructing a second JSON
+    /// geometry tree. Large native snapshots override this with typed serialization.
+    /// This is transient plan identity, not the persisted project representation.
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        snapshot_fingerprint(&self.to_json())
+    }
+    /// Immutable payloads shared by multiple snapshots, counted once per plan.
+    fn plan_retained_assets(&self) -> Vec<(blake3::Hash, usize)> {
+        Vec::new()
+    }
+    /// Optional direct authored comparison, avoiding capture/copy of large buffers.
+    fn matches_entity(
+        &self,
+        _entity: &bevy::ecs::world::EntityRef,
+        _world: &World,
+    ) -> Option<bool> {
+        None
+    }
+
     fn to_persisted_json(&self) -> Value {
         self.to_json()
     }
@@ -416,6 +436,18 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         self.apply_to(world);
     }
     fn remove_from(&self, world: &mut World);
+    /// GPU presentation of this captured after-state over the before-state's
+    /// existing mesh. World-space vertex snapshots need their relative pose.
+    fn preview_transform_from(&self, _before: &dyn AuthoredEntity) -> Option<Transform> {
+        self.preview_transform()
+    }
+
+    /// Small independent presentation metadata (e.g. guides/lights) may apply
+    /// its captured snapshot without forcing unrelated meshes off GPU previews.
+    fn isolated_snapshot_preview(&self) -> bool {
+        false
+    }
+
     fn preview_transform(&self) -> Option<Transform> {
         None
     }
@@ -618,4 +650,33 @@ impl BoxedEntity {
     pub fn cleanup_preview_entity(&self, world: &mut World, preview_entity: Entity) {
         self.0.cleanup_preview_entity(world, preview_entity);
     }
+}
+
+/// Stream a deterministic typed encoding into the plan hash and byte counter.
+/// In particular, never allocate a serde_json::Value for every mesh vertex.
+pub fn snapshot_fingerprint(
+    value: &impl serde::Serialize,
+) -> Result<(blake3::Hash, usize), String> {
+    struct Writer {
+        hash: blake3::Hasher,
+        bytes: usize,
+    }
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.hash.update(bytes);
+            self.bytes += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer {
+        hash: blake3::Hasher::new(),
+        bytes: 0,
+    };
+    value
+        .serialize(&mut rmp_serde::Serializer::new(&mut writer).with_struct_map())
+        .map_err(|error| error.to_string())?;
+    Ok((writer.hash.finalize(), writer.bytes))
 }

@@ -176,9 +176,17 @@ gets one instance container, retaining the source hierarchy inside it.
 that group to a new source file and links the existing group to it. Both paths
 use the same live-link lifecycle.
 
-The placed root can be moved or rotated independently, while
-its mapped contents remain owned by the external source file. Placing the model
-is one undoable operation.
+After selecting the file, the instance follows the cursor in the shared Move
+placement state, anchored at the source origin. Press **X**, **Y**, or **Z** to
+lock an axis, or **Shift** plus an axis key to constrain its perpendicular plane.
+Inference remains enabled; a **Y** lock can take its elevation from a terrain
+face while preserving the original horizontal position. Type a distance for
+precise movement, then press **Enter** or click to confirm. **Escape** cancels
+the insertion.
+
+The placed root can be moved or rotated independently, while its mapped
+contents remain owned by the external source file. Insertion and the confirmed
+placement move are separate undoable operations.
 
 Use **Open Linked Model** to edit the source document and **Refresh Linked
 Models** to pull source changes into existing instances. Refresh preserves each
