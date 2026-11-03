@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-11-03
-- branch: codex/chrome-polish
-- task-id: TALOS-tbuxqmjs
+- created: 2026-11-03T19:56:00Z
+- branch: codex/model-sharing
+- task-id: TALOS-rhflhfvo
 - target base: main
-- summary: Polish desktop menus, keyboard symbols and shared chrome presentation.
+- summary: Read-only model sharing and private desktop-to-web continuation
 - status: awaiting-merge

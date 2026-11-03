@@ -25,6 +25,8 @@ use crate::plugins::{
     ui::StatusBarData,
 };
 
+pub mod glb;
+
 pub struct ModelExportPlugin;
 
 impl Plugin for ModelExportPlugin {

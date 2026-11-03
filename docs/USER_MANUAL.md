@@ -213,3 +213,18 @@ Some interactions only appear when a capability is loaded. For example:
 
 This is intentional. Talos3D is a platform, and the active capability set
 defines the current workflow surface.
+
+
+## Publishing a view and continuing on another device
+
+Product editions may provide **File → Share model…** and **Continue on web**.
+Sharing publishes the visible model as a read-only snapshot with an expiry and
+revocable link. Later edits do not change that snapshot. Recipients can keep a
+copy of the delivered 3D view; revocation blocks new requests. Native project
+files and BIM sidecars are not included in the published view. The current view
+export preserves geometry and material base colors, excluding texture images.
+
+Continue on web saves and synchronizes the same private project before opening
+its signed-in browser editor. Resolve a sync conflict before continuing; pending
+offline work stays local if upload fails. Public Core remains usable without a
+hosted account; sharing/storage/account UI is supplied by the product adapter.

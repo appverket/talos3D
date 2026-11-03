@@ -40,6 +40,7 @@ fn shared_tool_definitions(world: &World) -> Vec<Value> {
 
 fn tool_definitions() -> Vec<Value> {
     vec![
+        json!({"name":"project_view_capture","description":"Capture a render-only GLB view and its native snapshot at one document revision. Does not publish or acknowledge storage.","inputSchema":object_schema([])}),
         json!({"name":"project_capture","description":"Capture the complete native project including Definition libraries, materials and BIM sidecars. Does not acknowledge storage.","inputSchema":object_schema([])}),
         json!({"name":"project_open","description":"Open complete native project bytes using the normal persistence loader.","inputSchema":{"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}}),
         json!({"name":"project_saved","description":"Acknowledge a durably stored snapshot; newer edits remain dirty.","inputSchema":{"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}}),
@@ -404,6 +405,14 @@ fn dispatch_tool(world: &mut World, tool_name: &str, args: Value) -> Result<Valu
         "project_status" => Ok(
             json!({"dirty":world.resource::<crate::plugins::document_state::DocumentState>().dirty,"revision":world.resource::<crate::plugins::history::History>().revision_token()}),
         ),
+        "project_view_capture" => {
+            use base64::Engine;
+            let bytes = crate::plugins::persistence::capture_project_bytes(world)?;
+            let glb = crate::plugins::model_export::glb::capture_view_glb(world)?;
+            Ok(
+                json!({"json":String::from_utf8(bytes).map_err(|e|e.to_string())?,"glb_base64":base64::engine::general_purpose::STANDARD.encode(glb),"revision":world.resource::<crate::plugins::history::History>().revision_token()}),
+            )
+        }
         "project_capture" => {
             let bytes = crate::plugins::persistence::capture_project_bytes(world)?;
             Ok(json!({"json":String::from_utf8(bytes).map_err(|e|e.to_string())?}))
