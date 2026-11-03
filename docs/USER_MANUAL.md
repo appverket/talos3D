@@ -223,6 +223,8 @@ revocable link. Later edits do not change that snapshot. Recipients can keep a
 copy of the delivered 3D view; revocation blocks new requests. Native project
 files and BIM sidecars are not included in the published view. The current view
 export preserves geometry and material base colors, excluding texture images.
+Turn off active section cuts before publishing; cut surfaces are not baked into
+this view format.
 
 Continue on web saves and synchronizes the same private project before opening
 its signed-in browser editor. Resolve a sync conflict before continuing; pending

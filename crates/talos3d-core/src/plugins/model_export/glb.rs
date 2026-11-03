@@ -29,6 +29,9 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
     {
         return Err("Finish the current edit before publishing a view".into());
     }
+    if !crate::plugins::vector_drawing::collect_active_clip_planes(world).is_empty() {
+        return Err("Turn off section cuts before publishing this model".into());
+    }
     let entries: Vec<_> = world
         .query::<(
             Entity,
@@ -304,5 +307,9 @@ mod tests {
         assert_eq!(doc["accessors"][0]["max"], json!([5., 3., 1.]));
         assert!(!String::from_utf8_lossy(&bytes).contains("element_"));
         assert_eq!(len % 4, 0);
+        world.spawn(crate::plugins::clipping_planes::ClipPlaneNode::at_y(2.));
+        assert!(capture_view_glb(&mut world)
+            .unwrap_err()
+            .contains("section cuts"));
     }
 }
