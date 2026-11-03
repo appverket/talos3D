@@ -447,21 +447,151 @@ mod menu_presentation_tests {
         assert_eq!(format_shortcut_for_platform("Ctrl/Cmd+S"), "Ctrl+S");
     }
 
-    #[test]
-    fn menu_shortcut_column_keeps_one_right_edge() {
-        let short_label_row =
-            egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(MENU_ROW_WIDTH, 24.0));
-        let long_label_row =
-            egui::Rect::from_min_size(egui::pos2(10.0, 60.0), egui::vec2(MENU_ROW_WIDTH, 24.0));
-        let short = menu_row_text_columns(short_label_row, 6.0, 18.0, true);
-        let long = menu_row_text_columns(long_label_row, 6.0, 52.0, true);
+    fn menu_frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Vec<egui::Response>) {
+        ctx.begin_pass(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        });
+        apply_chrome_visuals(ctx);
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let mut rows = Vec::new();
+        egui::Area::new(egui::Id::new("menu_test_anchor")).fixed_pos(egui::pos2(10.0, 10.0)).show(ctx, |ui| {
+            let anchor = ui.button("Menu");
+            egui::Popup::menu(&anchor).open(true).show(|ui| {
+                chrome_menu_style(ui.style_mut());
+                menu_section_heading(ui, "Section");
+                rows.push(menu_row_button_state(ui, true, None, "Plain command", Some("⌘S")));
+                rows.push(menu_row_button_state(ui, true, Some(true), "Toggle command", Some("⇧⌘S")));
+                menu_submenu(ui, "Cascade", |ui| { menu_row_button(ui, "Child command"); });
+                rows.push(menu_row_button_state(ui, false, None, "Disabled command", None));
+                rows.push(menu_row_button_state(ui, true, None,
+                    "An unusually long command label that must truncate before its keyboard shortcut", Some("⇧⌘O")));
+            });
+        });
+        (ctx.end_pass(), rows)
+    }
 
-        assert_eq!(short.shortcut_pos.x, long.shortcut_pos.x);
-        assert_eq!(short.shortcut_pos.x, short_label_row.right() - 6.0);
+    fn text_bounds(output: &egui::FullOutput, text: &str) -> egui::Rect {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(shape) if shape.galley.job.text == text => {
+                    Some(shape.galley.rect.translate(shape.pos.to_vec2()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing rendered text {text:?}"))
+    }
+
+    #[test]
+    fn menus_render_aligned_labels_shortcuts_and_complete_keyboard_symbols() {
+        for scale in [1.0, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(scale);
+            for _ in 0..3 {
+                menu_frame(&ctx, vec![]).0.drop_without_applying_deltas();
+            }
+            let (output, rows) = menu_frame(&ctx, vec![]);
+            let left = text_bounds(&output, "Plain command").left();
+            for label in ["Toggle command", "Cascade", "Disabled command", "Section"] {
+                assert!(
+                    (text_bounds(&output, label).left() - left).abs() <= 1.0,
+                    "{label} alignment at scale {scale}"
+                );
+            }
+            let right = text_bounds(&output, "⌘S").right();
+            assert!((text_bounds(&output, "⇧⌘S").right() - right).abs() <= 1.0);
+            assert!((text_bounds(&output, "⇧⌘O").right() - right).abs() <= 1.0);
+            assert!(!rows[2].enabled());
+            // Check actual egui font coverage, not merely the formatted strings.
+            ctx.fonts_mut(|fonts| {
+                for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                    // epaint 0.36 has_glyph gives false negatives for any
+                    // character on its replacement face. Query real charmaps.
+                    let mut font = fonts.fonts.font(&family);
+                    for symbol in "⌘⇧⌥⌃✓⏎⌫▣◈▫✎".chars() {
+                        assert!(
+                            font.characters().contains_key(&symbol),
+                            "missing {symbol} in {family:?}"
+                        );
+                    }
+                }
+            });
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn menu_rows_have_hover_feedback_keyboard_activation_and_disabled_input() {
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            menu_frame(&ctx, vec![]).0.drop_without_applying_deltas();
+        }
+        let (output, rows) = menu_frame(&ctx, vec![]);
+        let enabled_center = rows[0].rect.center();
+        let disabled_center = rows[2].rect.center();
+        let enabled_id = rows[0].id;
+        output.drop_without_applying_deltas();
+        for _ in 0..2 {
+            menu_frame(&ctx, vec![egui::Event::PointerMoved(enabled_center)])
+                .0
+                .drop_without_applying_deltas();
+        }
+        let (output, rows) = menu_frame(&ctx, vec![egui::Event::PointerMoved(enabled_center)]);
+        assert!(rows[0].hovered());
+        fn has_hover(shape: &egui::Shape, point: egui::Pos2) -> bool {
+            match shape {
+                egui::Shape::Rect(rect) => rect.fill == CHROME_HOVER && rect.rect.contains(point),
+                egui::Shape::Vec(shapes) => shapes.iter().any(|shape| has_hover(shape, point)),
+                _ => false,
+            }
+        }
         assert!(
-            long.label_clip_right < short.label_clip_right,
-            "a wider shortcut must clip the label column, never shift the shortcut"
+            output
+                .shapes
+                .iter()
+                .any(|shape| has_hover(&shape.shape, enabled_center)),
+            "native hover must paint feedback"
         );
+        output.drop_without_applying_deltas();
+        ctx.memory_mut(|memory| memory.request_focus(enabled_id));
+        let (output, rows) = menu_frame(
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(rows[0].clicked(), "focused command must accept Enter");
+        output.drop_without_applying_deltas();
+        for pressed in [true, false] {
+            let (output, rows) = menu_frame(
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(disabled_center),
+                    egui::Event::PointerButton {
+                        pos: disabled_center,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            assert!(!rows[2].enabled());
+            assert!(!rows[2].clicked(), "disabled command cannot activate");
+            output.drop_without_applying_deltas();
+        }
     }
 
     #[test]
@@ -1333,41 +1463,44 @@ fn draw_command_menu_button(
     }
 }
 
-/// Width of the leading gutter that holds a toggle's checkmark. Reserved on
-/// every row in a menu that contains any toggle, so labels stay aligned whether
-/// or not their own row is checked.
+/// Every menu row (commands, toggles and cascades) uses the same leading
+/// check column and native egui button. This keeps labels aligned and preserves
+/// hover/focus feedback, disabled semantics and keyboard/accessibility actions.
 const MENU_CHECK_GUTTER: f32 = 16.0;
-/// Stable row width gives every shortcut column the same right edge. Long
-/// labels are clipped before the shortcut gutter instead of moving the hint.
-const MENU_ROW_WIDTH: f32 = 320.0;
-const MENU_SHORTCUT_GAP: f32 = 24.0;
+const MENU_ROW_WIDTH: f32 = 260.0;
+const MENU_ROW_HEIGHT: f32 = 24.0;
+const MENU_SHORTCUT_GAP: f32 = 20.0;
 
-#[derive(Debug, Clone, Copy)]
-struct MenuRowTextColumns {
-    label_pos: egui::Pos2,
-    label_clip_right: f32,
-    shortcut_pos: egui::Pos2,
+fn chrome_menu_style(style: &mut egui::Style) {
+    egui::containers::menu::menu_style(style);
+    style.spacing.button_padding = egui::vec2(6.0, 3.0);
+    style.spacing.interact_size.y = MENU_ROW_HEIGHT;
+    style.spacing.item_spacing.y = 2.0;
 }
 
-fn menu_row_text_columns(
-    rect: egui::Rect,
-    horizontal_padding: f32,
-    shortcut_width: f32,
-    has_shortcut: bool,
-) -> MenuRowTextColumns {
-    let label_pos = egui::pos2(
-        rect.left() + horizontal_padding + MENU_CHECK_GUTTER,
-        rect.center().y,
-    );
-    let label_clip_right = rect.right()
-        - horizontal_padding
-        - shortcut_width
-        - if has_shortcut { MENU_SHORTCUT_GAP } else { 0.0 };
-    MenuRowTextColumns {
-        label_pos,
-        label_clip_right: label_clip_right.max(label_pos.x),
-        shortcut_pos: egui::pos2(rect.right() - horizontal_padding, rect.center().y),
-    }
+fn chrome_menu_button<'a>(label: &'a str, checked: bool) -> egui::Button<'a> {
+    use egui::AtomExt as _;
+    let check = (if checked { "✓" } else { "" }).atom_size(egui::vec2(MENU_CHECK_GUTTER, 16.0));
+    egui::Button::new((check, label.atom_shrink(true)))
+        .gap(0.0)
+        .min_size(egui::vec2(MENU_ROW_WIDTH, MENU_ROW_HEIGHT))
+        .truncate()
+}
+
+fn menu_submenu<R>(ui: &mut egui::Ui, label: &str, contents: impl FnOnce(&mut egui::Ui) -> R) {
+    egui::containers::menu::SubMenuButton::from_button(
+        chrome_menu_button(label, false)
+            .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
+    )
+    .ui(ui, contents);
+}
+
+fn menu_section_heading(ui: &mut egui::Ui, label: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(ui.spacing().button_padding.x + MENU_CHECK_GUTTER);
+        ui.label(egui::RichText::new(label).small().color(CHROME_MUTED));
+    });
 }
 
 fn menu_row_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Response {
@@ -1392,8 +1525,6 @@ fn menu_row_button_with_shortcut(
     menu_row_button_state(ui, enabled, None, label, shortcut)
 }
 
-/// Draw one menu row. `toggle_state` is `Some` only for commands that flip a
-/// mode; `Some(true)` draws the checkmark that tells the user the mode is on.
 fn menu_row_button_state(
     ui: &mut egui::Ui,
     enabled: bool,
@@ -1401,67 +1532,25 @@ fn menu_row_button_state(
     label: &str,
     shortcut: Option<&str>,
 ) -> egui::Response {
-    let row_height = ui.spacing().interact_size.y;
-    let font_id = egui::TextStyle::Button.resolve(ui.style());
-    let desired_size = egui::vec2(MENU_ROW_WIDTH, row_height);
-    let sense = if enabled {
-        egui::Sense::click()
-    } else {
-        egui::Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(desired_size, sense);
-
-    if ui.is_rect_visible(rect) {
-        let text_color = if enabled {
-            ui.visuals().widgets.inactive.text_color()
-        } else {
-            ui.visuals().weak_text_color()
-        };
-        if toggle_state == Some(true) {
-            ui.painter().text(
-                egui::pos2(rect.left() + ui.spacing().button_padding.x, rect.center().y),
-                egui::Align2::LEFT_CENTER,
-                "✓",
-                font_id.clone(),
-                ui.visuals().strong_text_color(),
-            );
-        }
-        let shortcut_width = shortcut
-            .map(|text| {
-                ui.painter()
-                    .layout_no_wrap(text.to_string(), font_id.clone(), text_color)
-                    .size()
-                    .x
-            })
-            .unwrap_or(0.0);
-        let columns = menu_row_text_columns(
-            rect,
-            ui.spacing().button_padding.x,
-            shortcut_width,
-            shortcut.is_some(),
-        );
-        let label_clip = egui::Rect::from_min_max(
-            rect.left_top(),
-            egui::pos2(columns.label_clip_right, rect.bottom()),
-        );
-        ui.painter().with_clip_rect(label_clip).text(
-            columns.label_pos,
-            egui::Align2::LEFT_CENTER,
-            label,
-            font_id.clone(),
-            text_color,
-        );
-        if let Some(shortcut) = shortcut {
-            ui.painter().text(
-                columns.shortcut_pos,
-                egui::Align2::RIGHT_CENTER,
-                shortcut,
-                font_id,
-                text_color,
-            );
-        }
+    use egui::AtomExt as _;
+    let mut button = chrome_menu_button(label, toggle_state == Some(true));
+    if let Some(shortcut) = shortcut {
+        button = button.shortcut_text((
+            egui::Atom::default().atom_size(egui::vec2(MENU_SHORTCUT_GAP, 0.0)),
+            shortcut,
+        ));
     }
-
+    let response = ui.add_enabled(enabled, button);
+    if let Some(checked) = toggle_state {
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                enabled && ui.is_enabled(),
+                checked,
+                label,
+            )
+        });
+    }
     response
 }
 
@@ -1541,9 +1630,9 @@ fn draw_document_history_menus(
     status_bar_data: &mut StatusBarData,
     hovered_menu_hint: &mut Option<String>,
 ) {
-    ui.menu_button("Open Recent", |ui| {
+    menu_submenu(ui, "Open Recent", |ui| {
         if recent_files.paths().is_empty() {
-            ui.add_enabled(false, egui::Button::new("No recent projects"));
+            menu_row_button_enabled(ui, false, "No recent projects");
         }
         for path in recent_files.paths() {
             let response =
@@ -1564,9 +1653,9 @@ fn draw_document_history_menus(
         }
     });
 
-    ui.menu_button("Recover Autosave", |ui| {
+    menu_submenu(ui, "Recover Autosave", |ui| {
         if recovery_files.files().is_empty() {
-            ui.add_enabled(false, egui::Button::new("No recovery files"));
+            menu_row_button_enabled(ui, false, "No recovery files");
         }
         for recovery in recovery_files.files() {
             let source = recovery
@@ -1672,12 +1761,7 @@ fn draw_command_submenu(
     rendered_ids.extend(descriptors.iter().map(|descriptor| descriptor.id.clone()));
 
     if should_render_inline_menu_group(label, descriptors.len()) {
-        ui.label(
-            egui::RichText::new(label)
-                .small()
-                .weak()
-                .color(CHROME_MUTED),
-        );
+        menu_section_heading(ui, label);
         for descriptor in &descriptors {
             draw_command_menu_button(
                 ui,
@@ -1691,7 +1775,7 @@ fn draw_command_submenu(
         }
         Some(MenuGroupRenderKind::Inline)
     } else {
-        ui.menu_button(label, |ui| {
+        menu_submenu(ui, label, |ui| {
             for descriptor in &descriptors {
                 draw_command_menu_button(
                     ui,
@@ -1720,7 +1804,7 @@ fn draw_view_workspace_submenu(
     toolbar_layout_state: &mut ToolbarLayoutState,
     doc_props: &mut DocumentProperties,
 ) {
-    ui.menu_button("Workspace", |ui| {
+    menu_submenu(ui, "Workspace", |ui| {
         let assistant =
             menu_row_button(ui, "Assistant...").on_hover_text("Open the assistant side panel");
         if assistant.contains_pointer() {
@@ -1774,7 +1858,7 @@ fn draw_view_workspace_submenu(
         }
 
         ui.separator();
-        ui.menu_button("Toolbars", |ui| {
+        menu_submenu(ui, "Toolbars", |ui| {
             draw_toolbar_visibility_menu(ui, toolbar_registry, toolbar_layout_state, doc_props);
         });
     });
@@ -1885,6 +1969,13 @@ fn draw_category_menu_contents(
     let mut rendered_ids = HashSet::new();
     let mut previous_kind: Option<MenuGroupRenderKind> = None;
     for group in groups {
+        if !group
+            .command_ids
+            .iter()
+            .any(|id| category_commands.iter().any(|command| command.id == *id))
+        {
+            continue;
+        }
         // Inline sections are visually denser than a submenu row; place a
         // separator between adjacent sections whenever at least one side is
         // inline. Adjacent submenu-only neighbours (the legacy case) keep
@@ -1919,7 +2010,17 @@ fn draw_category_menu_contents(
     // commands land in a named submenu of its own choosing rather than in "More".
     for group in menu_groups.groups_for(category) {
         let command_ids: Vec<&str> = group.command_ids.iter().map(String::as_str).collect();
-        if draw_command_submenu(
+        let has_commands = command_ids
+            .iter()
+            .any(|id| category_commands.iter().any(|command| command.id == *id));
+        if has_commands
+            && (previous_kind == Some(MenuGroupRenderKind::Inline)
+                || (previous_kind.is_some()
+                    && group_will_render_inline(&group.label, &command_ids, category_commands)))
+        {
+            ui.separator();
+        }
+        if let Some(kind) = draw_command_submenu(
             ui,
             &group.label,
             &command_ids,
@@ -1930,11 +2031,8 @@ fn draw_category_menu_contents(
             hovered_menu_hint,
             toggle_states,
             &mut rendered_ids,
-        )
-        .is_some()
-        {
-            // Contributed groups render last, so nothing downstream reads
-            // `previous_kind` again; each already emits its own submenu frame.
+        ) {
+            previous_kind = Some(kind);
         }
     }
 
@@ -1979,7 +2077,7 @@ fn draw_category_menu_contents(
         .filter(|descriptor| !rendered_ids.contains(&descriptor.id))
         .collect();
     if !leftovers.is_empty() {
-        ui.menu_button("More", |ui| {
+        menu_submenu(ui, "More", |ui| {
             for descriptor in leftovers {
                 draw_command_menu_button(
                     ui,
@@ -2198,41 +2296,43 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
 
     if data.menu_bar_state.visible {
         show_top_level_panel(egui::Panel::top("menu_bar").resizable(false), &ctx, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                for category in ordered_menu_categories_for_bar(&data.command_registry) {
-                    let category_commands = visible_menu_commands_for_category(
-                        &data.command_registry,
-                        &category,
-                        &data.capability_activation,
-                        &data.drafting_workspace_state,
-                    );
-                    ui.menu_button(category.label(), |ui| {
-                        draw_category_menu_contents(
-                            ui,
+            egui::MenuBar::new()
+                .config(egui::containers::menu::MenuConfig::new().style(chrome_menu_style))
+                .ui(ui, |ui| {
+                    for category in ordered_menu_categories_for_bar(&data.command_registry) {
+                        let category_commands = visible_menu_commands_for_category(
+                            &data.command_registry,
                             &category,
-                            &category_commands,
-                            selection_count,
-                            &mut data.pending_command_invocations,
-                            &mut data.status_bar_data,
-                            &mut hovered_menu_hint,
-                            &data.command_toggle_states,
-                            &data.menu_groups,
-                            &mut data.assistant_window_state,
-                            &mut data.lighting_window_state,
-                            &mut data.render_settings_window_state,
-                            &mut data.project_settings_window_state,
-                            &mut data.extensions_window_state,
-                            &mut data.agent_connection_window_state,
-                            &data.toolbar_registry,
-                            &mut data.toolbar_layout_state,
-                            &mut data.doc_props,
-                            &data.recent_files,
-                            &data.recovery_files,
+                            &data.capability_activation,
+                            &data.drafting_workspace_state,
                         );
-                    });
-                }
-                ui.menu_button("About", |ui| draw_about_menu(ui, &data.build_info));
-            });
+                        ui.menu_button(category.label(), |ui| {
+                            draw_category_menu_contents(
+                                ui,
+                                &category,
+                                &category_commands,
+                                selection_count,
+                                &mut data.pending_command_invocations,
+                                &mut data.status_bar_data,
+                                &mut hovered_menu_hint,
+                                &data.command_toggle_states,
+                                &data.menu_groups,
+                                &mut data.assistant_window_state,
+                                &mut data.lighting_window_state,
+                                &mut data.render_settings_window_state,
+                                &mut data.project_settings_window_state,
+                                &mut data.extensions_window_state,
+                                &mut data.agent_connection_window_state,
+                                &data.toolbar_registry,
+                                &mut data.toolbar_layout_state,
+                                &mut data.doc_props,
+                                &data.recent_files,
+                                &data.recovery_files,
+                            );
+                        });
+                    }
+                    ui.menu_button("About", |ui| draw_about_menu(ui, &data.build_info));
+                });
         });
     }
 
@@ -4423,7 +4523,7 @@ fn draw_viewport_context_menu(
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(160.0);
+                chrome_menu_style(ui.style_mut());
 
                 // Labels carry no shortcut text of their own: the chord is read
                 // from the command descriptor so the menu can never disagree
@@ -4561,9 +4661,7 @@ fn draw_toolbar_visibility_menu(
     toolbar_layout_state: &mut ToolbarLayoutState,
     doc_props: &mut DocumentProperties,
 ) {
-    ui.label("Toolbars");
-    ui.separator();
-
+    chrome_menu_style(ui.style_mut());
     let mut descriptors = toolbar_registry.toolbars().collect::<Vec<_>>();
     descriptors.sort_by(|left, right| left.label.cmp(&right.label));
     for descriptor in descriptors {
@@ -4572,23 +4670,16 @@ fn draw_toolbar_visibility_menu(
             .get(&descriptor.id)
             .map(|entry| entry.visible)
             .unwrap_or(descriptor.id == "core");
-        if descriptor.id == "core" {
-            let mut always_visible = true;
-            ui.add_enabled(
-                false,
-                egui::Checkbox::new(&mut always_visible, &descriptor.label),
-            );
-            continue;
-        }
-
-        let mut next_visible = visible;
-        if ui.checkbox(&mut next_visible, &descriptor.label).changed() {
-            set_toolbar_visibility(
-                toolbar_layout_state,
-                doc_props,
-                &descriptor.id,
-                next_visible,
-            );
+        if menu_row_button_state(
+            ui,
+            descriptor.id != "core",
+            Some(visible),
+            &descriptor.label,
+            None,
+        )
+        .clicked()
+        {
+            set_toolbar_visibility(toolbar_layout_state, doc_props, &descriptor.id, !visible);
         }
     }
 }
@@ -5537,7 +5628,10 @@ fn command_shortcut_for_platform(registry: &CommandRegistry, id: &str) -> Option
 fn command_tooltip_text(descriptor: &CommandDescriptor) -> String {
     let mut lines = vec![descriptor.label.clone()];
     if let Some(shortcut) = &descriptor.default_shortcut {
-        lines.push(format!("Shortcut: {shortcut}"));
+        lines.push(format!(
+            "Shortcut: {}",
+            format_shortcut_for_platform(shortcut)
+        ));
     }
     if let Some(hint) = &descriptor.hint {
         lines.push(hint.clone());
@@ -6199,6 +6293,22 @@ fn complete_toolbar_drag(
 }
 
 fn apply_chrome_visuals(ctx: &egui::Context) {
+    // Append a bundled fallback, preserving fonts installed by other capabilities.
+    // add_font is idempotent by name and applies at the start of the next pass.
+    ctx.add_font(egui::epaint::text::FontInsert::new(
+        "talos-chrome-symbols",
+        egui::FontData::from_static(include_bytes!("../../assets/fonts/TalosChromeSymbols.ttf")),
+        vec![
+            egui::epaint::text::InsertFontFamily {
+                family: egui::FontFamily::Proportional,
+                priority: egui::epaint::text::FontPriority::Lowest,
+            },
+            egui::epaint::text::InsertFontFamily {
+                family: egui::FontFamily::Monospace,
+                priority: egui::epaint::text::FontPriority::Lowest,
+            },
+        ],
+    ));
     let mut visuals = egui::Visuals::dark();
     visuals.window_fill = CHROME_BG;
     visuals.panel_fill = CHROME_BG;
@@ -6208,17 +6318,18 @@ fn apply_chrome_visuals(ctx: &egui::Context) {
     visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(68, 80, 100);
     visuals.widgets.inactive.fg_stroke.color = CHROME_TEXT;
     visuals.widgets.hovered.bg_fill = CHROME_HOVER;
-    visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(88, 103, 128);
+    visuals.widgets.hovered.weak_bg_fill = CHROME_HOVER;
     visuals.widgets.hovered.fg_stroke.color = CHROME_TEXT;
     visuals.widgets.active.bg_fill = CHROME_ACCENT;
-    visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(108, 136, 176);
+    visuals.widgets.active.weak_bg_fill = CHROME_ACCENT;
     visuals.widgets.active.fg_stroke.color = CHROME_TEXT;
     visuals.widgets.open.bg_fill = CHROME_ACCENT;
-    visuals.widgets.open.weak_bg_fill = egui::Color32::from_rgb(96, 121, 156);
+    visuals.widgets.open.weak_bg_fill = CHROME_ACCENT;
     visuals.override_text_color = Some(CHROME_TEXT);
     visuals.selection.bg_fill = CHROME_ACCENT;
     visuals.selection.stroke.color = CHROME_TEXT;
-    visuals.widgets.noninteractive.bg_stroke.color = CHROME_MUTED;
+    visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_rgb(55, 64, 78);
+    visuals.window_stroke.color = egui::Color32::from_rgb(55, 64, 78);
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.global_style()).clone();
