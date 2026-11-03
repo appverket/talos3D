@@ -192,7 +192,8 @@ impl Plugin for SelectionPlugin {
                         .in_set(InputPhase::ToolInput)
                         .run_if(in_state(ActiveTool::Select)),
                     collect_selection_pointer_events
-                        .in_set(InputPhase::ToolInput)
+                        .after(InputPhase::SyncOwnership)
+                        .before(InputPhase::HandleInput)
                         .before(handle_box_select)
                         .before(handle_selection_click),
                     handle_group_escape
@@ -529,6 +530,25 @@ fn collect_selection_pointer_events(
         pointer.edges.clear();
         *capture = SelectionPressCapture::default();
         tracker.last_click_entity = None;
+    }
+}
+
+/// Shared press-time coordinates for grips and object selection. The window's
+/// current cursor may already be at the drag endpoint when this frame starts.
+pub(crate) fn primary_press_position(world: &World) -> Option<Vec2> {
+    world
+        .get_resource::<SelectionPointerEvents>()?
+        .edges
+        .iter()
+        .find_map(|(state, position, modifiers)| {
+            (*state == ButtonState::Pressed && !modifiers.navigation).then_some(*position)
+        })
+}
+
+pub(crate) fn consume_primary_pointer_gesture(world: &mut World) {
+    if let Some(mut pointer) = world.get_resource_mut::<SelectionPointerEvents>() {
+        pointer.edges.clear();
+        cancel_selection_click(world);
     }
 }
 
@@ -3392,6 +3412,86 @@ mod tests {
             app.world().resource::<GroupEditContext>().stack,
             vec![ElementId(30), ElementId(20)]
         );
+    }
+
+    #[test]
+    fn quick_grip_drag_uses_press_position_and_does_not_deselect_the_assembly() {
+        use crate::plugins::{
+            authored_edit_plan::AuthoredEditPlanRegistry,
+            handles::{handle_handle_pointer_input, HandleContext},
+            history::History,
+            snap::SnapResult,
+            transform::{TransformMode, TransformPlugin, TransformState},
+            ui::StatusBarData,
+        };
+        let (mut app, window) = native_selection_app();
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_factory(crate::plugins::modeling::group::GroupFactory);
+        app.add_plugins(TransformPlugin)
+            .init_resource::<crate::plugins::scene_ray::PickApertures>()
+            .init_resource::<HandleContext>()
+            .init_resource::<SnapResult>()
+            .init_resource::<crate::plugins::cursor::CursorWorldPos>()
+            .init_resource::<StatusBarData>()
+            .init_resource::<History>()
+            .init_resource::<AuthoredEditPlanRegistry>()
+            .init_resource::<crate::plugins::face_edit::PushPullContext>();
+        let selected = find_entity_by_element_id_readonly(app.world(), ElementId(30)).unwrap();
+        app.world_mut().entity_mut(selected).insert(Selected);
+        let camera_entity = app
+            .world_mut()
+            .query_filtered::<Entity, With<OrbitCamera>>()
+            .single(app.world())
+            .unwrap();
+        app.world_mut()
+            .entity_mut(camera_entity)
+            .insert(Projection::default());
+        let camera = app.world().get::<Camera>(camera_entity).unwrap();
+        let transform = app.world().get::<GlobalTransform>(camera_entity).unwrap();
+        let press = camera
+            .world_to_viewport(transform, Vec3::splat(0.5))
+            .unwrap();
+        let end = press + Vec2::new(70., -30.);
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .set_cursor_position(Some(end));
+        for (position, state) in [(press, ButtonState::Pressed), (end, ButtonState::Released)] {
+            app.world_mut()
+                .write_message(WindowEvent::CursorMoved(bevy::window::CursorMoved {
+                    window,
+                    position,
+                    delta: None,
+                }));
+            app.world_mut()
+                .write_message(WindowEvent::MouseButtonInput(MouseButtonInput {
+                    window,
+                    button: MouseButton::Left,
+                    state,
+                }));
+        }
+        let mut schedule = Schedule::default();
+        schedule.add_systems(
+            (
+                collect_selection_pointer_events,
+                handle_handle_pointer_input,
+                handle_selection_click,
+            )
+                .chain(),
+        );
+        schedule.run(app.world_mut());
+        assert_eq!(
+            app.world().resource::<TransformState>().mode,
+            TransformMode::Moving
+        );
+        assert!(app.world().resource::<TransformState>().confirm_on_release);
+        assert!(app.world().get::<Selected>(selected).is_some());
+        assert!(app
+            .world()
+            .resource::<SelectionPointerEvents>()
+            .edges
+            .is_empty());
     }
 
     #[test]

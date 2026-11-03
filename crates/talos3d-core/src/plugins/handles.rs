@@ -405,7 +405,34 @@ fn update_hovered_handle(world: &World, mut commands: Commands, hover_handles: H
     });
 }
 
-fn handle_handle_pointer_input(world: &mut World) {
+fn pick_handle_at_press(world: &mut World, position: Vec2) -> Option<ResolvedHandle> {
+    // Resolve at most the selected grips, once per press. No scene ray-cast or
+    // new per-frame geometry traversal is introduced.
+    let mut params = bevy::ecs::system::SystemState::<HoverHandleContext>::new(world);
+    let context = params.get(world).ok()?;
+    if context.face_edit_context.is_active() {
+        return None;
+    }
+    let (camera, transform, _) = context.viewport.first_camera()?;
+    selected_resolved_handles(
+        world,
+        &context.selected_query,
+        &context.registry,
+        camera,
+        transform,
+        context.handle_context.display_mode,
+        context.pivot_point.position,
+    )
+    .into_iter()
+    .filter_map(|handle| {
+        let distance = handle.screen_position.distance(position);
+        (distance <= context.apertures.handle_px).then_some((distance, handle))
+    })
+    .min_by(|a, b| a.0.total_cmp(&b.0))
+    .map(|(_, handle)| handle)
+}
+
+pub(crate) fn handle_handle_pointer_input(world: &mut World) {
     if !world.resource::<InputOwnership>().is_idle() {
         clear_pending_handle_press(world);
         return;
@@ -419,12 +446,19 @@ fn handle_handle_pointer_input(world: &mut World) {
         return;
     }
 
+    let press_position = crate::plugins::selection::primary_press_position(world);
+    let pressed_handle = press_position.and_then(|position| pick_handle_at_press(world, position));
     let (left_pressed, left_released, cursor_screen, hovered_handle) = {
         let mouse_buttons = world.resource::<ButtonInput<MouseButton>>();
-        let left_pressed = mouse_buttons.just_pressed(MouseButton::Left);
+        let left_pressed =
+            press_position.is_some() || mouse_buttons.just_pressed(MouseButton::Left);
         let left_released = mouse_buttons.just_released(MouseButton::Left);
         let cursor_screen = current_cursor_screen(world);
-        let hovered_handle = world.resource::<HandleInteractionState>().hovered.clone();
+        let hovered_handle = if press_position.is_some() {
+            pressed_handle
+        } else {
+            world.resource::<HandleInteractionState>().hovered.clone()
+        };
         (left_pressed, left_released, cursor_screen, hovered_handle)
     };
 
@@ -432,9 +466,11 @@ fn handle_handle_pointer_input(world: &mut World) {
         world.resource_mut::<HandleInteractionState>().pressed =
             hovered_handle.map(|handle| PendingHandlePress {
                 handle,
-                pressed_cursor_screen: cursor_screen.unwrap_or(Vec2::ZERO),
+                pressed_cursor_screen: press_position.or(cursor_screen).unwrap_or(Vec2::ZERO),
             });
-        return;
+        if world.resource::<HandleInteractionState>().pressed.is_some() {
+            crate::plugins::selection::consume_primary_pointer_gesture(world);
+        }
     }
 
     let Some(pending) = world.resource::<HandleInteractionState>().pressed.clone() else {
