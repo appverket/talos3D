@@ -113,9 +113,20 @@ UI creation share one coordinate-frame contract.
 
 Linked documents use the same registered command surface. Discover and invoke
 `modeling.place_linked_model` to insert an external Talos3D document as a live
-instance. The result contains an explicit `linked_model_instance` relationship,
+instance. Pass `path` for any existing `.talos3d` project (optionally `name`);
+without `path`, the UI opens a file chooser. Loose objects and multiple root
+groups are supported without extracting or modifying the source first.
+The result contains an explicit `linked_model_instance` relationship,
 including the source path/root/hash, instance root/frame, and source-to-scene
-identity map. Placement is one history operation, so undo removes the complete
+identity map. `source_kind` is `group` for a single source group or `document`
+for a complete project wrapped by a virtual source root. A document root's
+`source_root_id` is a relationship-owned identity, not a persisted entity in
+the source file; its mapping resolves to the host instance root. The persisted
+`source_root_is_document` flag makes refresh rebuild this container even if the
+source's top-level hierarchy changes. Existing links without that flag retain
+their original group-root semantics.
+
+Placement is one history operation, so undo removes the complete
 instance and redo restores the same relationship and scene ids.
 
 Use the read-only `modeling.inspect_linked_models` command to inspect one or

@@ -165,8 +165,18 @@ The same renderer state is available over MCP for agent-driven workflows.
 
 ## Linked Models
 
-**Place Linked Model** inserts another `.talos3d` project as a live instance in
-the current model. The placed root can be moved or rotated independently, while
+Choose **Create > Linked Models > Place Linked Model** and select an existing
+`.talos3d` file to insert it as a live instance in the current model. The source
+can contain loose objects, nested groups, assemblies, or several top-level
+groups; no preparation or **Create Linked Model** extraction is required.
+The complete file is linked without changing it. A document with several roots
+gets one instance container, retaining the source hierarchy inside it.
+
+**Create Linked Model** in a selected group's context menu instead extracts
+that group to a new source file and links the existing group to it. Both paths
+use the same live-link lifecycle.
+
+The placed root can be moved or rotated independently, while
 its mapped contents remain owned by the external source file. Placing the model
 is one undoable operation.
 

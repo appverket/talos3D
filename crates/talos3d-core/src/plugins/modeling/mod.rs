@@ -423,7 +423,7 @@ impl Plugin for ModelingPlugin {
                 CommandDescriptor {
                     id: "modeling.place_linked_model".to_string(),
                     label: "Place Linked Model".to_string(),
-                    description: "Choose a Talos3D project file and place it into the current model as a live linked model".to_string(),
+                    description: "Choose an existing Talos3D project file and place its complete contents into the current model as one live linked model; no source group or prior extraction is required".to_string(),
                     category: CommandCategory::Create,
                     parameters: Some(serde_json::json!({
                         "type": "object",
@@ -434,7 +434,7 @@ impl Plugin for ModelingPlugin {
                     })),
                     default_shortcut: None,
                     icon: Some("icon.link".to_string()),
-                    hint: Some("Place an external model file into this scene as a live link".to_string()),
+                    hint: Some("Create a live linked instance from an existing .talos3d file".to_string()),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,

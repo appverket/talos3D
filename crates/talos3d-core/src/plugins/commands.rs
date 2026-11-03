@@ -1339,6 +1339,7 @@ mod tests {
                 member_ids: vec![nested_group_id],
                 frame: GroupFrame::identity(),
                 linked_model: Some(LinkedModelRef {
+                    source_root_is_document: false,
                     path: linked_path.to_string_lossy().into_owned(),
                     source_root_id: ElementId(1),
                     source_to_scene_ids: vec![LinkedModelIdMapping {

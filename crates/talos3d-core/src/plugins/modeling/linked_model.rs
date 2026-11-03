@@ -57,6 +57,7 @@ pub struct LinkedModelRelationship {
     pub instance_name: String,
     pub source_path: String,
     pub source_root_id: u64,
+    pub source_kind: &'static str,
     pub loaded_content_hash: u64,
     pub frame: LinkedModelFrame,
     pub root_member_ids: Vec<u64>,
@@ -211,6 +212,11 @@ pub fn linked_model_relationship(
         instance_name: members.name.clone(),
         source_path: linked.path.clone(),
         source_root_id: linked.source_root_id.0,
+        source_kind: if linked.source_root_is_document {
+            "document"
+        } else {
+            "group"
+        },
         loaded_content_hash: linked.content_hash,
         frame: LinkedModelFrame {
             translation: members.frame.translation.to_array(),
@@ -565,6 +571,7 @@ pub fn execute_create_linked_model(
         member_ids,
         frame,
         Some(LinkedModelRef {
+            source_root_is_document: false,
             path: key.clone(),
             source_root_id,
             source_to_scene_ids: source_ids
@@ -714,8 +721,13 @@ pub fn execute_place_linked_model(
     let key = path.to_string_lossy().into_owned();
     let bytes = world.resource::<Storage>().0.load(&key)?;
     let hash = content_hash(&bytes);
-    let linked_project = load_linked_project(world, &bytes)?;
-    let root = linked_project_root_group(&linked_project)?;
+    let mut linked_project = load_linked_project(world, &bytes)?;
+    let default_name = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Linked Model");
+    let (root, source_root_is_document) =
+        linked_project_root_group(&mut linked_project, default_name)?;
     let group_id = world.resource::<ElementIdAllocator>().next_id();
     let name = params
         .get("name")
@@ -723,6 +735,7 @@ pub fn execute_place_linked_model(
         .unwrap_or(root.name.as_str())
         .to_string();
     let linked = LinkedModelRef {
+        source_root_is_document,
         path: key.clone(),
         source_root_id: root.element_id,
         source_to_scene_ids: Vec::new(),
@@ -1325,7 +1338,10 @@ fn refresh_linked_group(
     if !force && hash == linked.content_hash {
         return Ok(None);
     }
-    let linked_project = load_linked_project(world, &bytes)?;
+    let mut linked_project = load_linked_project(world, &bytes)?;
+    if linked.source_root_is_document {
+        append_document_root(&mut linked_project, linked.source_root_id, "Linked Model")?;
+    }
     apply_linked_snapshots(world, group_id, linked, hash, linked_project)?;
     Ok(Some(hash))
 }
@@ -1358,39 +1374,96 @@ struct LinkedProject {
     textures: Option<TextureRegistry>,
 }
 
-fn linked_project_root_group(linked_project: &LinkedProject) -> Result<GroupSnapshot, String> {
-    let groups = linked_project
+/// Preserve the extracted-group format when one group contains all source
+/// roots. Ordinary documents may have loose objects or several independent
+/// groups; give those one virtual root, without modifying the source file.
+fn linked_project_root_group(
+    project: &mut LinkedProject,
+    name: &str,
+) -> Result<(GroupSnapshot, bool), String> {
+    if project.snapshots.is_empty() {
+        return Err("Linked model file is empty".to_string());
+    }
+    let child_ids = project
         .snapshots
         .iter()
         .filter_map(|snapshot| snapshot.0.as_any().downcast_ref::<GroupSnapshot>())
-        .cloned()
-        .collect::<Vec<_>>();
-    if groups.is_empty() {
-        return Err("Linked model file does not contain a group to place".to_string());
-    }
-
-    let group_ids = groups
-        .iter()
-        .map(|group| group.element_id)
-        .collect::<HashSet<_>>();
-    let child_group_ids = groups
-        .iter()
         .flat_map(|group| group.member_ids.iter().copied())
-        .filter(|id| group_ids.contains(id))
         .collect::<HashSet<_>>();
-    let mut root_candidates = groups
+    let roots = project
+        .snapshots
         .iter()
-        .filter(|group| !child_group_ids.contains(&group.element_id))
-        .cloned()
+        .filter(|snapshot| !child_ids.contains(&snapshot.element_id()))
         .collect::<Vec<_>>();
-    if root_candidates.is_empty() {
-        root_candidates = groups;
+    if let [snapshot] = roots.as_slice() {
+        if let Some(group) = snapshot.0.as_any().downcast_ref::<GroupSnapshot>() {
+            return Ok((group.clone(), false));
+        }
     }
-    root_candidates.sort_by_key(|group| group.element_id.0);
-    root_candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Linked model file does not contain a group to place".to_string())
+    let source_ids = project
+        .snapshots
+        .iter()
+        .map(|snapshot| snapshot.element_id())
+        .collect::<HashSet<_>>();
+    // Reserve from the top of JSON's exact-integer range, away from normal
+    // sequential element allocation. This id is stable in the relationship,
+    // including across source edits, and never written into the source file.
+    let root_id = (0..=((1_u64 << 53) - 1))
+        .rev()
+        .map(ElementId)
+        .find(|id| !source_ids.contains(id))
+        .ok_or_else(|| "Linked model has no available document-root identity".to_string())?;
+    Ok((append_document_root(project, root_id, name)?, true))
+}
+
+fn append_document_root(
+    project: &mut LinkedProject,
+    root_id: ElementId,
+    name: &str,
+) -> Result<GroupSnapshot, String> {
+    if project
+        .snapshots
+        .iter()
+        .any(|snapshot| snapshot.element_id() == root_id)
+    {
+        return Err(
+            "Linked source now uses its reserved document-root identity; place the file again"
+                .to_string(),
+        );
+    }
+    if project.snapshots.is_empty() {
+        return Err("Linked model file is empty".to_string());
+    }
+    let child_ids = project
+        .snapshots
+        .iter()
+        .filter_map(|snapshot| snapshot.0.as_any().downcast_ref::<GroupSnapshot>())
+        .flat_map(|group| group.member_ids.iter().copied())
+        .collect::<HashSet<_>>();
+    let mut member_ids = project
+        .snapshots
+        .iter()
+        .map(|snapshot| snapshot.element_id())
+        .filter(|id| !child_ids.contains(id))
+        .collect::<Vec<_>>();
+    member_ids.sort_unstable();
+    member_ids.dedup();
+    if member_ids.is_empty() {
+        return Err(
+            "Linked model file has no top-level objects (cyclic group membership)".to_string(),
+        );
+    }
+    let root = GroupSnapshot {
+        element_id: root_id,
+        name: name.to_string(),
+        member_ids,
+        frame: GroupFrame::identity(),
+        composite: None,
+        linked_model: None,
+        cached_bounds: None,
+    };
+    project.snapshots.push(root.clone().into());
+    Ok(root)
 }
 
 fn apply_linked_snapshots(
@@ -1404,8 +1477,8 @@ fn apply_linked_snapshots(
     let snapshots = linked_project.snapshots;
     let root = snapshots
         .iter()
-        .find_map(|snapshot| snapshot.0.as_any().downcast_ref::<GroupSnapshot>())
-        .filter(|group| group.element_id == linked.source_root_id)
+        .filter_map(|snapshot| snapshot.0.as_any().downcast_ref::<GroupSnapshot>())
+        .find(|group| group.element_id == linked.source_root_id)
         .cloned()
         .ok_or_else(|| "Linked model file is missing its root group".to_string())?;
     let frame = current_group_frame(world, group_id);
@@ -1882,6 +1955,259 @@ mod tests {
         ElementId(result.created[0])
     }
 
+    fn save_source(world: &mut World, path: &Path) -> Vec<u8> {
+        let mut ids = all_scene_element_ids(world).into_iter().collect::<Vec<_>>();
+        ids.sort_unstable();
+        let next = ids.iter().map(|id| id.0).max().unwrap_or(0) + 1;
+        let records = ids
+            .into_iter()
+            .map(|id| {
+                let snapshot = capture_snapshot(world, id).unwrap();
+                PersistedEntityRecord {
+                    type_name: snapshot.type_name().to_string(),
+                    data: snapshot.to_persisted_json(),
+                    semantic: None,
+                }
+            })
+            .collect();
+        let bytes = serialize_entity_records_as_project(world, next, records).unwrap();
+        std::fs::write(path, &bytes).unwrap();
+        bytes
+    }
+
+    fn mapped_id(world: &World, root: ElementId, source: u64) -> ElementId {
+        let relationship = linked_model_relationship(world, root).unwrap();
+        ElementId(
+            relationship
+                .source_to_scene_ids
+                .iter()
+                .find(|mapping| mapping.source_id == source)
+                .unwrap()
+                .scene_id,
+        )
+    }
+
+    #[test]
+    fn ordinary_ungrouped_file_is_a_complete_undoable_persisted_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("existing-model.talos3d");
+        let mut source = test_world();
+        let group = spawn_house_group(&mut source);
+        capture_snapshot(&source, group)
+            .unwrap()
+            .remove_from(&mut source);
+        let bytes = save_source(&mut source, &path);
+        let source_bounds =
+            compute_group_bounds_from_world(&source, &[ElementId(1), ElementId(2)]).unwrap();
+
+        let mut host = test_world();
+        let result = execute_place_linked_model(&mut host, &json!({"path": path})).unwrap();
+        let root = ElementId(result.output.unwrap()["root_group_id"].as_u64().unwrap());
+        let relationship = linked_model_relationship(&host, root).unwrap();
+        assert_eq!(relationship.source_kind, "document");
+        assert_eq!(relationship.instance_name, "existing-model");
+        assert_eq!(relationship.source_to_scene_ids.len(), 3);
+        assert_eq!(group_members(&host, root).unwrap().member_ids.len(), 2);
+        let bounds = compute_group_bounds_from_world(&host, &[root]).unwrap();
+        assert_eq!(bounds.min, source_bounds.min);
+        assert_eq!(bounds.max, source_bounds.max);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        apply_pending_history_commands_for_test(&mut host);
+        assert_eq!(host.resource::<History>().undo_stack_len(), 1);
+        host.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands_for_test(&mut host);
+        assert!(all_scene_element_ids(&mut host).is_empty());
+        host.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands_for_test(&mut host);
+        assert_eq!(
+            linked_model_relationship(&host, root).unwrap(),
+            relationship
+        );
+
+        let host_path = temp.path().join("host.talos3d");
+        let host_bytes = save_source(&mut host, &host_path);
+        let project = load_linked_project(&host, &host_bytes).unwrap();
+        let mut restored = test_world();
+        for snapshot in project.snapshots {
+            snapshot.apply_to(&mut restored);
+        }
+        assert_eq!(
+            linked_model_relationship(&restored, root).unwrap(),
+            relationship
+        );
+        execute_refresh_linked_models(&mut restored, &json!({"force": true})).unwrap();
+        assert_eq!(
+            linked_model_relationship(&restored, root).unwrap(),
+            relationship
+        );
+    }
+
+    #[test]
+    fn mixed_file_roots_refresh_as_one_moved_instance_without_losing_hierarchy() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mixed.talos3d");
+        let mut source = test_world();
+        let group = spawn_house_group(&mut source);
+        // One group and one loose physical object used to lose the loose object
+        // from root membership, even though it was imported into the scene.
+        let mut loose = capture_snapshot(&source, ElementId(2))
+            .unwrap()
+            .to_persisted_json();
+        loose["element_id"] = json!(4);
+        source
+            .resource::<CapabilityRegistry>()
+            .factory_for("box")
+            .unwrap()
+            .from_persisted_json(&loose)
+            .unwrap()
+            .apply_to(&mut source);
+        save_source(&mut source, &path);
+        let mut host = test_world();
+        let root = placed_house(&mut host, &path);
+        let other = placed_house(&mut host, &path);
+        let before = linked_model_relationship(&host, root).unwrap();
+        assert_eq!(before.source_kind, "document");
+        assert_eq!(
+            group_members(&host, root).unwrap().member_ids,
+            vec![mapped_id(&host, root, group.0), mapped_id(&host, root, 4)]
+        );
+        assert_eq!(
+            group_members(&host, mapped_id(&host, root, group.0))
+                .unwrap()
+                .member_ids,
+            vec![mapped_id(&host, root, 1), mapped_id(&host, root, 2)]
+        );
+        apply_pending_history_commands_for_test(&mut host);
+        let bounds = compute_group_bounds_from_world(&host, &[root]).unwrap();
+        let delta = Vec3::new(7.0, 2.0, -4.0);
+        let plan = plan_linked_model_placement(
+            &host,
+            root,
+            LinkedModelPlacementOperation::Translate { delta },
+        )
+        .unwrap();
+        crate::plugins::commands::enqueue_apply_entity_changes(
+            &mut host,
+            plan.into_apply_command("Move linked file"),
+        );
+        apply_pending_history_commands_for_test(&mut host);
+        let moved = compute_group_bounds_from_world(&host, &[root]).unwrap();
+        assert!((moved.min - bounds.min - delta).length() < 1e-4);
+        assert!(
+            (compute_group_bounds_from_world(&host, &[other])
+                .unwrap()
+                .min
+                - bounds.min)
+                .length()
+                < 1e-4
+        );
+
+        // The source now has only one group. Refresh must keep the original
+        // document scope and instance frame rather than switching root identity.
+        capture_snapshot(&source, ElementId(4))
+            .unwrap()
+            .remove_from(&mut source);
+        save_source(&mut source, &path);
+        execute_refresh_linked_models(&mut host, &json!({"group_ids": [root.0]})).unwrap();
+        let refreshed = linked_model_relationship(&host, root).unwrap();
+        assert_eq!(refreshed.source_root_id, before.source_root_id);
+        assert_eq!(refreshed.source_kind, "document");
+        assert_eq!(refreshed.frame.translation, delta.to_array());
+        assert_eq!(
+            mapped_id(&host, root, group.0),
+            ElementId(
+                before
+                    .source_to_scene_ids
+                    .iter()
+                    .find(|m| m.source_id == group.0)
+                    .unwrap()
+                    .scene_id
+            )
+        );
+        assert!(!refreshed
+            .source_to_scene_ids
+            .iter()
+            .any(|m| m.source_id == 4));
+        assert!(find_entity(&host, mapped_id(&host, other, 4)).is_some());
+        assert_eq!(
+            group_members(&host, root).unwrap().member_ids,
+            vec![mapped_id(&host, root, group.0)]
+        );
+    }
+
+    #[test]
+    fn nested_and_multiple_group_files_resolve_the_actual_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested.talos3d");
+        let mut source = test_world();
+        let group = spawn_house_group(&mut source);
+        GroupSnapshot {
+            element_id: ElementId(10),
+            name: "Outer".into(),
+            member_ids: vec![group],
+            frame: GroupFrame::identity(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut source);
+        save_source(&mut source, &path);
+        let mut host = test_world();
+        let root = placed_house(&mut host, &path);
+        assert_eq!(
+            linked_model_relationship(&host, root)
+                .unwrap()
+                .source_root_id,
+            10
+        );
+        assert_eq!(
+            group_members(&host, root).unwrap().member_ids,
+            vec![mapped_id(&host, root, group.0)]
+        );
+        execute_refresh_linked_models(&mut host, &json!({"force": true})).unwrap();
+
+        // Two independent top-level groups must both belong to the instance.
+        GroupSnapshot {
+            element_id: ElementId(11),
+            name: "Second".into(),
+            member_ids: vec![],
+            frame: GroupFrame::identity(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut source);
+        save_source(&mut source, &path);
+        let multi = placed_house(&mut host, &path);
+        assert_eq!(
+            linked_model_relationship(&host, multi).unwrap().source_kind,
+            "document"
+        );
+        assert_eq!(group_members(&host, multi).unwrap().member_ids.len(), 2);
+        assert!(group_members(&host, multi)
+            .unwrap()
+            .member_ids
+            .contains(&mapped_id(&host, multi, 10)));
+        assert!(group_members(&host, multi)
+            .unwrap()
+            .member_ids
+            .contains(&mapped_id(&host, multi, 11)));
+    }
+
+    #[test]
+    fn empty_file_refuses_before_mutating_host() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("empty.talos3d");
+        let mut source = test_world();
+        save_source(&mut source, &path);
+        let mut host = test_world();
+        let error = execute_place_linked_model(&mut host, &json!({"path": path})).unwrap_err();
+        assert!(error.contains("empty"));
+        assert!(all_scene_element_ids(&mut host).is_empty());
+        assert_eq!(host.resource::<History>().undo_stack_len(), 0);
+    }
+
     #[test]
     fn create_linked_model_normalizes_foundation_minimum_to_xz_plane() {
         let mut world = test_world();
@@ -2287,7 +2613,11 @@ mod tests {
             .copied()
             .map(ElementId)
             .collect::<Vec<_>>();
-        assert_eq!(created.len(), 4, "all source-owned records enter history");
+        assert_eq!(
+            created.len(),
+            5,
+            "all source-owned records and the document root enter history"
+        );
 
         apply_pending_history_commands_for_test(&mut target);
         assert_eq!(target.resource::<History>().undo_stack_len(), 1);
@@ -2598,6 +2928,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("house.talos3d");
         let linked = LinkedModelRef {
+            source_root_is_document: false,
             path: path.to_string_lossy().into_owned(),
             source_root_id: group_id,
             source_to_scene_ids: vec![
@@ -2707,6 +3038,7 @@ mod tests {
             vec![ElementId(1), ElementId(2)],
             GroupFrame::identity(),
             Some(LinkedModelRef {
+                source_root_is_document: false,
                 path: path.to_string_lossy().into_owned(),
                 source_root_id: group_id,
                 source_to_scene_ids: vec![
@@ -2827,6 +3159,7 @@ mod tests {
             vec![ElementId(1), ElementId(2)],
             GroupFrame::identity(),
             Some(LinkedModelRef {
+                source_root_is_document: false,
                 path: path.to_string_lossy().into_owned(),
                 source_root_id: group_id,
                 source_to_scene_ids: vec![

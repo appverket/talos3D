@@ -1,10 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-10-28
-- branch: codex/ground-plane-guide-picking
-- task-id: TALOS-zjyscfsf
+- created: 2026-11-03T12:00:00Z
+- branch: codex/existing-file-linked-model
+- task-id: TALOS-lhozrdzz
 - target base: origin/main
-- summary: Inspect grouped guides and repair guide picking and editing affordances.
+- summary: Support complete linked instances of existing Talos3D project files.
 - status: awaiting-merge
-- verification: 2180 core tests passed with model-api (6 ignored); native inspector verification found and fixed unit formatting; ordered modifier replay covers rapid Cmd/Shift-click.

@@ -118,6 +118,11 @@ pub struct GroupMembers {
 pub struct LinkedModelRef {
     pub path: String,
     pub source_root_id: ElementId,
+    /// The source root is a virtual container for a complete document rather
+    /// than a persisted source group. Its id is reserved in this relationship;
+    /// refresh rebuilds the container without rewriting the external file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_root_is_document: bool,
     /// Mapping from element ids in the linked model document to element ids in
     /// this scene instance. The initial conversion preserves ids, but the link
     /// contract is explicit so later placement paths can allocate independent

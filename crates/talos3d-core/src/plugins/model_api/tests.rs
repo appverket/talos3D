@@ -1755,6 +1755,7 @@ fn source_owned_linked_member_rejects_direct_property_edit() {
         frame: GroupFrame::identity(),
         composite: None,
         linked_model: Some(LinkedModelRef {
+            source_root_is_document: false,
             path: "linked.talos3d".to_string(),
             source_root_id: ElementId(10),
             source_to_scene_ids: vec![

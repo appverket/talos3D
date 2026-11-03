@@ -321,8 +321,11 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
             "guide_lines.place",
             "dimensions.place",
             "tools.tape",
-            "modeling.place_linked_model",
         ],
+    },
+    MenuSubmenuSpec {
+        label: "Linked Models",
+        command_ids: &["modeling.place_linked_model"],
     },
     MenuSubmenuSpec {
         label: "Booleans",
