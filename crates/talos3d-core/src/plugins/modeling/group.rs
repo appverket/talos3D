@@ -971,6 +971,7 @@ pub fn compute_group_bounds_from_world(
     let mut max = Vec3::splat(f32::MIN);
     let mut any = false;
     let mut visited = HashSet::new();
+    let mut occurrence_bounds = None;
 
     let mut stack: Vec<ElementId> = member_ids.to_vec();
     while let Some(id) = stack.pop() {
@@ -990,6 +991,14 @@ pub fn compute_group_bounds_from_world(
             && !entity_ref.contains::<super::mesh_generation::DerivedGeometry>()
         {
             if let Some(bounds) = super::snapshots::authored_triangle_mesh_bounds(&entity_ref) {
+                min = min.min(bounds.min);
+                max = max.max(bounds.max);
+                any = true;
+            }
+        } else if entity_ref.contains::<super::occurrence::OccurrenceIdentity>() {
+            let all = occurrence_bounds
+                .get_or_insert_with(|| super::occurrence::all_occurrence_generated_bounds(world));
+            if let Some(bounds) = all.get(&id) {
                 min = min.min(bounds.min);
                 max = max.max(bounds.max);
                 any = true;
@@ -1041,6 +1050,7 @@ pub fn compute_group_bounds_in_frame_from_world(
     let mut max = Vec3::splat(f32::MIN);
     let mut any = false;
     let mut visited = HashSet::new();
+    let mut occurrence_bounds = None;
 
     let mut stack: Vec<ElementId> = member_ids.to_vec();
     while let Some(id) = stack.pop() {
@@ -1064,6 +1074,17 @@ pub fn compute_group_bounds_in_frame_from_world(
             // Eight cached AABB corners give conservative rotated bounds. This
             // is deliberately independent of triangle count and snap-edge lists.
             if let Some(bounds) = super::snapshots::authored_triangle_mesh_bounds(&entity_ref) {
+                for corner in bounds.corners() {
+                    let local = to_local(corner);
+                    min = min.min(local);
+                    max = max.max(local);
+                    any = true;
+                }
+            }
+        } else if entity_ref.contains::<super::occurrence::OccurrenceIdentity>() {
+            let all = occurrence_bounds
+                .get_or_insert_with(|| super::occurrence::all_occurrence_generated_bounds(world));
+            if let Some(bounds) = all.get(&id) {
                 for corner in bounds.corners() {
                     let local = to_local(corner);
                     min = min.min(local);

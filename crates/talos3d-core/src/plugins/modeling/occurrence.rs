@@ -1059,6 +1059,52 @@ impl AuthoredEntityFactory for OccurrenceFactory {
     }
 }
 
+/// Aggregate occurrence presentation bounds in one scene pass. Group selection
+/// must not capture Definitions or rescan all generated parts for every member.
+pub(crate) fn all_occurrence_generated_bounds(world: &World) -> HashMap<ElementId, EntityBounds> {
+    let mut bounds = HashMap::<ElementId, EntityBounds>::new();
+    let mut include = |owner: ElementId, value: EntityBounds| {
+        bounds
+            .entry(owner)
+            .and_modify(|b| {
+                b.min = b.min.min(value.min);
+                b.max = b.max.max(value.max);
+            })
+            .or_insert(value);
+    };
+    if let Some(mut query) = world.try_query::<(
+        &GeneratedOccurrencePart,
+        &ProfileExtrusion,
+        Option<&ShapeRotation>,
+    )>() {
+        for (part, extrusion, rotation) in query.iter(world) {
+            if let Some(value) = extrusion.bounds(rotation.copied().unwrap_or_default().0) {
+                include(part.owner, value);
+            }
+        }
+    }
+    if let Some(mut query) = world.try_query::<(
+        &GeneratedOccurrencePart,
+        &bevy::camera::primitives::Aabb,
+        &GlobalTransform,
+    )>() {
+        for (part, aabb, transform) in query.iter(world) {
+            include(part.owner, aabb_to_entity_bounds(aabb, transform));
+        }
+    }
+    if let Some(mut query) = world.try_query::<(
+        &ElementId,
+        &OccurrenceIdentity,
+        &bevy::camera::primitives::Aabb,
+        &GlobalTransform,
+    )>() {
+        for (owner, _, aabb, transform) in query.iter(world) {
+            include(*owner, aabb_to_entity_bounds(aabb, transform));
+        }
+    }
+    bounds
+}
+
 fn occurrence_generated_bounds(world: &World, owner: ElementId) -> Option<EntityBounds> {
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
@@ -4157,6 +4203,7 @@ mod bounds_from_aabb_tests {
         let gt = global_transform_at(Vec3::new(1.0, 0.0, 0.0));
         world.spawn((
             owner,
+            OccurrenceIdentity::new(DefinitionId("test.bounds".into()), 1),
             Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)),
             gt,
             bevy::camera::primitives::Aabb {
@@ -4167,6 +4214,17 @@ mod bounds_from_aabb_tests {
 
         let bounds = occurrence_generated_bounds(&world, owner)
             .expect("should return bounds when root entity has Aabb");
+
+        let all = all_occurrence_generated_bounds(&world);
+        assert_eq!(all.get(&owner), Some(&bounds));
+        world.insert_resource(crate::capability_registry::CapabilityRegistry::default());
+        let selected =
+            crate::plugins::modeling::group::compute_group_bounds_from_world(&world, &[owner]);
+        assert_eq!(
+            selected,
+            Some(bounds),
+            "selection needs neither a Definition nor snapshot factory"
+        );
 
         // World min.x = translate(1) + (-2) = -1.0
         assert!(
