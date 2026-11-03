@@ -2603,7 +2603,9 @@ fn should_confirm_transform(
     mouse_buttons: &ButtonInput<MouseButton>,
     keys: &ButtonInput<KeyCode>,
 ) -> bool {
-    (state.confirm_on_release && mouse_buttons.just_released(MouseButton::Left))
+    // A fast drag can release before its first preview is ready. Button state
+    // persists across frames; the one-frame release edge does not.
+    (state.confirm_on_release && !mouse_buttons.pressed(MouseButton::Left))
         || (!state.confirm_on_release
             && state.mode != TransformMode::Scaling
             && mouse_buttons.just_pressed(MouseButton::Left))
@@ -3173,6 +3175,8 @@ mod tests {
         world.init_resource::<CursorWorldPos>();
         world.init_resource::<InputOwnership>();
         world.init_resource::<TransformState>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
         let mut window = Window::default();
         window.resolution.set(800., 600.);
         window.set_cursor_position(Some(Vec2::new(600., 300.)));
@@ -3312,7 +3316,14 @@ mod tests {
             .plan
             .clone()
             .unwrap();
-        confirm_captured_transform(&mut world);
+        world.resource_mut::<TransformState>().confirm_on_release = true;
+        // Native release already elapsed while the large aggregate preview was
+        // being prepared: no just_released event remains in this frame.
+        assert!(!world
+            .resource::<ButtonInput<MouseButton>>()
+            .just_released(MouseButton::Left));
+        confirm_transform(&mut world);
+        assert!(world.resource::<TransformState>().is_idle());
         drain(&mut world);
         for after in captured.after_snapshots() {
             assert_eq!(
