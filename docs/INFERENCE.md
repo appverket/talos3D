@@ -57,7 +57,9 @@ host-plane and placement constraints.
 ## Moving a selection
 
 Select the object or assembly, then press **M** or click **Move**. The Move button
-stays highlighted and the corner grips retain a 12-pixel diameter at detail and
+stays highlighted. With a selection, **M** also leaves Guide Line or another
+creation tool, discarding its unfinished preview. **G** means Guide Line, not
+Move. The corner grips retain a 12-pixel diameter at detail and
 site scales. Drag a grip; release to confirm or press **Esc** to cancel. While
 dragging, **X/Y/Z** constrain the axis and **Shift+X/Y/Z** constrain the plane
 perpendicular to that axis. Type a signed distance in metres for an exact move.

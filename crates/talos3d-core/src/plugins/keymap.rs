@@ -525,7 +525,13 @@ pub fn dispatch_command_shortcuts(
         }
         let allowed = match binding.context {
             ShortcutContext::Global | ShortcutContext::Tool => true,
-            ShortcutContext::Select => in_select && transform_idle && !face_editing,
+            // Move is also the way out of a drawing tool with a selection.
+            // Otherwise M silently does nothing and later clicks keep drawing.
+            ShortcutContext::Select => {
+                (in_select || binding.command_id == "modeling.move")
+                    && transform_idle
+                    && !face_editing
+            }
             ShortcutContext::Modal => false,
         };
         if allowed {
@@ -559,6 +565,37 @@ mod tests {
             activates_tool: activates_tool.map(str::to_string),
             capability_id: None,
         }
+    }
+
+    #[test]
+    fn move_can_leave_guide_creation_but_never_steals_a_modal_gesture() {
+        let mut app = App::new();
+        app.insert_resource(State::new(ActiveTool::PlaceGuideLine))
+            .insert_resource(Keymap {
+                bindings: descriptor_bindings(&descriptor("modeling.move", "M", None)),
+            })
+            .init_resource::<InputOwnership>()
+            .init_resource::<PendingCommandInvocations>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .add_systems(Update, dispatch_command_shortcuts);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyM);
+        app.update();
+        assert!(!app
+            .world()
+            .resource::<PendingCommandInvocations>()
+            .is_empty());
+        app.world_mut()
+            .insert_resource(PendingCommandInvocations::default());
+        app.world_mut().insert_resource(InputOwnership::Modal(
+            crate::plugins::input_ownership::ModalKind::Transform,
+        ));
+        app.update();
+        assert!(app
+            .world()
+            .resource::<PendingCommandInvocations>()
+            .is_empty());
     }
 
     #[test]

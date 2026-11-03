@@ -1007,7 +1007,9 @@ fn execute_create_polyline(world: &mut World, _: &Value) -> Result<CommandResult
 
 fn execute_begin_move(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     arm_move_handles(world)?;
-    Ok(CommandResult::empty())
+    // Changing the grip display alone leaves Guide Line (or another drawing
+    // tool) receiving the next click. Explicit Move intent changes the tool.
+    activate_tool_command(world, ActiveTool::Select)
 }
 
 fn execute_begin_rotate(world: &mut World, _: &Value) -> Result<CommandResult, String> {
@@ -1459,5 +1461,44 @@ mod menu_transform_tests {
         );
         assert!(world.resource::<TransformState>().is_idle());
         assert!(world.resource::<InputOwnership>().is_ui_capture());
+    }
+}
+
+#[cfg(test)]
+mod move_tool_tests {
+    use super::*;
+    use crate::plugins::{
+        handles::{HandleContext, HandleDisplayMode, HandleInteractionState},
+        input_ownership::InputOwnership,
+        selection::Selected,
+        ui::StatusBarData,
+    };
+
+    #[test]
+    fn move_command_exits_guide_creation_and_keeps_the_selected_assembly() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<ActiveTool>()
+            .init_resource::<TransformState>()
+            .init_resource::<InputOwnership>()
+            .init_resource::<HandleContext>()
+            .init_resource::<HandleInteractionState>()
+            .init_resource::<StatusBarData>();
+        app.world_mut()
+            .resource_mut::<NextState<ActiveTool>>()
+            .set(ActiveTool::PlaceGuideLine);
+        app.update();
+        let assembly = app.world_mut().spawn(Selected).id();
+        execute_begin_move(app.world_mut(), &Value::Null).unwrap();
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<ActiveTool>>().get(),
+            ActiveTool::Select
+        );
+        assert_eq!(
+            app.world().resource::<HandleContext>().display_mode,
+            HandleDisplayMode::Move
+        );
+        assert!(app.world().get::<Selected>(assembly).is_some());
     }
 }
