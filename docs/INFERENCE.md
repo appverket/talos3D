@@ -166,3 +166,12 @@ upper cap. The construction point records the center at the time of placement.
 body under the pointer. Enable **X-Ray** to see and snap to rear edges. **Tab**
 cycles through overlapping topology points in the pointer aperture. The display
 reuses one retained Bevy line asset for the hovered body, up to 4,096 edges.
+
+### Touching a surface along a guide
+
+During Move, bring the cursor near the point where an inferred direction
+crosses a stationary face. **Intersection with surface** marks the exact
+contact point. Release to place the grab point there. This also works with
+Shift held, an arrow lock, or an explicit X/Y/Z movement constraint. The
+intersection uses the finite triangle under the pointer, including on sloped
+and curved bodies.

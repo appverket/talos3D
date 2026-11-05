@@ -29,6 +29,9 @@ pub struct UxDragTrace {
 pub struct UxDragTraceSample {
     pub index: usize,
     pub action: String,
+    pub grab_anchor: Option<[f32; 3]>,
+    pub snap_label: Option<String>,
+    pub snap_point: Option<[f32; 3]>,
     pub plan_id: Option<String>,
     pub digest: Option<String>,
     pub after_entity_ids: Vec<u64>,
@@ -170,6 +173,18 @@ fn record_main_frame(world: &mut World) {
     let sample = UxDragTraceSample {
         index: 0,
         action: stamp.action.into(),
+        grab_anchor: world
+            .get_resource::<crate::plugins::transform::TransformState>()
+            .and_then(|s| s.initial_cursor)
+            .map(|p| p.to_array()),
+        snap_label: world
+            .get_resource::<crate::plugins::inference::InferenceEngine>()
+            .and_then(|e| e.best_label())
+            .map(str::to_owned),
+        snap_point: world
+            .get_resource::<crate::plugins::snap::SnapResult>()
+            .and_then(|s| s.target)
+            .map(|p| p.to_array()),
         plan_id: plan.as_ref().map(|p| p.plan_id().0.clone()),
         digest: plan.as_ref().map(|p| p.digest().into()),
         after_entity_ids: plan

@@ -28,6 +28,7 @@ pub struct CursorPlugin;
 impl Plugin for CursorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CursorWorldPos>()
+            .init_resource::<CursorSurfaceTriangle>()
             .init_resource::<DrawingPlane>()
             .init_resource::<ViewportUiInset>()
             .configure_sets(
@@ -70,6 +71,18 @@ pub struct CursorWorldPos {
     pub hovered_element_id: Option<ElementId>,
     pub surface_point: Option<Vec3>,
     pub surface_normal: Option<Vec3>,
+}
+
+/// Finite world-space patch from the same Bevy hit that supplies CursorWorldPos.
+#[derive(Resource, Default)]
+pub(super) struct CursorSurfaceTriangle(pub Option<[Vec3; 3]>);
+
+#[derive(Clone, Copy)]
+struct SurfaceHit {
+    point: Vec3,
+    entity: Entity,
+    normal: Vec3,
+    triangle: Option<[Vec3; 3]>,
 }
 
 #[derive(Resource, Default)]
@@ -420,6 +433,8 @@ fn normal_basis(normal: Vec3) -> (Vec3, Vec3) {
 
 fn update_cursor_world_pos(
     mut cursor_world_pos: ResMut<CursorWorldPos>,
+    mut surface_triangle: ResMut<CursorSurfaceTriangle>,
+    transform_state: Option<Res<crate::plugins::transform::TransformState>>,
     drawing_plane: Res<DrawingPlane>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform, Option<&OrbitCamera>)>,
@@ -428,6 +443,7 @@ fn update_cursor_world_pos(
     active_tool: Res<State<ActiveTool>>,
     mut tool_cursor_ray_cast: ToolCursorRayCast,
 ) {
+    surface_triangle.0 = None;
     if ownership.is_ui_capture() {
         clear_cursor_world_pos(&mut cursor_world_pos);
         return;
@@ -471,18 +487,24 @@ fn update_cursor_world_pos(
     let surface_hit = if use_scene_surface_cursor
         || crate::plugins::inference::supports_tool(active_tool.get())
     {
-        ray_cast_scene_surface(ray, &mut tool_cursor_ray_cast)
+        ray_cast_scene_surface(
+            ray,
+            &mut tool_cursor_ray_cast,
+            transform_state
+                .as_deref()
+                .map(|s| s.move_source_ids.as_ref()),
+        )
     } else {
         None
     };
     let raw_position = surface_hit
         .filter(|_| use_scene_surface_cursor)
-        .map(|(position, _, _)| position)
+        .map(|hit| hit.point)
         .or_else(|| cursor_plane.intersect_ray(ray))
         .or_else(|| {
             surface_hit
                 .filter(|_| *active_tool.get() == ActiveTool::Select)
-                .map(|hit| hit.0)
+                .map(|hit| hit.point)
         });
     let Some(raw_position) = raw_position else {
         clear_cursor_world_pos(&mut cursor_world_pos);
@@ -501,9 +523,10 @@ fn update_cursor_world_pos(
     cursor_world_pos.raw = Some(raw_position);
     cursor_world_pos.snapped = Some(snapped_position);
     cursor_world_pos.hovered_element_id = surface_hit
-        .and_then(|(_, entity, _)| resolve_surface_owner_element_id(entity, &tool_cursor_ray_cast));
-    cursor_world_pos.surface_point = surface_hit.map(|(point, _, _)| point);
-    cursor_world_pos.surface_normal = surface_hit.and_then(|(_, _, normal)| normal.try_normalize());
+        .and_then(|hit| resolve_surface_owner_element_id(hit.entity, &tool_cursor_ray_cast));
+    cursor_world_pos.surface_point = surface_hit.map(|hit| hit.point);
+    surface_triangle.0 = surface_hit.and_then(|hit| hit.triangle);
+    cursor_world_pos.surface_normal = surface_hit.and_then(|hit| hit.normal.try_normalize());
 }
 
 fn active_orbit_camera<'a>(
@@ -517,11 +540,12 @@ fn active_orbit_camera<'a>(
 fn ray_cast_scene_surface(
     ray: Ray3d,
     ray_cast: &mut ToolCursorRayCast,
-) -> Option<(Vec3, Entity, Vec3)> {
+    exclude: Option<&std::collections::HashSet<ElementId>>,
+) -> Option<SurfaceHit> {
     let ToolCursorRayCast {
         ray_cast,
         mesh_selectable_query,
-        element_id_query: _,
+        element_id_query,
         generated_part_query,
         visibility_query,
         layer_assignment_query,
@@ -538,7 +562,18 @@ fn ray_cast_scene_surface(
                 // resolves its fixed support and rejects the moving cap. A
                 // blanket exclusion instead exposes unrelated geometry behind
                 // the preview and makes push/pull jump to that geometry.
-                scene_surface_selectable(entity, mesh_selectable_query, generated_part_query)
+                let moving = exclude.filter(|ids| !ids.is_empty()).is_some_and(|ids| {
+                    element_id_query
+                        .get(entity)
+                        .ok()
+                        .is_some_and(|id| ids.contains(id))
+                        || generated_part_query
+                            .get(entity)
+                            .ok()
+                            .is_some_and(|p| ids.contains(&p.owner))
+                });
+                !moving
+                    && scene_surface_selectable(entity, mesh_selectable_query, generated_part_query)
                     && visibility_query
                         .get(entity)
                         .map_or(true, |visibility| *visibility != Visibility::Hidden)
@@ -552,7 +587,12 @@ fn ray_cast_scene_surface(
             }),
         )
         .first()
-        .map(|(entity, hit)| (hit.point, *entity, hit.normal))
+        .map(|(entity, hit)| SurfaceHit {
+            point: hit.point,
+            entity: *entity,
+            normal: hit.normal,
+            triangle: hit.triangle,
+        })
 }
 
 #[cfg(test)]
@@ -602,7 +642,9 @@ mod surface_tests {
                 .entity_mut(feature)
                 .insert(GlobalTransform::from_translation(Vec3::Z * z));
             let mut cursor = state.get_mut(&mut world).unwrap();
-            let (point, hit, _) = ray_cast_scene_surface(ray, &mut cursor).unwrap();
+            let surface = ray_cast_scene_surface(ray, &mut cursor, None).unwrap();
+            let (point, hit) = (surface.point, surface.entity);
+            assert!(surface.triangle.is_some());
             assert_eq!(hit, feature);
             assert_eq!(
                 resolve_surface_owner_element_id(hit, &cursor),
@@ -612,9 +654,9 @@ mod surface_tests {
         }
         world.entity_mut(feature).insert(Visibility::Hidden);
         assert_eq!(
-            ray_cast_scene_surface(ray, &mut state.get_mut(&mut world).unwrap())
+            ray_cast_scene_surface(ray, &mut state.get_mut(&mut world).unwrap(), None)
                 .unwrap()
-                .1,
+                .entity,
             background
         );
     }

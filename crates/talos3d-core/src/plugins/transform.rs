@@ -241,6 +241,7 @@ pub struct TransformState {
     pub mode: TransformMode,
     pub axis: AxisConstraint,
     pub numeric_buffer: Option<String>,
+    pub move_source_ids: Arc<HashSet<ElementId>>,
     pub copy_mode: bool,
     pub copy_ids: HashMap<ElementId, ElementId>,
     pub copy_error: Option<String>,
@@ -272,6 +273,7 @@ impl TransformState {
         self.mode = TransformMode::Idle;
         self.axis = AxisConstraint::None;
         self.numeric_buffer = None;
+        self.move_source_ids = Default::default();
         self.copy_mode = false;
         self.copy_ids.clear();
         self.copy_error = None;
@@ -438,11 +440,20 @@ pub fn start_transform_mode_with_options(
     world
         .resource_mut::<ActiveTransformPreview>()
         .placement_bounds = placement_bounds;
+    let free_move = world.resource::<PushPullContext>().active_face.is_none();
     let mut transform_state = world.resource_mut::<TransformState>();
     transform_state.mode = mode;
     transform_state.axis = axis;
     transform_state.numeric_buffer = None;
     transform_state.initial_cursor = Some(initial_cursor);
+    if mode == TransformMode::Moving && free_move {
+        transform_state.move_source_ids = Arc::new(
+            initial_snapshots
+                .iter()
+                .map(|(_, s)| s.element_id())
+                .collect(),
+        );
+    }
     transform_state.initial_snapshots = initial_snapshots;
     transform_state.pivot_override = start_pivot;
     transform_state.confirm_on_release = options.confirm_on_release;

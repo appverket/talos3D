@@ -938,6 +938,46 @@ pub(crate) fn update_inference(world: &mut World) {
             .arrow_guide
             .clone()
             .or_else(|| engine.held_guide.clone());
+        let moving = world
+            .get_resource::<TransformState>()
+            .filter(|s| s.mode == TransformMode::Moving);
+        let explicit_axis = moving.and_then(|s| {
+            let direction = match s.axis {
+                AxisConstraint::X => Vec3::X,
+                AxisConstraint::Y => Vec3::Y,
+                AxisConstraint::Z => Vec3::Z,
+                _ => return None,
+            };
+            Some(Guide {
+                origin: s.initial_cursor?,
+                direction,
+                kind: InferenceKind::Axis,
+                label: "Axis".into(),
+                owner: None,
+            })
+        });
+        // One finite hit triangle from the existing cursor pick. Never project
+        // onto an infinite face plane or cast another ray through the scene.
+        let triangle = world
+            .get_resource::<crate::plugins::cursor::CursorSurfaceTriangle>()
+            .and_then(|hit| hit.0);
+        let constrained = explicit_axis.as_ref().or(locked.as_ref());
+        let surface_snap = triangle
+            .filter(|_| {
+                stationary_surface && moving.is_some() && (constrained.is_some() || !exact_point)
+            })
+            .and_then(|triangle| {
+                let candidates = constrained.map(std::slice::from_ref).unwrap_or(&guides);
+                candidates
+                    .iter()
+                    .filter_map(|guide| {
+                        let point = guide_surface_intersection(guide, triangle)?;
+                        let distance = near(view.as_ref(), raw, point, APERTURE)?;
+                        Some((distance, guide.clone(), point))
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+            });
+        let at_surface = surface_snap.is_some();
         let mut best = None;
         // Compound inference: a true 3D intersection of two acquired guides.
         // At most 39 guides (three axes plus four references); never scene pairs.
@@ -964,7 +1004,9 @@ pub(crate) fn update_inference(world: &mut World) {
             }
         }
 
-        if let Some(guide) = locked.clone() {
+        if let Some(hit) = surface_snap {
+            best = Some(hit);
+        } else if let Some(guide) = locked.clone() {
             let point = if exact_point {
                 guide.project(resolved)
             } else {
@@ -1003,8 +1045,14 @@ pub(crate) fn update_inference(world: &mut World) {
         engine.guide = None;
         if let Some((_, guide, point)) = best.filter(|(_, _, point)| point.is_finite()) {
             resolved = point;
-            kind = SnapKind::Inference;
-            label = if locked.is_some() {
+            kind = if at_surface {
+                SnapKind::Intersection
+            } else {
+                SnapKind::Inference
+            };
+            label = if at_surface {
+                format!("{} · Intersection with surface", guide.label)
+            } else if locked.is_some() {
                 format!("{} · Locked", guide.label)
             } else {
                 guide.label.clone()
@@ -1014,7 +1062,7 @@ pub(crate) fn update_inference(world: &mut World) {
                 direction: Some(guide.direction),
                 distance: None,
                 snap_position: Some(point),
-                reference_entity: guide.owner,
+                reference_entity: if at_surface { owner } else { guide.owner },
                 label: label.clone(),
             };
             if locked.is_some() {
@@ -1106,6 +1154,18 @@ fn circle_tangents(center: Vec3, normal: Vec3, radius: f32, origin: Vec3) -> Vec
     let base = center + offset * (radius * radius / squared);
     let side = normal.cross(offset) * (radius * (squared - radius * radius).sqrt() / squared);
     vec![base + side, base - side]
+}
+
+fn guide_surface_intersection(guide: &Guide, [a, b, c]: [Vec3; 3]) -> Option<Vec3> {
+    use crate::plugins::modeling::snapshots::ray_triangle_intersection;
+    let direction = Dir3::new(guide.direction).ok()?;
+    // An inference line extends in both directions from its anchor.
+    [direction, -direction].into_iter().find_map(|dir| {
+        let ray = Ray3d::new(guide.origin, dir);
+        ray_triangle_intersection(ray, a, b, c)
+            .map(|t| ray.get_point(t))
+            .filter(|p| p.is_finite())
+    })
 }
 
 fn guide_intersection(a: &Guide, b: &Guide) -> Option<Vec3> {

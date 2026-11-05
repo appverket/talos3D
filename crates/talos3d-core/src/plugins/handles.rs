@@ -492,7 +492,9 @@ pub(crate) fn handle_handle_pointer_input(world: &mut World) {
         (left_pressed, left_released, cursor_screen, hovered_handle)
     };
 
-    if left_pressed {
+    // Native window edges and ButtonInput can deliver the same press in
+    // successive updates. Keep the point actually indicated on mouse-down.
+    if left_pressed && world.resource::<HandleInteractionState>().pressed.is_none() {
         world.resource_mut::<HandleInteractionState>().pressed =
             hovered_handle.map(|handle| PendingHandlePress {
                 handle,

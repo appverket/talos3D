@@ -1156,9 +1156,7 @@ fn execute_find_center(world: &mut World, _: &Value) -> Result<CommandResult, St
         visible: true,
         label: Some("Circle center".into()),
     };
-    world.write_message(CreateEntityCommand {
-        snapshot: snapshot.into(),
-    });
+    crate::plugins::commands::enqueue_create_world_entity(world, snapshot.into());
     Ok(CommandResult {
         created: vec![element_id.0],
         ..default()

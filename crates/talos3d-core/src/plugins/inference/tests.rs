@@ -437,3 +437,96 @@ fn aggregate_hover_does_not_offer_member_faces_before_direct_selection() {
         Some("Snap to surface")
     );
 }
+
+#[test]
+fn axis_intersection_uses_finite_tilted_triangle_in_either_direction() {
+    let triangle = [
+        Vec3::new(1., -1., -1.),
+        Vec3::new(3., 1., -1.),
+        Vec3::new(2., 0., 1.),
+    ];
+    let mut guide = Guide {
+        origin: Vec3::ZERO,
+        direction: Vec3::X,
+        kind: InferenceKind::Axis,
+        label: "X axis".into(),
+        owner: None,
+    };
+    assert_eq!(
+        guide_surface_intersection(&guide, triangle),
+        Some(Vec3::X * 2.)
+    );
+    guide.direction = -Vec3::X;
+    assert_eq!(
+        guide_surface_intersection(&guide, triangle),
+        Some(Vec3::X * 2.)
+    );
+    guide.origin = Vec3::Z * 2.;
+    assert!(guide_surface_intersection(&guide, triangle).is_none());
+    guide.direction = Vec3::Z;
+    assert!(guide_surface_intersection(&guide, triangle).is_none());
+}
+
+#[test]
+fn move_publishes_the_line_face_contact_for_free_and_locked_guides() {
+    let contact = Vec3::new(2., 0., 0.);
+    for axis in [AxisConstraint::None, AxisConstraint::X] {
+        let mut world = world_at(contact + Vec3::Y * 0.03);
+        world.spawn(ElementId(42));
+        let mut cursor = world.resource_mut::<CursorWorldPos>();
+        cursor.hovered_element_id = Some(ElementId(42));
+        cursor.surface_point = Some(contact + Vec3::new(0.03, 0.03, 0.));
+        world.insert_resource(crate::plugins::cursor::CursorSurfaceTriangle(Some([
+            Vec3::new(1., -1., -1.),
+            Vec3::new(3., 1., -1.),
+            Vec3::new(2., 0., 1.),
+        ])));
+        let mut state = world.resource_mut::<TransformState>();
+        state.mode = TransformMode::Moving;
+        state.axis = axis;
+        state.initial_cursor = Some(Vec3::ZERO);
+        update_inference(&mut world);
+        assert_eq!(world.resource::<SnapResult>().kind, SnapKind::Intersection);
+        assert_eq!(world.resource::<SnapResult>().target, Some(contact));
+        assert_eq!(world.resource::<CursorWorldPos>().snapped, Some(contact));
+        assert!(world
+            .resource::<InferenceEngine>()
+            .best_label()
+            .unwrap()
+            .contains("Intersection with surface"));
+    }
+}
+
+#[test]
+fn shift_held_line_intersects_surface_even_when_the_pointer_depth_is_off_the_line() {
+    let mut world = world_at(Vec3::new(1., 0., 0.01));
+    let mut state = world.resource_mut::<TransformState>();
+    state.mode = TransformMode::Moving;
+    state.initial_cursor = Some(Vec3::ZERO);
+    update_inference(&mut world);
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::ShiftLeft);
+    let contact = Vec3::X * 2.;
+    point(&mut world, contact + Vec3::new(0.03, 0.03, 0.));
+    world.spawn(ElementId(7));
+    let mut cursor = world.resource_mut::<CursorWorldPos>();
+    cursor.hovered_element_id = Some(ElementId(7));
+    cursor.surface_point = cursor.raw;
+    world.insert_resource(crate::plugins::cursor::CursorSurfaceTriangle(Some([
+        Vec3::new(1., -1., -1.),
+        Vec3::new(3., 1., -1.),
+        Vec3::new(2., 0., 1.),
+    ])));
+    update_inference(&mut world);
+    assert_eq!(world.resource::<SnapResult>().kind, SnapKind::Intersection);
+    assert_eq!(
+        world
+            .resource::<InferenceEngine>()
+            .locked
+            .as_ref()
+            .unwrap()
+            .snap_position,
+        Some(contact)
+    );
+}
