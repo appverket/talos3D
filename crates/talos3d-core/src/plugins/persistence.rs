@@ -185,6 +185,8 @@ struct RecoveryAutosaveState {
     timer: Timer,
     recovery_id: String,
     was_dirty: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pending: Option<std::thread::JoinHandle<Result<(), String>>>,
 }
 
 impl Default for RecoveryAutosaveState {
@@ -193,15 +195,35 @@ impl Default for RecoveryAutosaveState {
             timer: Timer::from_seconds(RECOVERY_AUTOSAVE_INTERVAL_SECONDS, TimerMode::Repeating),
             recovery_id: new_recovery_id(),
             was_dirty: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending: None,
         }
     }
 }
 
 impl RecoveryAutosaveState {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_write(&mut self) {
+        if let Some(job) = self.pending.take() {
+            match job.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => warn!("Recovery autosave failed: {error}"),
+                Err(_) => warn!("Recovery autosave worker stopped unexpectedly"),
+            }
+        }
+    }
+
     fn rotate_document(&mut self) {
         self.recovery_id = new_recovery_id();
         self.was_dirty = false;
         self.timer.reset();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for RecoveryAutosaveState {
+    fn drop(&mut self) {
+        self.finish_write();
     }
 }
 
@@ -1139,6 +1161,24 @@ fn unix_time_ms() -> u128 {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn autosave_recovery_system(world: &mut World) {
+    if let Some(job) = world.resource::<RecoveryAutosaveState>().pending.as_ref() {
+        if !job.is_finished() {
+            return;
+        }
+        world.resource_mut::<RecoveryAutosaveState>().finish_write();
+        if let Some(mut files) = world.get_resource_mut::<RecoveryFiles>() {
+            files.refresh();
+        }
+    }
+    // Detailed previews can temporarily update authored components. Capture
+    // recovery only at an authored boundary, as explicit saves do.
+    if world
+        .get_resource::<TransformState>()
+        .is_some_and(|s| !s.is_idle())
+    {
+        return;
+    }
+
     let dirty = world
         .get_resource::<DocumentState>()
         .is_some_and(|document| document.dirty);
@@ -1169,7 +1209,7 @@ fn autosave_recovery_system(world: &mut World) {
 fn autosave_recovery_system(_world: &mut World) {}
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write_recovery_autosave(world: &mut World) -> Result<PathBuf, String> {
+fn write_recovery_autosave(world: &mut World) -> Result<(), String> {
     let project = build_project_file(world)?;
     let (recovery_id, original_path, display_name) = {
         let state = world.resource::<RecoveryAutosaveState>();
@@ -1182,9 +1222,6 @@ fn write_recovery_autosave(world: &mut World) -> Result<PathBuf, String> {
     };
     let recovery_path = recovery_project_path(&recovery_id)?;
     let saved_at_unix_ms = unix_time_ms();
-    let bytes = crate::plugins::project_codec::encode(&project)?;
-    atomic_write_local(&recovery_path, &bytes)?;
-
     let record = RecoveryFile {
         id: recovery_id,
         recovery_path: recovery_path.clone(),
@@ -1192,13 +1229,21 @@ fn write_recovery_autosave(world: &mut World) -> Result<PathBuf, String> {
         display_name,
         saved_at_unix_ms,
     };
-    let metadata = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
-    atomic_write_local(&recovery_metadata_path(&recovery_path), &metadata)?;
-    prune_recovery_files()?;
-    if let Some(mut recovery_files) = world.get_resource_mut::<RecoveryFiles>() {
-        recovery_files.refresh();
-    }
-    Ok(recovery_path)
+    // Only this immutable revision crosses threads. An explicit save joins
+    // the writer before clearing recovery, preventing an older job from
+    // recreating a recovery file after a successful save.
+    let job = std::thread::Builder::new()
+        .name("project-recovery".into())
+        .spawn(move || {
+            let bytes = crate::plugins::project_codec::encode(&project)?;
+            atomic_write_local(&recovery_path, &bytes)?;
+            let metadata = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
+            atomic_write_local(&recovery_metadata_path(&recovery_path), &metadata)?;
+            prune_recovery_files()
+        })
+        .map_err(|error| error.to_string())?;
+    world.resource_mut::<RecoveryAutosaveState>().pending = Some(job);
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1216,6 +1261,10 @@ fn prune_recovery_files() -> Result<(), String> {
 }
 
 fn clear_active_recovery(world: &mut World) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(mut state) = world.get_resource_mut::<RecoveryAutosaveState>() {
+        state.finish_write();
+    }
     let Some(recovery_id) = world
         .get_resource::<RecoveryAutosaveState>()
         .map(|state| state.recovery_id.clone())
@@ -1273,7 +1322,9 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         .into_iter()
         .filter_map(|entity| world.get_entity(entity).ok())
         .filter_map(|entity_ref| {
-            let snapshot = registry.capture_snapshot(&entity_ref, world)?;
+            // Persist authored fields. Presentation capture additionally rebuilds
+            // aggregate bounds, which are omitted from the file.
+            let snapshot = registry.capture_edit_snapshot(&entity_ref, world)?;
             let semantic = capture_semantic_sidecars(&entity_ref);
             Some((snapshot, semantic))
         })
@@ -2650,6 +2701,23 @@ mod tests {
         assert!(!recent
             .paths()
             .contains(&PathBuf::from("/projects/project-0.talos3d")));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn explicit_save_fences_the_in_flight_recovery_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("finished");
+        let output = marker.clone();
+        let mut world = World::new();
+        let mut recovery = RecoveryAutosaveState::default();
+        recovery.pending = Some(std::thread::spawn(move || {
+            fs::write(output, b"complete").map_err(|e| e.to_string())
+        }));
+        world.insert_resource(recovery);
+        clear_active_recovery(&mut world);
+        assert_eq!(fs::read(marker).unwrap(), b"complete");
+        assert!(world.resource::<RecoveryAutosaveState>().pending.is_none());
     }
 
     #[test]

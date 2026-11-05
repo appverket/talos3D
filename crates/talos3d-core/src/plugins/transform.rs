@@ -1381,6 +1381,18 @@ fn same_placement_presentation(requested: &BoxedEntity, resolved: &BoxedEntity) 
                 && (a.rotation.abs_diff_eq(b.rotation, 1e-5)
                     || a.rotation.abs_diff_eq(-b.rotation, 1e-5)) =>
         {
+            // Hosting reconciliation also updates the declared attachment and
+            // can carry the previous derived AABB. Definition, parameters and
+            // pose are the inputs that determine the occurrence geometry.
+            use crate::plugins::modeling::occurrence::OccurrenceSnapshot;
+            if let (Some(a), Some(b)) = (
+                requested.0.as_any().downcast_ref::<OccurrenceSnapshot>(),
+                resolved.0.as_any().downcast_ref::<OccurrenceSnapshot>(),
+            ) {
+                return a.identity.definition_id == b.identity.definition_id
+                    && a.identity.definition_version == b.identity.definition_version
+                    && a.identity.overrides.0 == b.identity.overrides.0;
+            }
             match (requested.bounds(), resolved.bounds()) {
                 (Some(a), Some(b)) => close(a.min, b.min) && close(a.max, b.max),
                 (None, None) => true,
@@ -1416,12 +1428,20 @@ pub(crate) fn resolve_presented_placement(world: &mut World) -> Result<(), Strin
     };
     let requested = preview.after.clone();
     finish_transform_draft(world, state, &mut preview);
-    let paired = requested.len() == preview.after.len()
-        && requested
-            .iter()
-            .zip(&preview.after)
-            .all(|(a, b)| a.element_id() == b.element_id() && same_placement_presentation(a, b));
-    if !paired {
+    let by_id: HashMap<_, _> = requested.iter().map(|s| (s.element_id(), s)).collect();
+    let adjustment = preview.after.iter().find(|s| {
+        by_id
+            .get(&s.element_id())
+            .is_none_or(|before| !same_placement_presentation(before, s))
+    });
+    if adjustment.is_some() || requested.len() != preview.after.len() {
+        if let Some(s) = adjustment {
+            debug!(
+                "Detailed placement feedback required for {} {}",
+                s.type_name(),
+                s.element_id().0
+            );
+        }
         world
             .resource_mut::<ActiveTransformPreview>()
             .placement_bounds = None;

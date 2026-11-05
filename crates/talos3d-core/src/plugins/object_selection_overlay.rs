@@ -494,6 +494,53 @@ mod tests {
             app.world().resource::<Assets<FaceStippleMaterial>>().len(),
             1
         );
+        // A linked placement moves the highlighted surface around a shared
+        // pivot. The authored source and its GPU geometry stay in place.
+        use crate::plugins::{
+            history::History,
+            transform::{ActiveTransformPreview, TransformMotion, TransformState},
+        };
+        let base = History::default().revision_token();
+        app.insert_resource(TransformState {
+            pivot_override: Some(Vec3::ZERO),
+            ..default()
+        });
+        app.insert_resource(ActiveTransformPreview {
+            placement_bounds: Some(crate::authored_entity::EntityBounds {
+                min: Vec3::ZERO,
+                max: Vec3::ONE,
+            }),
+            last_motion: Some((
+                TransformMotion::Rotate(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+                base,
+            )),
+            ..default()
+        });
+        sync_object_selection_overlay(app.world_mut());
+        app.update();
+        let root = app
+            .world()
+            .resource::<ObjectSelectionOverlayState>()
+            .placement_root
+            .unwrap();
+        assert_eq!(app.world().get::<ChildOf>(overlay).unwrap().parent(), root);
+        assert_eq!(app.world().get::<Mesh3d>(overlay).unwrap().0, replacement);
+        let origin = app
+            .world()
+            .get::<GlobalTransform>(source)
+            .unwrap()
+            .translation();
+        assert_eq!(origin, Vec3::new(7., 3., 4.));
+        assert!(app
+            .world()
+            .get::<GlobalTransform>(overlay)
+            .unwrap()
+            .translation()
+            .abs_diff_eq(
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2) * origin,
+                1e-5
+            ));
+        app.insert_resource(ActiveTransformPreview::default());
         app.world_mut().entity_mut(group).remove::<Selected>();
         sync_object_selection_overlay(app.world_mut());
         assert!(app.world().get_entity(overlay).is_err());
