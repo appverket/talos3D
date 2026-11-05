@@ -117,6 +117,10 @@ impl AuthoredEditPlan {
     pub fn can_commit(&self) -> bool {
         self.can_commit
     }
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
     pub fn digest(&self) -> &str {
         &self.digest
     }

@@ -262,6 +262,15 @@ fn clear_edge_cage(world: &mut World) {
 }
 
 pub(crate) fn build_edge_cage(world: &World, entity: Entity, element_id: ElementId) -> EdgeCage {
+    build_inference_cage(world, entity, element_id, false)
+}
+
+pub(crate) fn build_inference_cage(
+    world: &World,
+    entity: Entity,
+    element_id: ElementId,
+    show_hidden: bool,
+) -> EdgeCage {
     let mut cage = EdgeCage {
         entity: Some(entity),
         element_id: Some(element_id),
@@ -278,7 +287,9 @@ pub(crate) fn build_edge_cage(world: &World, entity: Entity, element_id: Element
         let overrides = entity_ref.get::<SubobjectDisplayOverrides>();
         cage.edges = edges
             .into_iter()
-            .filter(|(edge, _, _)| !overrides.is_some_and(|o| o.is_edge_hidden(edge)))
+            .filter(|(edge, _, _)| {
+                show_hidden || !overrides.is_some_and(|o| o.is_edge_hidden(edge))
+            })
             .map(|(edge, start, end)| PickableEdge { edge, start, end })
             .collect();
         return cage;
@@ -307,7 +318,7 @@ pub(crate) fn build_edge_cage(world: &World, entity: Entity, element_id: Element
         let edge = generated_edge_ref_for_half_edge(&mesh, &entity_ref, canonical);
         // Hidden edges stay addressable by reference but are not pickable, as
         // the Model API's subobject listing promises.
-        if overrides.is_some_and(|overrides| overrides.is_edge_hidden(&edge)) {
+        if !show_hidden && overrides.is_some_and(|overrides| overrides.is_edge_hidden(&edge)) {
             continue;
         }
         let Some((start, end)) = edge_endpoints(&mesh, canonical) else {

@@ -336,6 +336,7 @@ struct OrbitCameraInput<'w, 's> {
     mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     ownership: Res<'w, InputOwnership>,
+    handles: Option<Res<'w, crate::plugins::handles::HandleInteractionState>>,
     motion: MessageReader<'w, 's, MouseMotion>,
     scroll: MessageReader<'w, 's, MouseWheel>,
     touch_events: MessageReader<'w, 's, TouchInput>,
@@ -413,7 +414,12 @@ fn orbit_camera(mut input: OrbitCameraInput) {
     let right_pressed = input.mouse_buttons.pressed(MouseButton::Right);
     let any_mouse_pressed = input.mouse_buttons.pressed(MouseButton::Left) || right_pressed;
     // Space takes precedence: while held, a drag always pans (never orbits).
-    let orbiting = orbit_modifier && any_mouse_pressed && !space_pan;
+    let transform_drag = matches!(
+        *input.ownership,
+        InputOwnership::Modal(crate::plugins::input_ownership::ModalKind::Transform)
+    ) || input.handles.as_ref().is_some_and(|s| s.is_busy());
+    let orbiting =
+        orbit_modifier && !space_pan && (right_pressed || (any_mouse_pressed && !transform_drag));
     let panning = input.mouse_buttons.pressed(MouseButton::Middle)
         || (right_pressed && shift)
         || (space_pan && any_mouse_pressed);

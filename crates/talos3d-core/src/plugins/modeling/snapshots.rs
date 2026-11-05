@@ -402,6 +402,7 @@ impl AuthoredEntity for PolylineSnapshot {
 /// only on commit or explicit snapshot export.
 #[derive(Clone)]
 pub(crate) struct RigidMeshSnapshot {
+    element_id: ElementId,
     source: std::sync::Arc<TriangleMeshSnapshot>,
     source_hash: blake3::Hash,
     source_bytes: usize,
@@ -417,6 +418,7 @@ pub(crate) fn share_mesh_snapshot(snapshot: BoxedEntity) -> BoxedEntity {
     };
     let (source_hash, source_bytes) = mesh.plan_fingerprint().expect("native mesh serialization");
     let shared = RigidMeshSnapshot {
+        element_id: mesh.element_id,
         source: std::sync::Arc::new(mesh.clone()),
         source_hash,
         source_bytes,
@@ -431,6 +433,7 @@ pub(crate) fn share_mesh_snapshot(snapshot: BoxedEntity) -> BoxedEntity {
 impl RigidMeshSnapshot {
     fn materialize(&self) -> TriangleMeshSnapshot {
         let mut snapshot = (*self.source).clone();
+        snapshot.element_id = self.element_id;
         for vertex in &mut snapshot.primitive.vertices {
             *vertex = self.point(*vertex);
         }
@@ -459,7 +462,7 @@ impl RigidMeshSnapshot {
         }
     }
     fn matches_native(&self, other: &TriangleMeshSnapshot) -> bool {
-        self.source.element_id == other.element_id
+        self.element_id == other.element_id
             && self.source.layer == other.layer
             && self.source.material_assignment == other.material_assignment
             && self.source.semantic_shadow == other.semantic_shadow
@@ -481,11 +484,23 @@ impl AuthoredEntity for RigidMeshSnapshot {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    fn copy_with_ids(
+        &self,
+        ids: &std::collections::HashMap<ElementId, ElementId>,
+    ) -> Option<BoxedEntity> {
+        if self.source.semantic_shadow.is_some() {
+            return None;
+        }
+        let mut copy = self.clone();
+        copy.element_id = *ids.get(&self.element_id)?;
+        Some(BoxedEntity(Box::new(copy)))
+    }
+
     fn type_name(&self) -> &'static str {
         "triangle_mesh"
     }
     fn element_id(&self) -> ElementId {
-        self.source.element_id
+        self.element_id
     }
     fn label(&self) -> String {
         self.source.label()
@@ -526,6 +541,7 @@ impl AuthoredEntity for RigidMeshSnapshot {
     }
     fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
         crate::authored_entity::snapshot_fingerprint(&(
+            self.element_id,
             self.source_hash.as_bytes(),
             self.rotation,
             self.offset,
@@ -538,7 +554,7 @@ impl AuthoredEntity for RigidMeshSnapshot {
         self.materialize().apply_to(world);
     }
     fn remove_from(&self, world: &mut World) {
-        self.source.remove_from(world);
+        despawn_by_element_id(world, self.element_id);
     }
     fn preview_transform(&self) -> Option<Transform> {
         Some(Transform::from_translation(self.offset).with_rotation(self.rotation))
@@ -563,7 +579,7 @@ impl AuthoredEntity for RigidMeshSnapshot {
             return Some(false);
         };
         Some(
-            entity.get::<ElementId>() == Some(&self.source.element_id)
+            entity.get::<ElementId>() == Some(&self.element_id)
                 && entity.get::<LayerAssignment>().map(|v| &v.layer) == self.source.layer.as_ref()
                 && entity.get::<MaterialAssignment>() == self.source.material_assignment.as_ref()
                 && entity.get::<SemanticShadow>() == self.source.semantic_shadow.as_ref()
@@ -586,7 +602,9 @@ impl AuthoredEntity for RigidMeshSnapshot {
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
         if let Some(other) = other.as_any().downcast_ref::<Self>() {
             if self.source_hash == other.source_hash {
-                return self.offset == other.offset && self.rotation == other.rotation;
+                return self.element_id == other.element_id
+                    && self.offset == other.offset
+                    && self.rotation == other.rotation;
             }
             return self.matches_native(&other.materialize());
         }

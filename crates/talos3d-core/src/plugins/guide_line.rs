@@ -240,13 +240,15 @@ impl AuthoredEntity for GuideLineSnapshot {
         // Keep these editable even on a new, unnamed infinite guide. Length is
         // historically the distance on EACH side of the anchor; preserve files
         // and API values and make that convention explicit in the inspector.
-        fields.push(property_field_with(
-            "length",
-            "Half-length (0 = infinite)",
-            PropertyValueKind::Scalar,
-            Some(PropertyValue::Scalar(self.finite_length.unwrap_or(0.0))),
-            true,
-        ));
+        if self.finite_length != Some(0.) {
+            fields.push(property_field_with(
+                "length",
+                "Half-length (0 = infinite)",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.finite_length.unwrap_or(0.0))),
+                true,
+            ));
+        }
         fields.push(property_field_with(
             "label",
             "Label",
@@ -563,7 +565,7 @@ impl AuthoredEntityFactory for GuideLineFactory {
                 element_id: None,
                 label: None,
             });
-            if let Some(length) = node.finite_length {
+            if let Some(length) = node.finite_length.filter(|length| *length > 0.) {
                 let dir = node.direction.normalize_or_zero();
                 out.push(SnapPoint {
                     position: node.anchor - dir * length,
@@ -592,7 +594,7 @@ impl AuthoredEntityFactory for GuideLineFactory {
             return;
         };
         for (element_id, node) in query.iter(world) {
-            if !node.visible {
+            if !node.visible || node.finite_length == Some(0.) {
                 continue;
             }
             let half = node.finite_length.unwrap_or(GUIDE_LINE_HALF_LENGTH);
@@ -1069,7 +1071,10 @@ fn ray_segment_distance(
     // independently clamping both unconstrained parameters misses endpoints.
     let segment = seg_end - seg_start;
     let length = segment.length();
-    let direction = segment.try_normalize()?;
+    let Some(direction) = segment.try_normalize() else {
+        let t = (seg_start - ray_origin).dot(ray_dir).max(0.);
+        return Some(((ray_origin + ray_dir * t).distance(seg_start), t));
+    };
     let offset = ray_origin - seg_start;
     let parallel = ray_dir.dot(direction);
     let along_ray = ray_dir.dot(offset);
@@ -1093,6 +1098,72 @@ fn ray_segment_distance(
 // ---------------------------------------------------------------------------
 // Command: toggle visibility
 // ---------------------------------------------------------------------------
+
+/// A finite guide of zero extent is a construction point. Its anchor uses the
+/// same draw, snap, command, persistence and undo paths as a construction line.
+fn execute_find_center(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    use crate::plugins::{
+        drafting::{
+            draft::draft_snapshot_for_member,
+            primitive::{DraftPrimitiveGeometry, DraftPrimitiveNode},
+        },
+        modeling::primitives::{CylinderPrimitive, ShapeRotation},
+        selection::Selected,
+    };
+    let (entity, id) = world
+        .query_filtered::<(Entity, &ElementId), With<Selected>>()
+        .single(world)
+        .map(|(e, id)| (e, *id))
+        .map_err(|_| "Select one circle or cylinder cap")?;
+    let (anchor, direction) = if let Some(node) = world.get::<DraftPrimitiveNode>(entity) {
+        let DraftPrimitiveGeometry::Circle(circle) = &node.geometry else {
+            return Err("Select a circle".into());
+        };
+        let draft = draft_snapshot_for_member(world, id).ok_or("Circle has no Draft plane")?;
+        (
+            draft.node.plane.to_world(circle.center),
+            draft.node.plane.normal,
+        )
+    } else if let Some(cylinder) = world.get::<CylinderPrimitive>(entity) {
+        let axis = world
+            .get::<ShapeRotation>(entity)
+            .copied()
+            .unwrap_or_default()
+            .0
+            * Vec3::Y;
+        let face = world
+            .get_resource::<FaceEditContext>()
+            .filter(|c| c.entity == Some(entity))
+            .and_then(|c| c.selected_face.as_ref());
+        let sign = match face.map(|f| f.face_id.0) {
+            None | Some(0) => 1.,
+            Some(1) => -1.,
+            _ => return Err("Select a circular end cap".into()),
+        };
+        (
+            cylinder.centre + axis * (sign * cylinder.height * 0.5),
+            axis,
+        )
+    } else {
+        return Err("Select a Draft circle or a cylinder cap".into());
+    };
+    let element_id = world.resource::<ElementIdAllocator>().next_id();
+    let snapshot = GuideLineSnapshot {
+        element_id,
+        anchor,
+        direction,
+        finite_length: Some(0.),
+        visible: true,
+        label: Some("Circle center".into()),
+    };
+    world.write_message(CreateEntityCommand {
+        snapshot: snapshot.into(),
+    });
+    Ok(CommandResult {
+        created: vec![element_id.0],
+        ..default()
+    })
+}
 
 fn execute_toggle_guide_line_visibility(
     world: &mut World,
@@ -1479,6 +1550,13 @@ impl Plugin for GuideLinePlugin {
                 license: None,
                 repository: None,
             })
+            .register_command(CommandDescriptor {
+                id:"guide_lines.find_center".into(), label:"Find Center".into(),
+                description:"Place a construction point at the center of a selected Draft circle or cylinder cap.".into(),
+                category:CommandCategory::Create, parameters:None, default_shortcut:None,icon:None,
+                hint:Some("Select a circle or circular end cap".into()),requires_selection:true,show_in_menu:true,
+                version:1, activates_tool:None, capability_id:Some("guide_lines".into()),
+            }, execute_find_center)
             .register_command(
                 CommandDescriptor {
                     id: "guide_lines.place".to_string(),

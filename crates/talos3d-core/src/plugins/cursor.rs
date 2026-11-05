@@ -478,7 +478,12 @@ fn update_cursor_world_pos(
     let raw_position = surface_hit
         .filter(|_| use_scene_surface_cursor)
         .map(|(position, _, _)| position)
-        .or_else(|| cursor_plane.intersect_ray(ray));
+        .or_else(|| cursor_plane.intersect_ray(ray))
+        .or_else(|| {
+            surface_hit
+                .filter(|_| *active_tool.get() == ActiveTool::Select)
+                .map(|hit| hit.0)
+        });
     let Some(raw_position) = raw_position else {
         clear_cursor_world_pos(&mut cursor_world_pos);
         return;

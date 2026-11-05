@@ -138,6 +138,18 @@ where
         self
     }
 
+    fn copy_with_ids(
+        &self,
+        ids: &std::collections::HashMap<ElementId, ElementId>,
+    ) -> Option<BoxedEntity> {
+        if self.opening_context.is_some() {
+            return None;
+        }
+        let mut copy = self.clone();
+        copy.element_id = *ids.get(&self.element_id)?;
+        Some(copy.into())
+    }
+
     fn type_name(&self) -> &'static str {
         P::TYPE_NAME
     }

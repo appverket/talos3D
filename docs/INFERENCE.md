@@ -131,3 +131,38 @@ dash segments per active guide. egui only lays out the tooltip text.
 Regression coverage exercises Shift release, arrow height projection, tool/UI
 ownership, point precedence, drawing-plane compatibility, true 3D intersections,
 circle tangency, cache scaling, and the actual Move preview/commit/undo path.
+
+## Moving from an edge and making copies
+
+Select a group and activate **Move (M)**. Hover over a member edge until the
+endpoint, midpoint, or on-edge marker appears. Drag from that point to a
+stationary point, edge, or guide. The entire selected group follows. A free
+snap can change elevation. **X**, **Y**, or **Z** constrains the displacement
+and draws a dotted trail from the grab point in red, green, or blue respectively.
+Hold **Shift** to retain the inferred direction.
+
+Hold **Option** on macOS or **Alt** on other desktops when starting a grip
+drag, or tap it during Move or Rotate to toggle copy mode. A rotation uses the
+active pivot. **Set Pivot** can place it outside the selection for a radial pattern.
+After placing a copy, type a count and press **Enter**.
+
+| Entry | Placement |
+| --- | --- |
+| `*10` | Ten copies at multiples of the first displacement or signed angle. |
+| `/10` | Ten equal intervals between the original and the first copy, with nine new copies in between. |
+
+Undo removes the repeated copies together. Undo again removes the first copy.
+The interactive array limit is 2,048 authored entities and 64 MiB of estimated
+geometry. Independent primitives, profile solids, native triangle meshes and
+complete groups of supported geometry can be copied. Capability-owned
+relationships and refinement metadata require a duplication plan from their
+owner. The status bar identifies a refused copy.
+
+Use **Create → Find Center** on a Draft circle or a cylinder cap to place a
+saved, inferencable construction point. Selecting a whole cylinder uses its
+upper cap. The construction point records the center at the time of placement.
+
+**View → Display → Show Hidden Geometry** shows the generated topology of the
+body under the pointer. Enable **X-Ray** to see and snap to rear edges. **Tab**
+cycles through overlapping topology points in the pointer aperture. The display
+reuses one retained Bevy line asset for the hovered body, up to 4,096 edges.

@@ -298,6 +298,15 @@ pub trait AuthoredEntity: Send + Sync + 'static {
     fn element_id(&self) -> ElementId;
     fn label(&self) -> String;
     fn center(&self) -> Vec3;
+    /// Re-identify an independent copy of this pose. Implementations must remap
+    /// internal references and decline when required relationships cannot travel.
+    fn copy_with_ids(
+        &self,
+        _ids: &std::collections::HashMap<ElementId, ElementId>,
+    ) -> Option<BoxedEntity> {
+        None
+    }
+
     /// Restore hosts before dependents. Capabilities may override this stage.
     /// Core stages: ordinary entities 2, derived bodies 3, assemblies 4, relations 5.
     fn dependency_order(&self) -> u8 {

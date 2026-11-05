@@ -188,7 +188,7 @@ fn actual_rotated_topology_supplies_midpoint_and_never_bounds_corner() {
             crate::plugins::selection::Selected,
         ))
         .id();
-    let cage = build_edge_cage(&world, entity, ElementId(19));
+    let cage = crate::plugins::edge_selection::build_edge_cage(&world, entity, ElementId(19));
     assert_eq!(cage.edges().len(), 12);
     let edge = &cage.edges()[0];
     let midpoint = (edge.start + edge.end) * 0.5;

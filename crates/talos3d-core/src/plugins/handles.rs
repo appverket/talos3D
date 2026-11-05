@@ -52,7 +52,7 @@ const PIVOT_COLOR: Color = Color::srgb(0.96, 0.35, 0.8);
 const ROTATE_RING_COLOR: Color = Color::srgb(0.42, 0.95, 0.58);
 const ROTATE_RING_SEGMENTS: usize = 24;
 const MOVE_HANDLE_HINT: &str =
-    "Move (M): drag a grip · X/Y/Z lock axis · Shift+X/Y/Z lock plane · type distance · Esc cancel";
+    "Move (M): drag a grip or a point on an edge · X/Y/Z lock axis · Shift+X/Y/Z lock plane · type distance · Esc cancel";
 const GUIDE_HANDLE_HINT: &str =
     "Drag the guide anchor to move · edit anchor/direction in Properties · Shift+G hides guides";
 const COMBINED_HANDLE_HINT: &str =
@@ -396,6 +396,7 @@ fn update_hovered_handle(world: &World, mut commands: Commands, hover_handles: H
         })
         .min_by(|left, right| left.0.total_cmp(&right.0))
         .map(|(_, handle)| handle)
+        .or_else(|| inferred_move_handle(world, camera, camera_transform, cursor_position))
     } else {
         None
     };
@@ -403,6 +404,34 @@ fn update_hovered_handle(world: &World, mut commands: Commands, hover_handles: H
     commands.queue(move |world: &mut World| {
         world.resource_mut::<HandleInteractionState>().hovered = new_hovered;
     });
+}
+
+fn inferred_move_handle(
+    world: &World,
+    camera: &Camera,
+    transform: &GlobalTransform,
+    pointer: Vec2,
+) -> Option<ResolvedHandle> {
+    let (entity, position) = world
+        .get_resource::<crate::plugins::inference::InferenceEngine>()?
+        .move_anchor?;
+    let screen_position = camera.world_to_viewport(transform, position).ok()?;
+    if screen_position.distance(pointer) > world.resource::<PickApertures>().handle_px {
+        return None;
+    }
+    Some(ResolvedHandle {
+        entity,
+        id: "inferred_move_anchor".into(),
+        label: "Move from this point".into(),
+        position,
+        screen_position,
+        render_style: HandleRenderStyle::Move,
+        interaction: HandleInteraction::Transform {
+            mode: TransformMode::Moving,
+            axis: AxisConstraint::None,
+            pivot_override: None,
+        },
+    })
 }
 
 fn pick_handle_at_press(world: &mut World, position: Vec2) -> Option<ResolvedHandle> {
@@ -430,6 +459,7 @@ fn pick_handle_at_press(world: &mut World, position: Vec2) -> Option<ResolvedHan
     })
     .min_by(|a, b| a.0.total_cmp(&b.0))
     .map(|(_, handle)| handle)
+    .or_else(|| inferred_move_handle(world, camera, transform, position))
 }
 
 pub(crate) fn handle_handle_pointer_input(world: &mut World) {

@@ -1,9 +1,9 @@
 # Worktree purpose
 
-- agent: codex
+- agent: codex@monster
 - created: 2026-11-05
-- branch: codex/linked-rigid-transform
-- task-id: TALOS-cuiewuij
+- branch: codex/sketchup-transforms
+- task-id: TALOS-xonavztq
 - target base: origin/main
-- summary: Repair linked-model rigid interaction
+- summary: Transform anchors, copies, and hidden geometry verification.
 - status: active

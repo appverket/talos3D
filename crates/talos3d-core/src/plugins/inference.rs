@@ -4,7 +4,7 @@ use crate::plugins::{
     camera::OrbitCamera,
     commands::find_entity_by_element_id_readonly,
     cursor::{cursor_window_position, CursorWorldPos, DrawingPlane},
-    edge_selection::{build_edge_cage, EdgeCage},
+    edge_selection::{build_inference_cage, EdgeCage},
     history::{History, ModelRevision},
     identity::ElementId,
     input_ownership::InputOwnership,
@@ -109,6 +109,17 @@ pub struct InferenceEngine {
     pub last_mode: Option<TransformMode>,
     cage: EdgeCage,
     cached_entity: Option<Entity>,
+    // Membership is stable throughout a hover and drag on a given model revision.
+    move_members: Option<(
+        Entity,
+        Option<ModelRevision>,
+        std::collections::HashSet<ElementId>,
+    )>,
+    pub(super) move_anchor: Option<(Entity, Vec3)>,
+    show_hidden: bool,
+    xray_topology: bool,
+    depth_cycle: Option<(ElementId, Vec2, usize)>,
+    overlay: Option<Entity>,
     segments: Vec<(Vec3, Vec3)>,
     revision: Option<ModelRevision>,
     references: Vec<Reference>,
@@ -328,6 +339,46 @@ fn selected_surface_is_addressable(world: &World) -> bool {
         && crate::plugins::selection::resolve_entity_for_selection(world, entity) == Some(entity)
 }
 
+fn move_anchor_root(world: &mut World, hovered: Option<ElementId>) -> Option<Entity> {
+    use crate::plugins::{
+        handles::{HandleContext, HandleDisplayMode},
+        selection::Selected,
+    };
+    let id = hovered?;
+    if world.get_resource::<HandleContext>()?.display_mode != HandleDisplayMode::Move
+        || !world.get_resource::<TransformState>()?.is_idle()
+    {
+        return None;
+    }
+    let (root, root_id) = world
+        .query_filtered::<(Entity, &ElementId), With<Selected>>()
+        .single(world)
+        .ok()
+        .map(|(e, id)| (e, *id))?;
+    if root_id == id {
+        return Some(root);
+    }
+    world.get::<crate::plugins::modeling::group::GroupMembers>(root)?;
+    let revision = world.get_resource::<History>().map(History::revision_token);
+    if world
+        .resource::<InferenceEngine>()
+        .move_members
+        .as_ref()
+        .is_none_or(|(e, rev, _)| *e != root || *rev != revision)
+    {
+        let ids = crate::plugins::modeling::group::collect_group_members_recursive(world, root_id);
+        world.resource_mut::<InferenceEngine>().move_members =
+            Some((root, revision, ids.into_iter().collect()));
+    }
+    world
+        .resource::<InferenceEngine>()
+        .move_members
+        .as_ref()?
+        .2
+        .contains(&id)
+        .then_some(root)
+}
+
 pub(crate) fn update_inference(world: &mut World) {
     let tool = world
         .get_resource::<State<ActiveTool>>()
@@ -337,6 +388,21 @@ pub(crate) fn update_inference(world: &mut World) {
         .get_resource::<InputOwnership>()
         .is_some_and(InputOwnership::is_ui_capture);
     let raw = world.resource::<SnapResult>().raw_position;
+    world.resource_mut::<InferenceEngine>().move_anchor = None;
+    let hovered = world.resource::<CursorWorldPos>().hovered_element_id;
+    let hidden = world
+        .get_resource::<crate::plugins::render_pipeline::RenderSettings>()
+        .is_some_and(|settings| settings.show_hidden_geometry);
+    let xray_topology = hidden
+        && world
+            .get_resource::<crate::plugins::render_pipeline::RenderSettings>()
+            .is_some_and(|s| s.xray_enabled);
+    let move_root = move_anchor_root(world, hovered);
+    if !hidden || blocked || !supports_tool(&tool) || raw.is_none() || hovered.is_none() {
+        if let Some(overlay) = world.resource_mut::<InferenceEngine>().overlay.take() {
+            world.despawn(overlay);
+        }
+    }
     if blocked || !supports_tool(&tool) || raw.is_none() {
         let mut engine = world.resource_mut::<InferenceEngine>();
         engine.feedback.clear();
@@ -355,6 +421,8 @@ pub(crate) fn update_inference(world: &mut World) {
         && world
             .get_resource::<TransformState>()
             .is_none_or(TransformState::is_idle)
+        && move_root.is_none()
+        && !hidden
         && !selected_surface_is_addressable(world)
     {
         world.resource_mut::<InferenceEngine>().reset_interaction();
@@ -449,13 +517,23 @@ pub(crate) fn update_inference(world: &mut World) {
                 }
             }
         }
-        if engine.cage.element_id() != owner || engine.revision != revision {
+        if engine.cage.element_id() != owner
+            || engine.revision != revision
+            || engine.show_hidden != hidden
+            || engine.xray_topology != xray_topology
+            || (hidden
+                && engine.overlay.is_none()
+                && owner.is_some()
+                && !engine.cage.edges().is_empty())
+        {
+            engine.show_hidden = hidden;
+            engine.xray_topology = xray_topology;
             engine.cached_entity =
                 owner.and_then(|id| find_entity_by_element_id_readonly(world, id));
             engine.cage = engine
                 .cached_entity
                 .zip(owner)
-                .map(|(entity, id)| build_edge_cage(world, entity, id))
+                .map(|(entity, id)| build_inference_cage(world, entity, id, hidden))
                 .unwrap_or_default();
             engine.segments.clear();
             if engine.cage.edges().is_empty() && !engine.cage.declined() {
@@ -475,6 +553,28 @@ pub(crate) fn update_inference(world: &mut World) {
                         }
                     }
                 }
+            }
+            if let Some(entity) = engine.overlay.take() {
+                world.despawn(entity);
+            }
+            if hidden
+                && !engine.cage.edges().is_empty()
+                && world.contains_resource::<Assets<GizmoAsset>>()
+            {
+                let mut asset = GizmoAsset::default();
+                for edge in engine.cage.edges() {
+                    asset.line(edge.start, edge.end, Color::srgb(0.26, 0.38, 0.50));
+                }
+                let handle = world.resource_mut::<Assets<GizmoAsset>>().add(asset);
+                engine.overlay = Some(
+                    world
+                        .spawn(Gizmo {
+                            handle,
+                            depth_bias: if xray_topology { -1. } else { -0.001 },
+                            ..default()
+                        })
+                        .id(),
+                );
             }
             engine.revision = revision;
         }
@@ -499,31 +599,44 @@ pub(crate) fn update_inference(world: &mut World) {
             engine.arrow_guide = None;
         }
         let allowed = |p: Vec3| !planar || (p - plane.origin).dot(plane.normal).abs() < 1e-3;
-        let mut point_hit: Option<(f32, Vec3, SnapKind, &'static str, Option<(Vec3, Vec3)>)> = None;
-        let mut edge_hit: Option<(f32, Vec3, Vec3, Vec3)> = None;
-        let mut offer = |point, kind, label, edge| {
+        type PointHit = (
+            f32,
+            Vec3,
+            SnapKind,
+            &'static str,
+            Option<(Vec3, Vec3)>,
+            bool,
+        );
+        let mut point_hit: Option<PointHit> = None;
+        let mut depth_hits = Vec::new();
+        let mut edge_hit: Option<(f32, Vec3, Vec3, Vec3, bool)> = None;
+        let mut offer = |point, kind, label, edge, on_body| {
             let visible =
                 visible_near_surface(point, surface, normal, view.as_ref().map(|v| v.ray.origin));
             if !allowed(point) || !visible {
                 return;
             }
             if let Some(distance) = near(view.as_ref(), raw, point, APERTURE) {
+                if xray_topology && on_body && depth_hits.len() < 128 {
+                    depth_hits.push((distance, point, kind, label, edge, on_body));
+                }
                 if point_hit.as_ref().is_none_or(|hit| distance < hit.0) {
-                    point_hit = Some((distance, point, kind, label, edge));
+                    point_hit = Some((distance, point, kind, label, edge, on_body));
                 }
             }
         };
-        for (start, end) in engine
+        for ((start, end), on_body) in engine
             .cage
             .edges()
             .iter()
             .map(|edge| (edge.start, edge.end))
             .chain(engine.segments.iter().copied())
+            .map(|segment| (segment, true))
             .chain(
                 engine
                     .reference_edges
                     .iter()
-                    .map(|edge| (edge.start, edge.end)),
+                    .map(|edge| ((edge.start, edge.end), false)),
             )
         {
             let edge = ReferenceEdge {
@@ -537,18 +650,21 @@ pub(crate) fn update_inference(world: &mut World) {
                 SnapKind::Endpoint,
                 "Endpoint",
                 Some((edge.start, edge.end)),
+                on_body,
             );
             offer(
                 edge.end,
                 SnapKind::Endpoint,
                 "Endpoint",
                 Some((edge.start, edge.end)),
+                on_body,
             );
             offer(
                 (edge.start + edge.end) * 0.5,
                 SnapKind::Midpoint,
                 "Midpoint",
                 Some((edge.start, edge.end)),
+                on_body,
             );
             if let Some(point) =
                 segment_point(edge.start, edge.end, raw, view.as_ref()).filter(|p| allowed(*p))
@@ -562,7 +678,7 @@ pub(crate) fn update_inference(world: &mut World) {
                         view.as_ref().map(|v| v.ray.origin),
                     );
                     if visible && edge_hit.as_ref().is_none_or(|hit| distance < hit.0) {
-                        edge_hit = Some((distance, point, edge.start, edge.end));
+                        edge_hit = Some((distance, point, edge.start, edge.end, on_body));
                     }
                 }
             }
@@ -578,19 +694,39 @@ pub(crate) fn update_inference(world: &mut World) {
                 let normal = rotation * Vec3::Y;
                 for sign in [-1.0, 1.0] {
                     let center = cylinder.centre + normal * (cylinder.height * 0.5 * sign);
-                    offer(center, SnapKind::Center, "Center", None);
+                    offer(center, SnapKind::Center, "Center", None, true);
                     if let Some(origin) = origin {
                         for tangent in circle_tangents(center, normal, cylinder.radius, origin) {
-                            offer(tangent, SnapKind::Control, "Tangent to circle", None);
+                            offer(tangent, SnapKind::Control, "Tangent to circle", None, true);
                         }
                     }
                 }
             }
         }
         // The world origin is a genuine point, never an invented object corner.
-        offer(Vec3::ZERO, SnapKind::Origin, "Origin", None);
+        offer(Vec3::ZERO, SnapKind::Origin, "Origin", None, false);
         let base_snap = world.resource::<SnapResult>().clone();
-        if keys.just_pressed(KeyCode::Tab) && base_snap.candidates.len() > 1 {
+        // In an end-on view front and rear topology can project to one pixel.
+        // Keep Tab cycling local to the aperture and the current hovered body.
+        if let Some((view, owner)) = view.as_ref().zip(owner).filter(|_| !depth_hits.is_empty()) {
+            depth_hits.sort_by(|a, b| {
+                a.0.total_cmp(&b.0).then_with(|| {
+                    a.1.distance_squared(view.ray.origin)
+                        .total_cmp(&b.1.distance_squared(view.ray.origin))
+                })
+            });
+            depth_hits.dedup_by(|a, b| a.1 == b.1);
+            let mut index = engine
+                .depth_cycle
+                .filter(|(id, pos, _)| *id == owner && pos.distance(view.cursor) < 2.)
+                .map_or(0, |c| c.2);
+            if keys.just_pressed(KeyCode::Tab) {
+                index += 1;
+            }
+            index %= depth_hits.len();
+            engine.depth_cycle = Some((owner, view.cursor, index));
+            point_hit = Some(depth_hits[index]);
+        } else if keys.just_pressed(KeyCode::Tab) && base_snap.candidates.len() > 1 {
             point_hit = None;
         }
         let mut resolved = base_snap.position.unwrap_or(raw);
@@ -604,15 +740,18 @@ pub(crate) fn update_inference(world: &mut World) {
             _ => "",
         }
         .to_string();
+        let mut anchor = None;
         let mut reference = None;
-        if let Some((_, point, point_kind, point_label, edge)) = point_hit {
+        if let Some((_, point, point_kind, point_label, edge, on_body)) = point_hit {
+            anchor = on_body.then_some(point);
             resolved = point;
             kind = point_kind;
             label = point_label.into();
             reference = Some(Reference { point, edge, owner });
         } else if matches!(kind, SnapKind::None | SnapKind::Grid) {
-            if let Some((_, point, start, end)) = edge_hit {
+            if let Some((_, point, start, end, on_body)) = edge_hit {
                 resolved = point;
+                anchor = on_body.then_some(point);
                 kind = SnapKind::OnEdge;
                 label = "On edge".into();
                 reference = Some(Reference {
@@ -644,6 +783,7 @@ pub(crate) fn update_inference(world: &mut World) {
             kind = SnapKind::None;
             label.clear();
         }
+        engine.move_anchor = move_root.zip(anchor);
         engine.acquire(reference, now);
         if keys.just_pressed(KeyCode::Tab)
             && base_snap.candidates.len() <= 1
@@ -791,9 +931,7 @@ pub(crate) fn update_inference(world: &mut World) {
         if !shift {
             engine.held_guide = None;
         }
-        if shift
-            && (keys.just_pressed(KeyCode::ShiftLeft) || keys.just_pressed(KeyCode::ShiftRight))
-        {
+        if shift && engine.held_guide.is_none() {
             engine.held_guide = engine.guide.clone();
         }
         let locked = engine
@@ -1017,15 +1155,19 @@ fn draw_inference_visuals(
         if engine.locked.is_some() {
             gizmos.line(guide.origin, point, color);
         } else {
-            for i in 0..16 {
-                let t = i as f32 / 16.0;
-                gizmos.line(
-                    guide.origin + delta * t,
-                    guide.origin + delta * (t + 0.035),
-                    color,
-                );
-            }
+            draw_dotted_trail(&mut gizmos, guide.origin, delta, color);
         }
+    }
+}
+pub(super) fn draw_dotted_trail<G: bevy::gizmos::config::GizmoConfigGroup>(
+    gizmos: &mut Gizmos<G>,
+    origin: Vec3,
+    delta: Vec3,
+    color: Color,
+) {
+    for i in 0..16 {
+        let t = i as f32 / 16.;
+        gizmos.line(origin + delta * t, origin + delta * (t + 0.035), color);
     }
 }
 fn draw_inference_tooltip(

@@ -61,6 +61,8 @@ const AXIS_Z_COLOR: Color = Color::srgb(0.35, 0.55, 0.95);
 const TRANSFORM_PREVIEW_COLOR: Color = Color::srgb(1.0, 0.8, 0.2);
 const FEATURE_PUSH_PULL_EPSILON: f32 = 0.001;
 
+mod copies;
+
 pub struct TransformPlugin;
 
 impl Plugin for TransformPlugin {
@@ -239,6 +241,10 @@ pub struct TransformState {
     pub mode: TransformMode,
     pub axis: AxisConstraint,
     pub numeric_buffer: Option<String>,
+    pub copy_mode: bool,
+    pub copy_ids: HashMap<ElementId, ElementId>,
+    pub copy_error: Option<String>,
+    pub copy_originals: Vec<Entity>,
     pub initial_cursor: Option<Vec3>,
     pub initial_snapshots: Vec<(Entity, BoxedEntity)>,
     pub preview_entities: Vec<(ElementId, Entity)>,
@@ -266,6 +272,10 @@ impl TransformState {
         self.mode = TransformMode::Idle;
         self.axis = AxisConstraint::None;
         self.numeric_buffer = None;
+        self.copy_mode = false;
+        self.copy_ids.clear();
+        self.copy_error = None;
+        self.copy_originals.clear();
         self.initial_cursor = None;
         self.initial_snapshots.clear();
         self.preview_entities.clear();
@@ -440,6 +450,12 @@ pub fn start_transform_mode_with_options(
     // Immediately set InputOwnership so other systems in this same frame
     // see Modal and don't process stale input events.
     *world.resource_mut::<InputOwnership>() = InputOwnership::Modal(ModalKind::Transform);
+    if world
+        .get_resource::<ButtonInput<KeyCode>>()
+        .is_some_and(|keys| keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight))
+    {
+        copies::toggle(world);
+    }
 
     Ok(())
 }
@@ -567,6 +583,7 @@ fn handle_transform_input(world: &mut World) {
             })
     });
     if !world.resource::<InputOwnership>().is_modal() {
+        copies::input(world, native_events.as_deref().unwrap_or_default());
         return;
     }
 
@@ -582,7 +599,9 @@ fn handle_transform_input(world: &mut World) {
             .iter()
             .filter(|event| {
                 event.state == bevy::input::ButtonState::Pressed
-                    && !(event.repeat && axis_for_key(event.key_code, shift_pressed).is_some())
+                    && !(event.repeat
+                        && (axis_for_key(event.key_code, shift_pressed).is_some()
+                            || matches!(event.key_code, KeyCode::AltLeft | KeyCode::AltRight)))
             })
             .map(|event| {
                 let text = event.text.as_deref().or_else(|| {
@@ -613,6 +632,12 @@ fn handle_transform_input(world: &mut World) {
         keys.get_just_pressed().copied().collect()
     };
 
+    if just_pressed
+        .iter()
+        .any(|k| matches!(k, KeyCode::AltLeft | KeyCode::AltRight))
+    {
+        copies::toggle(world);
+    }
     let mut transform_state = world.resource_mut::<TransformState>();
 
     for key in just_pressed {
@@ -1051,13 +1076,25 @@ fn publish_transform_candidate(
         .draft
         .as_ref()
         .expect("ordinary transform has a draft");
+    let mut context = draft.context.clone();
+    let (before, after) = if world.resource::<TransformState>().copy_mode {
+        context.request_kind = "copy".into();
+        context.intent = "Place transform copy".into();
+        context.mutation_scope = "copies".into();
+        (
+            Vec::new(),
+            copies::candidate(world.resource::<TransformState>(), draft)?,
+        )
+    } else {
+        (draft.before.clone(), draft.after.clone())
+    };
     let plan = AuthoredEditPlan::capture(
         world,
         Some(interaction),
         base,
-        draft.context.clone(),
-        draft.before.clone(),
-        draft.after.clone(),
+        context,
+        before,
+        after,
         draft.semantic_intents.clone(),
     )
     .map_err(|e| e.to_string())?;
@@ -1482,7 +1519,7 @@ fn confirm_captured_transform(world: &mut World) {
         return;
     }
     let active = world.resource::<ActiveTransformPreview>().clone();
-    let Some(plan) = active.plan else {
+    let Some(ref plan) = active.plan else {
         return;
     };
     let mode = world.resource::<TransformState>().mode;
@@ -1495,6 +1532,8 @@ fn confirm_captured_transform(world: &mut World) {
         Err(plan.context().findings.join("; "))
     } else if plan.before_snapshots() == plan.after_snapshots() {
         Ok(())
+    } else if world.resource::<TransformState>().copy_mode {
+        copies::commit(world, plan, &active)
     } else {
         queue_captured_plan(world, plan.plan_id()).map_err(|e| e.to_string())
     };
@@ -1560,6 +1599,7 @@ fn restore_previews_and_clear_session(world: &mut World, was_push_pull: bool) {
     } else {
         let _ = restore_captured_presentation(world);
     }
+    copies::clear_originals(world);
     cleanup_preview_entities(world);
     world
         .resource_mut::<ActiveTransformPreview>()
@@ -1663,6 +1703,8 @@ fn update_transform_status(world: &mut World) {
     let mode_label = match state.mode {
         TransformMode::Idle => return,
         TransformMode::Moving if is_push_pull => "Push/Pull",
+        TransformMode::Moving if state.copy_mode => "Move copy",
+        TransformMode::Rotating if state.copy_mode => "Rotate copy",
         TransformMode::Moving => "Move",
         TransformMode::Rotating => "Rotate",
         TransformMode::Scaling => "Scale",
@@ -1683,10 +1725,10 @@ fn update_transform_status(world: &mut World) {
     };
 
     let extra_hint = match state.mode {
-        TransformMode::Rotating => " · Ctrl snap 15\u{b0} · X/Y/Z plane",
+        TransformMode::Rotating => " · Alt/Option copy · Ctrl snap 15\u{b0} · X/Y/Z plane",
         TransformMode::Scaling => " · Shift uniform",
         TransformMode::Moving if !is_push_pull => {
-            " · X/Y/Z axis · Shift+X/Y/Z plane · type distance"
+            " · Alt/Option copy · X/Y/Z axis · Shift holds inference · type distance"
         }
         _ => "",
     };
@@ -1710,6 +1752,7 @@ fn update_transform_status(world: &mut World) {
 fn draw_transform_constraint(
     pivot_point: Res<PivotPoint>,
     transform_state: Res<TransformState>,
+    active: Res<ActiveTransformPreview>,
     push_pull: Res<PushPullContext>,
     mut gizmos: Gizmos,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
@@ -1727,6 +1770,19 @@ fn draw_transform_constraint(
         return;
     };
     let (direction, color) = constraint_visual(transform_state.axis);
+    if matches!(
+        transform_state.axis,
+        AxisConstraint::X | AxisConstraint::Y | AxisConstraint::Z
+    ) {
+        if let (Some(origin), Some((TransformMotion::Move(delta), _))) =
+            (transform_state.initial_cursor, &active.last_motion)
+        {
+            crate::plugins::inference::draw_dotted_trail(&mut gizmos, origin, *delta, color);
+            #[cfg(feature = "perf-stats")]
+            add_gizmo_line_count(&mut perf_stats, 16);
+            return;
+        }
+    }
     gizmos.line(
         center - direction * AXIS_LINE_LENGTH_METRES,
         center + direction * AXIS_LINE_LENGTH_METRES,
@@ -2143,7 +2199,14 @@ fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>)
     let current_cursor = target
         .or_else(|| move_cursor_on_drag_plane(world, initial_cursor, state.axis))
         .or_else(|| current_transform_cursor(world))?;
-    let constrained_delta = apply_move_constraint(current_cursor - initial_cursor, state.axis);
+    let delta = current_cursor - initial_cursor;
+    // A free gesture can snap in three dimensions. Preserve the historical
+    // horizontal fallback only for a cursor with no inferred target.
+    let constrained_delta = if state.axis == AxisConstraint::None && target.is_some() {
+        delta
+    } else {
+        apply_move_constraint(delta, state.axis)
+    };
     Some(numeric_value.map_or(constrained_delta, |value| {
         numeric_move_delta(state.axis, constrained_delta, value)
     }))

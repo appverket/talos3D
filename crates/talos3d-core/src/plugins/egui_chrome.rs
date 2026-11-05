@@ -319,6 +319,7 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
         command_ids: &[
             "modeling.create_polyline",
             "guide_lines.place",
+            "guide_lines.find_center",
             "dimensions.place",
             "tools.tape",
         ],
@@ -385,6 +386,7 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
         command_ids: &[
             "view.toggle_grid",
             "view.toggle_xray",
+            "view.show_hidden_geometry",
             "view.toggle_outline",
             "view.toggle_wireframe",
             "view.toggle_group_focus_hide",
@@ -5063,6 +5065,7 @@ fn draw_render_settings_window(
                     {
                         settings.paper_fill_enabled = false;
                     }
+                    ui.checkbox(&mut settings.show_hidden_geometry, "Show Hidden Geometry");
                     ui.add_enabled_ui(settings.xray_enabled, |ui| {
                         ui.add(
                             egui::Slider::new(&mut settings.xray_surface_alpha, 0.05..=0.9)

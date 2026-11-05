@@ -556,3 +556,73 @@ fn boundary_preview_can_collapse_reopen_cancel_commit_and_undo_without_mesh_conv
     boundary_edit::restore(&mut world);
     assert_eq!(capture_snapshot(&world, ElementId(2)), Some(original));
 }
+
+#[test]
+fn displayed_move_copy_and_internal_array_keep_source_and_endpoint_through_history() {
+    let mut world = fixture();
+    world.resource_mut::<ElementIdAllocator>().set_next(10);
+    let before = capture_snapshot(&world, ElementId(1)).unwrap();
+    copies::toggle(&mut world);
+    update_transform_preview(&mut world);
+    let shown = world.resource::<ActiveTransformPreview>().snapshots[0].center();
+    world.resource_mut::<TransformState>().numeric_buffer = Some("99".into());
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Enter);
+    confirm_transform(&mut world);
+    drain(&mut world);
+    assert_eq!(capture_snapshot(&world, ElementId(1)), Some(before));
+    assert_eq!(
+        capture_snapshot(&world, ElementId(10)).unwrap().center(),
+        shown
+    );
+    let mut last = world.remove_resource::<copies::LastCopy>().unwrap();
+    last.input = "/4".into();
+    copies::repeat(&mut world, &last).unwrap();
+    drain(&mut world);
+    for i in 1..4 {
+        assert_eq!(
+            capture_snapshot(&world, ElementId(10 + i))
+                .unwrap()
+                .center(),
+            shown * i as f32 / 4.
+        );
+    }
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    drain(&mut world);
+    assert!(capture_snapshot(&world, ElementId(11)).is_none());
+    assert_eq!(
+        capture_snapshot(&world, ElementId(10)).unwrap().center(),
+        shown
+    );
+}
+
+#[test]
+fn free_move_places_raised_edge_anchor_at_the_actual_lower_guide_point() {
+    let mut world = fixture();
+    let anchor = Vec3::new(0.25, 1.375, 0.5);
+    let target = Vec3::new(1., 0., -2.);
+    let mut state = world.resource_mut::<TransformState>();
+    state.axis = AxisConstraint::None;
+    state.numeric_buffer = None;
+    state.initial_cursor = Some(anchor);
+    world.resource_mut::<SnapResult>().target = Some(target);
+    update_transform_preview(&mut world);
+    let pose = world
+        .resource::<ActiveTransformPreview>()
+        .plan
+        .as_ref()
+        .unwrap()
+        .after_snapshots()[0]
+        .center();
+    assert!(pose.abs_diff_eq(target - anchor, 1e-5));
+    world
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .press(KeyCode::Enter);
+    confirm_transform(&mut world);
+    drain(&mut world);
+    assert_eq!(
+        capture_snapshot(&world, ElementId(1)).unwrap().center(),
+        pose
+    );
+}

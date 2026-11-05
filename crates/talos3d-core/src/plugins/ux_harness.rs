@@ -134,6 +134,9 @@ pub struct UxDragRequest {
     /// by ux_observe. Timing starts at Bevy input injection, excluding HTTP.
     #[serde(default)]
     pub trace: bool,
+    /// Hold one modifier across the gesture, including its activating press.
+    #[serde(default)]
+    pub modifier: Option<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -335,7 +338,25 @@ pub fn enqueue_drag(world: &mut World, request: UxDragRequest) -> Result<UxInput
     let start = Vec2::new(request.start[0], request.start[1]);
     let end = Vec2::new(request.end[0], request.end[1]);
     let step_count = request.steps.unwrap_or(12).clamp(1, 120);
+    let modifier = request
+        .modifier
+        .as_deref()
+        .map(parse_key_code)
+        .transpose()?;
+    if modifier
+        .as_ref()
+        .is_some_and(|(_, key)| !matches!(key, Key::Alt | Key::Shift))
+    {
+        return Err("Supported drag modifiers are Alt and Shift".into());
+    }
     let mut actions = Vec::new();
+    if let Some((code, key)) = &modifier {
+        actions.push(UxStepAction::Key {
+            key_code: *code,
+            logical_key: key.clone(),
+            state: ButtonState::Pressed,
+        });
+    }
     actions.push(UxStepAction::MovePointer(start));
     actions.push(UxStepAction::MouseButton {
         position: start,
@@ -351,6 +372,13 @@ pub fn enqueue_drag(world: &mut World, request: UxDragRequest) -> Result<UxInput
         button,
         state: ButtonState::Released,
     });
+    if let Some((code, key)) = modifier {
+        actions.push(UxStepAction::Key {
+            key_code: code,
+            logical_key: key,
+            state: ButtonState::Released,
+        });
+    }
     let result = enqueue_steps(world, actions)?;
     if request.trace {
         trace::begin(world, result.sequence);
@@ -683,6 +711,8 @@ fn parse_key_code(value: &str) -> Result<(KeyCode, Key), String> {
             let ch = value.chars().last().unwrap();
             key_code_for_character(ch).map(|code| (code, Key::Character(ch.to_string().into())))
         }
+        "alt" | "option" | "altleft" => Ok((KeyCode::AltLeft,Key::Alt)),
+        "shift" => Ok((KeyCode::ShiftLeft,Key::Shift)),
         "period" => Ok((KeyCode::Period, Key::Character(".".into()))),
         "minus" => Ok((KeyCode::Minus, Key::Character("-".into()))),
         "tab" => Ok((KeyCode::Tab, Key::Tab)),
@@ -723,6 +753,8 @@ fn key_code_for_character(ch: char) -> Result<KeyCode, String> {
         '7' => Ok(KeyCode::Digit7),
         '8' => Ok(KeyCode::Digit8),
         '9' => Ok(KeyCode::Digit9),
+        '*' => Ok(KeyCode::NumpadMultiply),
+        '/' => Ok(KeyCode::Slash),
         '.' => Ok(KeyCode::Period),
         '-' => Ok(KeyCode::Minus),
         _ => key_code_for_letter(ch),

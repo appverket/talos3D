@@ -178,6 +178,23 @@ impl AuthoredEntity for GroupSnapshot {
         self
     }
 
+    fn copy_with_ids(&self, ids: &HashMap<ElementId, ElementId>) -> Option<BoxedEntity> {
+        if self.composite.is_some() {
+            return None;
+        }
+        let mut copy = self.clone();
+        copy.element_id = *ids.get(&self.element_id)?;
+        for id in &mut copy.member_ids {
+            *id = *ids.get(id)?;
+        }
+        if let Some(link) = &mut copy.linked_model {
+            for pair in &mut link.source_to_scene_ids {
+                pair.scene_id = *ids.get(&pair.scene_id)?;
+            }
+        }
+        Some(copy.into())
+    }
+
     fn type_name(&self) -> &'static str {
         "group"
     }

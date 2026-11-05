@@ -166,6 +166,7 @@ pub struct RenderSettings {
     pub paper_fill_enabled: bool,
     /// Make surface materials semi-transparent to inspect hidden/interior parts.
     pub xray_enabled: bool,
+    pub show_hidden_geometry: bool,
     /// Alpha applied to surface materials while X-ray mode is enabled.
     pub xray_surface_alpha: f32,
 }
@@ -200,6 +201,7 @@ impl Default for RenderSettings {
             background_rgb: DEFAULT_BACKGROUND_RGB,
             paper_fill_enabled: false,
             xray_enabled: false,
+            show_hidden_geometry: false,
             xray_surface_alpha: DEFAULT_XRAY_SURFACE_ALPHA,
         }
     }
@@ -385,6 +387,18 @@ impl Plugin for RenderPipelinePlugin {
                 },
                 execute_toggle_xray,
                 render_state_xray,
+            )
+            .register_toggle_command(
+                CommandDescriptor {
+                    id: "view.show_hidden_geometry".into(), label: "Show Hidden Geometry".into(),
+                    description: "Inspect the generated edges of the pointed body. Enable X-Ray to infer through faces.".into(),
+                    category: CommandCategory::View, parameters: Some(serde_json::json!({"type":"object","properties":{"enabled":{"type":"boolean"}}})),
+                    default_shortcut: None, icon: None, hint: None, requires_selection: false, show_in_menu: true, version: 1, activates_tool: None, capability_id: None,
+                },
+                |world, args| update_render_settings(world, "", |settings| {
+                    settings.show_hidden_geometry = args.get("enabled").and_then(Value::as_bool).unwrap_or(!settings.show_hidden_geometry);
+                }),
+                |world| world.resource::<RenderSettings>().show_hidden_geometry,
             )
             .register_toggle_command(
                 CommandDescriptor {
