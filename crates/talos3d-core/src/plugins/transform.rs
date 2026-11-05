@@ -702,6 +702,16 @@ fn update_transform_preview(world: &mut World) {
         .resource::<ActiveTransformPreview>()
         .placement_bounds
         .is_some()
+        && matches!(current_motion(world), Some(TransformMotion::Rotate(q)) if !(q * Vec3::Y).abs_diff_eq(Vec3::Y, 1e-5))
+    {
+        let mut active = world.resource_mut::<ActiveTransformPreview>();
+        active.placement_bounds = None;
+        active.last_motion = None;
+    }
+    if world
+        .resource::<ActiveTransformPreview>()
+        .placement_bounds
+        .is_some()
     {
         let revision = world.resource::<History>().revision_token();
         if let Some((motion, value)) = measured_motion(world) {
@@ -1353,6 +1363,34 @@ fn confirm_transform(world: &mut World) {
     deselect_all_after_push_pull(world, was_push_pull);
 }
 
+// A modifier may discover an external dependent or constrain a requested
+// pose. In that case show the detailed candidate before accepting the edit.
+fn same_placement_presentation(requested: &BoxedEntity, resolved: &BoxedEntity) -> bool {
+    if requested == resolved {
+        return true;
+    }
+    let close = |a: Vec3, b: Vec3| a.abs_diff_eq(b, 1e-4);
+    if let (Some(a), Some(b)) = (group_snapshot(requested), group_snapshot(resolved)) {
+        return close(a.frame.translation, b.frame.translation)
+            && a.frame.rotation.angle_between(b.frame.rotation).abs() < 1e-4;
+    }
+    match (requested.preview_transform(), resolved.preview_transform()) {
+        (Some(a), Some(b))
+            if close(a.translation, b.translation)
+                && close(a.scale, b.scale)
+                && (a.rotation.abs_diff_eq(b.rotation, 1e-5)
+                    || a.rotation.abs_diff_eq(-b.rotation, 1e-5)) =>
+        {
+            match (requested.bounds(), resolved.bounds()) {
+                (Some(a), Some(b)) => close(a.min, b.min) && close(a.max, b.max),
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn resolve_presented_placement(world: &mut World) -> Result<(), String> {
     let Some(active) = world.get_resource::<ActiveTransformPreview>() else {
         return Ok(());
@@ -1376,7 +1414,21 @@ pub(crate) fn resolve_presented_placement(world: &mut World) -> Result<(), Strin
         display_value: active.display_value,
         draft: None,
     };
+    let requested = preview.after.clone();
     finish_transform_draft(world, state, &mut preview);
+    let paired = requested.len() == preview.after.len()
+        && requested
+            .iter()
+            .zip(&preview.after)
+            .all(|(a, b)| a.element_id() == b.element_id() && same_placement_presentation(a, b));
+    if !paired {
+        world
+            .resource_mut::<ActiveTransformPreview>()
+            .placement_bounds = None;
+        world.resource_mut::<ActiveTransformPreview>().last_motion = None;
+        world.resource_mut::<TransformState>().confirm_on_release = false;
+        return Err("Review the adjusted placement and press Enter to confirm".into());
+    }
     publish_transform_candidate(world, &preview)
 }
 
