@@ -12138,7 +12138,20 @@ fn transform_group_as_unit(
     let mut pivoted = request.clone();
     pivoted.pivot = Some([pivot.x as f64, pivot.y as f64, pivot.z as f64]);
     let leaf_snaps = capture_snapshots_by_ids(world, &leaf_ids)?;
-    let leaf_after = apply_transform_request(&leaf_snaps, &pivoted, authoring)?;
+    use crate::plugins::transform::{rigid_after, TransformMotion};
+    let motion = match normalized_transform_operation(&request.operation).as_str() {
+        "move" => Some(TransformMotion::Move(transform_move_delta(
+            request, authoring,
+        )?)),
+        "rotate" => Some(TransformMotion::Rotate(transform_rotation(
+            request, authoring,
+        )?)),
+        _ => None,
+    };
+    let leaf_after = match motion {
+        Some(motion) => rigid_after(leaf_snaps.iter().map(|(_, s)| s), motion, pivot),
+        None => apply_transform_request(&leaf_snaps, &pivoted, authoring)?,
+    };
 
     let mut before: Vec<BoxedEntity> = leaf_snaps.into_iter().map(|(_, s)| s).collect();
     let mut after: Vec<BoxedEntity> = leaf_after;

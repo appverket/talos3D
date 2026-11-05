@@ -4,11 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 use std::sync::Arc;
 
-use bevy::{
-    ecs::{system::SystemParam, world::EntityRef},
-    prelude::*,
-    window::PrimaryWindow,
-};
+use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
 
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{add_gizmo_line_count, add_transform_preview_time, PerfStats};
@@ -55,6 +51,8 @@ use crate::{
     },
 };
 
+// Below this size normal detailed linked previews remain inexpensive.
+const LINKED_PLACEMENT_MIN_MEMBERS: usize = 256;
 const ROTATION_SNAP_INCREMENT_RADIANS: f32 = PI / 12.0;
 const AXIS_LINE_LENGTH_METRES: f32 = 50.0;
 const AXIS_X_COLOR: Color = Color::srgb(0.95, 0.3, 0.3);
@@ -139,6 +137,7 @@ pub struct ActiveTransformPreview {
     pub display_value: Option<f32>,
     pub refusal: Option<String>,
     #[doc(hidden)]
+    pub placement_bounds: Option<crate::authored_entity::EntityBounds>,
     pub last_motion: Option<(TransformMotion, ModelRevision)>,
 }
 
@@ -150,7 +149,7 @@ pub enum TransformMotion {
     Scale(Vec3),
 }
 
-fn current_motion(world: &World) -> Option<TransformMotion> {
+fn measured_motion(world: &World) -> Option<(TransformMotion, f32)> {
     let state = world.resource::<TransformState>();
     let numeric = state
         .numeric_buffer
@@ -158,14 +157,26 @@ fn current_motion(world: &World) -> Option<TransformMotion> {
         .and_then(|v| v.parse::<f32>().ok());
     let center = effective_pivot(state, world.resource::<PivotPoint>())?;
     match state.mode {
-        TransformMode::Moving => move_delta(world, state, numeric).map(TransformMotion::Move),
-        TransformMode::Rotating => rotation_delta(world, state, center, numeric)
-            .map(|v| TransformMotion::Rotate(rotation_quat(state.axis, v))),
-        TransformMode::Scaling => {
-            scale_factor(world, state, center, numeric).map(TransformMotion::Scale)
-        }
+        TransformMode::Moving => move_delta(world, state, numeric)
+            .map(|d| (TransformMotion::Move(d), numeric.unwrap_or(d.length()))),
+        TransformMode::Rotating => rotation_delta(world, state, center, numeric).map(|v| {
+            (
+                TransformMotion::Rotate(rotation_quat(state.axis, v)),
+                v.to_degrees(),
+            )
+        }),
+        TransformMode::Scaling => scale_factor(world, state, center, numeric).map(|v| {
+            (
+                TransformMotion::Scale(v),
+                display_scale_value(state.axis, v),
+            )
+        }),
         TransformMode::Idle => None,
     }
+}
+
+fn current_motion(world: &World) -> Option<TransformMotion> {
+    measured_motion(world).map(|(motion, _)| motion)
 }
 
 pub type TransformPreviewModifier = fn(&World, &TransformState, &mut Vec<BoxedEntity>);
@@ -335,9 +346,47 @@ pub fn start_transform_mode_with_options(
     // gesture, the measured angle, and the committed edit all agree on one axis.
     let axis = drafting_rotation_axis(world, mode, options.axis);
 
+    // A large linked instance is manipulated as one placement. Capture its
+    // extent once; only the displayed rigid pose changes during the gesture.
+    let placement_bounds = if matches!(mode, TransformMode::Moving | TransformMode::Rotating)
+        && world.resource::<PushPullContext>().active_face.is_none()
+    {
+        let selected = world
+            .query_filtered::<Entity, With<Selected>>()
+            .single(world)
+            .ok();
+        selected
+            .and_then(|entity| world.get::<GroupMembers>(entity))
+            .filter(|group| {
+                group.linked_model.as_ref().is_some_and(|link| {
+                    // A host-added member (for example, an adaptive foundation) can
+                    // deform independently. Keep it on the detailed preview path.
+                    if link.source_to_scene_ids.len() < LINKED_PLACEMENT_MIN_MEMBERS {
+                        return false;
+                    }
+                    let mapped: HashSet<_> = link
+                        .source_to_scene_ids
+                        .iter()
+                        .map(|m| m.scene_id)
+                        .collect();
+                    initial_snapshots
+                        .iter()
+                        .all(|(_, s)| mapped.contains(&s.element_id()))
+                })
+            })
+            .and_then(|group| {
+                crate::plugins::modeling::group::compute_group_bounds_from_world(
+                    world,
+                    &group.member_ids,
+                )
+            })
+    } else {
+        None
+    };
     let start_pivot = options
         .pivot_override
         .or_else(|| world.resource::<PivotPoint>().position)
+        .or_else(|| placement_bounds.map(|bounds| bounds.center()))
         .or_else(|| selection_center(&initial_snapshots));
     let rotation_plane_cursor = (mode == TransformMode::Rotating)
         .then(|| start_pivot.and_then(|center| rotation_cursor_on_plane(world, center, axis)))
@@ -352,13 +401,16 @@ pub fn start_transform_mode_with_options(
     };
 
     begin_plan_interaction(world)?;
+    world
+        .resource_mut::<ActiveTransformPreview>()
+        .placement_bounds = placement_bounds;
     let mut transform_state = world.resource_mut::<TransformState>();
     transform_state.mode = mode;
     transform_state.axis = axis;
     transform_state.numeric_buffer = None;
     transform_state.initial_cursor = Some(initial_cursor);
     transform_state.initial_snapshots = initial_snapshots;
-    transform_state.pivot_override = options.pivot_override;
+    transform_state.pivot_override = start_pivot;
     transform_state.confirm_on_release = options.confirm_on_release;
 
     // Immediately set InputOwnership so other systems in this same frame
@@ -646,6 +698,37 @@ fn update_transform_preview(world: &mut World) {
         }
         return;
     }
+    if world
+        .resource::<ActiveTransformPreview>()
+        .placement_bounds
+        .is_some()
+    {
+        let revision = world.resource::<History>().revision_token();
+        if let Some((motion, value)) = measured_motion(world) {
+            let mut active = world.resource_mut::<ActiveTransformPreview>();
+            if active
+                .interaction
+                .as_ref()
+                .is_some_and(|(_, base)| *base == revision)
+            {
+                if active
+                    .last_motion
+                    .as_ref()
+                    .is_none_or(|(old, _)| *old != motion)
+                {
+                    active.plan = None;
+                    active.refusal = None;
+                }
+                active.last_motion = Some((motion, revision));
+                active.display_value = Some(value);
+            } else {
+                active.last_motion = None;
+                active.plan = None;
+                active.refusal = Some("The model changed during placement".into());
+            }
+        }
+        return;
+    }
     // Leaving the viewport is not a rejected edit. Retain the last valid
     // presentation and candidate until input resumes or the user cancels.
     if world.resource::<TransformState>().mode == TransformMode::Moving
@@ -807,6 +890,15 @@ fn update_transform_preview(world: &mut World) {
 /// authored edit, even when a legacy writer forgot to advance History.
 fn restore_captured_presentation(world: &mut World) -> Result<(), String> {
     use crate::plugins::authored_edit_plan::capture_snapshot_index;
+    if world
+        .resource::<ActiveTransformPreview>()
+        .placement_bounds
+        .is_some()
+    {
+        // Bounds presentation never writes authored or render components.
+        // The queued plan still preflights every original at commit.
+        return Ok(());
+    }
     let active = world.resource::<ActiveTransformPreview>().clone();
     let Some((_, base)) = &active.interaction else {
         return Ok(());
@@ -1043,7 +1135,7 @@ fn apply_live_snapshot_preview(world: &mut World, after: &[BoxedEntity]) {
         if snapshot
             .0
             .as_any()
-            .is::<crate::plugins::modeling::snapshots::TranslatedMeshSnapshot>()
+            .is::<crate::plugins::modeling::snapshots::RigidMeshSnapshot>()
         {
             if let (Some(previous), Some(entity)) = (previous, entities.get(&snapshot.element_id()))
             {
@@ -1261,7 +1353,38 @@ fn confirm_transform(world: &mut World) {
     deselect_all_after_push_pull(world, was_push_pull);
 }
 
+pub(crate) fn resolve_presented_placement(world: &mut World) -> Result<(), String> {
+    let Some(active) = world.get_resource::<ActiveTransformPreview>() else {
+        return Ok(());
+    };
+    if active.placement_bounds.is_none() || active.plan.is_some() {
+        return Ok(());
+    }
+    let Some((motion, revision)) = &active.last_motion else {
+        return Ok(());
+    };
+    if *revision != world.resource::<History>().revision_token() {
+        return Err("The model changed during placement".into());
+    }
+    let state = world.resource::<TransformState>();
+    let mut preview = TransformPreview {
+        after: rigid_after(
+            state.initial_snapshots.iter().map(|(_, s)| s),
+            *motion,
+            state.pivot_override.expect("placement pivot"),
+        ),
+        display_value: active.display_value,
+        draft: None,
+    };
+    finish_transform_draft(world, state, &mut preview);
+    publish_transform_candidate(world, &preview)
+}
+
 fn confirm_captured_transform(world: &mut World) {
+    if let Err(error) = resolve_presented_placement(world) {
+        invalidate_transform_candidate(world, &error);
+        return;
+    }
     let active = world.resource::<ActiveTransformPreview>().clone();
     let Some(plan) = active.plan else {
         return;
@@ -1438,7 +1561,7 @@ fn update_transform_status(world: &mut World) {
         return;
     }
     let display_value = world.resource::<ActiveTransformPreview>().display_value;
-    let state = world.resource::<TransformState>().clone();
+    let state = world.resource::<TransformState>();
     let inference = world.resource::<InferenceEngine>();
     let is_push_pull = world.resource::<PushPullContext>().active_face.is_some();
     let mode_label = match state.mode {
@@ -1517,6 +1640,24 @@ fn draw_transform_constraint(
     add_gizmo_line_count(&mut perf_stats, 1);
 }
 
+/// Rigid placement relative to the captured scene. Both the bounds and the
+/// selected GPU mesh instances consume this pose until the edit is committed.
+pub(crate) fn linked_placement_preview_pose(world: &World) -> Option<Transform> {
+    let active = world.get_resource::<ActiveTransformPreview>()?;
+    active.placement_bounds?;
+    let Some((motion, _)) = &active.last_motion else {
+        return Some(Transform::IDENTITY);
+    };
+    match *motion {
+        TransformMotion::Move(delta) => Some(Transform::from_translation(delta)),
+        TransformMotion::Rotate(rotation) => {
+            let pivot = world.resource::<TransformState>().pivot_override?;
+            Some(Transform::from_translation(pivot - rotation * pivot).with_rotation(rotation))
+        }
+        TransformMotion::Scale(_) => None,
+    }
+}
+
 fn draw_transform_preview(world: &World, mut gizmos: Gizmos) {
     // During push/pull the real entity mesh is updated live — no gizmo
     // outline needed.
@@ -1524,6 +1665,17 @@ fn draw_transform_preview(world: &World, mut gizmos: Gizmos) {
         return;
     }
 
+    if let Some(pose) = linked_placement_preview_pose(world) {
+        let bounds = world
+            .resource::<ActiveTransformPreview>()
+            .placement_bounds
+            .unwrap();
+        gizmos.cube(
+            pose * Transform::from_translation(bounds.center()).with_scale(bounds.max - bounds.min),
+            TRANSFORM_PREVIEW_COLOR,
+        );
+        return;
+    }
     let mode = world.resource::<TransformState>().mode;
     let live_transform_preview = mode != TransformMode::Idle;
 
@@ -1618,27 +1770,13 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
                 })
             } else {
                 let delta = move_delta(world, &state, numeric_value)?;
-                let selected_ids = state
-                    .initial_snapshots
-                    .iter()
-                    .map(|(_, snapshot)| snapshot.element_id())
-                    .collect::<HashSet<_>>();
                 Some(TransformPreview {
                     draft: None,
-                    after: state
-                        .initial_snapshots
-                        .iter()
-                        .map(|(_, snapshot)| {
-                            if snapshot
-                                .transform_parent()
-                                .is_some_and(|id| selected_ids.contains(&id))
-                            {
-                                snapshot.translate_with_parent(delta)
-                            } else {
-                                translate_preview_snapshot(snapshot, delta)
-                            }
-                        })
-                        .collect(),
+                    after: rigid_after(
+                        state.initial_snapshots.iter().map(|(_, s)| s),
+                        TransformMotion::Move(delta),
+                        center,
+                    ),
                     display_value: numeric_value.or_else(|| Some(delta.length())),
                 })
             }
@@ -1648,11 +1786,11 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
             let rotation = rotation_quat(state.axis, delta_radians);
             Some(TransformPreview {
                 draft: None,
-                after: state
-                    .initial_snapshots
-                    .iter()
-                    .map(|(_, snapshot)| rotate_preview_snapshot(snapshot, rotation, center))
-                    .collect(),
+                after: rigid_after(
+                    state.initial_snapshots.iter().map(|(_, s)| s),
+                    TransformMotion::Rotate(rotation),
+                    center,
+                ),
                 display_value: Some(delta_radians.to_degrees()),
             })
         }
@@ -1672,9 +1810,53 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
         }
         TransformMode::Idle => return None,
     }?;
+    finish_transform_draft(world, &state, &mut preview);
+    Some(preview)
+}
+
+pub(crate) fn rigid_after<'a>(
+    originals: impl Iterator<Item = &'a BoxedEntity> + Clone,
+    motion: TransformMotion,
+    pivot: Vec3,
+) -> Vec<BoxedEntity> {
+    let ids: HashSet<_> = originals.clone().map(BoxedEntity::element_id).collect();
+    let mut after: Vec<_> = originals
+        .clone()
+        .map(|s| match motion {
+            TransformMotion::Move(delta)
+                if s.transform_parent().is_some_and(|p| ids.contains(&p)) =>
+            {
+                s.translate_with_parent(delta)
+            }
+            TransformMotion::Move(delta) => translate_preview_snapshot(s, delta),
+            TransformMotion::Rotate(rotation) => rotate_preview_snapshot(s, rotation, pivot),
+            TransformMotion::Scale(_) => unreachable!("rigid placement"),
+        })
+        .collect();
+    if matches!(motion, TransformMotion::Rotate(_)) {
+        let parents: HashMap<_, _> = after
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.element_id(), i))
+            .collect();
+        for (i, original) in originals.enumerate() {
+            if let Some(parent) = original.transform_parent().and_then(|id| parents.get(&id)) {
+                if let Some(child) = original
+                    .0
+                    .with_transformed_parent(after[*parent].0.as_ref())
+                {
+                    after[i] = child;
+                }
+            }
+        }
+    }
+    after
+}
+
+fn finish_transform_draft(world: &World, state: &TransformState, preview: &mut TransformPreview) {
     let draft = prepare_transform_edit(
         world,
-        &state,
+        state,
         state
             .initial_snapshots
             .iter()
@@ -1684,7 +1866,6 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
     );
     preview.after = draft.after.clone();
     preview.draft = Some(draft);
-    Some(preview)
 }
 
 #[cfg(test)]
@@ -2300,6 +2481,9 @@ fn cleanup_preview_entities(world: &mut World) {
         std::mem::take(&mut state.preview_entities)
     };
 
+    if preview_entities.is_empty() {
+        return;
+    }
     let snapshots_by_id = world
         .resource::<TransformState>()
         .initial_snapshots
@@ -2322,139 +2506,50 @@ fn collect_selected_snapshots(world: &mut World) -> Vec<(Entity, BoxedEntity)> {
         query.iter(world).collect::<Vec<_>>()
     };
 
-    let selected_set = selected_entities.iter().copied().collect::<HashSet<_>>();
-
-    let mut result = Vec::new();
-    let mut seen_ids = HashSet::new();
-
-    for entity in selected_entities {
-        if opening_parent_is_selected(world, entity, &selected_set) {
-            continue;
-        }
-
-        // If this is a group, expand to leaf member snapshots and include the
-        // group/nested-group frame snapshots. The frame snapshots are essential:
-        // otherwise interactive transforms move the visible members but leave the
-        // selected group's authored local frame stale, while terrain-conforming
-        // members with live preview can appear to rotate independently.
-        if let Some(members) = world.get::<GroupMembers>(entity) {
-            if let Some(group_id) = world.get::<ElementId>(entity).copied() {
-                expand_group_frame_snapshots(world, group_id, &mut result, &mut seen_ids);
-            }
-            let member_ids = members.member_ids.clone();
-            expand_group_member_snapshots(world, &member_ids, &mut result, &mut seen_ids);
-        } else if let Some(snapshot) = capture_selected_snapshot(world, entity) {
-            push_snapshot_once(entity, snapshot, &mut result, &mut seen_ids);
-        }
+    if selected_entities.is_empty() {
+        return Vec::new();
     }
-
-    result
-}
-
-fn expand_group_member_snapshots(
-    world: &World,
-    member_ids: &[ElementId],
-    out: &mut Vec<(Entity, BoxedEntity)>,
-    seen_ids: &mut HashSet<ElementId>,
-) {
+    let index = crate::plugins::modeling::group::element_entity_index(world);
     let registry = world.resource::<CapabilityRegistry>();
-    for member_id in member_ids {
-        let Some(member_entity_id) = find_entity_by_element_id_readonly(world, *member_id) else {
+    let selected_set: HashSet<_> = selected_entities.iter().copied().collect();
+    let mut pending: Vec<_> = selected_entities
+        .into_iter()
+        .rev()
+        .map(|e| (e, false))
+        .collect();
+    let mut visited = HashSet::new();
+    let mut snapshots = Vec::new();
+    while let Some((entity, member)) = pending.pop() {
+        if visited.contains(&entity) {
             continue;
-        };
-        let Ok(member_entity) = world.get_entity(member_entity_id) else {
-            continue;
-        };
-        if let Some(members) = member_entity.get::<GroupMembers>() {
-            // Recurse into nested groups
-            expand_group_frame_snapshots(world, *member_id, out, seen_ids);
-            let nested_ids = members.member_ids.clone();
-            expand_group_member_snapshots(world, &nested_ids, out, seen_ids);
-        } else if let Some(snapshot) = registry.capture_snapshot(&member_entity, world) {
-            push_snapshot_once(member_entity.id(), snapshot, out, seen_ids);
         }
-    }
-}
-
-fn expand_group_frame_snapshots(
-    world: &World,
-    group_id: ElementId,
-    out: &mut Vec<(Entity, BoxedEntity)>,
-    seen_ids: &mut HashSet<ElementId>,
-) {
-    let Some(entity) = find_entity_by_element_id_readonly(world, group_id) else {
-        return;
-    };
-    let Ok(entity_ref) = world.get_entity(entity) else {
-        return;
-    };
-    if let Some(snapshot) = world
-        .resource::<CapabilityRegistry>()
-        .capture_snapshot(&entity_ref, world)
-    {
-        push_snapshot_once(entity, snapshot, out, seen_ids);
-    }
-    let Some(members) = entity_ref.get::<GroupMembers>() else {
-        return;
-    };
-    let nested_ids = members
-        .member_ids
-        .iter()
-        .copied()
-        .filter(|id| {
-            find_entity_by_element_id_readonly(world, *id)
-                .and_then(|entity| world.get::<GroupMembers>(entity))
-                .is_some()
-        })
-        .collect::<Vec<_>>();
-    for nested_id in nested_ids {
-        expand_group_frame_snapshots(world, nested_id, out, seen_ids);
-    }
-}
-
-fn push_snapshot_once(
-    entity: Entity,
-    snapshot: BoxedEntity,
-    out: &mut Vec<(Entity, BoxedEntity)>,
-    seen_ids: &mut HashSet<ElementId>,
-) {
-    if seen_ids.insert(snapshot.element_id()) {
-        out.push((
+        let entity_ref = world.entity(entity);
+        let Some(snapshot) = registry.capture_edit_snapshot(&entity_ref, world) else {
+            continue;
+        };
+        if let Some(group) = entity_ref.get::<GroupMembers>() {
+            pending.extend(
+                group
+                    .member_ids
+                    .iter()
+                    .rev()
+                    .filter_map(|id| index.get(id).map(|e| (*e, true))),
+            );
+        } else if !member
+            && snapshot
+                .transform_parent()
+                .and_then(|id| index.get(&id))
+                .is_some_and(|parent| selected_set.contains(parent))
+        {
+            continue;
+        }
+        visited.insert(entity);
+        snapshots.push((
             entity,
             crate::plugins::modeling::snapshots::share_mesh_snapshot(snapshot),
         ));
     }
-}
-
-fn opening_parent_is_selected(
-    world: &World,
-    entity: Entity,
-    selected_set: &HashSet<Entity>,
-) -> bool {
-    let Ok(entity_ref) = world.get_entity(entity) else {
-        return false;
-    };
-    let Some(snapshot) = world
-        .resource::<CapabilityRegistry>()
-        .capture_snapshot(&entity_ref, world)
-    else {
-        return false;
-    };
-    let Some(parent_id) = snapshot.transform_parent() else {
-        return false;
-    };
-    let mut q = world.try_query::<EntityRef>().unwrap();
-    q.iter(world)
-        .find(|entity_ref| entity_ref.get::<ElementId>().copied() == Some(parent_id))
-        .map(|entity_ref| selected_set.contains(&entity_ref.id()))
-        .unwrap_or(false)
-}
-
-fn capture_selected_snapshot(world: &World, entity: Entity) -> Option<BoxedEntity> {
-    let entity_ref = world.get_entity(entity).ok()?;
-    world
-        .resource::<CapabilityRegistry>()
-        .capture_snapshot(&entity_ref, world)
+    snapshots
 }
 
 fn selection_center(initial_snapshots: &[(Entity, BoxedEntity)]) -> Option<Vec3> {
@@ -3137,14 +3232,9 @@ mod tests {
         assert_eq!(move_delta(&world, &state, Some(9.0)), Some(Vec3::Y * 9.0));
     }
 
-    #[test]
-    fn large_linked_mesh_move_presents_shared_plan_cancels_and_undoes() {
+    fn linked_mesh_world() -> (World, BoxedEntity, BoxedEntity, Entity) {
         use crate::plugins::{
-            authored_edit_plan::capture_snapshot,
-            history::{
-                apply_pending_history_commands_for_test as drain, PendingCommandQueue,
-                SemanticEnforcement,
-            },
+            history::{PendingCommandQueue, SemanticEnforcement},
             identity::ElementIdAllocator,
             modeling::{
                 assembly::{RelationFactory, RelationSnapshot, SemanticRelation},
@@ -3240,6 +3330,16 @@ mod tests {
         let group_entity = find_entity_by_element_id_readonly(&world, ElementId(1)).unwrap();
         let mesh_entity = find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap();
         world.entity_mut(group_entity).insert(Selected);
+        (world, group, mesh, mesh_entity)
+    }
+
+    #[test]
+    fn large_linked_mesh_move_presents_shared_plan_cancels_and_undoes() {
+        use crate::plugins::{
+            authored_edit_plan::capture_snapshot,
+            history::{apply_pending_history_commands_for_test as drain, PendingCommandQueue},
+        };
+        let (mut world, group, mesh, mesh_entity) = linked_mesh_world();
         let start = |world: &mut World| {
             start_transform_mode_with_options(
                 world,
@@ -3335,6 +3435,85 @@ mod tests {
         drain(&mut world);
         assert_eq!(capture_snapshot(&world, ElementId(2)), Some(mesh));
         assert_eq!(capture_snapshot(&world, ElementId(1)), Some(group));
+    }
+
+    #[test]
+    fn linked_placement_presents_one_pose_and_commits_the_last_displayed_angle() {
+        use crate::plugins::{
+            authored_edit_plan::capture_snapshot,
+            history::{apply_pending_history_commands_for_test as drain, PendingCommandQueue},
+            modeling::group::LinkedModelIdMapping,
+        };
+        let (mut world, _, mesh, _) = linked_mesh_world();
+        let root = find_entity_by_element_id_readonly(&world, ElementId(1)).unwrap();
+        let count = LINKED_PLACEMENT_MIN_MEMBERS as u64;
+        for id in 4..=count {
+            world.spawn((
+                ElementId(id),
+                GroupMembers {
+                    name: "subgroup".into(),
+                    member_ids: vec![],
+                    frame: GroupFrame::identity(),
+                    linked_model: None,
+                },
+            ));
+        }
+        let mut group = world.get_mut::<GroupMembers>(root).unwrap();
+        group.member_ids.extend((4..=count).map(ElementId));
+        group.linked_model.as_mut().unwrap().source_to_scene_ids = (1..=count)
+            .map(|id| LinkedModelIdMapping {
+                source_id: ElementId(id),
+                scene_id: ElementId(id),
+            })
+            .collect();
+        let pivot = Vec3::new(10., 2., -5.);
+        let start = |world: &mut World| {
+            start_transform_mode_with_options(
+                world,
+                TransformMode::Rotating,
+                TransformStartOptions {
+                    initial_cursor: Some(Vec3::X),
+                    pivot_override: Some(pivot),
+                    ..default()
+                },
+            )
+            .unwrap()
+        };
+        start(&mut world);
+        for degrees in [9, 90] {
+            world.resource_mut::<TransformState>().numeric_buffer = Some(degrees.to_string());
+            update_transform_preview(&mut world);
+            assert!(world.resource::<ActiveTransformPreview>().plan.is_none());
+            let pose = linked_placement_preview_pose(&world).unwrap();
+            let q = Quat::from_rotation_y((degrees as f32).to_radians());
+            assert!(pose
+                .transform_point(Vec3::X)
+                .abs_diff_eq(pivot + q * (Vec3::X - pivot), 1e-5));
+            assert_eq!(capture_snapshot(&world, ElementId(2)), Some(mesh.clone()));
+        }
+        restore_previews_and_clear_session(&mut world, false);
+        assert!(linked_placement_preview_pose(&world).is_none());
+        *world.resource_mut::<InputOwnership>() = InputOwnership::Idle;
+        start(&mut world);
+        world.resource_mut::<TransformState>().numeric_buffer = Some("90".into());
+        update_transform_preview(&mut world);
+        let pose = linked_placement_preview_pose(&world).unwrap();
+        // New input has not been presented and cannot change the released pose.
+        world.resource_mut::<TransformState>().numeric_buffer = Some("180".into());
+        confirm_captured_transform(&mut world);
+        drain(&mut world);
+        let frame = world.get::<GroupMembers>(root).unwrap().frame;
+        assert!(frame.rotation.abs_diff_eq(pose.rotation, 1e-6));
+        assert!(frame.translation.abs_diff_eq(pose.translation, 1e-5));
+        let native = world
+            .get::<crate::plugins::modeling::primitives::TriangleMesh>(
+                find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap(),
+            )
+            .unwrap();
+        assert!(native.vertices[0].abs_diff_eq(pose.transform_point(Vec3::ZERO), 1e-5));
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        drain(&mut world);
+        assert_eq!(capture_snapshot(&world, ElementId(2)), Some(mesh));
     }
 
     #[test]

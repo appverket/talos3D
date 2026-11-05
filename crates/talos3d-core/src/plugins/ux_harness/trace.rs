@@ -125,8 +125,10 @@ pub(super) fn input(world: &mut World, step: &UxStep) {
         } => "release",
         _ => "other",
     };
+    let started = Instant::now();
     let release_plan = (action == "release")
         .then(|| {
+            crate::plugins::transform::resolve_presented_placement(world).ok()?;
             world
                 .get_resource::<ActiveTransformPreview>()
                 .and_then(|p| p.plan.clone())
@@ -134,7 +136,7 @@ pub(super) fn input(world: &mut World, step: &UxStep) {
         .flatten();
     world.resource_mut::<TraceState>().pending = Some(InputStamp {
         sequence: step.sequence,
-        started: Instant::now(),
+        started,
         action,
         release_plan,
     });

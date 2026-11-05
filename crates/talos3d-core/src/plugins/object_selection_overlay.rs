@@ -29,13 +29,18 @@ pub(crate) struct SelectedObjectOverlay(pub Entity);
 
 #[derive(Resource, Default)]
 struct ObjectSelectionOverlayState {
+    placement_root: Option<Entity>,
     material: Option<Handle<FaceStippleMaterial>>,
     feature_meshes: HashMap<Entity, (FaceProfileFeature, Quat, Handle<Mesh>)>,
 }
 
 pub(crate) fn install(app: &mut App) {
     app.init_resource::<ObjectSelectionOverlayState>()
-        .add_systems(Update, sync_object_selection_overlay);
+        .add_systems(
+            Update,
+            sync_object_selection_overlay
+                .after(crate::plugins::transform::TransformVisualSystems::PreviewUpdate),
+        );
 }
 
 // Selection/group traversal is O(authored entities), with no geometry reads.
@@ -47,6 +52,26 @@ fn sync_object_selection_overlay(world: &mut World) {
         || world
             .get_resource::<ViewportExportState>()
             .is_some_and(|s| s.ui_suppressed());
+    let placement = (!suppressed)
+        .then(|| super::transform::linked_placement_preview_pose(world))
+        .flatten();
+    if let Some(root) = world
+        .resource::<ObjectSelectionOverlayState>()
+        .placement_root
+    {
+        if let Some(pose) = placement {
+            if let Some(mut transform) = world.get_mut::<Transform>(root) {
+                transform.set_if_neq(pose);
+                return;
+            }
+        }
+        // Only transient overlays were reparented. Despawning the hierarchy
+        // releases their handles and the normal sync recreates current selection.
+        world.despawn(root);
+        world
+            .resource_mut::<ObjectSelectionOverlayState>()
+            .placement_root = None;
+    }
     let selected: HashSet<Entity> = if suppressed {
         HashSet::new()
     } else {
@@ -222,6 +247,32 @@ fn sync_object_selection_overlay(world: &mut World) {
                 Name::new("Selected object highlight"),
             ));
         }
+    }
+    if let Some(pose) = placement {
+        let root = world.spawn((pose, Visibility::Inherited, Preview)).id();
+        let overlays: Vec<_> = world
+            .query::<(Entity, &SelectedObjectOverlay)>()
+            .iter(world)
+            .filter_map(|(entity, overlay)| {
+                let source = world.get_entity(overlay.0).ok()?;
+                let transform = source.get::<GlobalTransform>()?.compute_transform();
+                let visible = source.get::<InheritedVisibility>().is_some_and(|v| v.get());
+                Some((entity, transform, visible))
+            })
+            .collect();
+        for (entity, transform, visible) in overlays {
+            let visibility = if visible {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            world
+                .entity_mut(entity)
+                .insert((ChildOf(root), transform, visibility));
+        }
+        world
+            .resource_mut::<ObjectSelectionOverlayState>()
+            .placement_root = Some(root);
     }
 }
 

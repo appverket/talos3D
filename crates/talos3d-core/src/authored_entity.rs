@@ -257,6 +257,19 @@ impl EntityBounds {
         ]
     }
 
+    /// Conservative extent of these eight corners in a new frame.
+    pub(crate) fn map_corners(&self, map: impl FnMut(Vec3) -> Vec3) -> Self {
+        let corners = self.corners().map(map);
+        Self {
+            min: corners
+                .into_iter()
+                .fold(Vec3::splat(f32::INFINITY), Vec3::min),
+            max: corners
+                .into_iter()
+                .fold(Vec3::splat(f32::NEG_INFINITY), Vec3::max),
+        }
+    }
+
     pub fn face_centers(&self) -> [(Vec3, Vec3); 6] {
         let center = self.center();
         [
@@ -307,6 +320,10 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         self.translate_by(delta)
     }
 
+    /// Rebind a parent-relative child to the exact transformed parent.
+    fn with_transformed_parent(&self, _parent: &dyn AuthoredEntity) -> Option<BoxedEntity> {
+        None
+    }
     fn rotate_by(&self, rotation: Quat) -> BoxedEntity;
     fn scale_by(&self, factor: Vec3, center: Vec3) -> BoxedEntity;
 
@@ -675,8 +692,15 @@ pub fn snapshot_fingerprint(
         hash: blake3::Hasher::new(),
         bytes: 0,
     };
-    value
-        .serialize(&mut rmp_serde::Serializer::new(&mut writer).with_struct_map())
-        .map_err(|error| error.to_string())?;
+    // MessagePack emits many small writes per vertex. Feed full blocks to
+    // BLAKE3 while preserving the exact byte stream and retained-byte count.
+    {
+        use std::io::Write;
+        let mut buffered = std::io::BufWriter::new(&mut writer);
+        value
+            .serialize(&mut rmp_serde::Serializer::new(&mut buffered).with_struct_map())
+            .map_err(|error| error.to_string())?;
+        buffered.flush().map_err(|error| error.to_string())?;
+    }
     Ok((writer.hash.finalize(), writer.bytes))
 }

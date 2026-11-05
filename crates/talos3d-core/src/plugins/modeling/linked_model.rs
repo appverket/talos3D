@@ -435,7 +435,6 @@ pub fn plan_linked_model_placement(
 ) -> Result<LinkedModelPlacementPlan, LinkedModelPlacementError> {
     let subject = linked_model_placement_subject(world, instance_root_id)?;
     let all_member_ids = collect_group_members_recursive(world, instance_root_id);
-    let member_set = all_member_ids.iter().copied().collect::<HashSet<_>>();
     let leaf_ids = all_member_ids
         .iter()
         .copied()
@@ -453,7 +452,6 @@ pub fn plan_linked_model_placement(
     };
 
     let mut before = Vec::new();
-    let mut after = Vec::new();
     for leaf_id in leaf_ids {
         let snapshot = capture_snapshot(world, leaf_id).map_err(|message| {
             placement_error(
@@ -464,23 +462,14 @@ pub fn plan_linked_model_placement(
                 ),
             )
         })?;
-        if snapshot
-            .transform_parent()
-            .is_some_and(|parent_id| member_set.contains(&parent_id))
-        {
-            continue;
-        }
-        let placed = match operation {
-            LinkedModelPlacementOperation::Translate { delta } => snapshot.translate_by(delta),
-            LinkedModelPlacementOperation::Rotate { rotation, .. } => {
-                let target = pivot + rotation * (snapshot.center() - pivot);
-                let rotated = snapshot.rotate_by(rotation);
-                rotated.translate_by(target - rotated.center())
-            }
-        };
         before.push(snapshot);
-        after.push(placed);
     }
+    use crate::plugins::transform::{rigid_after, TransformMotion};
+    let motion = match operation {
+        LinkedModelPlacementOperation::Translate { delta } => TransformMotion::Move(delta),
+        LinkedModelPlacementOperation::Rotate { rotation, .. } => TransformMotion::Rotate(rotation),
+    };
+    let mut after = rigid_after(before.iter(), motion, pivot);
 
     let mut group_ids = vec![instance_root_id];
     group_ids.extend(
@@ -1782,7 +1771,13 @@ fn apply_linked_snapshots(
             continue;
         }
         let remapped = remap_linked_snapshot(world, snapshot, &id_map)?;
-        let composed = compose_linked_snapshot(remapped, &frame);
+        // Source records are in dependency order. Reuse the transformed host
+        // for children whose authored controls are expressed in its frame.
+        let child = remapped.transform_parent().and_then(|id| {
+            let parent = capture_snapshot(world, id).ok()?;
+            remapped.0.with_transformed_parent(parent.0.as_ref())
+        });
+        let composed = child.unwrap_or_else(|| compose_linked_snapshot(remapped, &frame));
         composed.apply_to(world);
         stamp_authored_entity_dependencies(world, &composed);
     }

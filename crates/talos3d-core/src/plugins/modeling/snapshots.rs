@@ -401,11 +401,12 @@ impl AuthoredEntity for PolylineSnapshot {
 /// captured authored edit, not another movement rule; materialization happens
 /// only on commit or explicit snapshot export.
 #[derive(Clone)]
-pub(crate) struct TranslatedMeshSnapshot {
+pub(crate) struct RigidMeshSnapshot {
     source: std::sync::Arc<TriangleMeshSnapshot>,
     source_hash: blake3::Hash,
     source_bytes: usize,
     offset: Vec3,
+    rotation: Quat,
     center: Vec3,
     bounds: Option<EntityBounds>,
 }
@@ -415,24 +416,47 @@ pub(crate) fn share_mesh_snapshot(snapshot: BoxedEntity) -> BoxedEntity {
         return snapshot;
     };
     let (source_hash, source_bytes) = mesh.plan_fingerprint().expect("native mesh serialization");
-    let shared = TranslatedMeshSnapshot {
+    let shared = RigidMeshSnapshot {
         source: std::sync::Arc::new(mesh.clone()),
         source_hash,
         source_bytes,
         offset: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
         center: mesh.center(),
         bounds: mesh.bounds(),
     };
     BoxedEntity(Box::new(shared))
 }
 
-impl TranslatedMeshSnapshot {
+impl RigidMeshSnapshot {
     fn materialize(&self) -> TriangleMeshSnapshot {
         let mut snapshot = (*self.source).clone();
         for vertex in &mut snapshot.primitive.vertices {
-            *vertex += self.offset;
+            *vertex = self.point(*vertex);
+        }
+        if self.rotation != Quat::IDENTITY {
+            if let Some(normals) = &mut snapshot.primitive.normals {
+                for normal in normals {
+                    *normal = self.rotation * *normal;
+                }
+            }
         }
         snapshot
+    }
+    fn point(&self, point: Vec3) -> Vec3 {
+        if self.rotation == Quat::IDENTITY {
+            point + self.offset
+        } else {
+            self.rotation * point + self.offset
+        }
+    }
+    fn normals_match(&self, normals: &Option<Vec<Vec3>>) -> bool {
+        match (&self.source.primitive.normals, normals) {
+            (Some(a), Some(b)) if self.rotation != Quat::IDENTITY => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| self.rotation * *a == *b)
+            }
+            (a, b) => a == b,
+        }
     }
     fn matches_native(&self, other: &TriangleMeshSnapshot) -> bool {
         self.source.element_id == other.element_id
@@ -440,7 +464,7 @@ impl TranslatedMeshSnapshot {
             && self.source.material_assignment == other.material_assignment
             && self.source.semantic_shadow == other.semantic_shadow
             && self.source.primitive.faces == other.primitive.faces
-            && self.source.primitive.normals == other.primitive.normals
+            && self.normals_match(&other.primitive.normals)
             && self.source.primitive.name == other.primitive.name
             && self.source.primitive.vertices.len() == other.primitive.vertices.len()
             && self
@@ -449,11 +473,11 @@ impl TranslatedMeshSnapshot {
                 .vertices
                 .iter()
                 .zip(&other.primitive.vertices)
-                .all(|(a, b)| *a + self.offset == *b)
+                .all(|(a, b)| self.point(*a) == *b)
     }
 }
 
-impl AuthoredEntity for TranslatedMeshSnapshot {
+impl AuthoredEntity for RigidMeshSnapshot {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -467,13 +491,11 @@ impl AuthoredEntity for TranslatedMeshSnapshot {
         self.source.label()
     }
     fn center(&self) -> Vec3 {
-        self.center + self.offset
+        self.point(self.center)
     }
     fn bounds(&self) -> Option<EntityBounds> {
-        self.bounds.map(|b| EntityBounds {
-            min: b.min + self.offset,
-            max: b.max + self.offset,
-        })
+        self.bounds
+            .map(|bounds| bounds.map_corners(|p| self.point(p)))
     }
     fn translate_by(&self, delta: Vec3) -> BoxedEntity {
         let mut next = self.clone();
@@ -481,7 +503,11 @@ impl AuthoredEntity for TranslatedMeshSnapshot {
         BoxedEntity(Box::new(next))
     }
     fn rotate_by(&self, rotation: Quat) -> BoxedEntity {
-        self.materialize().rotate_by(rotation)
+        let mut next = self.clone();
+        let center = self.center();
+        next.rotation = rotation * self.rotation;
+        next.offset = center - next.rotation * self.center;
+        BoxedEntity(Box::new(next))
     }
     fn scale_by(&self, factor: Vec3, center: Vec3) -> BoxedEntity {
         self.materialize().scale_by(factor, center)
@@ -499,7 +525,11 @@ impl AuthoredEntity for TranslatedMeshSnapshot {
         self.materialize().to_json()
     }
     fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
-        crate::authored_entity::snapshot_fingerprint(&(self.source_hash.as_bytes(), self.offset))
+        crate::authored_entity::snapshot_fingerprint(&(
+            self.source_hash.as_bytes(),
+            self.rotation,
+            self.offset,
+        ))
     }
     fn plan_retained_assets(&self) -> Vec<(blake3::Hash, usize)> {
         vec![(self.source_hash, self.source_bytes)]
@@ -511,18 +541,22 @@ impl AuthoredEntity for TranslatedMeshSnapshot {
         self.source.remove_from(world);
     }
     fn preview_transform(&self) -> Option<Transform> {
-        Some(Transform::from_translation(self.offset))
+        Some(Transform::from_translation(self.offset).with_rotation(self.rotation))
     }
     fn preview_transform_from(&self, before: &dyn AuthoredEntity) -> Option<Transform> {
         if let Some(before) = before.as_any().downcast_ref::<Self>() {
             if self.source_hash == before.source_hash {
-                return Some(Transform::from_translation(self.offset - before.offset));
+                let rotation = self.rotation * before.rotation.inverse();
+                return Some(
+                    Transform::from_translation(self.offset - rotation * before.offset)
+                        .with_rotation(rotation),
+                );
             }
         }
         let before = before.as_any().downcast_ref::<TriangleMeshSnapshot>()?;
         self.source
             .eq_snapshot(before)
-            .then(|| Transform::from_translation(self.offset))
+            .then(|| Transform::from_translation(self.offset).with_rotation(self.rotation))
     }
     fn matches_entity(&self, entity: &EntityRef, _world: &World) -> Option<bool> {
         let Some(mesh) = entity.get::<TriangleMesh>() else {
@@ -534,14 +568,14 @@ impl AuthoredEntity for TranslatedMeshSnapshot {
                 && entity.get::<MaterialAssignment>() == self.source.material_assignment.as_ref()
                 && entity.get::<SemanticShadow>() == self.source.semantic_shadow.as_ref()
                 && mesh.faces == self.source.primitive.faces
-                && mesh.normals == self.source.primitive.normals
+                && self.normals_match(&mesh.normals)
                 && mesh.name == self.source.primitive.name
                 && mesh.vertices.len() == self.source.primitive.vertices.len()
                 && mesh
                     .vertices
                     .iter()
                     .zip(&self.source.primitive.vertices)
-                    .all(|(b, a)| *a + self.offset == *b),
+                    .all(|(b, a)| self.point(*a) == *b),
         )
     }
     fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) { /* GPU mesh supplies the preview. */
@@ -552,7 +586,7 @@ impl AuthoredEntity for TranslatedMeshSnapshot {
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
         if let Some(other) = other.as_any().downcast_ref::<Self>() {
             if self.source_hash == other.source_hash {
-                return self.offset == other.offset;
+                return self.offset == other.offset && self.rotation == other.rotation;
             }
             return self.matches_native(&other.materialize());
         }
@@ -839,7 +873,7 @@ impl AuthoredEntity for TriangleMeshSnapshot {
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        if let Some(other) = other.as_any().downcast_ref::<TranslatedMeshSnapshot>() {
+        if let Some(other) = other.as_any().downcast_ref::<RigidMeshSnapshot>() {
             return other.matches_native(self);
         }
         other

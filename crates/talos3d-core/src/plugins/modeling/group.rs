@@ -1125,9 +1125,11 @@ pub fn compute_group_bounds_in_frame_from_world(
     any.then_some(EntityBounds { min, max })
 }
 
-fn element_entity_index(world: &World) -> HashMap<ElementId, Entity> {
+pub(crate) fn element_entity_index(world: &World) -> HashMap<ElementId, Entity> {
     let mut index = HashMap::new();
-    let mut query = world.try_query::<(Entity, &ElementId)>().unwrap();
+    let Some(mut query) = world.try_query::<(Entity, &ElementId)>() else {
+        return index;
+    };
     for (entity, element_id) in query.iter(world) {
         index.insert(*element_id, entity);
     }

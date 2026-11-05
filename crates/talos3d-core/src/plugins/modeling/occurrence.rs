@@ -591,6 +591,11 @@ impl AuthoredEntity for OccurrenceSnapshot {
     fn rotate_by(&self, rotation: Quat) -> BoxedEntity {
         let mut next = self.clone();
         next.rotation = rotation * next.rotation;
+        // A Definition body can sit far from its occurrence origin. The
+        // aggregate planner orbits the post-rotation centre around its pivot.
+        next.generated_bounds = self.generated_bounds.map(|bounds| {
+            bounds.map_corners(|point| self.offset + rotation * (point - self.offset))
+        });
         BoxedEntity(Box::new(next))
     }
 
@@ -667,21 +672,23 @@ impl AuthoredEntity for OccurrenceSnapshot {
     }
 
     fn apply_to(&self, world: &mut World) {
-        let registry = world.resource::<DefinitionRegistry>().clone();
         let transform = Transform {
             translation: self.offset,
             rotation: self.rotation,
             scale: self.scale,
         };
 
-        if let Err(error) = render_occurrence(
-            world,
-            &registry,
-            self.element_id,
-            &self.identity,
-            transform,
-            Some(&self.label),
-        ) {
+        let result = world.resource_scope(|world, registry: Mut<DefinitionRegistry>| {
+            render_occurrence(
+                world,
+                &registry,
+                self.element_id,
+                &self.identity,
+                transform,
+                Some(&self.label),
+            )
+        });
+        if let Err(error) = result {
             // Older documents can contain unresolved bodies. Keep their authored
             // identity/controls on reload even when materialization is refused.
             // For an existing live occurrence, retain its last valid geometry.
@@ -710,16 +717,32 @@ impl AuthoredEntity for OccurrenceSnapshot {
             return;
         };
 
-        let registry = world.resource::<DefinitionRegistry>().clone();
-        let dirty = classify_occurrence_snapshot_change(&registry, self, previous);
+        let dirty = classify_occurrence_snapshot_change(
+            world.resource::<DefinitionRegistry>(),
+            self,
+            previous,
+        );
         let material_dirty = dirty.material_dirty;
 
-        if dirty.mesh_dirty || dirty.transform_dirty {
+        let entity = crate::plugins::commands::find_entity_by_element_id(world, self.element_id);
+        // A materialized single-mesh Definition already has geometry in local
+        // coordinates. Its pose can change without evaluating its source again.
+        let cached_pose = dirty.transform_dirty
+            && !dirty.mesh_dirty
+            && entity.is_some_and(|e| {
+                world.get::<LocalOccurrenceMesh>(e).is_some()
+                    && world.get::<Mesh3d>(e).is_some()
+                    && world.get::<ProfileExtrusion>(e).is_none()
+                    && world.get::<NeedsEval>(e).is_none()
+            });
+        if (dirty.mesh_dirty || dirty.transform_dirty) && !cached_pose {
             self.apply_to(world);
-        } else if let Some(entity) =
-            crate::plugins::commands::find_entity_by_element_id(world, self.element_id)
-        {
+        } else if let Some(entity) = entity {
             let mut entity_mut = world.entity_mut(entity);
+            if cached_pose {
+                let pose = self.preview_transform().unwrap();
+                entity_mut.insert((pose, GlobalTransform::from(pose)));
+            }
             entity_mut.insert((self.identity.clone(), Name::new(self.label.clone())));
             if let Some(mut classification) = entity_mut.get_mut::<OccurrenceClassification>() {
                 if dirty.material_dirty {
@@ -732,7 +755,9 @@ impl AuthoredEntity for OccurrenceSnapshot {
         if material_dirty {
             if let (Some(entity), Ok(definition)) = (
                 crate::plugins::commands::find_entity_by_element_id(world, self.element_id),
-                registry.effective_definition(&self.identity.definition_id),
+                world
+                    .resource::<DefinitionRegistry>()
+                    .effective_definition(&self.identity.definition_id),
             ) {
                 apply_occurrence_material_assignment(world, entity, &definition, &self.identity);
             }
@@ -1412,6 +1437,9 @@ pub(crate) fn resolve_compound_slot_occurrence_context_with_root_overrides(
     })
 }
 
+#[derive(Component)]
+struct LocalOccurrenceMesh;
+
 pub(crate) fn render_occurrence(
     world: &mut World,
     registry: &DefinitionRegistry,
@@ -1447,6 +1475,9 @@ pub(crate) fn render_occurrence(
         }
     }
     let root_entity = ensure_occurrence_root_entity(world, element_id, identity, transform, label);
+    world
+        .entity_mut(root_entity)
+        .remove::<LocalOccurrenceMesh>();
     let selected_parts: std::collections::HashSet<_> = world
         .query_filtered::<&GeneratedOccurrencePart, With<crate::plugins::selection::Selected>>()
         .iter(world)
@@ -1461,6 +1492,7 @@ pub(crate) fn render_occurrence(
         apply_occurrence_material_assignment(world, root_entity, &definition, identity);
         if let Ok(mut entity_mut) = world.get_entity_mut(root_entity) {
             entity_mut.insert((
+                LocalOccurrenceMesh,
                 identity.clone(),
                 OccurrenceClassification::clean(),
                 transform,
@@ -1507,6 +1539,9 @@ pub(crate) fn render_occurrence(
     }
 
     if let Ok(mut entity_mut) = world.get_entity_mut(root_entity) {
+        if definition.body.compound.is_none() && entity_mut.contains::<Mesh3d>() {
+            entity_mut.insert(LocalOccurrenceMesh);
+        }
         entity_mut.insert((
             identity.clone(),
             OccurrenceClassification::clean(),
@@ -4266,6 +4301,38 @@ mod frozen_mesh_occurrence_tests {
         world.insert_resource(PrimitiveMaterial(Handle::default()));
         world
     }
+    #[test]
+    fn rigid_rotation_orbits_the_occurrence_origin_with_an_off_center_body() {
+        use crate::plugins::transform::{rigid_after, TransformMotion};
+        let mut before = OccurrenceSnapshot::new(
+            ElementId(1),
+            OccurrenceIdentity::new(definition().id, 1),
+            "offset body",
+        );
+        before.offset = Vec3::new(4., 7., -2.);
+        let bounds = EntityBounds {
+            min: Vec3::new(13., 5., 8.),
+            max: Vec3::new(19., 9., 10.),
+        };
+        before.generated_bounds = Some(bounds);
+        let pivot = Vec3::new(-3., 2., 6.);
+        let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let snapshot: BoxedEntity = before.clone().into();
+        let after = rigid_after(
+            std::iter::once(&snapshot),
+            TransformMotion::Rotate(rotation),
+            pivot,
+        );
+        let actual = after[0]
+            .0
+            .as_any()
+            .downcast_ref::<OccurrenceSnapshot>()
+            .unwrap();
+        let place = |p| pivot + rotation * (p - pivot);
+        assert!(actual.offset.abs_diff_eq(place(before.offset), 1e-5));
+        assert!(actual.center().abs_diff_eq(place(bounds.center()), 1e-5));
+    }
+
     #[test]
     fn frozen_mesh_occurrences_share_gpu_mesh_and_keep_local_placement_after_reload() {
         let def = definition();

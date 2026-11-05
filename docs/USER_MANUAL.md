@@ -193,6 +193,11 @@ The placed root can be moved or rotated independently, while its mapped
 contents remain owned by the external source file. Insertion and the confirmed
 placement move are separate undoable operations.
 
+For large linked models, the blue selection surfaces and the outline show the
+proposed position as you drag or rotate. The solid model stays at its starting
+position until you confirm. Escape cancels the placement. Models with added
+host-dependent parts use the detailed preview so those parts can adjust.
+
 Use **Open Linked Model** to edit the source document and **Refresh Linked
 Models** to pull source changes into existing instances. Refresh preserves each
 instance's root transform and stable source-to-scene mappings whenever the

@@ -1582,6 +1582,9 @@ fn draw_selected_outlines(
     // semantic edit plan, so use its direct before/after members as the single
     // source of move feedback instead of asking each selection factory to infer it
     // again from the partially-presented world.
+    if active_transform_preview.placement_bounds.is_some() {
+        return; // The linked placement draws its cached extent and surface overlay.
+    }
     if active_mode == TransformMode::Moving {
         if let Some(bounds) =
             moving_transform_feedback_bounds(&transform_state, &active_transform_preview)
