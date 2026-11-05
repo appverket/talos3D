@@ -344,7 +344,16 @@ pub fn start_transform_mode_with_options(
 
     // An unconstrained rotation inside Drafting turns in the Draft plane, so the
     // gesture, the measured angle, and the committed edit all agree on one axis.
-    let axis = drafting_rotation_axis(world, mode, options.axis);
+    let held_axis = (mode == TransformMode::Moving && options.axis == AxisConstraint::None)
+        .then(|| {
+            world
+                .get_resource::<ButtonInput<KeyCode>>()
+                .and_then(held_move_axis)
+        })
+        .flatten();
+    let axis = held_axis
+        .map(|(_, axis)| axis)
+        .unwrap_or_else(|| drafting_rotation_axis(world, mode, options.axis));
 
     // A large linked instance is manipulated as one placement. Capture its
     // extent once; only the displayed rigid pose changes during the gesture.
@@ -401,6 +410,13 @@ pub fn start_transform_mode_with_options(
     };
 
     begin_plan_interaction(world)?;
+    if let Some((key, _)) = held_axis {
+        // Startup already applied this physical press. Modal input may still
+        // run in the same frame (for example when started by a command).
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear_just_pressed(key);
+    }
     world
         .resource_mut::<ActiveTransformPreview>()
         .placement_bounds = placement_bounds;
@@ -541,66 +557,59 @@ fn handle_transform_input(world: &mut World) {
     // Preserve native text order and keyboard-layout meaning (e.g. Swedish
     // minus lives on the physical Slash key). ButtonInput folds repeated keys
     // in one frame and cannot represent a typed measurement faithfully.
-    let native: Vec<KeyCode> = native_events
+    let mut presses = native_events
         .iter()
         .filter(|event| event.state == bevy::input::ButtonState::Pressed)
-        .map(|event| {
-            let text = event.text.as_deref().or_else(|| {
-                if let bevy::input::keyboard::Key::Character(text) = &event.logical_key {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
-            });
-            match text {
-                Some("0") => KeyCode::Digit0,
-                Some("1") => KeyCode::Digit1,
-                Some("2") => KeyCode::Digit2,
-                Some("3") => KeyCode::Digit3,
-                Some("4") => KeyCode::Digit4,
-                Some("5") => KeyCode::Digit5,
-                Some("6") => KeyCode::Digit6,
-                Some("7") => KeyCode::Digit7,
-                Some("8") => KeyCode::Digit8,
-                Some("9") => KeyCode::Digit9,
-                Some("-") => KeyCode::Minus,
-                Some(".") | Some(",") => KeyCode::Period,
-                _ => event.key_code,
-            }
-        })
-        .collect();
-    let just_pressed: Vec<KeyCode> = if native.is_empty() {
+        .peekable();
+    let just_pressed: Vec<KeyCode> = if presses.peek().is_none() {
         keys.get_just_pressed().copied().collect()
     } else {
-        native
+        presses
+            .filter(|event| {
+                // Axis locks toggle on a physical press. Text and backspace keep
+                // their native repeat behavior for measurement entry.
+                axis_for_key(event.key_code, shift_pressed).is_none()
+                    || (!event.repeat && keys.just_pressed(event.key_code))
+            })
+            .map(|event| {
+                let text = event.text.as_deref().or_else(|| {
+                    if let bevy::input::keyboard::Key::Character(text) = &event.logical_key {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                });
+                match text {
+                    Some("0") => KeyCode::Digit0,
+                    Some("1") => KeyCode::Digit1,
+                    Some("2") => KeyCode::Digit2,
+                    Some("3") => KeyCode::Digit3,
+                    Some("4") => KeyCode::Digit4,
+                    Some("5") => KeyCode::Digit5,
+                    Some("6") => KeyCode::Digit6,
+                    Some("7") => KeyCode::Digit7,
+                    Some("8") => KeyCode::Digit8,
+                    Some("9") => KeyCode::Digit9,
+                    Some("-") => KeyCode::Minus,
+                    Some(".") | Some(",") => KeyCode::Period,
+                    _ => event.key_code,
+                }
+            })
+            .collect()
     };
-    let _ = keys;
 
     let mut transform_state = world.resource_mut::<TransformState>();
 
     for key in just_pressed {
+        if let Some(axis) = axis_for_key(key, shift_pressed) {
+            transform_state.axis = if shift_pressed {
+                axis
+            } else {
+                toggle_axis(transform_state.axis, axis)
+            };
+            continue;
+        }
         match key {
-            KeyCode::KeyX => {
-                transform_state.axis = if shift_pressed {
-                    AxisConstraint::PlaneYZ
-                } else {
-                    toggle_axis(transform_state.axis, AxisConstraint::X)
-                };
-            }
-            KeyCode::KeyY => {
-                transform_state.axis = if shift_pressed {
-                    AxisConstraint::PlaneXZ
-                } else {
-                    toggle_axis(transform_state.axis, AxisConstraint::Y)
-                };
-            }
-            KeyCode::KeyZ => {
-                transform_state.axis = if shift_pressed {
-                    AxisConstraint::PlaneXY
-                } else {
-                    toggle_axis(transform_state.axis, AxisConstraint::Z)
-                };
-            }
             KeyCode::Digit0 | KeyCode::Numpad0 => {
                 push_numeric_char(&mut transform_state.numeric_buffer, '0')
             }
@@ -2662,6 +2671,30 @@ fn transform_label(mode: TransformMode) -> &'static str {
     }
 }
 
+fn axis_for_key(key: KeyCode, plane: bool) -> Option<AxisConstraint> {
+    match (key, plane) {
+        (KeyCode::KeyX, false) => Some(AxisConstraint::X),
+        (KeyCode::KeyY, false) => Some(AxisConstraint::Y),
+        (KeyCode::KeyZ, false) => Some(AxisConstraint::Z),
+        (KeyCode::KeyX, true) => Some(AxisConstraint::PlaneYZ),
+        (KeyCode::KeyY, true) => Some(AxisConstraint::PlaneXZ),
+        (KeyCode::KeyZ, true) => Some(AxisConstraint::PlaneXY),
+        _ => None,
+    }
+}
+
+fn held_move_axis(keys: &ButtonInput<KeyCode>) -> Option<(KeyCode, AxisConstraint)> {
+    let mut held = [KeyCode::KeyX, KeyCode::KeyY, KeyCode::KeyZ]
+        .into_iter()
+        .filter(|key| keys.pressed(*key));
+    let key = held.next()?;
+    if held.next().is_some() {
+        return None;
+    }
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    Some((key, axis_for_key(key, shift)?))
+}
+
 fn toggle_axis(current: AxisConstraint, axis: AxisConstraint) -> AxisConstraint {
     if current == axis {
         AxisConstraint::None
@@ -3509,15 +3542,9 @@ mod tests {
         assert_eq!(capture_snapshot(&world, ElementId(1)), Some(group));
     }
 
-    #[test]
-    fn linked_placement_presents_one_pose_and_commits_the_last_displayed_angle() {
-        use crate::plugins::{
-            authored_edit_plan::capture_snapshot,
-            history::{apply_pending_history_commands_for_test as drain, PendingCommandQueue},
-            modeling::group::LinkedModelIdMapping,
-        };
-        let (mut world, _, mesh, _) = linked_mesh_world();
-        let root = find_entity_by_element_id_readonly(&world, ElementId(1)).unwrap();
+    fn map_large_linked_fixture(world: &mut World) -> Entity {
+        use crate::plugins::modeling::group::LinkedModelIdMapping;
+        let root = find_entity_by_element_id_readonly(world, ElementId(1)).unwrap();
         let count = LINKED_PLACEMENT_MIN_MEMBERS as u64;
         for id in 4..=count {
             world.spawn((
@@ -3538,6 +3565,17 @@ mod tests {
                 scene_id: ElementId(id),
             })
             .collect();
+        root
+    }
+
+    #[test]
+    fn linked_placement_presents_one_pose_and_commits_the_last_displayed_angle() {
+        use crate::plugins::{
+            authored_edit_plan::capture_snapshot,
+            history::{apply_pending_history_commands_for_test as drain, PendingCommandQueue},
+        };
+        let (mut world, _, mesh, _) = linked_mesh_world();
+        let root = map_large_linked_fixture(&mut world);
         let pivot = Vec3::new(10., 2., -5.);
         let start = |world: &mut World| {
             start_transform_mode_with_options(
@@ -3586,6 +3624,69 @@ mod tests {
         world.resource_mut::<PendingCommandQueue>().queue_undo();
         drain(&mut world);
         assert_eq!(capture_snapshot(&world, ElementId(2)), Some(mesh));
+    }
+
+    #[test]
+    fn held_y_preserves_linked_preview_and_committed_horizontal_position() {
+        use crate::plugins::history::apply_pending_history_commands_for_test as drain;
+        use bevy::input::{
+            keyboard::{Key, KeyboardInput},
+            ButtonState,
+        };
+        let keydown = |world: &mut World, repeat| {
+            world
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .press(KeyCode::KeyY);
+            world
+                .resource_mut::<Messages<KeyboardInput>>()
+                .write(KeyboardInput {
+                    key_code: KeyCode::KeyY,
+                    logical_key: Key::Character("y".into()),
+                    state: ButtonState::Pressed,
+                    text: Some("y".into()),
+                    repeat,
+                    window: Entity::PLACEHOLDER,
+                });
+        };
+        for preheld in [false, true] {
+            let (mut world, _, _, _) = linked_mesh_world();
+            let root = map_large_linked_fixture(&mut world);
+            world.init_resource::<Messages<KeyboardInput>>();
+            if preheld {
+                keydown(&mut world, false);
+            }
+            start_transform_mode_with_options(
+                &mut world,
+                TransformMode::Moving,
+                TransformStartOptions {
+                    initial_cursor: Some(Vec3::ZERO),
+                    ..default()
+                },
+            )
+            .unwrap();
+            if !preheld {
+                keydown(&mut world, false);
+            }
+            for i in 1..=4 {
+                if i > 1 {
+                    world.resource_mut::<ButtonInput<KeyCode>>().clear();
+                    keydown(&mut world, true);
+                }
+                handle_transform_input(&mut world);
+                world.resource_mut::<SnapResult>().target = Some(Vec3::new(8., i as f32, -12.));
+                update_transform_preview(&mut world);
+                assert_eq!(
+                    linked_placement_preview_pose(&world).unwrap().translation,
+                    Vec3::Y * i as f32
+                );
+            }
+            confirm_captured_transform(&mut world);
+            drain(&mut world);
+            assert_eq!(
+                world.get::<GroupMembers>(root).unwrap().frame.translation,
+                Vec3::Y * 4.
+            );
+        }
     }
 
     #[test]

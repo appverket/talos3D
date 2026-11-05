@@ -184,6 +184,8 @@ including groups previously exported from the current document.
 After selecting the file, the instance follows the cursor in the shared Move
 placement state, anchored at the source origin. Press **X**, **Y**, or **Z** to
 lock an axis, or **Shift** plus an axis key to constrain its perpendicular plane.
+You can also hold an axis key before dragging a Move corner grip. The lock stays
+active when you release the key. Press the same axis key again to unlock.
 Inference remains enabled; a **Y** lock can take its elevation from a terrain
 face while preserving the original horizontal position. Type a distance for
 precise movement, then press **Enter** or click to confirm. **Escape** cancels
