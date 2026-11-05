@@ -413,9 +413,17 @@ pub fn start_transform_mode_with_options(
     if let Some((key, _)) = held_axis {
         // Startup already applied this physical press. Modal input may still
         // run in the same frame (for example when started by a command).
-        world
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .clear_just_pressed(key);
+        if let Some(messages) =
+            world.get_resource::<Messages<bevy::input::keyboard::KeyboardInput>>()
+        {
+            let end = messages.oldest_message_count() + messages.len();
+            world.init_resource::<TransformKeyboardCursor>();
+            world.resource_mut::<TransformKeyboardCursor>().seeded_axis = Some((key, end));
+        } else {
+            world
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .clear_just_pressed(key);
+        }
     }
     world
         .resource_mut::<ActiveTransformPreview>()
@@ -536,17 +544,27 @@ fn activate_pending_transform(world: &mut World) {
 }
 
 #[derive(Resource, Default)]
-struct TransformKeyboardCursor(
-    bevy::ecs::message::MessageCursor<bevy::input::keyboard::KeyboardInput>,
-);
+struct TransformKeyboardCursor {
+    reader: bevy::ecs::message::MessageCursor<bevy::input::keyboard::KeyboardInput>,
+    seeded_axis: Option<(KeyCode, usize)>,
+}
 
 fn handle_transform_input(world: &mut World) {
     world.init_resource::<TransformKeyboardCursor>();
     let native_events = world.resource_scope(|world, mut cursor: Mut<TransformKeyboardCursor>| {
         world
             .get_resource::<Messages<bevy::input::keyboard::KeyboardInput>>()
-            .map(|events| cursor.0.read(events).cloned().collect::<Vec<_>>())
-            .unwrap_or_default()
+            .map(|events| {
+                let seeded = cursor.seeded_axis.take();
+                cursor
+                    .reader
+                    .read_with_id(events)
+                    .filter(|(event, id)| {
+                        !seeded.is_some_and(|(key, end)| event.key_code == key && id.id < end)
+                    })
+                    .map(|(event, _)| event.clone())
+                    .collect::<Vec<_>>()
+            })
     });
     if !world.resource::<InputOwnership>().is_modal() {
         return;
@@ -557,19 +575,14 @@ fn handle_transform_input(world: &mut World) {
     // Preserve native text order and keyboard-layout meaning (e.g. Swedish
     // minus lives on the physical Slash key). ButtonInput folds repeated keys
     // in one frame and cannot represent a typed measurement faithfully.
-    let mut presses = native_events
-        .iter()
-        .filter(|event| event.state == bevy::input::ButtonState::Pressed)
-        .peekable();
-    let just_pressed: Vec<KeyCode> = if presses.peek().is_none() {
-        keys.get_just_pressed().copied().collect()
-    } else {
-        presses
+    // Use one delivery source for the session. A native message and the
+    // ButtonInput edge derived from it can arrive in different updates.
+    let just_pressed: Vec<KeyCode> = if let Some(events) = native_events {
+        events
+            .iter()
             .filter(|event| {
-                // Axis locks toggle on a physical press. Text and backspace keep
-                // their native repeat behavior for measurement entry.
-                axis_for_key(event.key_code, shift_pressed).is_none()
-                    || (!event.repeat && keys.just_pressed(event.key_code))
+                event.state == bevy::input::ButtonState::Pressed
+                    && !(event.repeat && axis_for_key(event.key_code, shift_pressed).is_some())
             })
             .map(|event| {
                 let text = event.text.as_deref().or_else(|| {
@@ -596,6 +609,8 @@ fn handle_transform_input(world: &mut World) {
                 }
             })
             .collect()
+    } else {
+        keys.get_just_pressed().copied().collect()
     };
 
     let mut transform_state = world.resource_mut::<TransformState>();
@@ -3635,9 +3650,6 @@ mod tests {
         };
         let keydown = |world: &mut World, repeat| {
             world
-                .resource_mut::<ButtonInput<KeyCode>>()
-                .press(KeyCode::KeyY);
-            world
                 .resource_mut::<Messages<KeyboardInput>>()
                 .write(KeyboardInput {
                     key_code: KeyCode::KeyY,
@@ -3653,6 +3665,9 @@ mod tests {
             let root = map_large_linked_fixture(&mut world);
             world.init_resource::<Messages<KeyboardInput>>();
             if preheld {
+                world
+                    .resource_mut::<ButtonInput<KeyCode>>()
+                    .press(KeyCode::KeyY);
                 keydown(&mut world, false);
             }
             start_transform_mode_with_options(
@@ -3668,7 +3683,13 @@ mod tests {
                 keydown(&mut world, false);
             }
             for i in 1..=4 {
-                if i > 1 {
+                if i == 2 {
+                    // ButtonInput can expose the already-delivered native
+                    // press on a later update. It must not unlock the axis.
+                    world
+                        .resource_mut::<ButtonInput<KeyCode>>()
+                        .press(KeyCode::KeyY);
+                } else if i > 2 {
                     world.resource_mut::<ButtonInput<KeyCode>>().clear();
                     keydown(&mut world, true);
                 }
