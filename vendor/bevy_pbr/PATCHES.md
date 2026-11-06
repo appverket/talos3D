@@ -1,13 +1,13 @@
 # Local Bevy PBR repairs
 
-Source: crates.io `bevy_pbr` 0.20.0, registry SHA-256
-`fb760932d1e683e7c00011f5c99e4e1cc893646a3a7b7224da6daf9bfa94853d`.
-Upstream: https://github.com/bevyengine/bevy/tree/v0.20.0/crates/bevy_pbr
+Source: crates.io `bevy_pbr` 0.20.1, registry SHA-256
+`1138d6ed9bbcc43a4d83878062869c20d4292f1112b177acfc1a20cf6ae14f3e`.
+Upstream: https://github.com/bevyengine/bevy/tree/v0.20.1/crates/bevy_pbr
 Licenses: MIT OR Apache-2.0; original license files retained.
 
 The package source differs in `src/render/light.rs` and the StandardMaterial
-Rust/WESL clipping paths listed below. Both repairs were rebased from 0.19.1;
-0.20.0 still sorts directional lights with the ascending bool comparator. The normalized registry Cargo manifest is retained so dependencies
+Rust/WESL clipping paths listed below. Both repairs were rebased from 0.19.1 through 0.20.0 to 0.20.1;
+0.20.1 still sorts directional lights with the ascending bool comparator. The normalized registry Cargo manifest is retained so dependencies
 still resolve to the released engine line. Cargo-generated cache markers,
 registry provenance JSON and the crate-local lockfile are excluded.
 
@@ -51,3 +51,19 @@ Proposed upstream shape: opt-in StandardMaterial world-space clip planes shared
 by color, prepass and shadow fragments, with explicit bounded backend capacity.
 `standard-material-clipping.patch` records the proposed implementation; no upstream PR has
 been submitted. Consume an upstream equivalent before removing these fields.
+
+## 0.20.1 rebase audit
+
+The 0.20.0-to-0.20.1 upstream diff changes volumetric-fog near-plane handling
+inside PBR. Those upstream Rust/WESL changes are included verbatim. Neither
+directional-light prioritization nor StandardMaterial clip-plane support is
+present in the released source, so both small prepared upstream patches remain
+necessary. Their source files have no conflicting upstream edits; the original
+patches apply cleanly and retain their regression coverage.
+
+This remains a minimal component vendor, not a fork of the entire renderer.
+The desired upstream interfaces and removal conditions above still apply. The
+priority correction can be proposed independently; clip planes need upstream
+API review for bounded backend capacity and all render passes before submission.
+The prepared patches are retained as reviewable upstream proposals, without
+claiming an upstream PR has been opened or accepted.

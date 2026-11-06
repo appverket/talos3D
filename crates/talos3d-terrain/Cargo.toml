@@ -11,7 +11,7 @@ description = "Terrain modeling and surface operations for Talos3D."
 model-api = ["talos3d-core/model-api"]
 
 [dependencies]
-bevy = { version = "0.20.0", default-features = false, features = [
+bevy = { version = "0.20.1", default-features = false, features = [
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_gizmos",
