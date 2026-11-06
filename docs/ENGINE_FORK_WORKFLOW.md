@@ -327,3 +327,12 @@ present cannot pass. Fixture files and raw traces remain local.
 Source release: https://github.com/bevyengine/bevy/releases/tag/v0.20.1
 
 Changes: https://github.com/bevyengine/bevy/compare/v0.20.0...v0.20.1
+
+Fresh downstream MCP-feature validation also exposed `rmcp` 1.3.0 allowing a
+newer 1.x macro generator that emits runtime calls absent in 1.3.0. Core now pins
+its optional macro generator to the matching 1.3.0, already used successfully by
+Architecture/Apps. This is a dependency-resolution repair, not a change to tools
+or their semantics. The desired upstream repair is for the runtime to bind its
+private macro ABI to a matching generator version; a local Cargo constraint is
+sufficient, so vendoring the SDK would add no value. Revisit both pins together
+when upgrading the MCP SDK.
