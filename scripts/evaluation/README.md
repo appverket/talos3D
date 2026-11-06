@@ -36,3 +36,16 @@ exit2 means no observed failures but acceptance remains untested.
 ```sh
 python3 -m unittest discover -s scripts/evaluation -p 'test_*.py'
 ```
+
+For an engine update's native performance gate, use
+`native_engine_benchmark.py PROJECT --credentials PRIVATE_JSON --instance ID
+--root LINKED_ROOT --output PRIVATE_REPORT --replace-disposable-document`.
+Use an optimized product build and the same saved large linked fixture, hardware,
+window and renderer settings on both sides. Run once before changing dependencies,
+then pass that report with `--baseline` to the candidate run. The runner reloads
+before each of three 72-step grip drags, measures activation/motion/first dirty
+release through swapchain submission, and requires an exact candidate commit.
+Missing presents fail rather than passing a headless or locked-screen run.
+The default active p95 budget is 33 ms; baseline comparisons also reject material
+regressions in activation, motion, worst active frame and release. Keep credentials,
+fixture, raw traces and reports outside Git. Inspect rendered geometry separately.
