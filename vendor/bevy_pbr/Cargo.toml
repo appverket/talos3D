@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "bevy_pbr"
-version = "0.20.0"
+version = "0.20.1"
 build = false
 autolib = false
 autobins = false
@@ -92,84 +92,84 @@ version = "0.7"
 default-features = false
 
 [dependencies.bevy_app]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_asset]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_camera]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_color]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_core_pipeline]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_derive]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_diagnostic]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_ecs]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_extract]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_gltf]
-version = "0.20.0"
+version = "0.20.1"
 optional = true
 
 [dependencies.bevy_image]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_light]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_log]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_material]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_math]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_mesh]
-version = "0.20.0"
+version = "0.20.1"
 features = [
     "morph",
     "bevy_mikktspace",
 ]
 
 [dependencies.bevy_platform]
-version = "0.20.0"
+version = "0.20.1"
 features = ["std"]
 default-features = false
 
 [dependencies.bevy_reflect]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_render]
-version = "0.20.0"
+version = "0.20.1"
 features = ["morph"]
 
 [dependencies.bevy_shader]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_shape]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_tasks]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_transform]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bevy_utils]
-version = "0.20.0"
+version = "0.20.1"
 
 [dependencies.bitflags]
 version = "2.3"

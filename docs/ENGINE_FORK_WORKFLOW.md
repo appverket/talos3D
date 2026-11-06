@@ -292,3 +292,47 @@ egui vendoring. Once upstream exposes the manual-root contract, publish the
 rectangle there and retire this adapter in favor of the upstream input resource.
 Regression coverage must keep viewport input free, chrome and floating windows
 interactive, and gesture release ownership intact.
+
+## Bevy 0.20.1 audit — 2026-11-06
+
+All direct Talos3D Bevy requirements move to `0.20.1`; lockfiles resolve the
+engine family together. Released `bevy_egui` 0.43.1 / egui 0.36 remain compatible,
+so no UI bridge or application interaction migration is introduced. Standalone
+catalog/project clients update their exact Bevy requirement alongside the app
+compositions.
+
+The upstream release fixes shader-sized GPU buffer allocation, cyclic shader
+dependencies, orphaned-entity ancestor traversal and transform propagation after
+entity-index reuse, redundant uniqueness checks in parallel queries, reflected
+Option defaults, and fog-volume near-plane rendering. It also updates ruzstd to
+the 0.9 line. Talos3D keeps its existing Bevy render extraction, retained rigid
+linked-instance presentation, shared authored edit plans and background recovery
+ordering; these fixes belong in the engine rather than new application workarounds.
+
+`vendor/bevy_pbr` is rebased onto the complete 0.20.1 registry source, including
+its volumetric-fog fix. The two existing patches are still needed and apply
+without conflicts. See its provenance, prepared upstream proposals and removal
+conditions in `vendor/bevy_pbr/PATCHES.md`.
+
+Validation uses the optimized Architecture product entry point, not only a Core
+test executable. Before/after tests use the same 3,121-record nested linked fixture
+(3,072 box meshes), hardware, viewport and renderer settings. Three 72-step
+native Move traces include activation, all presented motion, exact candidate
+commit and the first dirty edit's recovery cost. The active input-to-present p95
+budget is 33 ms; repeated baseline/candidate comparisons also reject material
+regressions in motion, activation or release, and report the worst observed stall
+separately. Timings exclude HTTP and physical display scanout; a missing swapchain
+present cannot pass. Fixture files and raw traces remain local.
+
+Source release: https://github.com/bevyengine/bevy/releases/tag/v0.20.1
+
+Changes: https://github.com/bevyengine/bevy/compare/v0.20.0...v0.20.1
+
+Fresh downstream MCP-feature validation also exposed `rmcp` 1.3.0 allowing a
+newer 1.x macro generator that emits runtime calls absent in 1.3.0. Core now pins
+its optional macro generator to the matching 1.3.0, already used successfully by
+Architecture/Apps. This is a dependency-resolution repair, not a change to tools
+or their semantics. The desired upstream repair is for the runtime to bind its
+private macro ABI to a matching generator version; a local Cargo constraint is
+sufficient, so vendoring the SDK would add no value. Revisit both pins together
+when upgrading the MCP SDK.
