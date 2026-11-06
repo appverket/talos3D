@@ -20,8 +20,10 @@ they now use the same sorted, capacity-limited list as GPU light extraction.
 
 Regression tests exercise a fill preceding a shadowed key with capacity one,
 volumetric/shadow precedence, stable identity order, and retained-list counts.
-The actual runtime still requires browser screenshot verification. This does
-not raise WebGL's light limit and does not alter authored scene light values.
+Both optimized browser backends compile and render section-clipped solids after
+this rebase. The separate colored-key visual probe is inconclusive; the two
+priority regression tests pass, but no colored-key screenshot pass is claimed.
+This does not raise WebGL's light limit or alter authored scene light values.
 
 Removal: consume a compatible released Bevy version containing this fix (or a
 reviewed upstream revision until released), delete this vendor directory and

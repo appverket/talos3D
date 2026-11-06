@@ -6,4 +6,4 @@
 - task-id: TALOS-oxmbwvky
 - target base: origin/main
 - summary: Upgrade Talos3D compositions to Bevy 0.20.1 and retain verified renderer patches.
-- status: active
+- status: awaiting-merge
