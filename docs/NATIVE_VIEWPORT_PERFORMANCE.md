@@ -131,12 +131,37 @@ preserves configuration change ticks. Tests cover zoom-out, zoom-in, new lights,
 and 120 orbit updates without repeated invalidation. This is shadowed viewport
 lighting, not a simulation of diffuse indoor light transport.
 
-The final combined code (`28a5615`, including object locking from `d11eaee`)
-was measured again with the existing scene's sky fill shadows enabled and the
-expanded cascade range active. Three 72-step orbits: motion p95
-16.39 / 16.31 / 16.30 ms, worst motion 16.77 ms, activation <=15.68 ms,
-release <=15.77 ms. The worst sample including initial pointer/modifier setup
-was 34.58 ms. All three motion budgets pass; every authored world bound remains
-unchanged. This second fixture differs only in the authored fill-shadow setting;
-it is an additional combined-feature acceptance run, not the identical-fixture
-before/after comparison above.
+The Architecture product also spawned an unmanaged sun/fill pair alongside the
+persisted lights. Those lights survived document replacement, bypassed the
+lighting API, and kept Bevy's fixed 150 m cutoff. Removing that duplicate
+product rig is required alongside this Core change. Distribution Architecture
+and Studio now use the same document lighting owner. This removes redundant
+light/shadow work; no CPU renderer, culling fallback, custom bias, or filter
+workaround is enabled.
+
+`native_shadow_acceptance.py` creates a generic two-box render fixture and
+compares the same ground sample with sunlight shadows on/off at 50 m and 201 m.
+It disables SSAO to isolate directional occlusion. The original product fails
+at 201 m (shadow/unshadowed luminance ratio 1.000); the corrected optimized Metal
+product passes at both distances (0.133 and 0.134; acceptance <0.75). Native
+viewport inspection confirms distant shadows. Near/distant views of the actual
+site also show roof, wall and balcony shadows and darkened glazing interiors.
+The original Bevy GPU preprocessing/culling remains fully supported and active.
+
+Final combined runtime acceptance uses Core `dc0f7cc` plus the Architecture
+startup-owner repair, including object locking from `d11eaee`. With the existing
+site sky fill shadows enabled, normal SSAO restored, unchanged 1280×720 window,
+and the expanded cascade range active, three 72-step orbits measure motion p95
+16.38 / 16.58 / 16.24 ms, worst motion 17.19 ms, activation <=16.55 ms,
+release <=16.30 ms. Worst including initial pointer/modifier setup: 31.91 ms.
+All three motion budgets pass; authored revision and every world bound remain
+unchanged, and camera motion causes zero geometry regeneration. This second
+fixture differs only in the authored fill-shadow setting; it is additional
+combined-feature acceptance, not the identical-fixture comparison above.
+
+Render regression command (Pillow required; use a disposable app instance):
+
+```sh
+python scripts/evaluation/native_shadow_acceptance.py --credentials PRIVATE.json \
+  --instance DISPOSABLE_ID --output PRIVATE_OUTPUT --replace-disposable-document
+```
