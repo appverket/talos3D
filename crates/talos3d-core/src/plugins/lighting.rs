@@ -860,11 +860,15 @@ fn fit_directional_shadow_range(
     let maximum_distance = (distance / 50.0).ceil() * 50.0;
     for mut config in &mut lights {
         if config.bounds.last().copied() != Some(maximum_distance) {
-            *config = CascadeShadowConfigBuilder {
+            let mut derived = CascadeShadowConfigBuilder {
                 maximum_distance,
                 ..default()
             }
             .build();
+            // Exponential splitting may round its final bound (150 ->
+            // 149.99998). Store the exact bucket to prevent idle invalidation.
+            *derived.bounds.last_mut().expect("at least one cascade") = maximum_distance;
+            *config = derived;
         }
     }
 }
@@ -1527,6 +1531,23 @@ mod tests {
                 .bounds
                 .last(),
             Some(&150.0)
+        );
+        let near_tick = app
+            .world()
+            .entity(light)
+            .get_ref::<CascadeShadowConfig>()
+            .unwrap()
+            .last_changed();
+        for _ in 0..120 {
+            app.update();
+        }
+        assert_eq!(
+            app.world()
+                .entity(light)
+                .get_ref::<CascadeShadowConfig>()
+                .unwrap()
+                .last_changed(),
+            near_tick
         );
         // A newly enabled light must receive coverage even without camera input.
         app.world_mut()
