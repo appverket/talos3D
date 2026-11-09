@@ -1,6 +1,9 @@
 use std::any::Any;
 
-use bevy::prelude::*;
+use bevy::{
+    light::{CascadeShadowConfig, CascadeShadowConfigBuilder, SimulationLightSystems},
+    prelude::*,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -13,6 +16,7 @@ use crate::{
     capability_registry::{AuthoredEntityFactory, HitCandidate, ModelSummaryAccumulator},
     capability_registry::{CapabilityDescriptor, CapabilityDistribution, CapabilityMaturity},
     plugins::{
+        camera::OrbitCamera,
         command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt},
         commands::{despawn_by_element_id, find_entity_by_element_id},
         document_properties::DocumentProperties,
@@ -752,6 +756,11 @@ impl Plugin for LightingPlugin {
                     sync_scene_lights,
                     draw_scene_light_gizmos,
                 ),
+            )
+            .add_systems(
+                PostUpdate,
+                fit_directional_shadow_range
+                    .before(SimulationLightSystems::UpdateDirectionalLightCascades),
             );
         // Bevy WebGL deliberately supports one directional light. Keep this
         // approximation in derived presentation, never authored settings.
@@ -798,7 +807,14 @@ pub fn create_daylight_rig(allocator: &ElementIdAllocator) -> Vec<SceneLightSnap
             Vec3::ZERO,
             [0.6, 0.7, 0.9],
             2_000.0,
-            false,
+            // A directional sky approximation still needs occlusion: otherwise
+            // it shines through closed walls and roofs. WebGL retains its
+            // documented single-shadowed-directional fallback.
+            !cfg!(all(
+                target_arch = "wasm32",
+                feature = "webgl2",
+                not(feature = "webgpu")
+            )),
         ),
     ]
 }
@@ -825,6 +841,32 @@ fn execute_toggle_lights_browser(
         .ok_or_else(|| "Lighting window state is unavailable".to_string())?;
     state.visible = !state.visible;
     Ok(crate::plugins::command_registry::CommandResult::empty())
+}
+
+/// Match shadow coverage to navigation scale without scanning model geometry.
+/// Bevy's 150m default loses all shadows at a site's ~200m orbit focus.
+/// Keep the engine's cascade count/resolution and near-detail split; expand only
+/// the far range in 50m buckets. Orbit/pan does not rebuild this configuration.
+fn fit_directional_shadow_range(
+    cameras: Query<(&OrbitCamera, &Camera)>,
+    mut lights: Query<&mut CascadeShadowConfig, (With<DirectionalLight>, With<SceneLightNode>)>,
+) {
+    let distance = cameras
+        .iter()
+        .filter(|(_, camera)| camera.is_active)
+        .map(|(orbit, _)| orbit.radius * 2.0)
+        .filter(|distance| distance.is_finite())
+        .fold(150.0_f32, f32::max);
+    let maximum_distance = (distance / 50.0).ceil() * 50.0;
+    for mut config in &mut lights {
+        if config.bounds.last().copied() != Some(maximum_distance) {
+            *config = CascadeShadowConfigBuilder {
+                maximum_distance,
+                ..default()
+            }
+            .build();
+        }
+    }
 }
 
 fn seed_default_lighting_scene(world: &mut World) {
@@ -1400,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn default_daylight_rig_matches_pre_pp59_startup_contract() {
+    fn default_daylight_rig_occludes_native_daylight() {
         let settings = SceneLightingSettings::default();
         assert_eq!(settings.ambient_color, [0.9, 0.92, 1.0]);
         assert_eq!(settings.ambient_brightness, 40.0);
@@ -1419,8 +1461,97 @@ mod tests {
         let fill = &rig[1];
         assert_eq!(fill.node.name, "Sky Fill");
         assert_eq!(fill.node.intensity, 2_000.0);
-        assert!(!fill.node.shadows_enabled);
+        assert_eq!(
+            fill.node.shadows_enabled,
+            !cfg!(all(
+                target_arch = "wasm32",
+                feature = "webgl2",
+                not(feature = "webgpu")
+            ))
+        );
         assert_eq!(fill.translation, Vec3::new(-8.0, 4.0, -6.0));
+    }
+
+    #[test]
+    fn site_shadow_coverage_tracks_zoom_without_invalidating_during_orbit() {
+        let mut app = App::new();
+        app.add_systems(PostUpdate, fit_directional_shadow_range);
+        let camera = app
+            .world_mut()
+            .spawn((
+                OrbitCamera {
+                    radius: 201.0,
+                    ..default()
+                },
+                Camera::default(),
+            ))
+            .id();
+        let light = app
+            .world_mut()
+            .spawn((SceneLightNode::default(), DirectionalLight::default()))
+            .id();
+        app.update();
+        let config = app.world().get::<CascadeShadowConfig>(light).unwrap();
+        assert_eq!(config.bounds.last(), Some(&450.0));
+        assert_eq!(
+            config.bounds.len(),
+            CascadeShadowConfig::default().bounds.len()
+        );
+        let tick = app
+            .world()
+            .entity(light)
+            .get_ref::<CascadeShadowConfig>()
+            .unwrap()
+            .last_changed();
+        for _ in 0..120 {
+            app.world_mut().get_mut::<OrbitCamera>(camera).unwrap().yaw += 0.01;
+            app.update();
+        }
+        assert_eq!(
+            app.world()
+                .entity(light)
+                .get_ref::<CascadeShadowConfig>()
+                .unwrap()
+                .last_changed(),
+            tick
+        );
+        app.world_mut()
+            .get_mut::<OrbitCamera>(camera)
+            .unwrap()
+            .radius = 28.0;
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<CascadeShadowConfig>(light)
+                .unwrap()
+                .bounds
+                .last(),
+            Some(&150.0)
+        );
+        // A newly enabled light must receive coverage even without camera input.
+        app.world_mut()
+            .get_mut::<OrbitCamera>(camera)
+            .unwrap()
+            .radius = 201.0;
+        let new_light = app
+            .world_mut()
+            .spawn((SceneLightNode::default(), DirectionalLight::default()))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<CascadeShadowConfig>(new_light)
+                .unwrap()
+                .bounds
+                .last(),
+            Some(&450.0)
+        );
+        assert!(
+            app.world()
+                .get::<SceneLightNode>(light)
+                .unwrap()
+                .shadows_enabled
+        );
     }
 
     #[test]

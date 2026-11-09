@@ -113,3 +113,20 @@ on the candidate. Credentials contain `url` and `token`; camera JSON contains
 The runner fails incomplete presentation, unintended edits, camera mismatch,
 changed fixture/view dimensions, or a missed latency budget. Idle overlay FPS is
 not motion performance: reactive mode deliberately sleeps between inputs.
+
+### Daylight occlusion at site scale
+
+The default native/WebGPU Sky Fill now casts shadows. Its old unshadowed
+2,000-lux directional contribution illuminated enclosed rooms through walls and
+roofs. Existing authored light choices are preserved; an existing scene can
+opt in through the shared `update_light` command. WebGL retains its documented
+single-directional approximation and does not claim interior lighting parity.
+
+Directional shadow coverage now follows twice the active orbit radius, with a
+150 m floor and 50 m buckets. The previous fixed 150 m range omitted buildings
+at the reported ~200 m overview distance. This is derived presentation only,
+using Bevy cascaded GPU shadows with unchanged cascade count, map resolution and
+near split. The small camera/light query does no model traversal; orbit/pan
+preserves configuration change ticks. Tests cover zoom-out, zoom-in, new lights,
+and 120 orbit updates without repeated invalidation. This is shadowed viewport
+lighting, not a simulation of diffuse indoor light transport.
