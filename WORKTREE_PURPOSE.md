@@ -2,8 +2,8 @@
 
 - agent: codex
 - created: 2026-11-09
-- branch: codex/object-locking
-- task-id: TALOS-rpnxspgv
-- target base: origin/main
-- summary: Persisted geometry/group locks and shared viewport interaction exclusion.
+- branch: codex/site-orbit-performance
+- task-id: TALOS-gqajkost
+- target base: main
+- summary: Profile and accelerate large-site orbit navigation.
 - status: active

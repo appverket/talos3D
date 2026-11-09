@@ -68,3 +68,48 @@ Regression tests exercise the actual Renderer window across closed and visible
 idle frames, preserve external changes, check material-browser read/apply change
 ticks, and verify default-off bloom can still be enabled. The plugin suite passes
 1,760 tests (four existing ignored).
+
+## Site orbit and planting invalidation — 2026-11-09
+
+A 5,604-entity linked site regressed to roughly 280 ms per input. CPU sampling
+attributed 95% of main-thread samples to planting contract reconstruction:
+per-frame group coverage recursively traversed members and searched the entire
+ECS for each ID. Rendering remained GPU accelerated.
+
+Planting now reconciles at its input boundary: history, authored geometry and
+containment, terrain results, bounds, and missing runtime contracts invalidate
+it. Camera and selection changes do not. Reconstruction indexes containment once
+and intersects member ancestor sets; unchanged derived components retain their
+change ticks. No geometry or authored payload cache is retained. The scheduled
+regression test exercises 120 camera updates over 4,096 unrelated entities,
+terrain reseating, component removal, and document replacement. Coverage tests
+preserve ambiguous and cyclic containment behavior.
+
+Apple M4 Max / 128 GiB, Metal, optimized Architecture with perf-stats, Bevy
+0.20.1, 1280 x 720 viewport. Three 72-step Alt+right-button orbits move 300 x 80
+pixels from the same camera, with no profiler or observer reads during motion.
+The first run follows document load; subsequent runs reset the camera.
+
+| Input to swapchain submission | Before | Planting repair |
+| --- | --- | --- |
+| Motion p95, each run | 280.94 / 281.95 / 277.49 ms | 16.83 / 16.46 / 16.51 ms |
+| Worst observed, all runs | 306.95 ms | 20.73 ms |
+| Activation, worst | 272.61 ms | 16.55 ms |
+| Release, worst | 281.13 ms | 15.89 ms |
+
+The acceptance budget is motion p95 <=33 ms in every run. Traces preserve model
+revision and every authored world bound; camera-only motion regenerates no meshes.
+The private fixture retains all linked geometry, materials and definitions, but
+uses unavailable source paths in both versions to exclude automatic source-file
+refresh. This benchmark measures navigation, not linked-file I/O or load time.
+Reported latency ends at swapchain submission, not physical display scanout.
+
+Repeat with `scripts/evaluation/native_orbit_benchmark.py PROJECT --credentials
+LOCAL_CREDENTIALS --instance DISPOSABLE_INSTANCE --camera CAMERA_JSON --output
+LOCAL_REPORT --build-label COMMIT --replace-disposable-document`. Keep the window
+visible. Use `--record-baseline` on the old build and `--baseline LOCAL_REPORT`
+on the candidate. Credentials contain `url` and `token`; camera JSON contains
+`set_camera` parameters. Keep credentials, fixture and raw reports outside Git.
+The runner fails incomplete presentation, unintended edits, camera mismatch,
+changed fixture/view dimensions, or a missed latency budget. Idle overlay FPS is
+not motion performance: reactive mode deliberately sleeps between inputs.

@@ -24,7 +24,7 @@ use talos3d_core::{
         commands::{
             despawn_by_element_id, find_entity_by_element_id, find_entity_by_element_id_readonly,
         },
-        history::{EditorCommand, HistorySet, PendingCommandQueue},
+        history::{EditorCommand, History, HistorySet, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         modeling::assembly::{
             AssemblyMemberRef, AssemblySnapshot, RelationSnapshot, SemanticAssembly,
@@ -58,7 +58,7 @@ use crate::{
 };
 
 /// Link recording how an object was planted, so the operation can be reversed.
-#[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PlantedOnSurface {
     /// The conforming foundation created under the object.
     pub foundation_id: ElementId,
@@ -320,6 +320,7 @@ impl Plugin for PlantingPlugin {
                 reseat_planted_structures,
             )
                 .chain()
+                .run_if(planting_inputs_changed)
                 .after(HistorySet::Apply),
         );
     }
@@ -1308,52 +1309,70 @@ fn foundation_system_from_structure(
     })
 }
 
+/// Resolve coverage from the containment graph once, rather than recursively
+/// visiting every candidate group and doing a world-wide ID lookup per member.
+/// Intersecting ancestor sets preserves the requirement for a unique covering
+/// group, including ambiguity and cycle handling for legacy documents.
 fn movable_group_from_structure(
     world: &mut World,
     structure: &SemanticAssembly,
     explicit_group_id: Option<ElementId>,
 ) -> Option<ElementId> {
-    let covers_structure = |world: &World, group_id: ElementId| {
-        let mut covered = collect_group_members_recursive(world, group_id)
-            .into_iter()
-            .collect::<HashSet<_>>();
-        covered.insert(group_id);
-        structure
+    let mut query = world.query::<(Entity, &ElementId, Option<&GroupMembers>)>();
+    let mut entities = HashMap::new();
+    let mut groups = HashSet::new();
+    let mut parents: HashMap<ElementId, Vec<ElementId>> = HashMap::new();
+    for (entity, id, members) in query.iter(world) {
+        entities.insert(*id, entity);
+        if let Some(members) = members {
+            groups.insert(*id);
+            for member in &members.member_ids {
+                parents.entry(*member).or_default().push(*id);
+            }
+        }
+    }
+    if explicit_group_id.is_some_and(|id| !groups.contains(&id)) {
+        return None;
+    }
+    if explicit_group_id.is_none() {
+        if let Some(member) = structure
             .members
             .iter()
-            .filter(|member| {
-                is_group(world, member.target)
-                    || capture_by_id(world, member.target)
-                        .and_then(|snapshot| snapshot.bounds())
-                        .is_some()
-            })
-            .all(|member| covered.contains(&member.target))
-    };
-    if let Some(group_id) = explicit_group_id {
-        return (is_group(world, group_id) && covers_structure(world, group_id))
-            .then_some(group_id);
+            .find(|member| member.role == "superstructure_group" && groups.contains(&member.target))
+        {
+            return Some(member.target);
+        }
     }
-    if let Some(group_id) = structure
-        .members
-        .iter()
-        .find(|member| member.role == "superstructure_group" && is_group(world, member.target))
-        .map(|member| member.target)
-    {
-        return Some(group_id);
+    let registry = world.resource::<CapabilityRegistry>();
+    let mut candidates = explicit_group_id.map_or_else(|| groups.clone(), |id| HashSet::from([id]));
+    for member in &structure.members {
+        let physical = groups.contains(&member.target)
+            || entities.get(&member.target).is_some_and(|entity| {
+                world
+                    .get_entity(*entity)
+                    .ok()
+                    .and_then(|entity| {
+                        registry
+                            .capture_snapshot(&entity, world)
+                            .and_then(|snapshot| snapshot.bounds())
+                    })
+                    .is_some()
+            });
+        if !physical {
+            continue;
+        }
+        let mut ancestors = HashSet::new();
+        let mut stack = vec![member.target];
+        while let Some(id) = stack.pop() {
+            if ancestors.insert(id) {
+                stack.extend(parents.get(&id).into_iter().flatten().copied());
+            }
+        }
+        candidates.retain(|id| ancestors.contains(id));
+        if candidates.is_empty() {
+            return None;
+        }
     }
-
-    // `create_assembly` emits a sibling physical group for the same member
-    // targets and returns it as `group_element_id`; that group is not itself a
-    // semantic member. Resolve it by coverage rather than falling back to the
-    // first group-valued member (which is often only the foundation branch).
-    let group_ids = {
-        let mut query = world.query::<(&ElementId, &GroupMembers)>();
-        query.iter(world).map(|(id, _)| *id).collect::<Vec<_>>()
-    };
-    let candidates = group_ids
-        .into_iter()
-        .filter(|group_id| covers_structure(world, *group_id))
-        .collect::<HashSet<_>>();
     (candidates.len() == 1).then(|| *candidates.iter().next().expect("one candidate"))
 }
 
@@ -1717,7 +1736,70 @@ fn same_planted_structure(left: PlantedStructure, right: PlantedStructure) -> bo
             <= 0.001
 }
 
+/// Planting is a derived model contract, not camera presentation. Reconcile only
+/// when its authored inputs, render bounds, or restored runtime components
+/// change. History also covers domain-specific authored components unknown to
+/// this capability. Component changes cover preview, loading and async terrain
+/// derivation before/without a history commit. Camera transforms have no
+/// ElementId and therefore cannot invalidate planting.
+#[allow(clippy::type_complexity)]
+fn planting_inputs_changed(
+    mut initialized: Local<bool>,
+    history: Option<Res<History>>,
+    vocabulary: Option<Res<talos3d_core::plugins::surface_placement::SurfacePlacementVocabulary>>,
+    changed: Query<
+        (),
+        (
+            With<ElementId>,
+            Or<(
+                Changed<ElementId>,
+                Changed<SemanticAssembly>,
+                Changed<GroupMembers>,
+                Changed<ConformingSolid>,
+                Changed<TerrainHeightfield>,
+                Changed<PlantedStructure>,
+                Changed<PlantedOnSurface>,
+                Changed<BoxPrimitive>,
+                Changed<TriangleMesh>,
+                Changed<Transform>,
+                Changed<bevy::camera::primitives::Aabb>,
+            )>,
+        ),
+    >,
+    mut removed_ids: RemovedComponents<ElementId>,
+    mut removed_groups: RemovedComponents<GroupMembers>,
+    mut removed_assemblies: RemovedComponents<SemanticAssembly>,
+    mut removed_foundations: RemovedComponents<ConformingSolid>,
+    mut removed_terrain: RemovedComponents<TerrainHeightfield>,
+    mut removed_contracts: RemovedComponents<PlantedStructure>,
+    mut removed_surface_links: RemovedComponents<PlantedOnSurface>,
+) -> bool {
+    let first_run = !*initialized;
+    *initialized = true;
+    // Always drain every reader, even when another dependency already changed.
+    let removed = removed_ids.read().count()
+        + removed_groups.read().count()
+        + removed_assemblies.read().count()
+        + removed_foundations.read().count()
+        + removed_terrain.read().count()
+        + removed_contracts.read().count()
+        + removed_surface_links.read().count();
+    first_run
+        || history.is_some_and(|h| h.is_changed())
+        || removed != 0
+        || !changed.is_empty()
+        || vocabulary.is_some_and(|v| v.is_changed())
+}
+
+#[cfg(test)]
+#[derive(Resource, Default)]
+struct PlantingMaintenanceRuns(usize);
+
 fn rehydrate_planted_structure_components(world: &mut World) {
+    #[cfg(test)]
+    if let Some(mut runs) = world.get_resource_mut::<PlantingMaintenanceRuns>() {
+        runs.0 += 1;
+    }
     let planted = persisted_planted_structures(world);
     for contract in planted {
         if !rehydrate_demoted_foundation_as_conforming(
@@ -1737,12 +1819,16 @@ fn rehydrate_planted_structure_components(world: &mut World) {
         {
             world.entity_mut(group_entity).insert(contract.planted);
         }
-        world
-            .entity_mut(group_entity)
-            .insert(contract.planted_on_surface);
+        if world.get::<PlantedOnSurface>(group_entity) != Some(&contract.planted_on_surface) {
+            world
+                .entity_mut(group_entity)
+                .insert(contract.planted_on_surface);
+        }
         if let Some(hidden_id) = contract.planted_on_surface.hidden_foundation {
             if let Some(hidden_entity) = find_entity_by_element_id(world, hidden_id) {
-                world.entity_mut(hidden_entity).insert(Visibility::Hidden);
+                if world.get::<Visibility>(hidden_entity) != Some(&Visibility::Hidden) {
+                    world.entity_mut(hidden_entity).insert(Visibility::Hidden);
+                }
             }
         }
     }
@@ -2854,6 +2940,165 @@ mod tests {
             cached_bounds: None,
         }
         .apply_to(world);
+    }
+
+    #[test]
+    fn camera_navigation_reuses_planting_and_model_edits_invalidate_it() {
+        let mut app = linked_test_app();
+        app.add_plugins(PlantingPlugin);
+        app.init_resource::<PlantingMaintenanceRuns>();
+        let terrain = app
+            .world_mut()
+            .spawn((ElementId(10), flat_heightfield(1.0)))
+            .id();
+        spawn_linked_building(app.world_mut());
+        execute_plant_on_surface(
+            app.world_mut(),
+            &json!({
+                "target_id": 1, "surface_id": 10, "hide_element_id": 2,
+            }),
+        )
+        .unwrap();
+        for _ in 0..4 {
+            app.update();
+        }
+        let root = find_entity_by_element_id(app.world_mut(), ElementId(1)).unwrap();
+        let body = find_entity_by_element_id(app.world_mut(), ElementId(3)).unwrap();
+        let camera = app
+            .world_mut()
+            .spawn((
+                talos3d_core::plugins::camera::OrbitCamera::default(),
+                Transform::default(),
+            ))
+            .id();
+        let before = capture_by_id(app.world(), ElementId(3)).unwrap();
+        let revision = app.world().resource::<History>().revision_token();
+        let runs = app.world().resource::<PlantingMaintenanceRuns>().0;
+        // A large unrelated scene must not cause planting work during orbit.
+        for i in 0..4096 {
+            app.world_mut()
+                .spawn((ElementId(10000 + i), Transform::default()));
+        }
+        app.update();
+        let runs = app
+            .world()
+            .resource::<PlantingMaintenanceRuns>()
+            .0
+            .max(runs);
+        for i in 0..120 {
+            app.world_mut()
+                .get_mut::<Transform>(camera)
+                .unwrap()
+                .rotate_y(0.01);
+            app.world_mut()
+                .get_mut::<talos3d_core::plugins::camera::OrbitCamera>(camera)
+                .unwrap()
+                .yaw += 0.01;
+            if i == 60 {
+                app.world_mut().entity_mut(root).insert(Selected);
+            }
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<PlantingMaintenanceRuns>().0,
+            runs,
+            "camera/selection must not reconstruct planting contracts"
+        );
+        assert_eq!(capture_by_id(app.world(), ElementId(3)).unwrap(), before);
+        assert_eq!(app.world().resource::<History>().revision_token(), revision);
+
+        // Runtime components can be lost on reload or snapshot replacement.
+        app.world_mut()
+            .entity_mut(root)
+            .remove::<PlantedStructure>();
+        app.world_mut()
+            .entity_mut(root)
+            .remove::<PlantedOnSurface>();
+        app.update();
+        assert!(app.world().get::<PlantedStructure>(root).is_some());
+        assert!(app.world().get::<PlantedOnSurface>(root).is_some());
+
+        // An asynchronous terrain change has no history revision but must reseat.
+        let old_y = app.world().get::<BoxPrimitive>(body).unwrap().centre.y;
+        app.world_mut()
+            .entity_mut(terrain)
+            .insert(flat_heightfield(3.0));
+        app.update();
+        let body = find_entity_by_element_id(app.world_mut(), ElementId(3)).unwrap();
+        assert!(
+            (app.world().get::<BoxPrimitive>(body).unwrap().centre.y - old_y - 2.0).abs() < 0.001
+        );
+        for _ in 0..4 {
+            app.update();
+        }
+        let settled = app.world().resource::<PlantingMaintenanceRuns>().0;
+        app.update();
+        assert_eq!(app.world().resource::<PlantingMaintenanceRuns>().0, settled);
+        app.world_mut().resource_mut::<History>().clear();
+        app.update();
+        assert_eq!(
+            app.world().resource::<PlantingMaintenanceRuns>().0,
+            settled + 1,
+            "document replacement must invalidate even with the same entities"
+        );
+    }
+
+    #[test]
+    fn indexed_coverage_preserves_ambiguity_and_handles_cycles() {
+        let mut world = test_world();
+        spawn_linked_building(&mut world);
+        let structure = SemanticAssembly {
+            assembly_type: "structure".into(),
+            label: "Structure".into(),
+            members: vec![AssemblyMemberRef {
+                target: ElementId(3),
+                role: "body".into(),
+            }],
+            parameters: json!({}),
+            metadata: json!({}),
+        };
+        assert_eq!(
+            movable_group_from_structure(&mut world, &structure, None),
+            Some(ElementId(1))
+        );
+        let nested = world
+            .spawn((
+                ElementId(50),
+                GroupMembers {
+                    name: "Nested".into(),
+                    member_ids: vec![ElementId(1)],
+                    frame: GroupFrame::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        assert_eq!(
+            movable_group_from_structure(&mut world, &structure, None),
+            None
+        );
+        assert_eq!(
+            movable_group_from_structure(&mut world, &structure, Some(ElementId(1))),
+            Some(ElementId(1))
+        );
+        let root = find_entity_by_element_id(&mut world, ElementId(1)).unwrap();
+        world
+            .get_mut::<GroupMembers>(root)
+            .unwrap()
+            .member_ids
+            .push(ElementId(50));
+        assert_eq!(
+            movable_group_from_structure(&mut world, &structure, None),
+            None
+        );
+        world
+            .get_mut::<GroupMembers>(nested)
+            .unwrap()
+            .member_ids
+            .clear();
+        assert_eq!(
+            movable_group_from_structure(&mut world, &structure, None),
+            Some(ElementId(1))
+        );
     }
 
     #[test]
