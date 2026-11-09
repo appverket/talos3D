@@ -130,7 +130,7 @@ pub struct LayerPlugin;
 
 impl Plugin for LayerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LayerRegistry>()
+        app.add_plugins(super::object_locks::ObjectLockPlugin).init_resource::<LayerRegistry>()
             .init_resource::<LayerState>()
             .init_resource::<ObjectVisibility>()
             .init_resource::<DocumentVisibility>()

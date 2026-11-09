@@ -516,6 +516,9 @@ impl AuthoredEntityFactory for DimensionAnnotationFactory {
         let mut query = world.try_query::<(Entity, &DimensionAnnotationNode)>()?;
         let mut best: Option<(Entity, f32)> = None;
         for (entity, node) in query.iter(world) {
+            if crate::plugins::object_locks::entity_locked(world, entity) {
+                continue;
+            }
             if !node.visible {
                 continue;
             }

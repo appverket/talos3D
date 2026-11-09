@@ -75,6 +75,8 @@ pub struct OutlinerNode {
     pub visibility_id: Option<u64>,
     pub explicitly_hidden: bool,
     pub effectively_hidden: bool,
+    pub explicitly_locked: bool,
+    pub effectively_locked: bool,
     /// Arena indices of child rows.
     pub children: Vec<usize>,
     /// Arena index of this row's parent, or `None` for a root row. Used to walk
@@ -405,9 +407,10 @@ fn flatten_entry(world: &World, entry: &OutlineEntry, nodes: &mut Vec<OutlinerNo
         .collect();
     nodes.push(OutlinerNode {
         node_id: entry.node_id,
-        select_entity: (!world
-            .get_resource::<crate::plugins::layers::LayerRegistry>()
-            .is_some_and(|_| entity_on_locked_layer(world, entry.entity)))
+        select_entity: (!super::object_locks::entity_locked(world, entry.entity)
+            && !world
+                .get_resource::<crate::plugins::layers::LayerRegistry>()
+                .is_some_and(|_| entity_on_locked_layer(world, entry.entity)))
         .then_some(entry.entity),
         label: world
             .get::<GeneratedOccurrencePart>(entry.entity)
@@ -435,6 +438,12 @@ fn flatten_entry(world: &World, entry: &OutlineEntry, nodes: &mut Vec<OutlinerNo
                 .is_some_and(|state| state.hidden.contains(&ElementId(id)))
         }),
         effectively_hidden: crate::plugins::layers::entity_document_hidden(world, entry.entity),
+        explicitly_locked: entry.element_id.is_some_and(|id| {
+            world
+                .get_resource::<super::object_locks::ObjectLocks>()
+                .is_some_and(|state| state.locked.contains(&ElementId(id)))
+        }),
+        effectively_locked: super::object_locks::entity_locked(world, entry.entity),
         children,
         parent: None,
         edit_context: OutlinerEditContext::default(),
@@ -659,17 +668,24 @@ fn kind_str(kind: OutlinerKind) -> &'static str {
 /// tool. Shares [`collect_outline_forest`] with the panel so the UI and API
 /// can never disagree about the model's structure.
 pub fn outline_tree_json(world: &mut World) -> Value {
-    fn entry_json(entry: &OutlineEntry) -> Value {
+    fn entry_json(world: &World, entry: &OutlineEntry) -> Value {
+        let explicitly_locked = entry.element_id.is_some_and(|id| {
+            world
+                .get_resource::<super::object_locks::ObjectLocks>()
+                .is_some_and(|state| state.locked.contains(&ElementId(id)))
+        });
         serde_json::json!({
             "element_id": entry.element_id,
             "label": entry.label,
             "kind": kind_str(entry.kind),
-            "children": entry.children.iter().map(entry_json).collect::<Vec<_>>(),
+            "locked": super::object_locks::entity_locked(world, entry.entity),
+            "explicitly_locked": explicitly_locked,
+            "children": entry.children.iter().map(|entry| entry_json(world, entry)).collect::<Vec<_>>(),
         })
     }
     let roots = collect_outline_forest(world);
     serde_json::json!({
-        "roots": roots.iter().map(entry_json).collect::<Vec<_>>(),
+        "roots": roots.iter().map(|entry| entry_json(world, entry)).collect::<Vec<_>>(),
     })
 }
 
@@ -830,6 +846,30 @@ fn render_outliner_row(
                 }
             } else {
                 ui.add_space(20.0);
+            }
+            if let Some(id) = node.visibility_id {
+                let inherited = node.effectively_locked && !node.explicitly_locked;
+                let label = if node.effectively_locked {
+                    "Locked"
+                } else {
+                    "Lock"
+                };
+                let response = ui
+                    .add_enabled(!inherited, egui::Button::new(label).small())
+                    .on_hover_text(if inherited {
+                        "Locked by a parent group; unlock that group first"
+                    } else if node.explicitly_locked {
+                        "Unlock this object (parent locks still apply)"
+                    } else {
+                        "Lock this object and its contents against viewport interaction"
+                    });
+                if response.clicked() {
+                    queue_command_invocation_resource(
+                        pending_commands,
+                        "view.set_object_locked".to_string(),
+                        serde_json::json!({"element_ids":[id],"locked":!node.explicitly_locked}),
+                    );
+                }
             }
             ui.add_space(depth as f32 * OUTLINER_INDENT_PER_DEPTH);
 

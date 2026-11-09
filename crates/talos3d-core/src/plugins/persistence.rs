@@ -309,6 +309,8 @@ struct ProjectFile {
     layers: Option<LayerRegistry>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     hidden_objects: BTreeSet<ElementId>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    locked_objects: BTreeSet<ElementId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     materials: Option<MaterialRegistry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -691,6 +693,8 @@ pub fn new_document(world: &mut World) {
     world.insert_resource(OpaquePersistedEntities::default());
     world.insert_resource(crate::plugins::foreign_source::SourceArtifacts::default());
     world.insert_resource(LayerRegistry::default());
+    world.insert_resource(super::object_locks::ObjectLocks::default());
+    world.insert_resource(super::object_locks::DocumentLocks::default());
     world.insert_resource(ObjectVisibility::default());
     world.insert_resource(DocumentVisibility::default());
     world.insert_resource(MaterialRegistry::default());
@@ -1508,6 +1512,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         document_properties: Some(doc_props),
         layers,
         hidden_objects: referenced_hidden_objects(world, &entities),
+        locked_objects: referenced_locked_objects(world, &entities),
         materials,
         textures,
         definitions,
@@ -1575,6 +1580,7 @@ pub(crate) fn serialize_entity_records_as_project(
         document_properties: doc_props,
         layers,
         hidden_objects: referenced_hidden_objects(world, &entities),
+        locked_objects: referenced_locked_objects(world, &entities),
         materials,
         textures,
         definitions,
@@ -1590,6 +1596,20 @@ pub(crate) fn serialize_entity_records_as_project(
         entities,
     };
     serde_json::to_vec(&project).map_err(|error| error.to_string())
+}
+
+fn referenced_locked_objects(
+    world: &World,
+    entities: &[PersistedEntityRecord],
+) -> BTreeSet<ElementId> {
+    let Some(state) = world.get_resource::<super::object_locks::ObjectLocks>() else {
+        return BTreeSet::new();
+    };
+    entities
+        .iter()
+        .map(|record| ElementId(entity_record_sort_key(record).1))
+        .filter(|id| state.locked.contains(id))
+        .collect()
 }
 
 fn referenced_hidden_objects(
@@ -1772,6 +1792,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         document_properties,
         layers,
         hidden_objects,
+        locked_objects,
         materials,
         textures,
         definitions,
@@ -1930,6 +1951,9 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     world.insert_resource(ObjectVisibility {
         hidden: hidden_objects,
     });
+    world.insert_resource(super::object_locks::ObjectLocks {
+        locked: locked_objects,
+    });
     let mut textures = textures.unwrap_or_default();
     textures.rebuild_fingerprint_index();
     world.insert_resource(textures);
@@ -2061,6 +2085,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         .set(ActiveTool::Select);
     // Restore exact authored IDs before callers can resolve Draft membership.
     sync_drawing_metadata(world);
+    super::object_locks::refresh_object_locks(world);
     focus_camera_on_loaded_snapshots(world, &restored_snapshots);
     Ok(())
 }
@@ -2270,6 +2295,9 @@ fn set_feedback(world: &mut World, message: String) {
 
 #[cfg(test)]
 mod tests {
+    mod object_lock_tests {
+        include!("persistence_object_lock_tests.rs");
+    }
     use super::*;
     use crate::capability_registry::ElementClassId;
     use crate::plugins::{
@@ -2747,6 +2775,7 @@ mod tests {
             document_properties: Some(DocumentProperties::default()),
             layers: None,
             hidden_objects: BTreeSet::from([ElementId(42)]),
+            locked_objects: BTreeSet::new(),
             materials: None,
             textures: None,
             definitions: None,
@@ -2907,6 +2936,7 @@ mod tests {
                 document_properties: Some(DocumentProperties::default()),
                 layers: None,
                 hidden_objects: BTreeSet::new(),
+                locked_objects: BTreeSet::new(),
                 materials: None,
                 textures: None,
                 definitions: None,
@@ -3359,6 +3389,7 @@ mod tests {
                 document_properties: Some(DocumentProperties::default()),
                 layers: None,
                 hidden_objects: BTreeSet::new(),
+                locked_objects: BTreeSet::new(),
                 materials: None,
                 textures: None,
                 definitions: None,
@@ -3394,6 +3425,7 @@ mod tests {
                 document_properties: None,
                 layers: None,
                 hidden_objects: BTreeSet::new(),
+                locked_objects: BTreeSet::new(),
                 materials: None,
                 textures: None,
                 definitions: None,
@@ -3432,6 +3464,7 @@ mod tests {
                 document_properties: None,
                 layers: None,
                 hidden_objects: BTreeSet::new(),
+                locked_objects: BTreeSet::new(),
                 materials: None,
                 textures: None,
                 definitions: None,
@@ -3484,6 +3517,7 @@ mod tests {
             document_properties: Some(DocumentProperties::default()),
             layers: None,
             hidden_objects: BTreeSet::new(),
+            locked_objects: BTreeSet::new(),
             materials: None,
             textures: None,
             definitions: None,
@@ -3562,6 +3596,7 @@ mod tests {
             document_properties: Some(DocumentProperties::default()),
             layers: None,
             hidden_objects: BTreeSet::new(),
+            locked_objects: BTreeSet::new(),
             materials: None,
             textures: None,
             definitions: None,
@@ -4519,6 +4554,7 @@ mod tests {
             document_properties: Some(DocumentProperties::default()),
             layers: None,
             hidden_objects: BTreeSet::new(),
+            locked_objects: BTreeSet::new(),
             materials: None,
             textures: None,
             definitions: None,

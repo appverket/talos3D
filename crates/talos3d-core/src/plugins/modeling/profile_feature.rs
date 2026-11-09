@@ -911,6 +911,9 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
         let mut best: Option<HitCandidate> = None;
         let mut query = world.try_query::<(Entity, &FaceProfileFeature)>().unwrap();
         for (entity, feature) in query.iter(world) {
+            if crate::plugins::object_locks::entity_locked(world, entity) {
+                continue;
+            }
             let Some(surface_distance) = evaluated_feature_hit_distance(world, entity, ray) else {
                 continue;
             };

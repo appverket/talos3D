@@ -103,6 +103,7 @@ struct ToolCursorRayCast<'w, 's> {
     layer_assignment_query: Query<'w, 's, Option<&'static LayerAssignment>>,
     element_layer_query: Query<'w, 's, (&'static ElementId, Option<&'static LayerAssignment>)>,
     layer_registry: Res<'w, LayerRegistry>,
+    object_locks: Option<Res<'w, super::object_locks::DocumentLocks>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +552,7 @@ fn ray_cast_scene_surface(
         layer_assignment_query,
         element_layer_query,
         layer_registry,
+        object_locks,
     } = ray_cast;
 
     ray_cast
@@ -573,6 +575,12 @@ fn ray_cast_scene_surface(
                             .is_some_and(|p| ids.contains(&p.owner))
                 });
                 !moving
+                    && !object_locks.as_ref().is_some_and(|state| {
+                        state.excludes(
+                            element_id_query.get(entity).ok(),
+                            generated_part_query.get(entity).ok().map(|part| part.owner),
+                        )
+                    })
                     && scene_surface_selectable(entity, mesh_selectable_query, generated_part_query)
                     && visibility_query
                         .get(entity)
@@ -652,6 +660,26 @@ mod surface_tests {
             );
             assert!((point.z - (z + 0.5)).abs() < 1e-5);
         }
+        // The real Bevy mesh ray must pass through a visible locked foreground.
+        world.insert_resource(super::super::object_locks::DocumentLocks {
+            locked: std::collections::HashSet::from([ElementId(2)]),
+        });
+        assert_eq!(
+            ray_cast_scene_surface(ray, &mut state.get_mut(&mut world).unwrap(), None)
+                .unwrap()
+                .entity,
+            background
+        );
+        world
+            .resource_mut::<super::super::object_locks::DocumentLocks>()
+            .locked
+            .clear();
+        assert_eq!(
+            ray_cast_scene_surface(ray, &mut state.get_mut(&mut world).unwrap(), None)
+                .unwrap()
+                .entity,
+            feature
+        );
         world.entity_mut(feature).insert(Visibility::Hidden);
         assert_eq!(
             ray_cast_scene_surface(ray, &mut state.get_mut(&mut world).unwrap(), None)

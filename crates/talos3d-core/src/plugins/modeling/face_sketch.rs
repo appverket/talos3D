@@ -90,6 +90,9 @@ pub fn register(app: &mut App) {
 }
 
 pub fn select_hit(world: &mut World, hit: FaceHitCandidate) {
+    if crate::plugins::object_locks::entity_locked(world, hit.entity) {
+        return;
+    }
     world.init_resource::<SubobjectSelection>();
     world.init_resource::<DrawingPlane>();
     world

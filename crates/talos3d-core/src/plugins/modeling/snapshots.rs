@@ -989,6 +989,9 @@ impl AuthoredEntityFactory for PolylineFactory {
 
         let mut __q = world.try_query::<EntityRef>().unwrap();
         for entity_ref in __q.iter(world) {
+            if crate::plugins::object_locks::entity_locked(world, entity_ref.id()) {
+                continue;
+            }
             let Some(polyline) = entity_ref.get::<Polyline>() else {
                 continue;
             };

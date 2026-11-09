@@ -674,6 +674,9 @@ fn hit_test_kind(world: &World, ray: Ray3d, kind: DraftPrimitiveKind) -> Option<
     let mut query = world.try_query::<(Entity, &ElementId, &DraftPrimitiveNode)>()?;
     let mut best = None;
     for (entity, element_id, node) in query.iter(world) {
+        if crate::plugins::object_locks::entity_locked(world, entity) {
+            continue;
+        }
         if !node.visible || node.geometry.kind() != kind {
             continue;
         }

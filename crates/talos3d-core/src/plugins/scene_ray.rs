@@ -97,6 +97,9 @@ pub fn ray_cast_nearest_entity(world: &World, ray: Ray3d) -> Option<HitCandidate
 }
 
 fn entity_is_pick_visible(world: &World, entity: Entity) -> bool {
+    if super::object_locks::entity_locked(world, entity) {
+        return false;
+    }
     if !entity_on_visible_layer(world, entity) {
         return false;
     }

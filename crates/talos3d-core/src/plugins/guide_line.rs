@@ -524,7 +524,9 @@ impl AuthoredEntityFactory for GuideLineFactory {
         let mut query = world.try_query::<(Entity, &ElementId, &GuideLineNode)>()?;
         query
             .iter(world)
-            .filter(|(_, _, node)| node.visible)
+            .filter(|(entity, _, node)| {
+                node.visible && !crate::plugins::object_locks::entity_locked(world, *entity)
+            })
             .filter_map(|(entity, _element_id, node)| {
                 let half = node.finite_length.unwrap_or(GUIDE_LINE_HALF_LENGTH);
                 let dir = node.direction.normalize_or_zero();

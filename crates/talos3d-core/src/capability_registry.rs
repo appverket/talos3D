@@ -1204,6 +1204,9 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
         0
     }
 
+    /// Choose the nearest interactive hit. Exclude candidates with
+    /// `plugins::object_locks::entity_locked` before reducing to the nearest;
+    /// filtering only the returned hit would make locks block objects behind them.
     fn hit_test(&self, _world: &World, _ray: Ray3d) -> Option<HitCandidate> {
         None
     }

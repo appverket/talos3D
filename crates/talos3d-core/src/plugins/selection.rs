@@ -315,8 +315,13 @@ pub fn apply_click_selection(
 /// genuinely not selectable right now: muted, on a locked layer, or outside the
 /// group being edited.
 pub fn retain_selected_entity(world: &World, entity: Entity) -> Option<Entity> {
+    if super::object_locks::entity_locked(world, entity) {
+        return None;
+    }
     let entity = redirect_selection_proxy_to_target(world, entity);
-    if world.get::<GroupEditMuted>(entity).is_some() {
+    if super::object_locks::entity_locked(world, entity)
+        || world.get::<GroupEditMuted>(entity).is_some()
+    {
         return None;
     }
     if world
@@ -418,6 +423,7 @@ struct SelectionHitTest<'w, 's> {
     element_layer_query: Query<'w, 's, (&'static ElementId, Option<&'static LayerAssignment>)>,
     layer_registry: Res<'w, LayerRegistry>,
     document_visibility: Option<Res<'w, crate::plugins::layers::DocumentVisibility>>,
+    object_locks: Option<Res<'w, super::object_locks::DocumentLocks>>,
     element_id_query: Query<'w, 's, &'static ElementId>,
     face_profile_feature_query: Query<'w, 's, (), With<FaceProfileFeature>>,
 }
@@ -726,6 +732,8 @@ fn complete_selection_click(
     additive_selection: bool,
     now: f64,
 ) {
+    let hit_entity =
+        hit_entity.filter(|entity| !super::object_locks::entity_locked(world, *entity));
     let selected_entities: Vec<Entity> = world
         .query_filtered::<Entity, With<Selected>>()
         .iter(world)
@@ -919,8 +927,13 @@ fn resolve_generated_part_for_selection(
 }
 
 pub fn resolve_entity_for_selection(world: &World, entity: Entity) -> Option<Entity> {
+    if super::object_locks::entity_locked(world, entity) {
+        return None;
+    }
     let entity = redirect_selection_proxy_to_target(world, entity);
-    if world.get::<GroupEditMuted>(entity).is_some() {
+    if super::object_locks::entity_locked(world, entity)
+        || world.get::<GroupEditMuted>(entity).is_some()
+    {
         return None;
     }
     if world
@@ -1721,6 +1734,9 @@ fn draw_bounds_wireframe(gizmos: &mut Gizmos, bounds: &EntityBounds, color: Colo
 }
 
 fn entity_is_visible(world: &World, entity: Entity) -> bool {
+    if super::object_locks::entity_locked(world, entity) {
+        return false;
+    }
     if crate::plugins::layers::entity_document_hidden(world, entity) {
         return false;
     }
@@ -1862,6 +1878,7 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d, cursor_position: Vec2) ->
         element_layer_query,
         layer_registry,
         document_visibility,
+        object_locks,
         element_id_query,
         face_profile_feature_query,
     } = &mut hit_test;
@@ -1870,6 +1887,16 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d, cursor_position: Vec2) ->
             ray,
             &MeshRayCastSettings::default().with_filter(&|entity| {
                 mesh_selectable_query.contains(entity)
+                    && !object_locks.as_ref().is_some_and(|state| {
+                        state.excludes(
+                            element_id_query.get(entity).ok(),
+                            generated_part_query
+                                .get(entity)
+                                .ok()
+                                .flatten()
+                                .map(|part| part.owner),
+                        )
+                    })
                     && !document_visibility.as_ref().is_some_and(|state| {
                         element_id_query
                             .get(entity)
@@ -2048,6 +2075,7 @@ struct BoxSelectContext<'w, 's> {
     face_edit_context: Res<'w, FaceEditContext>,
     layer_registry: Res<'w, LayerRegistry>,
     light_object_visibility: Res<'w, SceneLightObjectVisibility>,
+    object_locks: Option<Res<'w, super::object_locks::DocumentLocks>>,
     entity_query: Query<'w, 's, BoxSelectEntityQueryItem>,
     generated_occurrence_query: Query<'w, 's, BoxSelectGeneratedOccurrenceQueryItem>,
     occurrence_owner_query:
@@ -2173,6 +2201,13 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                 rotation,
             ) in &cx.entity_query
             {
+                if cx
+                    .object_locks
+                    .as_ref()
+                    .is_some_and(|state| state.locked.contains(element_id))
+                {
+                    continue;
+                }
                 if visibility.copied() == Some(Visibility::Hidden) {
                     continue;
                 }
@@ -2236,6 +2271,13 @@ fn handle_box_select(mut cx: BoxSelectContext) {
             for (part_entity, generated, global_transform, visibility, aabb) in
                 &cx.generated_occurrence_query
             {
+                if cx
+                    .object_locks
+                    .as_ref()
+                    .is_some_and(|state| state.locked.contains(&generated.owner))
+                {
+                    continue;
+                }
                 if visibility.copied() == Some(Visibility::Hidden) {
                     continue;
                 }
@@ -2421,6 +2463,9 @@ fn clear_pending_box_select_click(box_state: &mut BoxSelectState) {
 
 #[cfg(test)]
 mod tests {
+    mod object_lock_tests {
+        include!("selection_object_lock_tests.rs");
+    }
     use super::*;
     use crate::authored_entity::BoxedEntity;
     use crate::plugins::{

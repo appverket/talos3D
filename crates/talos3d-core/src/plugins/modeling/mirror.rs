@@ -485,6 +485,9 @@ impl AuthoredEntityFactory for MirrorFactory {
         let mut best: Option<HitCandidate> = None;
         let mut query = world.try_query::<(Entity, &EvaluatedMirror)>().unwrap();
         for (entity, evaluated) in query.iter(world) {
+            if crate::plugins::object_locks::entity_locked(world, entity) {
+                continue;
+            }
             if evaluated.vertices.is_empty() {
                 continue;
             }

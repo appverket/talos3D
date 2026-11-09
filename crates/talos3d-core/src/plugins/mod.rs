@@ -66,6 +66,7 @@ pub mod model_api;
 pub mod model_export;
 pub mod modeling;
 pub mod named_views;
+pub mod object_locks;
 mod object_selection_overlay;
 pub mod occurrence_controls;
 pub mod outliner;

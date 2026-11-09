@@ -522,7 +522,8 @@ fn entity_ref_is_visible_snap_owner(world: &World, entity_ref: EntityRef<'_>) ->
 }
 
 fn entity_is_visible_snap_owner(world: &World, entity: Entity) -> bool {
-    if !entity_on_visible_layer(world, entity) {
+    if super::object_locks::entity_locked(world, entity) || !entity_on_visible_layer(world, entity)
+    {
         return false;
     }
     world

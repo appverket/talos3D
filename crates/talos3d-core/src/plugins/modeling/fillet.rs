@@ -586,6 +586,9 @@ fn evaluated_fillet_hit_test(
         .try_query::<(Entity, Option<&ChamferNode>, &EvaluatedFillet)>()
         .unwrap();
     for (entity, chamfer, evaluated) in query.iter(world) {
+        if crate::plugins::object_locks::entity_locked(world, entity) {
+            continue;
+        }
         if chamfer_only && chamfer.is_none() {
             continue;
         }

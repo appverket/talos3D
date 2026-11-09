@@ -173,6 +173,9 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
 
         let mut query = world.try_query::<EntityRef>().unwrap();
         for entity_ref in query.iter(world) {
+            if crate::plugins::object_locks::entity_locked(world, entity_ref.id()) {
+                continue;
+            }
             if entity_ref.contains::<OpeningContext>() {
                 continue;
             }

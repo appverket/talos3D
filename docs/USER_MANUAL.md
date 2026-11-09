@@ -237,3 +237,18 @@ Continue on web saves and synchronizes the same private project before opening
 its signed-in browser editor. Resolve a sync conflict before continuing; pending
 offline work stays local if upload fails. Public Core remains usable without a
 hosted account; sharing/storage/account UI is supplied by the product adapter.
+
+## Lock reference geometry
+
+Open **View → Outliner** and click **Lock** beside an object or group.
+Locked objects remain visible, but viewport clicks, double-clicks, marquee
+selection, hover, snapping and tool-surface picks pass through them. Locking a
+group includes nested members and generated occurrence geometry. An existing
+selection or edit context inside the locked scope is cleared.
+
+Click **Locked** in the Outliner to unlock. Inherited locks identify the parent
+group to unlock; a child's own lock survives unlocking its parent. Locks support
+Undo/Redo and are saved in the project. Visibility and layer settings remain
+independent. These are interaction locks, not access controls for explicit model
+commands or automation. The shared command is `view.set_object_locked`, with
+`element_ids` and `locked`; `outline_tree` reports explicit and effective locks.

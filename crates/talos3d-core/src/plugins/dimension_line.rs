@@ -629,6 +629,7 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             .iter(world)
             .filter(|(entity, id, node)| {
                 node.visible
+                    && !crate::plugins::object_locks::entity_locked(world, *entity)
                     && scope.permits(
                         **id,
                         world
