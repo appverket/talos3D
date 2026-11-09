@@ -130,3 +130,13 @@ near split. The small camera/light query does no model traversal; orbit/pan
 preserves configuration change ticks. Tests cover zoom-out, zoom-in, new lights,
 and 120 orbit updates without repeated invalidation. This is shadowed viewport
 lighting, not a simulation of diffuse indoor light transport.
+
+The final combined code (`28a5615`, including object locking from `d11eaee`)
+was measured again with the existing scene's sky fill shadows enabled and the
+expanded cascade range active. Three 72-step orbits: motion p95
+16.39 / 16.31 / 16.30 ms, worst motion 16.77 ms, activation <=15.68 ms,
+release <=15.77 ms. The worst sample including initial pointer/modifier setup
+was 34.58 ms. All three motion budgets pass; every authored world bound remains
+unchanged. This second fixture differs only in the authored fill-shadow setting;
+it is an additional combined-feature acceptance run, not the identical-fixture
+before/after comparison above.

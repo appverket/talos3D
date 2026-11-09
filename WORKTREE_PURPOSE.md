@@ -6,4 +6,4 @@
 - task-id: TALOS-gqajkost
 - target base: main
 - summary: Profile and accelerate large-site orbit navigation.
-- status: active
+- status: awaiting-merge
