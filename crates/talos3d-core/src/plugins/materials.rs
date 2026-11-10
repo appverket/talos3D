@@ -8,9 +8,7 @@ use std::collections::BTreeMap;
 use base64::prelude::*;
 use bevy::{
     asset::RenderAssetUsages,
-    image::{
-        CompressedImageFormats, ImageAddressMode, ImageSampler, ImageSamplerDescriptor, ImageType,
-    },
+    image::{CompressedImageFormats, ImageType},
     math::Affine2,
     prelude::*,
 };
@@ -19,6 +17,7 @@ use serde_json::Value;
 
 use crate::curation::{AssetId, ContentHash, EvidenceRef, MaterialSpecRegistry};
 use crate::plugins::registry_generation::RegistryGeneration;
+use crate::plugins::texture_mipmaps::{material_texture_sampler, with_full_mip_chain};
 
 pub const BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80: &str = "builtin.glass.blue_tint_glazing_80";
 pub const BUILTIN_MATERIAL_WINDOW_DARK_GASKET: &str = "builtin.window.dark_gasket";
@@ -137,15 +136,13 @@ impl TexturePayload {
                     true,
                     // Material UV scale/offset describes tiling; clamping to the
                     // last texel makes most of a scaled surface appear flat.
-                    ImageSampler::Descriptor(ImageSamplerDescriptor {
-                        address_mode_u: ImageAddressMode::Repeat,
-                        address_mode_v: ImageAddressMode::Repeat,
-                        ..ImageSamplerDescriptor::linear()
-                    }),
+                    material_texture_sampler(),
                     RenderAssetUsages::RENDER_WORLD,
                 )
                 .ok()?;
-                Some(images.add(image))
+                // Tiled finishes are minified as soon as the camera pulls
+                // back; without mips their fine lines alias into moiré.
+                Some(images.add(with_full_mip_chain(image)))
             }
         }
     }
@@ -2058,11 +2055,22 @@ mod tests {
         let image = images.get(&handle).unwrap();
         assert_eq!(image.width(), 16);
         assert_eq!(image.height(), 128);
-        let ImageSampler::Descriptor(sampler) = &image.sampler else {
+        let bevy::image::ImageSampler::Descriptor(sampler) = &image.sampler else {
             panic!("material sampler must be explicit");
         };
-        assert_eq!(sampler.address_mode_u, ImageAddressMode::Repeat);
-        assert_eq!(sampler.address_mode_v, ImageAddressMode::Repeat);
+        assert_eq!(
+            sampler.address_mode_u,
+            bevy::image::ImageAddressMode::Repeat
+        );
+        assert_eq!(
+            sampler.address_mode_v,
+            bevy::image::ImageAddressMode::Repeat
+        );
+        // The decoded texture carries its whole mip chain (16×128 → 1×1) so a
+        // minified finish blends instead of aliasing.
+        assert_eq!(image.texture_descriptor.mip_level_count, 8);
+        assert_eq!(sampler.mipmap_filter, bevy::image::ImageFilterMode::Linear);
+        assert!(sampler.anisotropy_clamp > 1);
     }
 
     #[test]

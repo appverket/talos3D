@@ -102,6 +102,7 @@ pub mod support_graph;
 pub mod surface_debug;
 pub mod surface_placement;
 pub mod tape_tool;
+pub mod texture_mipmaps;
 pub mod toolbar;
 pub mod tools;
 pub mod transform;
