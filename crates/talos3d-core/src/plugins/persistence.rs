@@ -759,12 +759,79 @@ pub fn new_document(world: &mut World) {
 /// Capturing is not a save acknowledgement: the shell must first commit bytes
 /// and its pending operation durably, then call `acknowledge_project_bytes`.
 pub fn capture_project_bytes(world: &mut World) -> Result<Vec<u8>, String> {
-    let project = build_project_file(world)?;
-    // Keep the object-form JSON transport contract for existing shell clients.
-    // Stable bytes remain essential for delayed-save acknowledgements.
-    let mut value = serde_json::to_value(&project).map_err(|e| e.to_string())?;
-    value.sort_all_objects();
-    serde_json::to_vec(&value).map_err(|e| e.to_string())
+    serde_json::to_vec(&capture_project_value(world)?).map_err(|e| e.to_string())
+}
+
+// Move already-serialized entity geometry into the document. Serializing the
+// scene into a second Value tree at once can exhaust a 32-bit browser heap.
+fn capture_project_value(world: &mut World) -> Result<Value, String> {
+    let mut project = build_project_file(world)?;
+    let entities = std::mem::take(&mut project.entities);
+    let ext = std::mem::take(&mut project.extensions);
+    let mut root = serde_json::to_value(project).map_err(|e| e.to_string())?;
+    let object = root.as_object_mut().ok_or("Invalid project object")?;
+    for (key, value) in ext {
+        object.entry(key).or_insert(value);
+    }
+    let mut records = Vec::with_capacity(entities.len());
+    for mut entity in entities {
+        let data = entity.data.take();
+        let mut record = serde_json::to_value(entity).map_err(|e| e.to_string())?;
+        record["data"] = data;
+        records.push(record);
+    }
+    object.insert("entities".into(), Value::Array(records));
+    root.sort_all_objects();
+    Ok(root)
+}
+
+/// Browser capture must not first allocate oversized JSON and then parse it
+/// into a second full document while the live editor owns its scene.
+pub fn capture_for_storage(world: &mut World, limit: usize) -> Result<Vec<u8>, String> {
+    struct Bounded {
+        bytes: Vec<u8>,
+        limit: usize,
+    }
+    impl std::io::Write for Bounded {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if b.len() > self.limit - self.bytes.len() {
+                return Err(std::io::ErrorKind::FileTooLarge.into());
+            }
+            self.bytes.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let root = capture_project_value(world)?;
+    let mut writer = Bounded {
+        bytes: Vec::new(),
+        limit,
+    };
+    match serde_json::to_writer(&mut writer, &root) {
+        Ok(()) => return Ok(writer.bytes),
+        Err(e) if e.io_error_kind() == Some(std::io::ErrorKind::FileTooLarge) => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    drop(writer);
+    pack_with_limit(root, limit)
+}
+
+fn pack_with_limit(model: Value, limit: usize) -> Result<Vec<u8>, String> {
+    let packed = crate::plugins::project_codec::encode_for_transfer(model)?;
+    if packed.len() <= limit {
+        return Ok(packed);
+    }
+    let binary = crate::plugins::project_codec::binary_envelope(&packed)?;
+    if binary.len() <= limit {
+        return Ok(binary);
+    }
+    Err(format!(
+        "The complete project needs {} bytes; the storage limit is {}. No components were omitted.",
+        binary.len(),
+        limit
+    ))
 }
 
 /// Storage adapters can compact oversized object snapshots on their worker before
@@ -775,13 +842,7 @@ pub fn fit_project_transfer(bytes: Vec<u8>, limit: usize) -> Result<Vec<u8>, Str
     }
     let model = crate::plugins::project_codec::decode(&bytes)?;
     drop(bytes);
-    let packed = crate::plugins::project_codec::encode_for_transfer(model)?;
-    if packed.len() > limit {
-        return Err(
-            "The complete project exceeds the storage limit; no components were omitted".into(),
-        );
-    }
-    Ok(packed)
+    pack_with_limit(model, limit)
 }
 
 /// Compact native-file representation of the same complete authored snapshot.
@@ -803,13 +864,21 @@ pub fn open_project_bytes(world: &mut World, bytes: &[u8]) -> Result<(), String>
 
 /// A delayed local write cannot mark a newer edit clean.
 pub fn acknowledge_project_bytes(world: &mut World, bytes: &[u8]) -> Result<bool, String> {
-    let current = capture_project_bytes(world)?;
-    // Match the logical document across lossless storage representations.
-    let matches = if bytes.first() == Some(&b'[') {
-        let restored: Value = crate::plugins::project_codec::decode(bytes)?;
-        serde_json::from_slice::<Value>(&current).map_err(|e| e.to_string())? == restored
+    let matches = if bytes.starts_with(crate::plugins::project_codec::BINARY_MAGIC)
+        || bytes.first() == Some(&b'[')
+    {
+        let current = capture_for_storage(world, 64 * 1024 * 1024)?;
+        if current == bytes {
+            true
+        } else if current.starts_with(crate::plugins::project_codec::BINARY_MAGIC)
+            && bytes.first() == Some(&b'[')
+        {
+            crate::plugins::project_codec::binary_envelope(bytes)? == current
+        } else {
+            false
+        }
     } else {
-        current == bytes
+        capture_project_bytes(world)? == bytes
     };
     if !matches {
         return Ok(false);

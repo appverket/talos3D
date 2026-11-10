@@ -387,6 +387,15 @@ fn vec3_json(value: Vec3) -> Value {
     json!([value.x, value.y, value.z])
 }
 
+fn project_transport_text(bytes: Vec<u8>) -> Result<String, String> {
+    let bytes = if bytes.starts_with(crate::plugins::project_codec::BINARY_MAGIC) {
+        crate::plugins::project_codec::text_envelope(&bytes)?
+    } else {
+        bytes
+    };
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
 fn dispatch_tool(world: &mut World, tool_name: &str, args: Value) -> Result<Value, String> {
     match tool_name {
         "project_library_install" => {
@@ -408,11 +417,10 @@ fn dispatch_tool(world: &mut World, tool_name: &str, args: Value) -> Result<Valu
         ),
         "project_view_capture" => {
             use base64::Engine;
-            let bytes = crate::plugins::persistence::capture_project_bytes(world)?;
-            let bytes = crate::plugins::persistence::fit_project_transfer(bytes, 64 * 1024 * 1024)?;
+            let bytes = crate::plugins::persistence::capture_for_storage(world, 64 * 1024 * 1024)?;
             let glb = crate::plugins::model_export::glb::capture_view_glb(world)?;
             Ok(
-                json!({"json":String::from_utf8(bytes).map_err(|e|e.to_string())?,"glb_base64":base64::engine::general_purpose::STANDARD.encode(glb),"revision":world.resource::<crate::plugins::history::History>().revision_token()}),
+                json!({"json":project_transport_text(bytes)?,"glb_base64":base64::engine::general_purpose::STANDARD.encode(glb),"revision":world.resource::<crate::plugins::history::History>().revision_token()}),
             )
         }
         "project_pack" => {
@@ -423,16 +431,15 @@ fn dispatch_tool(world: &mut World, tool_name: &str, args: Value) -> Result<Valu
                 .as_bytes()
                 .to_vec();
             let bytes = crate::plugins::persistence::fit_project_transfer(bytes, 64 * 1024 * 1024)?;
-            Ok(json!({"json":String::from_utf8(bytes).map_err(|e|e.to_string())?}))
+            Ok(json!({"json":project_transport_text(bytes)?}))
         }
         "project_capture" => {
-            let bytes = crate::plugins::persistence::capture_project_bytes(world)?;
             let bytes = if args.get("for_storage").and_then(Value::as_bool) == Some(true) {
-                crate::plugins::persistence::fit_project_transfer(bytes, 64 * 1024 * 1024)?
+                crate::plugins::persistence::capture_for_storage(world, 64 * 1024 * 1024)?
             } else {
-                bytes
+                crate::plugins::persistence::capture_project_bytes(world)?
             };
-            Ok(json!({"json":String::from_utf8(bytes).map_err(|e|e.to_string())?}))
+            Ok(json!({"json":project_transport_text(bytes)?}))
         }
         "project_open" | "project_saved" => {
             let bytes = args

@@ -213,10 +213,43 @@ fn intern_buffers(
     Ok(())
 }
 
+/// A private blob may carry the native envelope's gzipped payload directly.
+/// The 16-byte header retains the version and exact expanded length, without
+/// requiring the additional third of a blob used for base64 on text bridges.
+pub const BINARY_MAGIC: &[u8; 8] = b"TALOS3D\x01";
+pub fn binary_envelope(text: &[u8]) -> Result<Vec<u8>, String> {
+    let (magic, version, codec, len, b64): (&str, u32, &str, u64, &str) =
+        serde_json::from_slice(text).map_err(|e| e.to_string())?;
+    if (magic, version, codec) != (MAGIC, VERSION, CODEC) || len > MAX_PACKED_BYTES {
+        return Err("Unsupported native envelope".into());
+    }
+    let compressed = STANDARD.decode(b64).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(16 + compressed.len());
+    out.extend(BINARY_MAGIC);
+    out.extend(len.to_le_bytes());
+    out.extend(compressed);
+    Ok(out)
+}
+
+pub fn text_envelope(bin: &[u8]) -> Result<Vec<u8>, String> {
+    if !bin.starts_with(BINARY_MAGIC) || bin.len() <= 16 {
+        return Err("Invalid binary native envelope".into());
+    }
+    let len = u64::from_le_bytes(bin[8..16].try_into().unwrap());
+    if len > MAX_PACKED_BYTES {
+        return Err("Invalid native payload length".into());
+    }
+    serde_json::to_vec(&(MAGIC, VERSION, CODEC, len, STANDARD.encode(&bin[16..])))
+        .map_err(|e| e.to_string())
+}
+
 /// Accept both existing object-form JSON and compact envelopes. Decode and validate
 /// completely before a caller mutates its world, including compressed checksums,
 /// trailing bytes, reference locations and format versions.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    if bytes.starts_with(BINARY_MAGIC) {
+        return decode(&text_envelope(bytes)?);
+    }
     if bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) != Some(b'[') {
         return serde_json::from_slice(bytes).map_err(|e| e.to_string());
     }
@@ -448,4 +481,19 @@ fn transfer_round_trips_precision_and_opaque_components() {
     let restored: Value = decode(&encode_for_transfer(d.clone()).unwrap()).unwrap();
     assert_eq!(d, restored);
     assert!(restored["native"][1].as_f64().unwrap().is_sign_negative());
+}
+
+#[cfg(test)]
+#[test]
+fn compact_binary_native_envelope_is_lossless_and_bounded() {
+    let model = serde_json::json!({"version":3,"unknown":vec![[0.25,0.123456789012345];512]});
+    let text = encode_for_transfer(model.clone()).unwrap();
+    let binary = binary_envelope(&text).unwrap();
+    assert!(binary.len() < text.len());
+    assert_eq!(text_envelope(&binary).unwrap(), text);
+    assert_eq!(decode::<Value>(&binary).unwrap(), model);
+    assert!(decode::<Value>(&binary[..15]).is_err());
+    let mut bad = binary;
+    bad[8..16].fill(255);
+    assert!(decode::<Value>(&bad).is_err());
 }
