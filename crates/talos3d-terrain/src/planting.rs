@@ -26,6 +26,7 @@ use talos3d_core::{
         },
         history::{EditorCommand, History, HistorySet, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
+        layers::ObjectVisibility,
         modeling::assembly::{
             AssemblyMemberRef, AssemblySnapshot, RelationSnapshot, SemanticAssembly,
         },
@@ -98,6 +99,7 @@ struct PlantLinkedOnSurfaceHistoryCommand {
     planted_structure: PlantedStructure,
     hidden_foundation: Option<ElementId>,
     previous_hidden_visibility: Option<Visibility>,
+    previously_document_hidden: bool,
 }
 
 impl EditorCommand for PlantLinkedOnSurfaceHistoryCommand {
@@ -117,6 +119,7 @@ impl EditorCommand for PlantLinkedOnSurfaceHistoryCommand {
             world.entity_mut(target).insert(self.planted_structure);
         }
         if let Some(hidden_id) = self.hidden_foundation {
+            set_foundation_document_hidden(world, hidden_id, true);
             if let Some(entity) = find_entity_by_element_id(world, hidden_id) {
                 world.entity_mut(entity).insert(Visibility::Hidden);
             }
@@ -135,6 +138,7 @@ impl EditorCommand for PlantLinkedOnSurfaceHistoryCommand {
             world.entity_mut(target).remove::<PlantedStructure>();
         }
         if let Some(hidden_id) = self.hidden_foundation {
+            set_foundation_document_hidden(world, hidden_id, self.previously_document_hidden);
             if let Some(entity) = find_entity_by_element_id(world, hidden_id) {
                 if let Some(visibility) = self.previous_hidden_visibility {
                     world.entity_mut(entity).insert(visibility);
@@ -142,6 +146,21 @@ impl EditorCommand for PlantLinkedOnSurfaceHistoryCommand {
                     world.entity_mut(entity).remove::<Visibility>();
                 }
             }
+        }
+    }
+}
+
+// Use document visibility so compound occurrence parts and regenerated meshes
+// follow the same exclusion as their authored base. Raw Bevy visibility alone
+// is overwritten by layer reconciliation and misses detached generated parts.
+fn set_foundation_document_hidden(world: &mut World, id: ElementId, hidden: bool) {
+    world.init_resource::<ObjectVisibility>();
+    if world.resource::<ObjectVisibility>().hidden.contains(&id) != hidden {
+        let mut visibility = world.resource_mut::<ObjectVisibility>();
+        if hidden {
+            visibility.hidden.insert(id);
+        } else {
+            visibility.hidden.remove(&id);
         }
     }
 }
@@ -1883,6 +1902,7 @@ fn rehydrate_planted_structure_components(world: &mut World) {
                 .insert(contract.planted_on_surface);
         }
         if let Some(hidden_id) = contract.planted_on_surface.hidden_foundation {
+            set_foundation_document_hidden(world, hidden_id, true);
             if let Some(hidden_entity) = find_entity_by_element_id(world, hidden_id) {
                 if world.get::<Visibility>(hidden_entity) != Some(&Visibility::Hidden) {
                     world.entity_mut(hidden_entity).insert(Visibility::Hidden);
@@ -2368,6 +2388,11 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         .as_ref()
         .map(|plan| plan.before().to_vec())
         .unwrap_or_default();
+    let previously_document_hidden = hide_id.is_some_and(|id| {
+        world
+            .get_resource::<ObjectVisibility>()
+            .is_some_and(|state| state.hidden.contains(&id))
+    });
     let previous_hidden_visibility = hide_id.and_then(|id| {
         find_entity_by_element_id(world, id)
             .and_then(|entity| world.get::<Visibility>(entity).copied())
@@ -2413,6 +2438,7 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
 
     // Hide the original foundation (reversible).
     if let Some(hide_id) = hide_id {
+        set_foundation_document_hidden(world, hide_id, true);
         if let Some(entity) = find_entity_by_element_id(world, hide_id) {
             world.entity_mut(entity).insert(Visibility::Hidden);
         }
@@ -2470,6 +2496,7 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
                 planted_structure,
                 hidden_foundation: hide_id,
                 previous_hidden_visibility,
+                previously_document_hidden,
             }));
     }
 
@@ -2679,6 +2706,7 @@ fn execute_unplant_on_surface(world: &mut World, params: &Value) -> Result<Comma
 
     // Un-hide the original foundation.
     if let Some(hidden) = link.hidden_foundation {
+        set_foundation_document_hidden(world, hidden, false);
         if let Some(entity) = find_entity_by_element_id(world, hidden) {
             world.entity_mut(entity).insert(Visibility::Inherited);
         }
@@ -3535,6 +3563,72 @@ mod tests {
         }
         reseat_planted_structures(world);
         assert_eq!(capture_by_id(world, ElementId(3)).unwrap(), *body);
+    }
+
+    #[test]
+    fn planted_occurrence_visibility_covers_generated_parts_and_history() {
+        use talos3d_core::plugins::layers::LayerPlugin;
+        let mut app = linked_test_app();
+        app.add_plugins(LayerPlugin);
+        app.world_mut()
+            .spawn((ElementId(10), flat_heightfield(1.0)));
+        spawn_linked_building(app.world_mut());
+        let part = app
+            .world_mut()
+            .spawn((
+                GeneratedOccurrencePart {
+                    owner: ElementId(2),
+                    slot_path: "slab".into(),
+                    definition_id: talos3d_core::plugins::modeling::definition::DefinitionId(
+                        "slab".into(),
+                    ),
+                },
+                Visibility::Inherited,
+            ))
+            .id();
+        execute_plant_on_surface(
+            app.world_mut(),
+            &json!({
+                "target_id": 1, "surface_id": 10, "hide_element_id": 2,
+            }),
+        )
+        .unwrap();
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Hidden)
+        );
+        app.world_mut()
+            .resource_mut::<PendingCommandQueue>()
+            .queue_undo();
+        app.update();
+        app.update();
+        assert!(!app
+            .world()
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&ElementId(2)));
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Inherited)
+        );
+        app.world_mut()
+            .resource_mut::<PendingCommandQueue>()
+            .queue_redo();
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Hidden)
+        );
+        execute_unplant_on_surface(app.world_mut(), &json!({"target_id": 1})).unwrap();
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Inherited)
+        );
     }
 
     #[test]
