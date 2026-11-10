@@ -1,14 +1,25 @@
 //! Portable, render-only publication. No authored snapshots, names, IDs or URIs.
 //! Collection runs once at publication; material batches become GPU primitives.
-use crate::plugins::identity::ElementId;
+use crate::plugins::{
+    definition_preview_scene::PreviewOnly, identity::ElementId, layers::entity_document_hidden,
+    modeling::occurrence::GeneratedOccurrencePart,
+};
 use bevy::{
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     prelude::*,
 };
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 const MAX_BYTES: usize = 64 * 1024 * 1024;
+#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+enum Layout {
+    Indexed,
+    FlatTriangles,
+    ShadedTriangles,
+}
+type Batches = BTreeMap<([u32; 6], Layout), Batch>;
+
 #[derive(Default)]
 struct Batch {
     positions: Vec<[f32; 3]>,
@@ -32,6 +43,18 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
     if !crate::plugins::vector_drawing::collect_active_clip_planes(world).is_empty() {
         return Err("Turn off section cuts before publishing this model".into());
     }
+    // Compound occurrences generate detached meshes with an authored owner ID.
+    // Owners may be logical nodes with no inherited visibility component.
+    let visible_owners: HashSet<_> = world
+        .query::<(Entity, &ElementId, Option<&InheritedVisibility>)>()
+        .iter(world)
+        .filter(|(e, _, v)| {
+            v.is_none_or(|v| v.get())
+                && !entity_document_hidden(world, *e)
+                && world.get::<PreviewOnly>(*e).is_none()
+        })
+        .map(|(_, id, _)| *id)
+        .collect();
     let entries: Vec<_> = world
         .query::<(
             Entity,
@@ -46,14 +69,21 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
         .collect();
     let meshes = world.resource::<Assets<Mesh>>();
     let materials = world.get_resource::<Assets<StandardMaterial>>();
-    let mut batches: BTreeMap<[u32; 6], Batch> = BTreeMap::new();
-    let mut vertex_count = 0usize;
+    let mut batches = Batches::new();
+    let mut binary_size = 0usize;
     for (entity, handle, transform, material) in entries {
         let mut current = Some(entity);
         let mut authored = false;
         while let Some(e) = current {
-            if world.get::<ElementId>(e).is_some() {
-                authored = true;
+            if world.get::<PreviewOnly>(e).is_some() {
+                break;
+            }
+            if let Some(id) = world
+                .get::<GeneratedOccurrencePart>(e)
+                .map(|p| p.owner)
+                .or_else(|| world.get::<ElementId>(e).copied())
+            {
+                authored = visible_owners.contains(&id);
                 break;
             }
             current = world.get::<ChildOf>(e).map(|p| p.parent());
@@ -85,11 +115,6 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
         {
             return Err("Invalid model triangles".into());
         }
-        vertex_count += positions.len();
-        // Bound memory before allocating the publication buffers.
-        if vertex_count > MAX_BYTES / 36 {
-            return Err("Shared view exceeds 64 MB; reduce model detail".into());
-        }
         let mat = material
             .as_ref()
             .and_then(|h| materials.and_then(|a| a.get(h)));
@@ -104,8 +129,6 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
             mat.map_or(0.8, |m| m.perceptual_roughness).to_bits(),
             mat.map_or(0.0, |m| m.metallic).to_bits(),
         ];
-        let batch = batches.entry(key).or_default();
-        let base = batch.positions.len() as u32;
         let affine = transform.affine();
         let determinant = affine.matrix3.determinant();
         if !determinant.is_finite() || determinant.abs() < 1e-12 {
@@ -116,6 +139,59 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
             Some(VertexAttributeValues::Float32x3(v)) if v.len() == positions.len() => Some(v),
             _ => None,
         };
+        // Imported triangle soups often repeat both the implicit sequential
+        // indices and the geometric face normal for every vertex. glTF can
+        // represent those triangles directly; keep authored smooth normals.
+        if local_indices.len() <= positions.len().saturating_mul(4) / 3 {
+            let generated;
+            let normals = match normals {
+                Some(values) => values.as_slice(),
+                None => {
+                    generated = local_vertex_normals(positions, &local_indices);
+                    &generated
+                }
+            };
+            for tri in local_indices.as_chunks::<3>().0 {
+                let mut corners = tri.map(|i| i as usize);
+                if determinant < 0. {
+                    corners.swap(1, 2);
+                }
+                let points =
+                    corners.map(|i| affine.transform_point3(Vec3::from_array(positions[i])));
+                if !points.iter().all(|p| p.is_finite()) {
+                    return Err("Cannot publish non-finite geometry".into());
+                }
+                let face = (points[1] - points[0])
+                    .cross(points[2] - points[0])
+                    .normalize_or_zero();
+                let shading = corners
+                    .map(|i| (normal_matrix * Vec3::from_array(normals[i])).normalize_or_zero());
+                // Keep distinct shading, including reversed normals. Agreement
+                // within 0.82 degrees is visually flat at publication precision.
+                let flat = shading.iter().all(|n| n.dot(face) >= 0.9999);
+                let layout = if flat {
+                    Layout::FlatTriangles
+                } else {
+                    Layout::ShadedTriangles
+                };
+                reserve_bytes(&mut binary_size, if flat { 36 } else { 72 })?;
+                let batch = batches.entry((key, layout)).or_default();
+                batch.positions.extend(points.map(|v| v.to_array()));
+                if !flat {
+                    batch.normals.extend(shading.map(|v| v.to_array()));
+                }
+            }
+            continue;
+        }
+        reserve_bytes(
+            &mut binary_size,
+            positions
+                .len()
+                .saturating_mul(24)
+                .saturating_add(local_indices.len().saturating_mul(4)),
+        )?;
+        let batch = batches.entry((key, Layout::Indexed)).or_default();
+        let base = batch.positions.len() as u32;
         for (i, p) in positions.iter().enumerate() {
             let p = affine.transform_point3(Vec3::from_array(*p));
             if !p.is_finite() {
@@ -150,7 +226,29 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
     }
     encode(batches)
 }
-fn encode(batches: BTreeMap<[u32; 6], Batch>) -> Result<Vec<u8>, String> {
+/// Area-weighted normals for a mesh without authored shading. Keep shared
+/// vertices smooth even if this mesh is encoded as unindexed triangles.
+fn local_vertex_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+    let mut result = vec![Vec3::ZERO; positions.len()];
+    for tri in indices.as_chunks::<3>().0 {
+        let [a, b, c] = tri.map(|i| Vec3::from_array(positions[i as usize]));
+        let normal = (b - a).cross(c - a);
+        for i in tri {
+            result[*i as usize] += normal;
+        }
+    }
+    result.into_iter().map(|n| n.to_array()).collect()
+}
+
+fn reserve_bytes(total: &mut usize, bytes: usize) -> Result<(), String> {
+    *total = total.saturating_add(bytes);
+    if *total > MAX_BYTES {
+        return Err("Shared view exceeds 64 MiB; reduce model detail".into());
+    }
+    Ok(())
+}
+
+fn encode(batches: Batches) -> Result<Vec<u8>, String> {
     let (mut bin, mut views, mut accessors, mut materials, mut primitives) = (
         Vec::new(),
         Vec::<Value>::new(),
@@ -180,7 +278,7 @@ fn encode(batches: BTreeMap<[u32; 6], Batch>) -> Result<Vec<u8>, String> {
         accessors.push(a);
         id
     }
-    for (key, mut batch) in batches {
+    for ((key, _), mut batch) in batches {
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);
         for p in &batch.positions {
@@ -206,34 +304,40 @@ fn encode(batches: BTreeMap<[u32; 6], Batch>) -> Result<Vec<u8>, String> {
             "VEC3",
             Some((min.to_array(), max.to_array())),
         );
-        let norm = attribute(
-            &mut bin,
-            &mut views,
-            &mut accessors,
-            &floats(&batch.normals),
-            batch.normals.len(),
-            5126,
-            "VEC3",
-            None,
-        );
-        let indices: Vec<u8> = batch.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
-        let idx = attribute(
-            &mut bin,
-            &mut views,
-            &mut accessors,
-            &indices,
-            batch.indices.len(),
-            5125,
-            "SCALAR",
-            None,
-        );
+        let mut primitive = json!({"attributes":{"POSITION":pos},"mode":4});
+        if !batch.normals.is_empty() {
+            primitive["attributes"]["NORMAL"] = json!(attribute(
+                &mut bin,
+                &mut views,
+                &mut accessors,
+                &floats(&batch.normals),
+                batch.normals.len(),
+                5126,
+                "VEC3",
+                None,
+            ));
+        }
+        if !batch.indices.is_empty() {
+            let indices: Vec<_> = batch.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
+            primitive["indices"] = json!(attribute(
+                &mut bin,
+                &mut views,
+                &mut accessors,
+                &indices,
+                batch.indices.len(),
+                5125,
+                "SCALAR",
+                None,
+            ));
+        }
         let color = key[..4]
             .iter()
             .map(|v| f32::from_bits(*v))
             .collect::<Vec<_>>();
         let mat = materials.len();
         materials.push(json!({"pbrMetallicRoughness":{"baseColorFactor":color,"roughnessFactor":f32::from_bits(key[4]),"metallicFactor":f32::from_bits(key[5])},"alphaMode":if color[3]<1.0 {"BLEND"} else {"OPAQUE"},"doubleSided":true}));
-        primitives.push(json!({"attributes":{"POSITION":pos,"NORMAL":norm},"indices":idx,"material":mat,"mode":4}));
+        primitive["material"] = json!(mat);
+        primitives.push(primitive);
     }
     let doc = json!({"asset":{"version":"2.0","generator":"Talos3D"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":primitives}],"materials":materials,"accessors":accessors,"bufferViews":views,"buffers":[{"byteLength":bin.len()}]});
     let mut json = serde_json::to_vec(&doc).map_err(|e| e.to_string())?;
@@ -262,6 +366,71 @@ fn encode(batches: BTreeMap<[u32; 6], Batch>) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn detached_occurrence_retains_visible_triangles_and_explicit_shading_only_where_needed() {
+        use crate::plugins::{layers::DocumentVisibility, modeling::definition::DefinitionId};
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, Default::default());
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![
+                [0., 0., 0.],
+                [1., 0., 0.],
+                [0., 1., 0.],
+                [0., 0., 0.],
+                [1., 0., 0.],
+                [0., 1., 0.],
+            ],
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_NORMAL,
+            vec![
+                [0., 0., 1.],
+                [0., 0., 1.],
+                [0., 0., 1.],
+                [0., 0., 1.],
+                [0., 1., 0.],
+                [0., 0., 1.],
+            ],
+        );
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
+        let owner = ElementId(7);
+        world.spawn(owner);
+        world.spawn((
+            GeneratedOccurrencePart {
+                owner,
+                slot_path: "private".into(),
+                definition_id: DefinitionId("private".into()),
+            },
+            Mesh3d(mesh),
+            GlobalTransform::IDENTITY,
+            InheritedVisibility::VISIBLE,
+        ));
+        let bytes = capture_view_glb(&mut world).unwrap();
+        let n = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let doc: Value = serde_json::from_slice(&bytes[20..20 + n]).unwrap();
+        let primitives = doc["meshes"][0]["primitives"].as_array().unwrap();
+        assert_eq!(primitives.len(), 2);
+        assert!(primitives.iter().all(|p| p.get("indices").is_none()));
+        assert_eq!(
+            primitives
+                .iter()
+                .filter(|p| p["attributes"].get("NORMAL").is_some())
+                .count(),
+            1
+        );
+        for p in primitives {
+            let pos = p["attributes"]["POSITION"].as_u64().unwrap() as usize;
+            assert_eq!(doc["accessors"][pos]["count"], 3);
+        }
+        world.insert_resource(DocumentVisibility {
+            hidden: HashSet::from([owner]),
+        });
+        assert!(capture_view_glb(&mut world)
+            .unwrap_err()
+            .contains("no visible"));
+    }
     #[test]
     fn publication_uses_authored_ancestry_visibility_world_transforms_and_material_batches() {
         let mut world = World::new();
