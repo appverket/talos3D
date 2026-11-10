@@ -712,6 +712,20 @@ fn draw_materials(c: &mut Canvas) {
     c.line(15.0, 16.0, 17.0, 16.0);
 }
 
+fn draw_padlock(c: &mut Canvas, locked: bool) {
+    c.rounded_rect(5.0, 11.0, 14.0, 10.0, 2.0);
+    let center = if locked { 12.0 } else { 16.0 };
+    c.arc(center, 7.0, 4.0, TAU / 2.0, TAU);
+    c.line(center - 4.0, 7.0, center - 4.0, 11.0);
+    c.line(
+        center + 4.0,
+        7.0,
+        center + 4.0,
+        if locked { 11.0 } else { 8.0 },
+    );
+    c.line(12.0, 15.0, 12.0, 17.0);
+}
+
 pub fn render_icon(name: &str) -> Vec<u8> {
     let mut c = Canvas::new();
     match name {
@@ -767,6 +781,8 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "opening" => draw_opening(&mut c),
         "definitions" => draw_definitions(&mut c),
         "materials" => draw_materials(&mut c),
+        "lock_closed" => draw_padlock(&mut c, true),
+        "lock_open" => draw_padlock(&mut c, false),
         _ => draw_plus(&mut c),
     }
     c.into_rgba()

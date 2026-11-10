@@ -872,20 +872,18 @@ fn render_outliner_row(
             }
             if let Some(id) = node.visibility_id {
                 let inherited = node.effectively_locked && !node.explicitly_locked;
-                let label = if node.effectively_locked {
-                    "Locked"
+                let icon = interaction::padlock_image(ui, node.effectively_locked);
+                let tooltip = if inherited {
+                    "Locked by a parent group; unlock that group first"
+                } else if node.explicitly_locked {
+                    "Unlock this object (parent locks still apply)"
                 } else {
-                    "Lock"
+                    "Lock this object and its contents against viewport interaction"
                 };
                 let response = ui
-                    .add_enabled(!inherited, egui::Button::new(label).small())
-                    .on_hover_text(if inherited {
-                        "Locked by a parent group; unlock that group first"
-                    } else if node.explicitly_locked {
-                        "Unlock this object (parent locks still apply)"
-                    } else {
-                        "Lock this object and its contents against viewport interaction"
-                    });
+                    .add_enabled(!inherited, egui::Button::image(icon).small().frame(false))
+                    .on_hover_text(tooltip)
+                    .on_disabled_hover_text(tooltip);
                 if response.clicked() {
                     queue_command_invocation_resource(
                         pending_commands,

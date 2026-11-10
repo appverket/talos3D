@@ -1,6 +1,33 @@
 //! Outliner gestures only choose targets; domain edits use registered commands.
 use super::*;
 
+pub(super) fn padlock_image(ui: &egui::Ui, locked: bool) -> egui::Image<'static> {
+    let name = if locked { "lock_closed" } else { "lock_open" };
+    let id = egui::Id::new(("outliner_padlock", name));
+    // Reuse the toolbar artwork pipeline, rasterized/uploaded once per UI context.
+    // Only the virtualized visible rows submit textured quads on subsequent frames.
+    let texture = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::TextureHandle>(id));
+    let texture = texture.unwrap_or_else(|| {
+        let rgba = super::super::icons::render_icon(name);
+        let size = super::super::icons::ICON_SIZE as usize;
+        let texture = ui.ctx().load_texture(
+            name,
+            egui::ColorImage::from_rgba_unmultiplied([size, size], &rgba),
+            egui::TextureOptions::LINEAR,
+        );
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(id, texture.clone()));
+        texture
+    });
+    egui::Image::new((texture.id(), egui::vec2(16.0, 16.0))).alt_text(if locked {
+        "Locked"
+    } else {
+        "Unlocked"
+    })
+}
+
 pub(super) fn row_selection_action(
     tree: &OutlinerTree,
     state: &mut OutlinerWindowState,

@@ -246,7 +246,7 @@ hosted account; sharing/storage/account UI is supplied by the product adapter.
 
 ## Lock reference geometry
 
-Open **View → Outliner** and click **Lock** beside an object or group.
+Open **View → Outliner** and click the open padlock beside an object or group.
 You can also right-click a selection in the viewport or Outliner and choose
 **Lock Selected**. This locks the entire selection in one undoable operation.
 Locked objects remain visible, but viewport clicks, double-clicks, marquee
@@ -254,7 +254,7 @@ selection, hover, snapping and tool-surface picks pass through them. Locking a
 group includes nested members and generated occurrence geometry. An existing
 selection or edit context inside the locked scope is cleared.
 
-Click **Locked** in the Outliner to unlock. Inherited locks identify the parent
+Click the closed padlock in the Outliner to unlock. Inherited locks identify the parent
 group to unlock; a child's own lock survives unlocking its parent. Locks support
 Undo/Redo and are saved in the project. Visibility and layer settings remain
 independent. These are interaction locks, not access controls for explicit model
