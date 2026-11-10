@@ -40,6 +40,7 @@ use talos3d_core::{
             linked_model_placement_subject, plan_linked_model_placement,
             LinkedModelPlacementOperation,
         },
+        modeling::occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
         modeling::primitives::{BoxPrimitive, ShapeRotation, TriangleMesh},
         modeling::snapshots::TriangleMeshSnapshot,
         selection::Selected,
@@ -1069,6 +1070,55 @@ fn translate_group_frame(world: &mut World, group_id: ElementId, delta: Vec3) {
     }
 }
 
+/// Placement-time measurement only. Transform generated vertices into the authored
+/// group frame before bounding; inverse-transforming a world AABB inflates a
+/// rotated occurrence twice. No meshes are rebuilt and no per-frame work is added.
+fn occurrence_footprint_bounds(
+    world: &World,
+    owner: ElementId,
+    frame: GroupFrame,
+) -> Option<EntityBounds> {
+    let entity = find_entity_by_element_id_readonly(world, owner)?;
+    world.get::<OccurrenceIdentity>(entity)?;
+    let meshes = world.get_resource::<Assets<Mesh>>()?;
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    let mut any = false;
+    let inverse = frame.rotation.inverse();
+    let mut include = |handle: &Mesh3d, transform: &GlobalTransform| {
+        let Some(positions) = meshes
+            .get(handle.id())
+            .and_then(|mesh| mesh.attribute(Mesh::ATTRIBUTE_POSITION))
+            .and_then(|positions| positions.as_float3())
+        else {
+            return;
+        };
+        for point in positions {
+            let local =
+                inverse * (transform.transform_point(Vec3::from(*point)) - frame.translation);
+            min = min.min(local);
+            max = max.max(local);
+            any = true;
+        }
+    };
+    if let (Some(mesh), Some(transform)) = (
+        world.get::<Mesh3d>(entity),
+        world.get::<GlobalTransform>(entity),
+    ) {
+        include(mesh, transform);
+    }
+    if let Some(mut query) =
+        world.try_query::<(&GeneratedOccurrencePart, &Mesh3d, &GlobalTransform)>()
+    {
+        for (part, mesh, transform) in query.iter(world) {
+            if part.owner == owner {
+                include(mesh, transform);
+            }
+        }
+    }
+    any.then_some(EntityBounds { min, max })
+}
+
 fn foundation_footprint_from_body(
     world: &mut World,
     foundation_body_id: ElementId,
@@ -1081,8 +1131,14 @@ fn foundation_footprint_from_body(
     if let Some(group_id) = find_group_for_member(world, foundation_body_id) {
         if let Some(frame) = group_frame(world, group_id) {
             if !frame.is_identity() {
-                if let Some(bounds) =
-                    compute_group_bounds_in_frame_from_world(world, &[foundation_body_id], &frame)
+                if let Some(bounds) = occurrence_footprint_bounds(world, foundation_body_id, frame)
+                    .or_else(|| {
+                        compute_group_bounds_in_frame_from_world(
+                            world,
+                            &[foundation_body_id],
+                            &frame,
+                        )
+                    })
                 {
                     let local_center = bounds.center();
                     let world_center = frame.point_to_world(local_center);
@@ -1511,6 +1567,7 @@ fn create_structure_assembly(
     surface_id: ElementId,
     y_delta: f32,
     hidden_foundation: Option<ElementId>,
+    base_offset_from_foundation_top: f32,
     label: String,
 ) -> ElementId {
     let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
@@ -1539,6 +1596,7 @@ fn create_structure_assembly(
                 "surface_id": surface_id.0,
                 "y_delta": y_delta,
                 "hidden_foundation_id": hidden_foundation.map(|id| id.0),
+                "base_offset_from_foundation_top": base_offset_from_foundation_top,
             }),
             metadata: json!({
                 "kind": "structure",
@@ -2248,32 +2306,51 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         target_before.0.bounds()
     }
     .ok_or_else(|| "target has no bounds".to_string())?;
-    let footprint_bounds = hide_id
-        .and_then(|id| capture_by_id(world, id).and_then(|snapshot| snapshot.bounds()))
-        .unwrap_or(bounds);
-    let center = Vec2::new(
-        (footprint_bounds.min.x + footprint_bounds.max.x) * 0.5,
-        (footprint_bounds.min.z + footprint_bounds.max.z) * 0.5,
-    );
-    let half_extents = Vec2::new(
-        ((footprint_bounds.max.x - footprint_bounds.min.x) * 0.5).max(0.05),
-        ((footprint_bounds.max.z - footprint_bounds.min.z) * 0.5).max(0.05),
-    );
-    let base_y = bounds.min.y;
-
+    // Replacing a base seats its upper face on the new support. Hidden source
+    // references may extend below it; preserve their aggregate offset for every
+    // later reseat, preview, reload and undo/redo through the shared contract.
+    let (center, half_extents, yaw, seating_y) = if let Some(id) = hide_id {
+        let base = capture_by_id(world, id)
+            .and_then(|snapshot| snapshot.bounds())
+            .ok_or_else(|| "original foundation has no bounds".to_string())?;
+        let (center, half_extents, yaw) = foundation_footprint_from_body(world, id)?;
+        (center, half_extents, yaw, base.max.y)
+    } else {
+        (
+            Vec2::new(bounds.center().x, bounds.center().z),
+            Vec2::new(
+                ((bounds.max.x - bounds.min.x) * 0.5).max(0.05),
+                ((bounds.max.z - bounds.min.z) * 0.5).max(0.05),
+            ),
+            0.0,
+            bounds.min.y,
+        )
+    };
+    let retained_base_y = if is_group(world, target_id) {
+        member_bounds_excluding(world, &group_member_ids(world, target_id), ElementId(0))
+            .map(|bounds| bounds.min.y)
+            .unwrap_or(bounds.min.y)
+    } else {
+        bounds.min.y
+    };
+    let base_offset_from_foundation_top = retained_base_y - seating_y;
+    let solid = ConformingSolid {
+        name: "Hugging Foundation".to_string(),
+        position: center,
+        half_extents,
+        yaw,
+        min_thickness,
+        max_depth,
+        surface_id,
+        resolution,
+        floor_datum: None,
+    };
     let heightfield = find_heightfield(world, surface_id)
         .ok_or_else(|| "surface height field not ready".to_string())?;
-    let corners = [
-        center + Vec2::new(-half_extents.x, -half_extents.y),
-        center + Vec2::new(half_extents.x, -half_extents.y),
-        center + Vec2::new(half_extents.x, half_extents.y),
-        center + Vec2::new(-half_extents.x, half_extents.y),
-    ];
-    let (max_grade, _) = heightfield
-        .max_over(&corners)
-        .ok_or_else(|| "footprint does not overlap the surface".to_string())?;
-    let y_top = max_grade + min_thickness;
-    let y_delta = y_top - base_y;
+    let y_top = conforming_metrics(&solid, &heightfield)
+        .ok_or_else(|| "footprint does not overlap the surface".to_string())?
+        .y_top;
+    let y_delta = y_top - seating_y;
     let linked_plan = linked_subject
         .as_ref()
         .map(|_| {
@@ -2301,17 +2378,7 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
     ConformingSolidSnapshot {
         element_id: foundation_id,
         derived_top: 0.0,
-        solid: ConformingSolid {
-            name: "Hugging Foundation".to_string(),
-            position: center,
-            half_extents,
-            yaw: 0.0,
-            min_thickness,
-            max_depth,
-            surface_id,
-            resolution,
-            floor_datum: None,
-        },
+        solid,
     }
     .apply_to(world);
     let foundation_structure_id =
@@ -2340,6 +2407,7 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         surface_id,
         y_delta,
         hide_id,
+        base_offset_from_foundation_top,
         format!("Planted {}", target_before.0.label()),
     );
 
@@ -2360,7 +2428,7 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         foundation_structure_id: Some(foundation_structure_id),
         foundation_id,
         surface_id,
-        base_offset_from_foundation_top: 0.0,
+        base_offset_from_foundation_top,
     };
     world.entity_mut(target_entity).insert(planted_on_surface);
     world.entity_mut(target_entity).insert(planted_structure);
@@ -3354,6 +3422,163 @@ mod tests {
             .iter()
             .any(|member| member.target == foundation_id
                 && member.role == "terrain_conforming_foundation"));
+    }
+
+    #[test]
+    fn rotated_linked_replacement_seats_slab_top_through_preview_and_reload() {
+        let mut app = linked_test_app();
+        let world = app.world_mut();
+        world.spawn((ElementId(10), ramp_heightfield()));
+        spawn_linked_building(world);
+        // Imported hidden reference extends below the real slab by 0.4 m.
+        PrimitiveSnapshot {
+            element_id: ElementId(4),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, -0.3, 0.0),
+                half_extents: Vec3::splat(0.1),
+            },
+            rotation: ShapeRotation::default(),
+            layer: None,
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(world);
+        let root = find_entity_by_element_id(world, ElementId(1)).unwrap();
+        {
+            let mut group = world.get_mut::<GroupMembers>(root).unwrap();
+            group.member_ids.push(ElementId(4));
+            group
+                .linked_model
+                .as_mut()
+                .unwrap()
+                .source_to_scene_ids
+                .push(LinkedModelIdMapping {
+                    source_id: ElementId(103),
+                    scene_id: ElementId(4),
+                });
+        }
+        let reference = find_entity_by_element_id(world, ElementId(4)).unwrap();
+        world.entity_mut(reference).insert(Visibility::Hidden);
+        let rotation = Quat::from_rotation_y(0.7);
+        let plan = plan_linked_model_placement(
+            world,
+            ElementId(1),
+            LinkedModelPlacementOperation::Rotate {
+                rotation,
+                pivot: Some(Vec3::ZERO),
+            },
+        )
+        .unwrap();
+        for snapshot in plan.after() {
+            snapshot.apply_to(world);
+        }
+        let result = execute_plant_on_surface(
+            world,
+            &json!({
+                "target_id": 1, "surface_id": 10, "hide_element_id": 2, "min_thickness": 0.4,
+            }),
+        )
+        .unwrap();
+        let foundation_id = ElementId(
+            result.output.as_ref().unwrap()["foundation_id"]
+                .as_u64()
+                .unwrap(),
+        );
+        let foundation = find_entity_by_element_id(world, foundation_id).unwrap();
+        let solid = world.get::<ConformingSolid>(foundation).unwrap();
+        assert!((solid.half_extents - Vec2::splat(1.5)).length() < 0.001);
+        assert!((solid.yaw + 0.7).abs() < 0.001);
+        let top = foundation_top(world, foundation_id, ElementId(10)).unwrap();
+        assert!(
+            (capture_by_id(world, ElementId(3))
+                .unwrap()
+                .bounds()
+                .unwrap()
+                .min
+                .y
+                - top)
+                .abs()
+                < 0.001
+        );
+        let planted = *world.get::<PlantedStructure>(root).unwrap();
+        assert!((planted.base_offset_from_foundation_top + 0.8).abs() < 0.001);
+        // Rehydration must preserve the datum instead of jumping to hidden bounds.
+        world.entity_mut(root).remove::<PlantedStructure>();
+        rehydrate_planted_structure_components(world);
+        assert!(same_planted_structure(
+            *world.get::<PlantedStructure>(root).unwrap(),
+            planted
+        ));
+        let before = capture_by_id(world, ElementId(3)).unwrap();
+        reseat_planted_structures(world);
+        assert_eq!(capture_by_id(world, ElementId(3)).unwrap(), before);
+        let mut after = translated_target_snapshots(world, ElementId(1), Vec3::new(2.0, 0.0, 0.0));
+        let state = TransformState {
+            mode: TransformMode::Moving,
+            initial_snapshots: vec![(root, capture_by_id(world, ElementId(1)).unwrap())],
+            ..Default::default()
+        };
+        adjust_planted_structure_transform_preview(world, &state, &mut after);
+        let support = after
+            .iter()
+            .find(|s| s.element_id() == foundation_id)
+            .unwrap();
+        let preview_top = preview_foundation_top(world, support, ElementId(10)).unwrap();
+        let body = after
+            .iter()
+            .find(|s| s.element_id() == ElementId(3))
+            .unwrap();
+        assert!((body.bounds().unwrap().min.y - preview_top).abs() < 0.001);
+        for snapshot in &after {
+            snapshot.apply_to(world);
+        }
+        reseat_planted_structures(world);
+        assert_eq!(capture_by_id(world, ElementId(3)).unwrap(), *body);
+    }
+
+    #[test]
+    fn occurrence_footprint_measures_local_vertices_before_bounding() {
+        use talos3d_core::plugins::modeling::occurrence::OccurrenceIdentity;
+        let mut world = test_world();
+        world.init_resource::<Assets<Mesh>>();
+        let rotation = Quat::from_rotation_y(0.7);
+        let translation = Vec3::new(4.0, 2.0, -3.0);
+        let mut mesh = Mesh::from(Cuboid::new(19.0, 0.4, 8.0));
+        // Mesh vertices are retained by normal authored representation assets.
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap()
+                .to_vec(),
+        );
+        let handle = world.resource_mut::<Assets<Mesh>>().add(mesh);
+        let identity: OccurrenceIdentity = serde_json::from_value(json!({
+            "definition_id": "test-slab", "definition_version": 1, "overrides": {}
+        }))
+        .unwrap();
+        world.spawn((
+            ElementId(2),
+            identity,
+            Mesh3d(handle),
+            GlobalTransform::from(Transform {
+                translation,
+                rotation,
+                ..Default::default()
+            }),
+        ));
+        let bounds = occurrence_footprint_bounds(
+            &world,
+            ElementId(2),
+            GroupFrame {
+                translation,
+                rotation,
+            },
+        )
+        .unwrap();
+        assert!((bounds.max - bounds.min - Vec3::new(19.0, 0.4, 8.0)).length() < 0.0001);
     }
 
     #[test]

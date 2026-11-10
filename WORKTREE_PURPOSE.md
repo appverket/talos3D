@@ -2,8 +2,8 @@
 
 - agent: codex
 - created: 2026-11-10
-- branch: codex/outliner-selection-actions
-- task-id: TALOS-jidaywli
-- target base: origin/main
-- summary: Context-menu locking, sibling range selection and grouping in the Outliner.
+- branch: codex/linked-conforming-foundation
+- task-id: TALOS-ckxygjhm
+- target base: main
+- summary: Preserve oriented support footprint and authored seating datum for linked terrain planting
 - status: active
