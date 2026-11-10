@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-11-09
-- branch: codex/site-orbit-performance
-- task-id: TALOS-gqajkost
-- target base: main
-- summary: Profile and accelerate large-site orbit navigation.
-- status: awaiting-merge
+- created: 2026-11-10
+- branch: codex/outliner-selection-actions
+- task-id: TALOS-jidaywli
+- target base: origin/main
+- summary: Context-menu locking, sibling range selection and grouping in the Outliner.
+- status: active

@@ -73,8 +73,9 @@ Core alone does not supply Architecture's construction expertise.
 - Authored primitives, profiles, reusable Definitions and occurrences, evaluated
   bodies, editable geometry features and semantic assemblies/relations.
 - Shared selection, transforms, drafting, materials, lighting and viewport UI.
-- Persistent object/group locks in the Outliner: keep reference geometry visible
-  while excluding it from viewport selection, hover and tool picking.
+- Persistent object/group locks in the Outliner and selection context menu:
+  keep reference geometry visible while excluding viewport selection and picking.
+- Shift-click sibling ranges and **Group Selected** directly in the Outliner.
 - Commands, captured edit plans and history shared by interactive and API edits.
 - Local project persistence, recovery and reusable content libraries.
 - Capability registries for entities, tools, commands, vocabulary, validators,

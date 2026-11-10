@@ -78,7 +78,13 @@ clicks also leave face editing. Shift-click retains additive selection.
 
 Viewport selections reveal their Outliner row: containing branches expand and
 the panel scrolls to the selected object. Click an Outliner row to select that
-exact object. Ctrl/Cmd-click in the viewport selects the
+exact object. Shift-click another row under the same parent to select the
+inclusive sibling range, skipping locked entries and excluding descendants.
+Ctrl/Cmd-click toggles individual rows; Ctrl/Cmd+Shift-click adds a range.
+Right-click an already selected row to keep the multi-selection and choose
+**Group Selected**, or use the same button above the tree. Grouping is enabled
+for two or more editable objects under one parent and supports Undo/Redo.
+Ctrl/Cmd-click in the viewport selects the
 individual authored object through its containing groups. Generated Definition
 parts still select their owning occurrence.
 
@@ -241,6 +247,8 @@ hosted account; sharing/storage/account UI is supplied by the product adapter.
 ## Lock reference geometry
 
 Open **View → Outliner** and click **Lock** beside an object or group.
+You can also right-click a selection in the viewport or Outliner and choose
+**Lock Selected**. This locks the entire selection in one undoable operation.
 Locked objects remain visible, but viewport clicks, double-clicks, marquee
 selection, hover, snapping and tool-surface picks pass through them. Locking a
 group includes nested members and generated occurrence geometry. An existing

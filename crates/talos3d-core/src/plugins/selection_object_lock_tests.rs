@@ -20,6 +20,34 @@ fn with_locks(app: &mut App) {
 }
 
 #[test]
+fn object_locks_selected_command_locks_all_targets_in_one_undo_step() {
+    let (mut app, _) = native_selection_app();
+    with_locks(&mut app);
+    let group = crate::plugins::commands::find_entity_by_element_id(app.world_mut(), ElementId(30))
+        .unwrap();
+    let other = app.world_mut().spawn((ElementId(90), Selected)).id();
+    app.world_mut().entity_mut(group).insert(Selected);
+    crate::plugins::command_registry::execute_command(
+        app.world_mut(),
+        "view.lock_selected",
+        &serde_json::Value::Null,
+    )
+    .unwrap();
+    apply_pending_history_commands_for_test(app.world_mut());
+    assert_eq!(
+        app.world().resource::<ObjectLocks>().locked,
+        [ElementId(30), ElementId(90)].into()
+    );
+    assert!(app.world().get::<Selected>(group).is_none());
+    assert!(app.world().get::<Selected>(other).is_none());
+    app.world_mut()
+        .resource_mut::<PendingCommandQueue>()
+        .queue_undo();
+    apply_pending_history_commands_for_test(app.world_mut());
+    assert!(app.world().resource::<ObjectLocks>().locked.is_empty());
+}
+
+#[test]
 fn object_locks_native_click_passes_through_locked_group_and_undo_restores_picking() {
     use crate::plugins::modeling::primitives::BoxPrimitive;
     use bevy::input::ButtonState::{Pressed, Released};

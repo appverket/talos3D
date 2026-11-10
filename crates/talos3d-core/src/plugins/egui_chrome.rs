@@ -4613,6 +4613,7 @@ fn draw_viewport_context_menu(
                     item!("Definitions\u{2026}", "modeling.toggle_definitions_browser");
                     ui.separator();
                     item!("Zoom to Selection", "core.zoom_to_selection");
+                    item!("Lock Selected", "view.lock_selected");
                     ui.separator();
                     item!("Group", "modeling.group");
                     if selected_group_count == 1 {

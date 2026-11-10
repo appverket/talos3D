@@ -65,8 +65,29 @@ impl Plugin for ObjectLockPlugin {
                 default_shortcut: None, icon: None, hint: None, requires_selection: false,
                 show_in_menu: false, version: 1, activates_tool: None, capability_id: None,
             }, execute_set_object_locked)
+            .register_command(CommandDescriptor {
+                id: "view.lock_selected".into(),
+                label: "Lock Selected".into(),
+                description: "Lock the selected objects against viewport interaction. Unlock them from the Outliner.".into(),
+                category: CommandCategory::View,
+                parameters: None, default_shortcut: None, icon: None, hint: None,
+                requires_selection: true, show_in_menu: false, version: 1,
+                activates_tool: None, capability_id: None,
+            }, execute_lock_selected)
             .add_systems(PreUpdate, refresh_changed_locks);
     }
+}
+
+fn execute_lock_selected(
+    world: &mut World,
+    _: &serde_json::Value,
+) -> Result<CommandResult, String> {
+    let ids: BTreeSet<_> = world
+        .query_filtered::<(Option<&ElementId>, Option<&GeneratedOccurrencePart>), With<Selected>>()
+        .iter(world)
+        .filter_map(|(id, part)| part.map(|part| part.owner).or(id.copied()))
+        .collect();
+    execute_set_object_locked(world, &serde_json::json!({"element_ids":ids,"locked":true}))
 }
 
 fn refresh_changed_locks(

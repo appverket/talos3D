@@ -51,6 +51,10 @@ const OUTLINER_INDENT_PER_DEPTH: f32 = 14.0;
 const OUTLINER_TOGGLE_WIDTH: f32 = 16.0;
 const OUTLINER_ROW_HEIGHT: f32 = 22.0;
 
+#[path = "outliner_interaction.rs"]
+mod interaction;
+use interaction::{can_group_selection, draw_row_context_menu, row_selection_action};
+
 /// What kind of model element a tree row represents. Used only for the row
 /// glyph/styling — selection and traversal do not depend on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,13 +136,17 @@ pub struct OutlinerWindowState {
     selection_from_panel: bool,
     /// A viewport click also reveals an unchanged selection after manual folding.
     reveal_requested: bool,
+    /// Stable row identity; a Shift range never crosses this row's parent.
+    selection_anchor: Option<u64>,
 }
 
 /// A pending selection change produced by a click on an outliner row.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct OutlinerSelectAction {
     pub target: Entity,
     pub additive: bool,
+    /// Inclusive sibling range. Additive ranges add rather than toggle members.
+    pub range: Option<Vec<Entity>>,
 }
 
 pub struct OutlinerPlugin;
@@ -225,6 +233,7 @@ pub fn build_outliner_tree(world: &mut World) {
             state.last_selection.clear();
             state.pending_reveal = None;
             state.selection_from_panel = false;
+            state.selection_anchor = None;
         }
         if let Some(mut tree) = world.get_resource_mut::<OutlinerTree>() {
             tree.clear();
@@ -365,6 +374,7 @@ fn reveal_selection_if_changed(world: &mut World, nodes: &[OutlinerNode], select
     if state.last_selection == selected && !requested {
         return;
     }
+    state.selection_anchor = None;
     let previous: HashSet<u64> = state.last_selection.iter().copied().collect();
     let focus = selected
         .iter()
@@ -732,7 +742,20 @@ pub fn draw_outliner_window(
                     state.collapsed.clear();
                 }
             });
-            ui.small("Checked = shown · Ctrl/Cmd-click picks an individual object");
+            let can_group = can_group_selection(tree, selected);
+            if ui
+                .add_enabled(can_group, egui::Button::new("Group Selected").small())
+                .on_disabled_hover_text("Select two or more editable objects under the same parent")
+                .clicked()
+            {
+                queue_command_invocation_resource(
+                    pending_commands,
+                    "modeling.group".to_string(),
+                    serde_json::json!({}),
+                );
+            }
+            ui.small("Shift-click: sibling range · Ctrl/Cmd-click: toggle");
+            ui.small("Checked = shown");
             ui.separator();
             let visible_rows = collect_visible_outliner_rows(tree, state);
             // A selection made outside the panel is only communicated if the row
@@ -905,58 +928,16 @@ fn render_outliner_row(
                 text = text.color(ui.visuals().weak_text_color());
             }
             let response = ui.selectable_label(is_selected, text);
-            if response.clicked() && node.select_entity.is_some() {
-                let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
-                *action = Some(OutlinerSelectAction {
-                    target: node.select_entity.expect("checked selectable target"),
-                    additive,
-                });
+            if response.clicked() {
+                *action = row_selection_action(tree, state, idx, ui.input(|i| i.modifiers));
             }
-            if response.clicked_by(egui::PointerButton::Secondary) && node.select_entity.is_some() {
-                *action = Some(OutlinerSelectAction {
-                    target: node.select_entity.expect("checked selectable target"),
-                    additive: false,
-                });
+            // A context click on an existing selection must preserve the range.
+            if response.clicked_by(egui::PointerButton::Secondary) && !is_selected {
+                *action = row_selection_action(tree, state, idx, egui::Modifiers::NONE);
             }
-            if matches!(node.kind, OutlinerKind::Group) {
-                response.context_menu(|ui| {
-                    let (command_id, fallback_label) = if node.is_linked_model {
-                        ("modeling.open_linked_model", "Open Linked Model")
-                    } else {
-                        (
-                            "modeling.create_linked_model_from_selection",
-                            "Create Linked Model",
-                        )
-                    };
-                    let label = command_registry
-                        .get(command_id)
-                        .map(|descriptor| descriptor.label.as_str())
-                        .unwrap_or(fallback_label);
-                    if ui.button(label).clicked() {
-                        queue_command_invocation_resource(
-                            pending_commands,
-                            command_id.to_string(),
-                            serde_json::json!({ "group_id": node.node_id }),
-                        );
-                        ui.close();
-                    }
-                    if node.is_linked_model {
-                        let command_id = "modeling.refresh_linked_models";
-                        let label = command_registry
-                            .get(command_id)
-                            .map(|descriptor| descriptor.label.as_str())
-                            .unwrap_or("Refresh Linked Model");
-                        if ui.button(label).clicked() {
-                            queue_command_invocation_resource(
-                                pending_commands,
-                                command_id.to_string(),
-                                serde_json::json!({ "group_ids": [node.node_id], "force": true }),
-                            );
-                            ui.close();
-                        }
-                    }
-                });
-            }
+            response.context_menu(|ui| {
+                draw_row_context_menu(ui, node, tree, selected, pending_commands, command_registry);
+            });
         });
     });
 }
@@ -1016,7 +997,13 @@ pub fn apply_outliner_selection(
     current: &HashSet<Entity>,
     action: OutlinerSelectAction,
 ) {
-    let OutlinerSelectAction { target, additive } = action;
+    let OutlinerSelectAction {
+        target,
+        additive,
+        range,
+    } = action;
+    let toggle = additive && range.is_none();
+    let targets: HashSet<Entity> = range.unwrap_or_else(|| vec![target]).into_iter().collect();
     commands.queue(move |world: &mut World| {
         if let Some(part) = world.get::<GeneratedOccurrencePart>(target).cloned() {
             let already_entered = world
@@ -1033,24 +1020,27 @@ pub fn apply_outliner_selection(
             }
         }
     });
-    if additive {
-        if current.contains(&target) {
+    if !additive {
+        for entity in current {
+            if !targets.contains(entity) {
+                commands.entity(*entity).remove::<Selected>();
+            }
+        }
+    }
+    for target in targets {
+        if toggle && current.contains(&target) {
             commands.entity(target).remove::<Selected>();
         } else {
             commands.entity(target).insert(Selected);
         }
-    } else {
-        for entity in current {
-            if *entity != target {
-                commands.entity(*entity).remove::<Selected>();
-            }
-        }
-        commands.entity(target).insert(Selected);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    mod interaction_tests {
+        include!("outliner_interaction_tests.rs");
+    }
     use super::*;
     use crate::plugins::modeling::{
         assembly::SemanticRelation,
@@ -1156,6 +1146,7 @@ mod tests {
             OutlinerSelectAction {
                 target: generated,
                 additive: false,
+                range: None,
             },
         );
         queue.apply(&mut world);
