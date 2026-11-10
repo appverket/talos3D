@@ -11,6 +11,9 @@ use bevy::{
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 
+mod textures;
+use crate::plugins::materials::{MaterialAssignment, MaterialHandleCache, MaterialRegistry};
+use textures::{Images, Maps, Surface};
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
 enum Layout {
@@ -18,10 +21,11 @@ enum Layout {
     FlatTriangles,
     ShadedTriangles,
 }
-type Batches = BTreeMap<([u32; 6], Layout), Batch>;
+type Batches = BTreeMap<([u32; 6], Maps, Layout), Batch>;
 
 #[derive(Default)]
 struct Batch {
+    uvs: Vec<[f32; 2]>,
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     indices: Vec<u32>,
@@ -29,7 +33,7 @@ struct Batch {
 
 /// Publish all non-hidden authored geometry, including parts outside the camera
 /// frustum. Helpers without an authored ancestor (grid, grips, previews) stay out.
-/// Texture images are intentionally not published; PBR base colors are retained.
+/// Material images and their effective UVs travel inside the binary artifact.
 pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
     if world
         .get_resource::<crate::plugins::history::PendingCommandQueue>()
@@ -71,6 +75,14 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
     let materials = world.get_resource::<Assets<StandardMaterial>>();
     let mut batches = Batches::new();
     let mut binary_size = 0usize;
+    let mut images = Images::default();
+    let reverse: std::collections::HashMap<_, _> = world
+        .get_resource::<MaterialHandleCache>()
+        .into_iter()
+        .flat_map(|c| c.0.iter())
+        .map(|(k, h)| (h.id(), k.split('|').next().unwrap()))
+        .collect();
+    let registry = world.get_resource::<MaterialRegistry>();
     for (entity, handle, transform, material) in entries {
         let mut current = Some(entity);
         let mut authored = false;
@@ -118,17 +130,41 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
         let mat = material
             .as_ref()
             .and_then(|h| materials.and_then(|a| a.get(h)));
-        let color = mat
-            .map(|m| m.base_color.to_linear().to_f32_array())
-            .unwrap_or([0.7, 0.7, 0.7, 1.0]);
-        let key = [
-            color[0].to_bits(),
-            color[1].to_bits(),
-            color[2].to_bits(),
-            color[3].to_bits(),
-            mat.map_or(0.8, |m| m.perceptual_roughness).to_bits(),
-            mat.map_or(0.0, |m| m.metallic).to_bits(),
-        ];
+        let assigned = world.get::<MaterialAssignment>(entity);
+        let assigned_id = assigned.and_then(|a| {
+            a.render_material_id(world.get_resource::<crate::curation::MaterialSpecRegistry>())
+        });
+        let cached_id = material
+            .as_ref()
+            .and_then(|h| reverse.get(&h.id()).copied());
+        let def = assigned_id
+            .as_deref()
+            .or(cached_id)
+            .and_then(|id| registry.and_then(|r| r.get(id)));
+        let mut surf = Surface::new(
+            world,
+            mat,
+            def,
+            assigned.and_then(|a| a.texture_mapping_override()),
+            &mut images,
+        )?;
+        if assigned_id.is_none() && cached_id.is_some() {
+            if let Some(m) = mat {
+                surf.uv = m.uv_transform;
+            }
+        }
+        let [r, g, b, a] = surf.color;
+        let key = [r, g, b, a, surf.rough, surf.metal].map(f32::to_bits);
+        let textured = surf.maps.0.iter().any(Option::is_some);
+        let uv = if textured {
+            match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+                Some(VertexAttributeValues::Float32x2(v)) if v.len() == positions.len() => Some(v),
+                _ => return Err("Textured surface is missing its UV coordinates".into()),
+            }
+        } else {
+            None
+        };
+        let mapped = |v: [f32; 2]| surf.uv.transform_point2(Vec2::from_array(v)).to_array();
         let affine = transform.affine();
         let determinant = affine.matrix3.determinant();
         if !determinant.is_finite() || determinant.abs() < 1e-12 {
@@ -175,7 +211,10 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
                     Layout::ShadedTriangles
                 };
                 reserve_bytes(&mut binary_size, if flat { 36 } else { 72 })?;
-                let batch = batches.entry((key, layout)).or_default();
+                let batch = batches.entry((key, surf.maps, layout)).or_default();
+                if let Some(uv) = uv {
+                    batch.uvs.extend(corners.map(|i| mapped(uv[i])));
+                }
                 batch.positions.extend(points.map(|v| v.to_array()));
                 if !flat {
                     batch.normals.extend(shading.map(|v| v.to_array()));
@@ -190,7 +229,12 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
                 .saturating_mul(24)
                 .saturating_add(local_indices.len().saturating_mul(4)),
         )?;
-        let batch = batches.entry((key, Layout::Indexed)).or_default();
+        let batch = batches
+            .entry((key, surf.maps, Layout::Indexed))
+            .or_default();
+        if let Some(uv) = uv {
+            batch.uvs.extend(uv.iter().copied().map(mapped));
+        }
         let base = batch.positions.len() as u32;
         for (i, p) in positions.iter().enumerate() {
             let p = affine.transform_point3(Vec3::from_array(*p));
@@ -224,7 +268,7 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
     if batches.is_empty() {
         return Err("The model has no visible 3D geometry to share".into());
     }
-    encode(batches)
+    encode(batches, images)
 }
 /// Area-weighted normals for a mesh without authored shading. Keep shared
 /// vertices smooth even if this mesh is encoded as unindexed triangles.
@@ -248,7 +292,43 @@ fn reserve_bytes(total: &mut usize, bytes: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn encode(batches: Batches) -> Result<Vec<u8>, String> {
+/// Index identical complete corners only when the result uses fewer bytes.
+fn compact_triangles(b: &mut Batch) {
+    if !b.indices.is_empty() || b.positions.len() < 12 {
+        return;
+    }
+    let mut seen = std::collections::HashMap::new();
+    let mut indices = Vec::with_capacity(b.positions.len());
+    let mut keep = Vec::new();
+    for (i, p) in b.positions.iter().enumerate() {
+        let key = (
+            p.map(f32::to_bits),
+            b.normals.get(i).map(|n| n.map(f32::to_bits)),
+            b.uvs.get(i).map(|v| v.map(f32::to_bits)),
+        );
+        let index = *seen.entry(key).or_insert_with(|| {
+            let j = keep.len() as u32;
+            keep.push(i);
+            j
+        });
+        indices.push(index);
+    }
+    let stride =
+        12 + if b.normals.is_empty() { 0 } else { 12 } + if b.uvs.is_empty() { 0 } else { 8 };
+    if keep.len() * stride + indices.len() * 4 >= b.positions.len() * stride {
+        return;
+    }
+    b.positions = keep.iter().map(|&i| b.positions[i]).collect();
+    if !b.normals.is_empty() {
+        b.normals = keep.iter().map(|&i| b.normals[i]).collect()
+    }
+    if !b.uvs.is_empty() {
+        b.uvs = keep.iter().map(|&i| b.uvs[i]).collect()
+    }
+    b.indices = indices;
+}
+
+fn encode(batches: Batches, images: Images) -> Result<Vec<u8>, String> {
     let (mut bin, mut views, mut accessors, mut materials, mut primitives) = (
         Vec::new(),
         Vec::<Value>::new(),
@@ -278,7 +358,8 @@ fn encode(batches: Batches) -> Result<Vec<u8>, String> {
         accessors.push(a);
         id
     }
-    for ((key, _), mut batch) in batches {
+    for ((key, maps, _), mut batch) in batches {
+        compact_triangles(&mut batch);
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);
         for p in &batch.positions {
@@ -305,6 +386,24 @@ fn encode(batches: Batches) -> Result<Vec<u8>, String> {
             Some((min.to_array(), max.to_array())),
         );
         let mut primitive = json!({"attributes":{"POSITION":pos},"mode":4});
+        if !batch.uvs.is_empty() {
+            let bytes = batch
+                .uvs
+                .iter()
+                .flatten()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>();
+            primitive["attributes"]["TEXCOORD_0"] = json!(attribute(
+                &mut bin,
+                &mut views,
+                &mut accessors,
+                &bytes,
+                batch.uvs.len(),
+                5126,
+                "VEC2",
+                None
+            ));
+        }
         if !batch.normals.is_empty() {
             primitive["attributes"]["NORMAL"] = json!(attribute(
                 &mut bin,
@@ -336,10 +435,16 @@ fn encode(batches: Batches) -> Result<Vec<u8>, String> {
             .collect::<Vec<_>>();
         let mat = materials.len();
         materials.push(json!({"pbrMetallicRoughness":{"baseColorFactor":color,"roughnessFactor":f32::from_bits(key[4]),"metallicFactor":f32::from_bits(key[5])},"alphaMode":if color[3]<1.0 {"BLEND"} else {"OPAQUE"},"doubleSided":true}));
+        maps.apply(&mut materials[mat]);
         primitive["material"] = json!(mat);
         primitives.push(primitive);
     }
-    let doc = json!({"asset":{"version":"2.0","generator":"Talos3D"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":primitives}],"materials":materials,"accessors":accessors,"bufferViews":views,"buffers":[{"byteLength":bin.len()}]});
+    let (image_docs, texture_docs) = images.finish(&mut bin, &mut views);
+    let mut doc = json!({"asset":{"version":"2.0","generator":"Talos3D"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":primitives}],"materials":materials,"accessors":accessors,"bufferViews":views,"buffers":[{"byteLength":bin.len()}]});
+    if !image_docs.is_empty() {
+        doc["images"] = json!(image_docs);
+        doc["textures"] = json!(texture_docs);
+    }
     let mut json = serde_json::to_vec(&doc).map_err(|e| e.to_string())?;
     while !json.len().is_multiple_of(4) {
         json.push(b' ');
@@ -366,6 +471,68 @@ fn encode(batches: Batches) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn export_embeds_authored_images_and_mapped_uvs_even_if_renderer_has_a_fallback() {
+        use crate::plugins::materials::*;
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let mut w = World::new();
+        w.init_resource::<Assets<Mesh>>();
+        w.init_resource::<MaterialRegistry>();
+        w.init_resource::<TextureRegistry>();
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut buffer, image::ImageFormat::Png)
+            .unwrap();
+        let mut def = MaterialDef::new("private source");
+        let im = TextureRef::Embedded {
+            data: STANDARD.encode(buffer.get_ref()),
+            mime: "image/png".into(),
+        };
+        def.base_color_texture = Some(im.clone());
+        def.emissive_texture = Some(im);
+        def.uv_offset = [0.25, 0.5];
+        normalize_material_textures(&mut def, &mut w.resource_mut::<TextureRegistry>());
+        let assignment = MaterialAssignment::new(def.id.clone());
+        w.resource_mut::<MaterialRegistry>().upsert(def);
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, Default::default());
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]],
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0., 0.], [1., 0.], [0., 1.]]);
+        let handle = w.resource_mut::<Assets<Mesh>>().add(mesh);
+        w.spawn((
+            ElementId(19),
+            assignment,
+            Mesh3d(handle),
+            GlobalTransform::IDENTITY,
+            InheritedVisibility::VISIBLE,
+        ));
+        let bytes = capture_view_glb(&mut w).unwrap();
+        let n = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        let doc: Value = serde_json::from_slice(&bytes[20..20 + n]).unwrap();
+        let bin = &bytes[28 + n..];
+        assert_eq!(doc["images"].as_array().unwrap().len(), 1);
+        let view = |i: &Value| &doc["bufferViews"][i.as_u64().unwrap() as usize];
+        let img = view(&doc["images"][0]["bufferView"]);
+        let off = img["byteOffset"].as_u64().unwrap() as usize;
+        assert_eq!(&bin[off..off + buffer.get_ref().len()], buffer.get_ref());
+        assert_eq!(
+            doc["materials"][0]["emissiveTexture"]["index"],
+            doc["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["index"]
+        );
+        let uv = &doc["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"];
+        let offset = view(&doc["accessors"][uv.as_u64().unwrap() as usize]["bufferView"])
+            ["byteOffset"]
+            .as_u64()
+            .unwrap() as usize;
+        assert_eq!(
+            f32::from_le_bytes(bin[offset..offset + 4].try_into().unwrap()),
+            0.25
+        );
+        w.remove_resource::<TextureRegistry>();
+        assert!(capture_view_glb(&mut w).unwrap_err().contains("missing"));
+    }
     #[test]
     fn detached_occurrence_retains_visible_triangles_and_explicit_shading_only_where_needed() {
         use crate::plugins::{layers::DocumentVisibility, modeling::definition::DefinitionId};

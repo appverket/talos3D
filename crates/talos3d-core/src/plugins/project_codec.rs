@@ -47,7 +47,39 @@ pub fn encode<T: Serialize>(project: &T) -> Result<Vec<u8>, String> {
     encode_value(serde_json::to_value(project).map_err(|e| e.to_string())?).map(|v| v.0)
 }
 
-pub fn encode_value(mut root: Value) -> Result<(Vec<u8>, StorageStatistics), String> {
+pub fn encode_value(root: Value) -> Result<(Vec<u8>, StorageStatistics), String> {
+    encode_value_mode(root, false)
+}
+
+/// Same native envelope and decoder. Compact only losslessly representable floats:
+/// JSON integers and doubles that cannot round-trip through f32 are untouched.
+pub fn encode_for_transfer(root: Value) -> Result<Vec<u8>, String> {
+    encode_value_mode(root, true).map(|v| v.0)
+}
+
+struct Exact<'a>(&'a Value);
+impl Serialize for Exact<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Value::Number(n) if n.is_f64() => {
+                let f = n.as_f64().unwrap();
+                let narrow = f as f32;
+                if (narrow as f64).to_bits() == f.to_bits() {
+                    s.serialize_f32(narrow)
+                } else {
+                    s.serialize_f64(f)
+                }
+            }
+            Value::Array(a) => s.collect_seq(a.iter().map(Exact)),
+            Value::Object(o) => s.collect_map(o.iter().map(|(k, v)| (k, Exact(v)))),
+            v => v.serialize(s),
+        }
+    }
+}
+fn encode_value_mode(
+    mut root: Value,
+    transfer: bool,
+) -> Result<(Vec<u8>, StorageStatistics), String> {
     if !root.is_object() {
         return Err("A native project must be a JSON object".into());
     }
@@ -64,12 +96,34 @@ pub fn encode_value(mut root: Value) -> Result<(Vec<u8>, StorageStatistics), Str
         &mut packed.references,
         &mut HashMap::new(),
     )?;
-    let payload = rmp_serde::to_vec_named(&packed).map_err(|e| e.to_string())?;
+    let payload = if transfer {
+        #[derive(Serialize)]
+        struct Transfer<'a> {
+            root: Exact<'a>,
+            buffers: Vec<Exact<'a>>,
+            references: &'a [BufferReference],
+        }
+        rmp_serde::to_vec_named(&Transfer {
+            root: Exact(&packed.root),
+            buffers: packed.buffers.iter().map(Exact).collect(),
+            references: &packed.references,
+        })
+    } else {
+        rmp_serde::to_vec_named(&packed)
+    }
+    .map_err(|e| e.to_string())?;
     if payload.len() as u64 > MAX_PACKED_BYTES {
         return Err("Project exceeds the compact format's 8 GiB unpacked limit".into());
     }
     buffer_uses(&packed, payload.len())?;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    let mut encoder = GzEncoder::new(
+        Vec::new(),
+        if transfer {
+            Compression::new(8)
+        } else {
+            Compression::fast()
+        },
+    );
     encoder.write_all(&payload).map_err(|e| e.to_string())?;
     let compressed = encoder.finish().map_err(|e| e.to_string())?;
     let bytes = serde_json::to_vec(&(
@@ -385,4 +439,13 @@ mod tests {
         corrupted[4] = json!(STANDARD.encode(compressed));
         assert!(decode::<Value>(&serde_json::to_vec(&corrupted).unwrap()).is_err());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn transfer_round_trips_precision_and_opaque_components() {
+    let d = serde_json::json!({"native":[0.0,-0.0,1.25,0.123456789012345,9007199254740993_u64],"unknown":{"points":vec![[1.125,0.123456789012345];90]}});
+    let restored: Value = decode(&encode_for_transfer(d.clone()).unwrap()).unwrap();
+    assert_eq!(d, restored);
+    assert!(restored["native"][1].as_f64().unwrap().is_sign_negative());
 }

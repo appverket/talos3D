@@ -41,7 +41,8 @@ fn shared_tool_definitions(world: &World) -> Vec<Value> {
 fn tool_definitions() -> Vec<Value> {
     vec![
         json!({"name":"project_view_capture","description":"Capture a render-only GLB view and its native snapshot at one document revision. Does not publish or acknowledge storage.","inputSchema":object_schema([])}),
-        json!({"name":"project_capture","description":"Capture the complete native project including Definition libraries, materials and BIM sidecars. Does not acknowledge storage.","inputSchema":object_schema([])}),
+        json!({"name":"project_pack","description":"Pack native project bytes for storage without opening or modifying any document.","inputSchema":{"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}}),
+        json!({"name":"project_capture","description":"Capture the complete native project including Definition libraries, materials and BIM sidecars. Does not acknowledge storage.","inputSchema":{"type":"object","properties":{"for_storage":{"type":"boolean"}}}}),
         json!({"name":"project_open","description":"Open complete native project bytes using the normal persistence loader.","inputSchema":{"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}}),
         json!({"name":"project_saved","description":"Acknowledge a durably stored snapshot; newer edits remain dirty.","inputSchema":{"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}}),
         json!({"name":"project_library_install","description":"Install a revision-pinned library without replacing placed components; undoable.","inputSchema":{"type":"object","properties":{"json":{"type":"string"},"revision":{"type":"string"}},"required":["json","revision"]}}),
@@ -408,13 +409,29 @@ fn dispatch_tool(world: &mut World, tool_name: &str, args: Value) -> Result<Valu
         "project_view_capture" => {
             use base64::Engine;
             let bytes = crate::plugins::persistence::capture_project_bytes(world)?;
+            let bytes = crate::plugins::persistence::fit_project_transfer(bytes, 64 * 1024 * 1024)?;
             let glb = crate::plugins::model_export::glb::capture_view_glb(world)?;
             Ok(
                 json!({"json":String::from_utf8(bytes).map_err(|e|e.to_string())?,"glb_base64":base64::engine::general_purpose::STANDARD.encode(glb),"revision":world.resource::<crate::plugins::history::History>().revision_token()}),
             )
         }
+        "project_pack" => {
+            let bytes = args
+                .get("json")
+                .and_then(Value::as_str)
+                .ok_or("native project JSON required")?
+                .as_bytes()
+                .to_vec();
+            let bytes = crate::plugins::persistence::fit_project_transfer(bytes, 64 * 1024 * 1024)?;
+            Ok(json!({"json":String::from_utf8(bytes).map_err(|e|e.to_string())?}))
+        }
         "project_capture" => {
             let bytes = crate::plugins::persistence::capture_project_bytes(world)?;
+            let bytes = if args.get("for_storage").and_then(Value::as_bool) == Some(true) {
+                crate::plugins::persistence::fit_project_transfer(bytes, 64 * 1024 * 1024)?
+            } else {
+                bytes
+            };
             Ok(json!({"json":String::from_utf8(bytes).map_err(|e|e.to_string())?}))
         }
         "project_open" | "project_saved" => {
