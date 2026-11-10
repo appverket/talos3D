@@ -103,19 +103,18 @@ pub(super) fn draw_row_context_menu(
             );
             ui.close();
         }
-    } else if node.effectively_locked {
-        if ui
+    } else if node.effectively_locked
+        && ui
             .add_enabled(node.explicitly_locked, egui::Button::new("Unlock"))
             .on_disabled_hover_text("Unlock the parent group first")
             .clicked()
-        {
-            queue_command_invocation_resource(
-                pending,
-                "view.set_object_locked".to_string(),
-                serde_json::json!({"element_ids":[node.node_id],"locked":false}),
-            );
-            ui.close();
-        }
+    {
+        queue_command_invocation_resource(
+            pending,
+            "view.set_object_locked".to_string(),
+            serde_json::json!({"element_ids":[node.node_id],"locked":false}),
+        );
+        ui.close();
     }
     if node.kind != OutlinerKind::Group || node.effectively_locked {
         return;
