@@ -86,6 +86,15 @@ are navigated structurally, while raw imported meshes and composite results
 require explicit **Edit Faces**. The affordance is a cheap component check and
 must not copy geometry during selection.
 
+Core wraps registered entity factories with shared material capture and restore.
+Capabilities without native material fields receive the versioned
+`core.material_assignment.v1` snapshot metadata automatically. Use factories from
+`CapabilityRegistry` for persistence, copying and linked imports. Existing native
+material fields remain readable; occurrence overrides retain Definition inheritance.
+Snapshot transforms and history retain the shared metadata. User-facing material
+edits use the common validated history command; rendered components alone are
+not a successful authored edit.
+
 ### Command registration
 
 - command id

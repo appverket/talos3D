@@ -1,9 +1,1 @@
-# Worktree purpose
-
-- agent: codex
-- created: 2026-11-10
-- branch: codex/linked-conforming-foundation
-- task-id: TALOS-ckxygjhm
-- target base: main
-- summary: Preserve oriented support footprint and authored seating datum for linked terrain planting
-- status: active
+TALOS-lzoqxdqd: Preserve authored material assignments across persistence, history, copies and linked instances. Owner: codex@pollux. Branch: codex/lzoqxdqd-material-persistence. No private model fixtures in Git.

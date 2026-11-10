@@ -1496,18 +1496,20 @@ fn handle_apply_material(world: &mut World, req: ApplyMaterialRequest) -> Result
     {
         return Err(format!("Material '{}' not found", req.material_id));
     }
-    let mut applied = Vec::new();
-    for &eid in &req.element_ids {
-        let entity = find_entity_by_element_id(world, ElementId(eid))
-            .ok_or_else(|| format!("Entity {eid} not found"))?;
-        crate::plugins::materials::set_authored_material_assignment(
-            world,
-            entity,
-            Some(MaterialAssignment::new(req.material_id.clone())),
-        );
-        applied.push(eid);
-    }
-    Ok(applied)
+    let updates = req
+        .element_ids
+        .iter()
+        .map(|&eid| {
+            let entity = find_entity_by_element_id(world, ElementId(eid))
+                .ok_or_else(|| format!("Entity {eid} not found"))?;
+            Ok((
+                entity,
+                Some(MaterialAssignment::new(req.material_id.clone())),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    crate::plugins::materials::edit_material_assignments(world, updates)?;
+    Ok(req.element_ids)
 }
 
 #[cfg(feature = "model-api")]
@@ -1649,14 +1651,16 @@ fn assign_material_texture_ref(
 
 #[cfg(feature = "model-api")]
 fn handle_remove_material(world: &mut World, element_ids: Vec<u64>) -> Result<Vec<u64>, String> {
-    let mut removed = Vec::new();
-    for eid in element_ids {
-        let entity = find_entity_by_element_id(world, ElementId(eid))
-            .ok_or_else(|| format!("Entity {eid} not found"))?;
-        crate::plugins::materials::set_authored_material_assignment(world, entity, None);
-        removed.push(eid);
-    }
-    Ok(removed)
+    let updates = element_ids
+        .iter()
+        .map(|&eid| {
+            let entity = find_entity_by_element_id(world, ElementId(eid))
+                .ok_or_else(|| format!("Entity {eid} not found"))?;
+            Ok((entity, None))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    crate::plugins::materials::edit_material_assignments(world, updates)?;
+    Ok(element_ids)
 }
 
 #[cfg(feature = "model-api")]
@@ -1679,21 +1683,21 @@ fn handle_set_material_assignment(
 ) -> Result<Vec<EntityMaterialAssignmentInfo>, String> {
     crate::plugins::materials::validate_material_assignment(world, &request.assignment)?;
 
-    let mut updated = Vec::new();
-    for element_id in request.element_ids {
-        let entity = find_entity_by_element_id(world, ElementId(element_id))
-            .ok_or_else(|| format!("Entity {element_id} not found"))?;
-        crate::plugins::materials::set_authored_material_assignment(
-            world,
-            entity,
-            Some(request.assignment.clone()),
-        );
-        updated.push(EntityMaterialAssignmentInfo {
-            element_id,
-            assignment: Some(request.assignment.clone()),
-        });
-    }
-    Ok(updated)
+    let updates = request
+        .element_ids
+        .iter()
+        .map(|&element_id| {
+            let entity = find_entity_by_element_id(world, ElementId(element_id))
+                .ok_or_else(|| format!("Entity {element_id} not found"))?;
+            Ok((entity, Some(request.assignment.clone())))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    crate::plugins::materials::edit_material_assignments(world, updates)?;
+    request
+        .element_ids
+        .into_iter()
+        .map(|id| handle_get_material_assignment(world, id))
+        .collect()
 }
 
 #[cfg(feature = "model-api")]
@@ -1737,11 +1741,10 @@ fn handle_update_texture_mapping(
                 .ok_or_else(|| format!("Entity {element_id} has no material assignment"))?;
             assignment.set_texture_mapping_override(mapping)?;
             crate::plugins::materials::validate_material_assignment(world, &assignment)?;
-            crate::plugins::materials::set_authored_material_assignment(
+            crate::plugins::materials::edit_material_assignments(
                 world,
-                entity,
-                Some(assignment),
-            );
+                vec![(entity, Some(assignment))],
+            )?;
             element_texture_mapping_info(world, element_id)
         }
     }
@@ -1770,11 +1773,10 @@ fn handle_reset_texture_mapping(
                 .cloned()
                 .ok_or_else(|| format!("Entity {element_id} has no material assignment"))?;
             assignment.clear_texture_mapping_override();
-            crate::plugins::materials::set_authored_material_assignment(
+            crate::plugins::materials::edit_material_assignments(
                 world,
-                entity,
-                Some(assignment),
-            );
+                vec![(entity, Some(assignment))],
+            )?;
             element_texture_mapping_info(world, element_id)
         }
     }

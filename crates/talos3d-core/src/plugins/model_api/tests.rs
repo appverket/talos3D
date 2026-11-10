@@ -9228,7 +9228,14 @@ fn assembly_pattern_draft_round_trip_with_gap_and_source_refs() {
 #[test]
 fn material_assignment_round_trips_layer_sets() {
     let mut world = init_model_api_test_world();
-    world.spawn((ElementId(42),));
+    world.spawn((
+        ElementId(42),
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+    ));
     world
         .resource_mut::<crate::plugins::materials::MaterialRegistry>()
         .upsert(MaterialDef {
@@ -9278,7 +9285,14 @@ fn material_assignment_round_trips_layer_sets() {
 #[test]
 fn assign_material_uses_existing_registry_material() {
     let mut world = init_model_api_test_world();
-    world.spawn((ElementId(42),));
+    world.spawn((
+        ElementId(42),
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+    ));
     world
         .resource_mut::<crate::plugins::materials::MaterialRegistry>()
         .upsert(MaterialDef {
@@ -9318,7 +9332,14 @@ fn assign_material_uses_existing_registry_material() {
 #[test]
 fn assign_material_can_create_color_material() {
     let mut world = init_model_api_test_world();
-    world.spawn((ElementId(42),));
+    world.spawn((
+        ElementId(42),
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+    ));
 
     let assigned = handle_assign_material(
         &mut world,
@@ -9357,7 +9378,14 @@ fn assign_material_can_create_color_material() {
 #[test]
 fn assign_material_can_create_asset_textured_material() {
     let mut world = init_model_api_test_world();
-    world.spawn((ElementId(42),));
+    world.spawn((
+        ElementId(42),
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+    ));
 
     let assigned = handle_assign_material(
         &mut world,
@@ -9483,7 +9511,15 @@ fn texture_mapping_tools_update_assignment_override() {
             name: "Project Cedar".to_string(),
             ..Default::default()
         });
-    world.spawn((ElementId(42), MaterialAssignment::new("project.cedar")));
+    world.spawn((
+        ElementId(42),
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+        MaterialAssignment::new("project.cedar"),
+    ));
 
     let updated = handle_update_texture_mapping(
         &mut world,
@@ -15132,4 +15168,60 @@ fn capability_face_refs_are_agent_discoverable_and_selectable() {
             vec![listed[0].reference.clone()]
         );
     }
+}
+
+#[test]
+fn mcp_material_batch_is_atomic_and_undoable() {
+    let mut world = init_model_api_test_world();
+    let entity = world
+        .spawn((
+            ElementId(42),
+            BoxPrimitive {
+                centre: Vec3::ZERO,
+                half_extents: Vec3::ONE,
+            },
+            ShapeRotation::default(),
+        ))
+        .id();
+    world.spawn(ElementId(43)); // An id alone cannot be saved as an authored entity.
+    world
+        .resource_mut::<MaterialRegistry>()
+        .upsert(MaterialDef {
+            id: "ground".into(),
+            ..Default::default()
+        });
+    world.resource_mut::<History>().mark_save_point();
+    for ids in [vec![42, 999], vec![42, 43], vec![42, 42]] {
+        assert!(handle_apply_material(
+            &mut world,
+            ApplyMaterialRequest {
+                element_ids: ids,
+                material_id: "ground".into()
+            }
+        )
+        .is_err());
+        assert!(world.get::<MaterialAssignment>(entity).is_none());
+        assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+        assert!(!world.resource::<DocumentState>().dirty);
+    }
+    handle_apply_material(
+        &mut world,
+        ApplyMaterialRequest {
+            element_ids: vec![42],
+            material_id: "ground".into(),
+        },
+    )
+    .unwrap();
+    assert!(world.resource::<DocumentState>().dirty);
+    assert_eq!(world.resource::<History>().undo_stack_len(), 1);
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    apply_pending_history_commands(&mut world);
+    assert!(world.get::<MaterialAssignment>(entity).is_none());
+    assert!(!world.resource::<DocumentState>().dirty);
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    apply_pending_history_commands(&mut world);
+    assert_eq!(
+        world.get::<MaterialAssignment>(entity),
+        Some(&MaterialAssignment::new("ground"))
+    );
 }

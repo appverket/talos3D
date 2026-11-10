@@ -1402,6 +1402,101 @@ pub(crate) fn set_authored_material_assignment(
     }
 }
 
+/// A material edit stores only bindings, never copies or rebuilds geometry.
+/// UI and MCP use the same validated, atomic batch and history command.
+struct MaterialAssignmentCommand {
+    changes: Vec<(
+        crate::plugins::identity::ElementId,
+        Option<MaterialAssignment>,
+        Option<MaterialAssignment>,
+    )>,
+}
+
+impl crate::plugins::history::EditorCommand for MaterialAssignmentCommand {
+    fn label(&self) -> &'static str {
+        "Assign material"
+    }
+    fn apply(&mut self, world: &mut World) {
+        self.restore(world, false);
+    }
+    fn undo(&mut self, world: &mut World) {
+        self.restore(world, true);
+    }
+}
+
+impl MaterialAssignmentCommand {
+    fn restore(&self, world: &mut World, before: bool) {
+        let entities: std::collections::HashMap<_, _> = world
+            .query::<(Entity, &crate::plugins::identity::ElementId)>()
+            .iter(world)
+            .map(|(entity, id)| (*id, entity))
+            .collect();
+        for (id, old, new) in &self.changes {
+            if let Some(entity) = entities.get(id) {
+                set_authored_material_assignment(
+                    world,
+                    *entity,
+                    if before { old } else { new }.clone(),
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn edit_material_assignments(
+    world: &mut World,
+    updates: Vec<(Entity, Option<MaterialAssignment>)>,
+) -> Result<(), String> {
+    use crate::capability_registry::CapabilityRegistry;
+    use crate::plugins::{
+        history::PendingCommandQueue, identity::ElementId, modeling::occurrence::OccurrenceIdentity,
+    };
+    let mut changes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // Validate every target before accepting any part of a batch.
+    for (entity, assignment) in updates {
+        if let Some(assignment) = &assignment {
+            validate_material_assignment(world, assignment)?;
+        }
+        let entity_ref = world
+            .get_entity(entity)
+            .map_err(|_| "Material target no longer exists")?;
+        let id = *entity_ref
+            .get::<ElementId>()
+            .ok_or("Material target is not authored")?;
+        if !seen.insert(id) {
+            return Err(format!("Duplicate material target {}", id.0));
+        }
+        if crate::plugins::object_locks::entity_locked(world, entity) {
+            return Err(format!("Entity {} is locked", id.0));
+        }
+        if world
+            .resource::<CapabilityRegistry>()
+            .capture_edit_snapshot(&entity_ref, world)
+            .is_none()
+        {
+            return Err(format!(
+                "Entity {} has no persistent authored snapshot",
+                id.0
+            ));
+        }
+        let before = entity_ref
+            .get::<OccurrenceIdentity>()
+            .map(|identity| identity.material_override.clone())
+            .unwrap_or_else(|| entity_ref.get::<MaterialAssignment>().cloned());
+        if before != assignment {
+            changes.push((id, before, assignment));
+        }
+    }
+    if !changes.is_empty() {
+        world
+            .resource_mut::<PendingCommandQueue>()
+            .push_command(Box::new(MaterialAssignmentCommand { changes }));
+        crate::plugins::history::apply_pending_history_commands(world);
+    }
+    Ok(())
+}
+
 // ─── Bevy material handles cache ─────────────────────────────────────────────
 
 /// Maps `material_id + effective texture mapping → Handle<StandardMaterial>`.
@@ -1727,13 +1822,13 @@ fn execute_apply_material_to_selection(
         q.iter(world).collect()
     };
     let count = selected_entities.len();
-    for entity in selected_entities {
-        set_authored_material_assignment(
-            world,
-            entity,
-            Some(MaterialAssignment::new(material_id.clone())),
-        );
-    }
+    edit_material_assignments(
+        world,
+        selected_entities
+            .into_iter()
+            .map(|entity| (entity, Some(MaterialAssignment::new(material_id.clone()))))
+            .collect(),
+    )?;
     Ok(crate::plugins::command_registry::CommandResult {
         output: Some(serde_json::json!({ "applied_to": count })),
         ..Default::default()
@@ -1755,9 +1850,13 @@ fn execute_set_material_assignment_to_selection(
         q.iter(world).collect()
     };
     let count = selected_entities.len();
-    for entity in selected_entities {
-        set_authored_material_assignment(world, entity, Some(assignment.clone()));
-    }
+    edit_material_assignments(
+        world,
+        selected_entities
+            .into_iter()
+            .map(|entity| (entity, Some(assignment.clone())))
+            .collect(),
+    )?;
     Ok(crate::plugins::command_registry::CommandResult {
         output: Some(serde_json::json!({ "applied_to": count })),
         ..Default::default()
@@ -1773,9 +1872,13 @@ fn execute_clear_material_assignment_on_selection(
         q.iter(world).collect()
     };
     let count = selected_entities.len();
-    for entity in selected_entities {
-        set_authored_material_assignment(world, entity, None);
-    }
+    edit_material_assignments(
+        world,
+        selected_entities
+            .into_iter()
+            .map(|entity| (entity, None))
+            .collect(),
+    )?;
     Ok(crate::plugins::command_registry::CommandResult {
         output: Some(serde_json::json!({ "cleared": count })),
         ..Default::default()
@@ -2081,6 +2184,11 @@ mod tests {
             selection::Selected,
         };
         let mut world = World::new();
+        let mut capabilities = crate::capability_registry::CapabilityRegistry::default();
+        capabilities.register_factory(crate::plugins::modeling::occurrence::OccurrenceFactory);
+        world.insert_resource(capabilities);
+        world.init_resource::<crate::plugins::history::History>();
+        world.init_resource::<crate::plugins::history::PendingCommandQueue>();
         let mut registry = MaterialRegistry::default();
         registry.upsert(MaterialDef {
             id: "finish".to_string(),

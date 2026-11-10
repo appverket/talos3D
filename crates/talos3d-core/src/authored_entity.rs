@@ -290,6 +290,12 @@ pub enum EntityScope {
 }
 
 pub trait AuthoredEntity: Send + Sync + 'static {
+    /// Core metadata decorators expose the capability-owned body for direct
+    /// geometry comparison. `as_any` continues to identify the capability type.
+    fn snapshot_body(&self) -> Option<&dyn AuthoredEntity> {
+        None
+    }
+
     fn as_any(&self) -> &dyn Any;
     fn type_name(&self) -> &'static str;
     fn creation_label(&self) -> Option<&'static str> {
@@ -399,10 +405,9 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         &self,
         assignment: Option<MaterialAssignment>,
     ) -> Result<BoxedEntity, String> {
-        let _ = assignment;
-        Err(format!(
-            "{} snapshots do not support material assignment",
-            self.type_name()
+        Ok(crate::authored_material::with_material(
+            self.box_clone(),
+            assignment,
         ))
     }
     fn subobject_display_overrides(&self) -> Option<SubobjectDisplayOverrides> {
@@ -505,7 +510,12 @@ impl Clone for BoxedEntity {
 
 impl PartialEq for BoxedEntity {
     fn eq(&self, other: &Self) -> bool {
-        self.0.eq_snapshot(other.0.as_ref())
+        self.material_assignment() == other.material_assignment()
+            && self
+                .0
+                .snapshot_body()
+                .unwrap_or(self.0.as_ref())
+                .eq_snapshot(other.0.snapshot_body().unwrap_or(other.0.as_ref()))
     }
 }
 

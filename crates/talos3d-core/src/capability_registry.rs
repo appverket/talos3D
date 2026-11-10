@@ -1573,7 +1573,7 @@ impl CapabilityRegistry {
     where
         F: AuthoredEntityFactory,
     {
-        let factory = Arc::new(factory);
+        let factory = Arc::new(crate::authored_material::MaterialFactory(factory));
         self.factories_by_type
             .insert(factory.type_name(), factory.clone());
         self.ordered_factories.push(factory);
