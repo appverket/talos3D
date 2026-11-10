@@ -7,7 +7,7 @@
 
 use std::{
     any::Any,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -121,7 +121,11 @@ pub struct OccurrenceIdentity {
     pub foreign_interpretation: Option<crate::plugins::foreign_source::NativeInterpretation>,
     /// The definition this occurrence instantiates.
     pub definition_id: DefinitionId,
-    /// The definition version this occurrence was last evaluated against.
+    /// The definition version this occurrence was instantiated from or last
+    /// explicitly rebound to. It is authored provenance, not an evaluation
+    /// stamp: occurrences always evaluate against the registry's current
+    /// Definition, and a `definition.update` (of this Definition or of a child
+    /// it is composed from) re-evaluates them without rewriting this field.
     pub definition_version: DefinitionVersion,
     /// Parameter values that override the definition's defaults.
     pub overrides: OverrideMap,
@@ -1242,56 +1246,65 @@ fn draw_occurrence_bounds(gizmos: &mut Gizmos, bounds: EntityBounds, color: Colo
 // ECS evaluation systems
 // ---------------------------------------------------------------------------
 
+/// Drain the pending changes and widen them to every Definition that must be
+/// re-evaluated as a consequence, dropping their cached representations.
+///
+/// A compound or derived Definition is evaluated from its children and base at
+/// occurrence time, so replacing a leaf body changes the geometry of every
+/// consumer even though only the leaf's version was bumped.
+fn drain_changed_with_dependents(
+    changed: &mut ChangedDefinitions,
+    registry: Option<&DefinitionRegistry>,
+    representation_cache: &mut RepresentationCache,
+) -> HashSet<DefinitionId> {
+    let ids = changed.drain();
+    let ids = match registry {
+        Some(registry) if !ids.is_empty() => registry.with_dependents(ids),
+        _ => ids.into_iter().collect(),
+    };
+    for id in &ids {
+        representation_cache.invalidate_definition(id);
+    }
+    ids
+}
+
 /// Mark all occurrences of changed definitions as needing re-evaluation.
 pub fn propagate_definition_changes(
     mut changed: ResMut<ChangedDefinitions>,
+    registry: Option<Res<DefinitionRegistry>>,
     mut representation_cache: ResMut<RepresentationCache>,
     mut query: Query<(&OccurrenceIdentity, &mut OccurrenceClassification)>,
-    mut commands: Commands,
 ) {
-    let ids = changed.drain();
+    let ids =
+        drain_changed_with_dependents(&mut changed, registry.as_deref(), &mut representation_cache);
     if ids.is_empty() {
         return;
     }
-
-    invalidate_changed_definition_cache(&ids, &mut representation_cache);
-
     for (identity, mut classification) in &mut query {
         if ids.contains(&identity.definition_id) {
             classification.mark_mesh_dirty();
         }
-        let _ = &mut commands;
     }
 }
 
 /// Full-entity variant that can insert the `NeedsEval` marker.
 pub fn propagate_definition_changes_with_commands(
     mut changed: ResMut<ChangedDefinitions>,
+    registry: Option<Res<DefinitionRegistry>>,
     mut representation_cache: ResMut<RepresentationCache>,
     query: Query<(Entity, &OccurrenceIdentity)>,
     mut commands: Commands,
 ) {
-    let ids = changed.drain();
+    let ids =
+        drain_changed_with_dependents(&mut changed, registry.as_deref(), &mut representation_cache);
     if ids.is_empty() {
         return;
     }
-
-    invalidate_changed_definition_cache(&ids, &mut representation_cache);
-
     for (entity, identity) in &query {
         if ids.contains(&identity.definition_id) {
             commands.entity(entity).insert(NeedsEval);
         }
     }
-}
-
-fn invalidate_changed_definition_cache(
-    ids: &[DefinitionId],
-    representation_cache: &mut RepresentationCache,
-) -> usize {
-    ids.iter()
-        .map(|id| representation_cache.invalidate_definition(id))
-        .sum()
 }
 
 /// Re-evaluate occurrences that have the `NeedsEval` marker component.
@@ -4424,6 +4437,104 @@ mod frozen_mesh_occurrence_tests {
         let bounds = occurrence_generated_bounds(&w, ElementId(1)).unwrap();
         assert!((bounds.max.z - 1.0).abs() < 1e-5);
         assert_eq!(w.resource::<Assets<Mesh>>().len(), 1);
+    }
+    fn compound_of(id: &str, child: &str) -> Definition {
+        serde_json::from_value(json!({
+            "id":id, "name":id, "definition_kind":"Solid", "definition_version":1,
+            "interface":{"parameters":[]}, "body":{"schema_version":1, "compound":{"child_slots":[{
+                "slot_id":"product", "role":"product", "definition_id":child,
+                "transform_binding":{"translation":[{"expr_kind":"literal","value":2},{"expr_kind":"literal","value":0},{"expr_kind":"literal","value":0}]},
+                "multiplicity":"Single"}]}}, "domain_data":{}
+        })).unwrap()
+    }
+    /// TALOS-ujbiiwlv: replacing a leaf FrozenMesh body left occurrences of the
+    /// compounds built from it rendering and reporting the old geometry.
+    #[test]
+    fn leaf_definition_update_re_evaluates_compound_occurrences_transitively() {
+        let mut leaf = definition();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(leaf.clone());
+        registry.insert(compound_of("test.compound", "test.frozen"));
+        registry.insert(compound_of("test.outer", "test.compound"));
+        let mut variant = compound_of("test.outer.variant", "test.compound");
+        variant.base_definition_id = Some(DefinitionId("test.outer".into()));
+        registry.insert(variant);
+        registry.insert(compound_of("test.unrelated", "test.other"));
+        let mut affected = registry
+            .with_dependents([leaf.id.clone()])
+            .into_iter()
+            .map(|id| id.0)
+            .collect::<Vec<_>>();
+        affected.sort();
+        assert_eq!(
+            affected,
+            [
+                "test.compound",
+                "test.frozen",
+                "test.outer",
+                "test.outer.variant"
+            ]
+        );
+
+        let mut app = App::new();
+        #[cfg(feature = "perf-stats")]
+        app.init_resource::<crate::plugins::perf_stats::PerfStats>();
+        app.init_resource::<ChangedDefinitions>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<RepresentationCache>()
+            .insert_resource(PrimitiveMaterial(Handle::default()))
+            .insert_resource(registry.clone())
+            .add_systems(
+                Update,
+                (
+                    propagate_definition_changes_with_commands,
+                    evaluate_occurrences,
+                )
+                    .chain(),
+            );
+        let identity = OccurrenceIdentity::new(DefinitionId("test.outer".into()), 1);
+        render_occurrence(
+            app.world_mut(),
+            &registry,
+            ElementId(1),
+            &identity,
+            Transform::IDENTITY,
+            None,
+        )
+        .unwrap();
+        let reach = |app: &App| {
+            occurrence_generated_bounds(app.world(), ElementId(1))
+                .unwrap()
+                .max
+                .x
+        };
+        assert!((reach(&app) - 5.2).abs() < 1e-5);
+
+        // `definition.update` on the leaf: new body, bumped version, one mark.
+        let mut encoded = serde_json::to_value(&leaf).unwrap();
+        encoded["body"]["evaluators"][0]["FrozenMesh"]["vertices"] =
+            json!([[0, 0, 0], [2400, 0, 0], [0, 1400, 0]]);
+        encoded["definition_version"] = json!(2);
+        leaf = serde_json::from_value(encoded).unwrap();
+        app.world_mut()
+            .resource_mut::<DefinitionRegistry>()
+            .insert(leaf.clone());
+        app.world_mut()
+            .resource_mut::<ChangedDefinitions>()
+            .mark_changed(leaf.id.clone());
+        app.update();
+
+        assert!(
+            (reach(&app) - 6.4).abs() < 1e-5,
+            "compound occurrence still reports the old leaf geometry: {}",
+            reach(&app)
+        );
+        let mut roots = app.world_mut().query::<(&ElementId, &OccurrenceIdentity)>();
+        let (_, root) = roots.single(app.world()).unwrap();
+        assert_eq!(
+            root.definition_version, 1,
+            "the authored instantiation version is not an evaluation stamp"
+        );
     }
     #[test]
     fn deformable_mesh_renders_resized_bounds_and_rejects_invalid_edits_atomically() {

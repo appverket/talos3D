@@ -2696,6 +2696,45 @@ impl DefinitionRegistry {
         self.definitions.values().collect()
     }
 
+    /// `ids` plus every registered Definition whose evaluated content depends
+    /// on one of them, transitively: compounds that place it in a child slot
+    /// and variants derived from it through `base_definition_id`.
+    ///
+    /// A dependent keeps its own `definition_version`; this closure is how a
+    /// change to a shared child reaches the occurrences of its consumers.
+    pub fn with_dependents(
+        &self,
+        ids: impl IntoIterator<Item = DefinitionId>,
+    ) -> HashSet<DefinitionId> {
+        let mut dependents: HashMap<&DefinitionId, Vec<&DefinitionId>> = HashMap::new();
+        for definition in self.definitions.values() {
+            let slots =
+                definition.body.compound.iter().flat_map(|compound| {
+                    compound.child_slots.iter().map(|slot| &slot.definition_id)
+                });
+            for dependency in definition.base_definition_id.iter().chain(slots) {
+                dependents
+                    .entry(dependency)
+                    .or_default()
+                    .push(&definition.id);
+            }
+        }
+        let mut closure = HashSet::new();
+        let mut pending: Vec<DefinitionId> = ids.into_iter().collect();
+        while let Some(id) = pending.pop() {
+            if let Some(direct) = dependents.get(&id) {
+                pending.extend(
+                    direct
+                        .iter()
+                        .filter(|dependent| !closure.contains(**dependent))
+                        .map(|dependent| (*dependent).clone()),
+                );
+            }
+            closure.insert(id);
+        }
+        closure
+    }
+
     /// Remove a definition, returning it if it existed.
     pub fn remove(&mut self, id: &DefinitionId) -> Option<Definition> {
         self.generation.bump();
