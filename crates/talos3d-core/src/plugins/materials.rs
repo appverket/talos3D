@@ -1402,7 +1402,7 @@ pub(crate) fn set_authored_material_assignment(
     }
 }
 
-/// A material edit stores only bindings, never copies or rebuilds geometry.
+/// Material history retains only bindings and never rebuilds geometry.
 /// UI and MCP use the same validated, atomic batch and history command.
 struct MaterialAssignmentCommand {
     changes: Vec<(

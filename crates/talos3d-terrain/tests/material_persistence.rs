@@ -88,6 +88,10 @@ fn terrain_material_survives_project_history_and_registered_factory_roundtrip() 
     source.world_mut().entity_mut(entity).insert(Selected);
     source
         .world_mut()
+        .entity_mut(entity)
+        .remove::<talos3d_terrain::components::NeedsTerrainMesh>();
+    source
+        .world_mut()
         .resource_mut::<History>()
         .mark_save_point();
     execute_command(
@@ -113,6 +117,13 @@ fn terrain_material_survives_project_history_and_registered_factory_roundtrip() 
         .queue_redo();
     source.update();
     assert_eq!(assignment(&mut source), expected);
+    assert!(
+        !source
+            .world()
+            .entity(entity)
+            .contains::<talos3d_terrain::components::NeedsTerrainMesh>(),
+        "apply/undo/redo must update bindings without rebuilding terrain geometry"
+    );
 
     let captured = source
         .world()
