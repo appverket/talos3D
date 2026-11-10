@@ -15170,6 +15170,7 @@ fn capability_face_refs_are_agent_discoverable_and_selectable() {
     }
 }
 
+#[cfg(feature = "model-api")]
 #[test]
 fn mcp_material_batch_is_atomic_and_undoable() {
     let mut world = init_model_api_test_world();
