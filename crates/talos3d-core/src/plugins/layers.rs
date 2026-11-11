@@ -153,7 +153,9 @@ impl Plugin for LayerPlugin {
                 show_in_menu: true, version: 1, activates_tool: None, capability_id: None,
             }, |world, _| {
                 let ids: Vec<_> = world.query_filtered::<&ElementId, With<super::selection::Selected>>().iter(world).copied().collect();
-                execute_set_object_visibility(world, &serde_json::json!({"visible": false, "element_ids": ids}))
+                let result = execute_set_object_visibility(world, &serde_json::json!({"visible": false, "element_ids": ids}))?;
+                super::command_registry::clear_object_selection(world);
+                Ok(result)
             })
             // Default fallback runs in Update, strictly after domain plugins
             // (e.g. terrain) have claimed their entities in PreUpdate. Then

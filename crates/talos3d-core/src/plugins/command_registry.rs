@@ -1063,17 +1063,19 @@ fn execute_select_all(world: &mut World, _: &Value) -> Result<CommandResult, Str
 }
 
 fn execute_deselect(world: &mut World, _: &Value) -> Result<CommandResult, String> {
-    let mut q = world.try_query::<EntityRef>().unwrap();
-    let entities: Vec<Entity> = q
+    clear_object_selection(world);
+    Ok(CommandResult::empty())
+}
+
+pub(crate) fn clear_object_selection(world: &mut World) {
+    let entities: Vec<Entity> = world
+        .query_filtered::<Entity, With<Selected>>()
         .iter(world)
-        .filter(|entity_ref| entity_ref.contains::<Selected>())
-        .map(|entity_ref| entity_ref.id())
         .collect();
     for entity in entities {
         world.entity_mut(entity).remove::<Selected>();
     }
     world.insert_resource(PivotPoint::default());
-    Ok(CommandResult::empty())
 }
 
 fn execute_zoom_to_extents(world: &mut World, _: &Value) -> Result<CommandResult, String> {
