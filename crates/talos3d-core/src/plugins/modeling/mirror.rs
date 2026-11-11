@@ -479,12 +479,15 @@ impl AuthoredEntityFactory for MirrorFactory {
         }
     }
 
-    fn hit_test(&self, world: &World, ray: bevy::math::Ray3d) -> Option<HitCandidate> {
+    fn hit_test(&self, world: &World, ray: bevy::shape::Ray3d) -> Option<HitCandidate> {
         use crate::plugins::modeling::primitive_trait::ray_aabb_intersection;
 
         let mut best: Option<HitCandidate> = None;
         let mut query = world.try_query::<(Entity, &EvaluatedMirror)>().unwrap();
         for (entity, evaluated) in query.iter(world) {
+            if crate::plugins::object_locks::entity_locked(world, entity) {
+                continue;
+            }
             if evaluated.vertices.is_empty() {
                 continue;
             }

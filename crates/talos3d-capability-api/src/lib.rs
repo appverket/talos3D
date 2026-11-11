@@ -15,10 +15,11 @@ pub mod prelude {
     };
     pub use crate::document_properties::DocumentProperties;
     pub use crate::hosting::{
-        HostAffectedRegion, HostingCheckId, HostingCheckStatus, HostingContractDescriptor,
-        HostingContractInfo, HostingContractKindId, HostingValidationCheck,
-        HostingValidationRequest, HostingValidationResult, HostingValidationStatus,
-        HostingValidatorFn, HostingValidatorId, MeasuredValue,
+        HostAffectedRegion, HostedGeometryPolicies, HostedGeometryPolicy, HostedSelectionContext,
+        HostingCheckId, HostingCheckStatus, HostingContractDescriptor, HostingContractInfo,
+        HostingContractKindId, HostingValidationCheck, HostingValidationRequest,
+        HostingValidationResult, HostingValidationStatus, HostingValidatorFn, HostingValidatorId,
+        MeasuredValue,
     };
     pub use crate::identity::ElementId;
     pub use crate::toolbar::{
@@ -45,6 +46,16 @@ pub mod commands {
     };
 }
 
+/// Transient native planning contracts. AuthoringScript remains the durable IR.
+pub mod edit_plans {
+    pub use talos3d_core::plugins::authored_edit_plan::{
+        modifiers::{EditModifierRequest, EditPlanDraft, EditPlanModifiers, OrderedEditModifier},
+        queue_captured_plan, AuthoredEditPlan, AuthoredEditPlanRegistry, InteractionId,
+        PlanContext, PlanError, PlanId,
+    };
+    pub use talos3d_core::plugins::history::ModelRevision;
+}
+
 pub mod definitions {
     pub use talos3d_core::plugins::modeling::definition::{
         BindingSide, ConstraintSeverity, OverridePolicy, ParamType, ParameterBinding, ParameterDef,
@@ -58,10 +69,11 @@ pub mod document_properties {
 
 pub mod hosting {
     pub use talos3d_core::plugins::hosting_contracts::{
-        HostAffectedRegion, HostingCheckId, HostingCheckStatus, HostingContractDescriptor,
-        HostingContractInfo, HostingContractKindId, HostingValidationCheck,
-        HostingValidationRequest, HostingValidationResult, HostingValidationStatus,
-        HostingValidatorFn, HostingValidatorId, MeasuredValue,
+        HostAffectedRegion, HostedGeometryPolicies, HostedGeometryPolicy, HostedSelectionContext,
+        HostingCheckId, HostingCheckStatus, HostingContractDescriptor, HostingContractInfo,
+        HostingContractKindId, HostingValidationCheck, HostingValidationRequest,
+        HostingValidationResult, HostingValidationStatus, HostingValidatorFn, HostingValidatorId,
+        MeasuredValue,
     };
 }
 
@@ -135,4 +147,29 @@ pub mod tools {
 
 pub mod modeling {
     pub use talos3d_core::plugins::modeling::ModelingWorkbench;
+}
+
+/// Data-driven family schemas shared by specialized editions.
+pub mod component_families {
+    pub use talos3d_core::plugins::component_family::{
+        apply_component_family_spec_to_definition, component_family_spec_from_definition,
+        derive_component_family_parameters, instantiate_component_family_definition,
+        parse_component_family_asset, parse_component_family_spec, ComponentFamily,
+        ComponentFamilyAssetFile, ComponentFamilyParameter, ComponentFamilyRegistry,
+        ComponentFamilyValueType, ParametricDriverBinding,
+    };
+}
+
+/// Capability-owned guidance and discovery vocabulary.
+pub mod guidance {
+    pub use talos3d_core::plugins::authoring_guidance::{
+        DiscoveryAliases, GuidanceCardInfo, GuidanceCardRegistry,
+    };
+}
+
+/// Capability policies used by shared refinement and surface placement.
+pub mod placement {
+    pub use talos3d_core::plugins::materials::BuiltinMaterialDefaults;
+    pub use talos3d_core::plugins::refinement::{SettingOutPolicies, SettingOutPolicy};
+    pub use talos3d_core::plugins::surface_placement::SurfacePlacementVocabulary;
 }

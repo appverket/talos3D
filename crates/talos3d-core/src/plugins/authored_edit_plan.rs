@@ -1,0 +1,702 @@
+//! ADR-065's transient, immutable mutation carrier. AuthoringScript remains the
+//! durable IR. Presentation borrows captured snapshots; apply never replans.
+pub mod modifiers;
+pub mod requests;
+mod semantic_state;
+use super::{
+    history::{EditorCommand, History, ModelRevision, PendingCommandQueue},
+    identity::{ElementId, ElementIdAllocator},
+    modeling::dependency_graph::stamp_authored_entity_dependencies,
+};
+use crate::{
+    authored_entity::BoxedEntity,
+    capability_registry::CapabilityRegistry,
+    semantics::{
+        components::{SemanticGraph, WorldSemanticContext},
+        evaluate, Refusal, SemanticPlan, Verdict,
+    },
+};
+use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::Arc,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PlanId(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct InteractionId(pub String);
+
+/// Capability-owned diagnostic/context data; never a second authored graph.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PlanContext {
+    pub planner_id: String,
+    pub planner_version: u32,
+    pub request_kind: String,
+    pub mutation_scope: String,
+    pub intent: String,
+    pub assumptions: Vec<String>,
+    pub unresolved_decisions: Vec<String>,
+    pub obligations: Vec<String>,
+    pub findings: Vec<String>,
+    /// Capability planning failures. Unlike informational findings, these
+    /// prevent a captured plan from being committed on every surface.
+    #[serde(default)]
+    pub refusals: Vec<String>,
+    pub derived_impacts: Vec<String>,
+    pub presentation_hints: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct AuthoredEditPlan {
+    interaction_id: Option<InteractionId>,
+    plan_id: PlanId,
+    base_model_revision: ModelRevision,
+    context: PlanContext,
+    before_snapshots: Vec<BoxedEntity>,
+    after_snapshots: Vec<BoxedEntity>,
+    created_ids: Vec<ElementId>,
+    removed_ids: Vec<ElementId>,
+    semantic_intents: SemanticPlan,
+    semantic_changes: Vec<semantic_state::Change>,
+    source_artifacts: Vec<super::foreign_source::SourceArtifactChange>,
+    semantic_refusals: Vec<Value>,
+    can_commit: bool,
+    /// Content fingerprint, independent of the immutable candidate identity.
+    digest: String,
+    retained_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanError {
+    UnknownPlan,
+    UnknownInteraction,
+    Stale,
+    PendingWork,
+    InvalidSnapshots(String),
+    Capacity,
+    Refused(Vec<Refusal>),
+}
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for PlanError {}
+
+impl AuthoredEditPlan {
+    pub fn plan_id(&self) -> &PlanId {
+        &self.plan_id
+    }
+    pub fn interaction_id(&self) -> Option<&InteractionId> {
+        self.interaction_id.as_ref()
+    }
+    pub fn base_model_revision(&self) -> &ModelRevision {
+        &self.base_model_revision
+    }
+    pub fn context(&self) -> &PlanContext {
+        &self.context
+    }
+    pub fn before_snapshots(&self) -> &[BoxedEntity] {
+        &self.before_snapshots
+    }
+    pub fn after_snapshots(&self) -> &[BoxedEntity] {
+        &self.after_snapshots
+    }
+    pub fn created_ids(&self) -> &[ElementId] {
+        &self.created_ids
+    }
+    pub fn removed_ids(&self) -> &[ElementId] {
+        &self.removed_ids
+    }
+    pub fn semantic_intents(&self) -> &SemanticPlan {
+        &self.semantic_intents
+    }
+    pub fn can_commit(&self) -> bool {
+        self.can_commit
+    }
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn capture(
+        world: &World,
+        interaction_id: Option<InteractionId>,
+        base: ModelRevision,
+        context: PlanContext,
+        before: Vec<BoxedEntity>,
+        after: Vec<BoxedEntity>,
+        semantic_intents: SemanticPlan,
+    ) -> Result<Self, PlanError> {
+        fn ids(snapshots: &[BoxedEntity]) -> Result<BTreeSet<ElementId>, PlanError> {
+            let set: BTreeSet<_> = snapshots.iter().map(|s| s.element_id()).collect();
+            if set.len() != snapshots.len() {
+                return Err(PlanError::InvalidSnapshots(
+                    "duplicate authored identity".into(),
+                ));
+            }
+            Ok(set)
+        }
+        if world
+            .get_resource::<History>()
+            .map(History::revision_token)
+            .as_ref()
+            != Some(&base)
+        {
+            return Err(PlanError::Stale);
+        }
+        if !semantic_intents.is_empty() && !world.contains_resource::<SemanticGraph>() {
+            return Err(PlanError::InvalidSnapshots(
+                "No semantic graph is installed".into(),
+            ));
+        }
+        let old = ids(&before)?;
+        let new = ids(&after)?;
+        if new.contains(&ElementId(u64::MAX)) {
+            return Err(PlanError::InvalidSnapshots(
+                "authored identity cannot exhaust the allocator".into(),
+            ));
+        }
+        let after_by_id: BTreeMap<_, _> = after.iter().map(|s| (s.element_id(), s)).collect();
+        for snapshot in &before {
+            if let Some(changed) = after_by_id.get(&snapshot.element_id()) {
+                if snapshot.type_name() != changed.type_name() {
+                    return Err(PlanError::InvalidSnapshots(
+                        "retyping requires an explicit capability migration".into(),
+                    ));
+                }
+            }
+        }
+        let can_commit = context.refusals.is_empty();
+        let mut plan = Self {
+            interaction_id,
+            plan_id: PlanId(uuid::Uuid::new_v4().to_string()),
+            base_model_revision: base,
+            context,
+            before_snapshots: before,
+            after_snapshots: after,
+            created_ids: new.difference(&old).copied().collect(),
+            removed_ids: old.difference(&new).copied().collect(),
+            semantic_intents,
+            semantic_changes: Vec::new(),
+            source_artifacts: Vec::new(),
+            semantic_refusals: Vec::new(),
+            can_commit,
+            digest: String::new(),
+            retained_bytes: 0,
+        };
+        if let Some(graph) = world.get_resource::<SemanticGraph>() {
+            match evaluate(
+                graph,
+                &WorldSemanticContext::new(world),
+                &plan.semantic_intents,
+            ) {
+                Verdict::Refuse(refusals) => {
+                    plan.can_commit = false;
+                    plan.semantic_refusals = refusals.iter().map(|r| json!({
+                        "violated":r.violated, "reason":r.reason, "observed":r.observed,
+                        "repair":r.repair, "contrasts":r.contrasts,
+                        "evidence":r.violated.as_ref().and_then(|id| graph.proposition(id)).map(|p| &p.evidence),
+                    })).collect();
+                    plan.context
+                        .findings
+                        .extend(refusals.iter().map(Refusal::summary));
+                }
+                Verdict::AdmitWithObligation(obligations) => plan
+                    .context
+                    .obligations
+                    .extend(obligations.iter().map(|o| o.summary.clone())),
+                Verdict::Admit => {}
+            }
+        }
+        plan.semantic_changes = semantic_state::capture(
+            world,
+            &plan.semantic_intents,
+            &plan.created_ids,
+            plan.can_commit,
+        )?;
+        plan.refresh_fingerprint()?;
+        Ok(plan)
+    }
+
+    /// Attach validated immutable project assets before publishing this carrier.
+    pub fn with_source_artifacts(
+        mut self,
+        world: &World,
+        changes: Vec<super::foreign_source::SourceArtifactChange>,
+    ) -> Result<Self, PlanError> {
+        if changes.is_empty() {
+            return Ok(self);
+        }
+        super::foreign_source::validate_changes(world, &changes)
+            .map_err(PlanError::InvalidSnapshots)?;
+        self.source_artifacts = changes;
+        self.refresh_fingerprint()?;
+        Ok(self)
+    }
+
+    fn refresh_fingerprint(&mut self) -> Result<(), PlanError> {
+        let mut hash = blake3::Hasher::new();
+        let metadata = serde_json::to_vec(&json!({
+            "format":"talos.edit_plan.fingerprint.v2", "base":self.base_model_revision,
+            "context":self.context, "intents":self.semantic_intents,
+            "changes":self.semantic_changes, "refusals":self.semantic_refusals,
+            "can_commit":self.can_commit,
+            "assets":self.source_artifacts.iter().map(|c|c.manifest()).collect::<Vec<_>>()
+        }))
+        .map_err(|e| PlanError::InvalidSnapshots(e.to_string()))?;
+        hash.update(&metadata);
+        let mut bytes = metadata.len();
+        let mut assets = BTreeMap::new();
+        for snapshots in [&self.before_snapshots, &self.after_snapshots] {
+            hash.update(&(snapshots.len() as u64).to_le_bytes());
+            for snapshot in snapshots {
+                let (fingerprint, size) = snapshot
+                    .0
+                    .plan_fingerprint()
+                    .map_err(PlanError::InvalidSnapshots)?;
+                hash.update(snapshot.type_name().as_bytes());
+                hash.update(&[0]);
+                hash.update(fingerprint.as_bytes());
+                bytes += size;
+                for (id, size) in snapshot.0.plan_retained_assets() {
+                    assets.insert(*id.as_bytes(), size);
+                }
+            }
+        }
+        self.retained_bytes = bytes
+            + assets.values().sum::<usize>()
+            + self
+                .source_artifacts
+                .iter()
+                .map(|c| c.retained_bytes())
+                .sum::<usize>();
+        self.digest = hash.finalize().to_hex().to_string();
+        Ok(())
+    }
+
+    /// Normalized digest input. Snapshot application order remains captured in
+    /// the carrier; the digest preserves it because dependency order matters.
+    pub fn content(&self) -> Value {
+        json!({"format":"talos.authored_edit_plan.transient.v1","base_model_revision":self.base_model_revision,
+            "context":self.context,"before":self.before_snapshots.iter().map(BoxedEntity::to_json).collect::<Vec<_>>(),
+            "after":self.after_snapshots.iter().map(BoxedEntity::to_json).collect::<Vec<_>>(),
+            "semantic_intents":self.semantic_intents,"semantic_changes":self.semantic_changes,
+            "source_artifact_changes":self.source_artifacts.iter().map(|c|c.manifest()).collect::<Vec<_>>(),
+            "semantic_refusals":self.semantic_refusals,"can_commit":self.can_commit})
+    }
+
+    fn preflight(&self, world: &World) -> Option<Refusal> {
+        let refusal = |reason: &str| Refusal {
+            violated: None,
+            reason: reason.into(),
+            observed: format!("plan {} at {:?}", self.plan_id.0, self.base_model_revision),
+            repair: "Inspect the current model and create a new preview.".into(),
+            contrasts: Vec::new(),
+        };
+        if world
+            .get_resource::<History>()
+            .map(History::revision_token)
+            .as_ref()
+            != Some(&self.base_model_revision)
+        {
+            return Some(refusal("The captured edit plan is stale."));
+        }
+        if !self.can_commit {
+            return Some(refusal("The captured plan has unresolved refusals."));
+        }
+        // Also catch authored changes made by a legacy writer that did not yet
+        // advance history. Presentation must restore its transient state first.
+        let matching = matching_snapshot_entities(world, &self.before_snapshots);
+        let current = capture_snapshot_index(
+            world,
+            self.before_snapshots
+                .iter()
+                .map(BoxedEntity::element_id)
+                .filter(|id| !matching.contains_key(id)),
+        );
+
+        for snapshot in &self.before_snapshots {
+            if !matching.contains_key(&snapshot.element_id())
+                && current.get(&snapshot.element_id()).map(|(_, s)| s) != Some(snapshot)
+            {
+                return Some(refusal(
+                    "The captured before-state no longer matches the model.",
+                ));
+            }
+        }
+        if self
+            .semantic_changes
+            .iter()
+            .any(|change| !change.matches_before(world))
+        {
+            return Some(refusal(
+                "The captured semantic before-state no longer matches the model.",
+            ));
+        }
+        if self
+            .source_artifacts
+            .iter()
+            .any(|change| !change.matches_before(world))
+        {
+            return Some(refusal(
+                "The captured foreign source before-state no longer matches the model.",
+            ));
+        }
+        for id in &self.created_ids {
+            if entity_exists(world, *id) {
+                return Some(refusal("A created identity is already in use."));
+            }
+        }
+        None
+    }
+}
+
+fn entity_exists(world: &World, id: ElementId) -> bool {
+    world
+        .try_query::<&ElementId>()
+        .is_some_and(|mut q| q.iter(world).any(|current| *current == id))
+}
+pub fn capture_snapshot(world: &World, id: ElementId) -> Option<BoxedEntity> {
+    capture_snapshot_index(world, [id])
+        .remove(&id)
+        .map(|(_, snapshot)| snapshot)
+}
+
+/// One entity scan per batch, including sparse dependent snapshots. Live
+/// presentation and preflight must not scan the whole model once per member.
+pub(crate) fn capture_snapshot_index(
+    world: &World,
+    ids: impl IntoIterator<Item = ElementId>,
+) -> BTreeMap<ElementId, (Entity, BoxedEntity)> {
+    let wanted = ids.into_iter().collect::<BTreeSet<_>>();
+    if wanted.is_empty() {
+        return BTreeMap::new();
+    }
+    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+        return BTreeMap::new();
+    };
+    let Some(mut query) = world.try_query::<(Entity, &ElementId)>() else {
+        return BTreeMap::new();
+    };
+    query
+        .iter(world)
+        .filter(|(_, id)| wanted.contains(id))
+        .filter_map(|(entity, id)| {
+            registry
+                .capture_edit_snapshot(&world.entity(entity), world)
+                .map(|snapshot| (*id, (entity, snapshot)))
+        })
+        .collect()
+}
+
+/// Compare shared large payloads directly against authored ECS components.
+/// Factories still capture other snapshots through their normal contract.
+pub(crate) fn matching_snapshot_entities(
+    world: &World,
+    snapshots: &[BoxedEntity],
+) -> BTreeMap<ElementId, Entity> {
+    let by_id = snapshots
+        .iter()
+        .map(|s| (s.element_id(), s))
+        .collect::<BTreeMap<_, _>>();
+    let Some(mut query) = world.try_query::<(Entity, &ElementId)>() else {
+        return BTreeMap::new();
+    };
+    query
+        .iter(world)
+        .filter_map(|(entity, id)| {
+            let snapshot = by_id.get(id)?;
+            (snapshot.0.matches_entity(&world.entity(entity), world) == Some(true))
+                .then_some((*id, entity))
+        })
+        .collect()
+}
+
+struct Interaction {
+    base: ModelRevision,
+    active: Option<PlanId>,
+    originals: BTreeMap<ElementId, BoxedEntity>,
+    original_bytes: usize,
+}
+
+/// At most one candidate per interaction; FIFO eviction bounds both standalone
+/// plans and interactions. Evicted, cancelled, superseded or consumed IDs cannot
+/// apply. Per-entry byte limits bound retained snapshots and metadata.
+#[derive(Resource)]
+pub struct AuthoredEditPlanRegistry {
+    plans: BTreeMap<PlanId, Arc<AuthoredEditPlan>>,
+    interactions: BTreeMap<InteractionId, Interaction>,
+    order: VecDeque<PlanId>,
+    max_entries: usize,
+    max_entry_bytes: usize,
+    max_total_bytes: usize,
+}
+impl Default for AuthoredEditPlanRegistry {
+    fn default() -> Self {
+        // A single imported assembly may hold hundreds of MiB of immutable
+        // meshes. Shared assets count once per plan; total retention is bounded
+        // independently of the number of small candidates.
+        let mut registry = Self::with_limits(64, 512 * 1024 * 1024);
+        registry.max_total_bytes = 512 * 1024 * 1024;
+        registry
+    }
+}
+impl AuthoredEditPlanRegistry {
+    pub fn with_limits(max_entries: usize, max_entry_bytes: usize) -> Self {
+        Self {
+            plans: Default::default(),
+            interactions: Default::default(),
+            order: Default::default(),
+            max_entries,
+            max_entry_bytes,
+            max_total_bytes: max_entries
+                .saturating_mul(max_entry_bytes)
+                .saturating_mul(2),
+        }
+    }
+    pub fn begin_interaction(&mut self, base: ModelRevision) -> Result<InteractionId, PlanError> {
+        // Old document/revision interactions cannot be resumed. Release them
+        // before checking capacity so a load or missed cancellation cannot
+        // permanently exhaust the interaction budget.
+        let stale: Vec<_> = self
+            .interactions
+            .iter()
+            .filter_map(|(id, interaction)| (interaction.base != base).then_some(id.clone()))
+            .collect();
+        for id in stale {
+            self.cancel(&id);
+        }
+        if self.interactions.len() >= self.max_entries {
+            return Err(PlanError::Capacity);
+        }
+        let id = InteractionId(uuid::Uuid::new_v4().to_string());
+        self.interactions.insert(
+            id.clone(),
+            Interaction {
+                base,
+                active: None,
+                originals: Default::default(),
+                original_bytes: 0,
+            },
+        );
+        Ok(id)
+    }
+    pub fn publish(
+        &mut self,
+        mut plan: AuthoredEditPlan,
+    ) -> Result<Arc<AuthoredEditPlan>, PlanError> {
+        if self.max_entries == 0 || plan.retained_bytes > self.max_entry_bytes {
+            return Err(PlanError::Capacity);
+        }
+        // Publication assigns the candidate's final identity. Even recovering an
+        // Arc after eviction and republishing its content cannot revive an old ID.
+        plan.plan_id = PlanId(uuid::Uuid::new_v4().to_string());
+        if let Some(id) = &plan.interaction_id {
+            let interaction = self
+                .interactions
+                .get_mut(id)
+                .ok_or(PlanError::UnknownInteraction)?;
+            if interaction.base != plan.base_model_revision {
+                return Err(PlanError::Stale);
+            }
+            let mut additions = Vec::new();
+            let mut bytes = interaction.original_bytes;
+            for snapshot in &plan.before_snapshots {
+                if let Some(old) = interaction.originals.get(&snapshot.element_id()) {
+                    if old != snapshot {
+                        return Err(PlanError::InvalidSnapshots(
+                            "interaction before-state changed".into(),
+                        ));
+                    }
+                } else {
+                    bytes += snapshot
+                        .0
+                        .plan_fingerprint()
+                        .map_err(PlanError::InvalidSnapshots)?
+                        .1;
+                    bytes += snapshot
+                        .0
+                        .plan_retained_assets()
+                        .iter()
+                        .map(|(_, size)| size)
+                        .sum::<usize>();
+                    additions.push((snapshot.element_id(), snapshot.clone()));
+                }
+            }
+            if bytes > self.max_entry_bytes
+                || bytes.saturating_add(plan.retained_bytes) > self.max_total_bytes
+            {
+                return Err(PlanError::Capacity);
+            }
+            interaction.originals.extend(additions);
+            interaction.original_bytes = bytes;
+            if let Some(old) = interaction.active.replace(plan.plan_id.clone()) {
+                self.plans.remove(&old);
+                self.order.retain(|p| p != &old);
+            }
+        }
+        while self.plans.len() >= self.max_entries {
+            if let Some(old) = self.order.pop_front() {
+                if let Some(evicted) = self.plans.remove(&old) {
+                    if let Some(id) = &evicted.interaction_id {
+                        self.interactions.remove(id);
+                    }
+                }
+            } else {
+                return Err(PlanError::Capacity);
+            }
+        }
+        let plan = Arc::new(plan);
+        self.order.push_back(plan.plan_id.clone());
+        self.plans.insert(plan.plan_id.clone(), plan.clone());
+        while self.plans.values().map(|p| p.retained_bytes).sum::<usize>()
+            + self
+                .interactions
+                .values()
+                .map(|i| i.original_bytes)
+                .sum::<usize>()
+            > self.max_total_bytes
+        {
+            let old = self.order.pop_front().ok_or(PlanError::Capacity)?;
+            if let Some(evicted) = self.plans.remove(&old) {
+                if let Some(id) = &evicted.interaction_id {
+                    self.interactions.remove(id);
+                }
+            }
+        }
+        if !self.plans.contains_key(plan.plan_id()) {
+            return Err(PlanError::Capacity);
+        }
+        Ok(plan)
+    }
+    pub fn get(&self, id: &PlanId) -> Option<Arc<AuthoredEditPlan>> {
+        self.plans.get(id).cloned()
+    }
+    pub fn active(&self, id: &InteractionId) -> Option<Arc<AuthoredEditPlan>> {
+        self.interactions
+            .get(id)?
+            .active
+            .as_ref()
+            .and_then(|id| self.get(id))
+    }
+    /// Invalidate presentation without losing the fixed interaction base.
+    pub fn discard_candidate(&mut self, id: &InteractionId) {
+        if let Some(interaction) = self.interactions.get_mut(id) {
+            if let Some(plan) = interaction.active.take() {
+                self.plans.remove(&plan);
+                self.order.retain(|p| p != &plan);
+            }
+        }
+    }
+    pub fn cancel(&mut self, id: &InteractionId) {
+        if let Some(interaction) = self.interactions.remove(id) {
+            if let Some(plan) = interaction.active {
+                self.plans.remove(&plan);
+                self.order.retain(|p| p != &plan);
+            }
+        }
+    }
+    pub fn clear(&mut self) {
+        self.plans.clear();
+        self.interactions.clear();
+        self.order.clear();
+    }
+    fn consume(&mut self, id: &PlanId) -> Result<Arc<AuthoredEditPlan>, PlanError> {
+        let plan = self.plans.remove(id).ok_or(PlanError::UnknownPlan)?;
+        self.order.retain(|p| p != id);
+        if let Some(interaction) = &plan.interaction_id {
+            self.interactions.remove(interaction);
+        }
+        Ok(plan)
+    }
+}
+
+/// Queue the captured candidate once. The command repeats its preflight at the
+/// actual history drain so an intervening queued edit cannot sneak past it.
+pub fn queue_captured_plan(world: &mut World, id: &PlanId) -> Result<(), PlanError> {
+    // Keep the captured command a standalone atomic history item. In particular
+    // do not let an open legacy group mutate its inputs after group preflight.
+    if !world.resource::<PendingCommandQueue>().is_empty() {
+        return Err(PlanError::PendingWork);
+    }
+    let plan = world
+        .resource::<AuthoredEditPlanRegistry>()
+        .get(id)
+        .ok_or(PlanError::UnknownPlan)?;
+    if let Some(refusal) = plan.preflight(world) {
+        return Err(PlanError::Refused(vec![refusal]));
+    }
+    let plan = world
+        .resource_mut::<AuthoredEditPlanRegistry>()
+        .consume(id)?;
+    world
+        .resource_mut::<PendingCommandQueue>()
+        .push_command(Box::new(CapturedPlanCommand(plan)));
+    Ok(())
+}
+
+struct CapturedPlanCommand(Arc<AuthoredEditPlan>);
+impl EditorCommand for CapturedPlanCommand {
+    fn label(&self) -> &'static str {
+        "Apply captured edit plan"
+    }
+    fn preflight(&self, world: &World) -> Option<Refusal> {
+        self.0.preflight(world)
+    }
+    fn semantic_plan(&self, _world: &World) -> SemanticPlan {
+        self.0.semantic_intents.clone()
+    }
+    fn apply(&mut self, world: &mut World) {
+        for change in &self.0.source_artifacts {
+            change.apply(world, false);
+        }
+        apply_snapshots(world, &self.0.after_snapshots, &self.0.before_snapshots);
+        for change in &self.0.semantic_changes {
+            change.apply(world, false);
+        }
+    }
+    fn undo(&mut self, world: &mut World) {
+        apply_snapshots(world, &self.0.before_snapshots, &self.0.after_snapshots);
+        for change in &self.0.semantic_changes {
+            change.apply(world, true);
+        }
+        for change in &self.0.source_artifacts {
+            change.apply(world, true);
+        }
+    }
+    // Redo deliberately uses captured content rather than the original revision.
+}
+
+fn apply_snapshots(world: &mut World, target: &[BoxedEntity], previous: &[BoxedEntity]) {
+    let target_ids: BTreeSet<_> = target.iter().map(|s| s.element_id()).collect();
+    for snapshot in previous
+        .iter()
+        .rev()
+        .filter(|s| !target_ids.contains(&s.element_id()))
+    {
+        snapshot.remove_from(world);
+    }
+    let previous: BTreeMap<_, _> = previous.iter().map(|s| (s.element_id(), s)).collect();
+    if let (Some(max_id), Some(mut allocator)) = (
+        target.iter().map(|s| s.element_id().0).max(),
+        world.get_resource_mut::<ElementIdAllocator>(),
+    ) {
+        if allocator.next_value() <= max_id {
+            allocator.set_next(max_id.saturating_add(1));
+        }
+    }
+    for snapshot in target {
+        snapshot.apply_with_previous(world, previous.get(&snapshot.element_id()).copied());
+        stamp_authored_entity_dependencies(world, snapshot);
+    }
+}
+
+#[cfg(test)]
+mod tests;

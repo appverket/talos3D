@@ -2,16 +2,21 @@
 name = "talos3d-core"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/appverket/talos3D"
+
+description = "Authored 3D model, editor runtime and capability contracts for Talos3D."
 
 [features]
 default = []
-model-api = ["dep:rmcp", "dep:tokio", "dep:schemars", "dep:axum", "dep:tokio-util", "dep:serde_yaml"]
+model-api = ["dep:rmcp", "dep:rmcp-macros", "dep:tokio", "dep:schemars", "dep:axum", "dep:tokio-util", "dep:serde_yaml"]
 perf-stats = []
 webgpu = ["bevy/webgpu"]
 webgl2 = ["bevy/webgl2"]
 
 [dependencies]
-bevy = { version = "0.19.1", default-features = false, features = [
+web-time = "1.1"
+bevy = { version = "0.20.1", default-features = false, features = [
     "bevy_anti_alias",
     "bevy_asset",
     "bevy_core_pipeline",
@@ -29,20 +34,24 @@ bevy = { version = "0.19.1", default-features = false, features = [
     "bevy_window",
     "bevy_text",
     "bevy_ui",
+    "bevy_ui_render",
     "tonemapping_luts",
     "default_font",
     "png",
     "jpeg",
 ] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Native numeric controls and branch fingerprints must survive JSON save/load
+# exactly; the default fast parser can shift a persisted f64 by a final bit.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 rfd = "0.17"
-bevy_egui = "0.40.1"
-rmcp = { version = "=1.3.0", features = ["server", "transport-io", "transport-streamable-http-server", "macros"], optional = true }
+bevy_egui = "0.43.1"
+rmcp = { version = "=1.3.0", default-features = false, features = ["server", "macros"], optional = true }
+# rmcp's macro/runtime interface is private: newer 1.x generators can emit calls
+# absent in this pinned runtime. Keep fresh downstream resolutions compatible.
+rmcp-macros = { version = "=1.3.0", optional = true }
 serde_yaml = { version = "0.9", optional = true }
-tokio = { version = "1", features = ["rt", "sync", "io-std", "net"], optional = true }
-axum = { version = "0.8", optional = true }
-tokio-util = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["sync", "macros", "time"], optional = true }
 schemars = { version = "1", optional = true }
 dxf = "0.6"
 cadio-dwg = { path = "../cadio-dwg" }
@@ -56,19 +65,25 @@ semver = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 thiserror = "2"
 hex = "0.4"
+sha2 = "0.10"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 uuid = { version = "1", features = ["serde"] }
 # Lightweight pure-Rust expression evaluator for AuthoringScript ArgExpr::Expr.
 # Supports arithmetic, tan/sin/cos/sqrt/pi, and variable contexts (PP82/Change-4).
 evalexpr = "11"
+rmp-serde = "1"
+flate2 = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rmcp = { version = "=1.3.0", default-features = false, features = ["transport-io", "transport-streamable-http-server"], optional = true }
+axum = { version = "0.8", optional = true }
+tokio-util = { version = "0.7", optional = true }
 # Native-only persistence substrate deps. `etcetera` provides the OS
 # cache-dir discovery for LocalFileArtifactStore. `tokio` is needed by
-# the substrate plugin's worker thread bookkeeping (the cloud-side
-# CloudArtifactStore lives in appverket-infra/services/products/talos3d/
-# talos3d-catalog-client and owns its own runtime there).
+# the substrate plugin's worker thread bookkeeping. Remote storage adapters
+# are supplied independently by app compositions.
 etcetera = "0.8"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time", "io-std", "net"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
@@ -97,3 +112,7 @@ web-sys = { version = "0.3", features = [
 tempfile = "3"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+
+[build-dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"

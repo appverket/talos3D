@@ -17,6 +17,7 @@ impl Plugin for PlaneToolPlugin {
             .add_systems(
                 Update,
                 (cancel_plane_tool, handle_plane_clicks, draw_plane_preview)
+                    .after(crate::plugins::snap::SnapSystems::Resolve)
                     .run_if(in_state(ActiveTool::PlacePlane)),
             );
     }

@@ -145,9 +145,10 @@ struct CreateEntityHistoryCommand {
 
 impl EditorCommand for CreateEntityHistoryCommand {
     fn label(&self) -> &'static str {
+        if let Some(label) = self.snapshot.0.creation_label() {
+            return label;
+        }
         match self.snapshot.type_name() {
-            "wall" => "Create wall",
-            "opening" => "Create opening",
             "box" => "Create box",
             "cylinder" => "Create cylinder",
             "sphere" => "Create sphere",
@@ -198,6 +199,7 @@ impl EditorCommand for DeleteEntitiesHistoryCommand {
 }
 
 struct ModifyEntitiesHistoryCommand {
+    refusal: Option<String>,
     label: &'static str,
     before: Vec<BoxedEntity>,
     after: Vec<BoxedEntity>,
@@ -206,6 +208,18 @@ struct ModifyEntitiesHistoryCommand {
 impl EditorCommand for ModifyEntitiesHistoryCommand {
     fn label(&self) -> &'static str {
         self.label
+    }
+
+    fn preflight(&self, _world: &World) -> Option<crate::semantics::Refusal> {
+        self.refusal
+            .as_ref()
+            .map(|reason| crate::semantics::Refusal {
+                violated: None,
+                reason: reason.clone(),
+                observed: self.label.into(),
+                repair: "Revise the edit using the reported constraint.".into(),
+                contrasts: Vec::new(),
+            })
     }
 
     fn apply(&mut self, world: &mut World) {
@@ -311,9 +325,6 @@ fn queue_create_triangle_mesh_commands(world: &mut World) {
 }
 
 fn queue_delete_entities_commands(world: &mut World) {
-    use crate::plugins::modeling::assembly::{AssemblySnapshot, SemanticAssembly};
-    use crate::plugins::modeling::composite_solid::CompositeSolid;
-
     let resolved_from_requests = {
         let commands: Vec<DeleteEntitiesCommand> = world
             .resource_mut::<Messages<DeleteEntitiesCommand>>()
@@ -337,101 +348,11 @@ fn queue_delete_entities_commands(world: &mut World) {
     let history_commands: Vec<Box<dyn EditorCommand>> = commands
         .iter()
         .filter_map(|command| {
-            let registry = world.resource::<CapabilityRegistry>();
-
-            let mut snapshots: Vec<BoxedEntity> = command
-                .element_ids
-                .iter()
-                .filter_map(|element_id| {
-                    let mut q = world.try_query::<EntityRef>().unwrap();
-                    let entity_ref = q.iter(world).find(|entity_ref| {
-                        entity_ref.get::<ElementId>().copied() == Some(*element_id)
-                    })?;
-                    registry.capture_snapshot(&entity_ref, world)
-                })
-                .collect();
-
+            let (snapshots, repair_before, repair_after) =
+                capture_delete_snapshots(world, &command.element_ids);
             if snapshots.is_empty() {
                 return None;
             }
-
-            snapshots.sort_by_key(snapshot_dependency_order);
-
-            // Capture before/after snapshots of surviving aggregates that will
-            // lose members. A delete must never leave a semantic assembly or a
-            // plain authored group pointing at entities that no longer exist.
-            let deleted_ids = &command.element_ids;
-            let mut repair_before = Vec::new();
-            let mut repair_after = Vec::new();
-
-            let mut q = world.try_query::<EntityRef>().unwrap();
-            for entity_ref in q.iter(world) {
-                let Some(eid) = entity_ref.get::<ElementId>() else {
-                    continue;
-                };
-                if deleted_ids.contains(eid) {
-                    continue;
-                }
-
-                if let Some(assembly) = entity_ref.get::<SemanticAssembly>() {
-                    if assembly
-                        .members
-                        .iter()
-                        .any(|member| deleted_ids.contains(&member.target))
-                    {
-                        if let Some(before) = registry.capture_snapshot(&entity_ref, world) {
-                            let mut pruned = assembly.clone();
-                            pruned.members.retain(|m| !deleted_ids.contains(&m.target));
-                            let after = AssemblySnapshot {
-                                element_id: *eid,
-                                assembly: pruned,
-                                refinement_state: entity_ref
-                                    .get::<crate::plugins::refinement::RefinementStateComponent>()
-                                    .map(|component| component.state),
-                                obligations: entity_ref
-                                    .get::<crate::plugins::refinement::ObligationSet>()
-                                    .cloned(),
-                                claim_grounding: entity_ref
-                                    .get::<crate::plugins::refinement::ClaimGrounding>()
-                                    .cloned(),
-                                authoring_provenance: entity_ref
-                                    .get::<crate::plugins::refinement::AuthoringProvenance>()
-                                    .cloned(),
-                            };
-                            repair_before.push(before);
-                            repair_after.push(BoxedEntity::from(after));
-                        }
-                    }
-                }
-
-                if let Some(group) = entity_ref.get::<GroupMembers>() {
-                    if group
-                        .member_ids
-                        .iter()
-                        .any(|member_id| deleted_ids.contains(member_id))
-                    {
-                        if let Some(before) = registry.capture_snapshot(&entity_ref, world) {
-                            let after = GroupSnapshot {
-                                element_id: *eid,
-                                name: group.name.clone(),
-                                member_ids: group
-                                    .member_ids
-                                    .iter()
-                                    .copied()
-                                    .filter(|member_id| !deleted_ids.contains(member_id))
-                                    .collect(),
-                                frame: group.frame,
-                                composite: entity_ref.get::<CompositeSolid>().cloned(),
-                                linked_model: group.linked_model.clone(),
-                                cached_bounds: None,
-                            };
-                            repair_before.push(before);
-                            repair_after.push(BoxedEntity::from(after));
-                        }
-                    }
-                }
-            }
-
             if repair_before.is_empty() {
                 Some(Box::new(DeleteEntitiesHistoryCommand { snapshots }) as Box<dyn EditorCommand>)
             } else {
@@ -448,6 +369,112 @@ fn queue_delete_entities_commands(world: &mut World) {
     for command in history_commands {
         queue.commands.push(command);
     }
+}
+
+/// Shared deletion capture, including repairs to surviving group/assembly membership.
+pub(crate) fn capture_delete_snapshots(
+    world: &World,
+    element_ids: &[ElementId],
+) -> (Vec<BoxedEntity>, Vec<BoxedEntity>, Vec<BoxedEntity>) {
+    use crate::plugins::modeling::{
+        assembly::{AssemblySnapshot, SemanticAssembly},
+        composite_solid::CompositeSolid,
+    };
+    let registry = world.resource::<CapabilityRegistry>();
+
+    let mut snapshots: Vec<BoxedEntity> = element_ids
+        .iter()
+        .filter_map(|element_id| {
+            let mut q = world.try_query::<EntityRef>().unwrap();
+            let entity_ref = q
+                .iter(world)
+                .find(|entity_ref| entity_ref.get::<ElementId>().copied() == Some(*element_id))?;
+            registry.capture_snapshot(&entity_ref, world)
+        })
+        .collect();
+
+    if snapshots.is_empty() {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
+    snapshots.sort_by_key(snapshot_dependency_order);
+
+    // Capture before/after snapshots of surviving aggregates that will
+    // lose members. A delete must never leave a semantic assembly or a
+    // plain authored group pointing at entities that no longer exist.
+    let deleted_ids = &element_ids;
+    let mut repair_before = Vec::new();
+    let mut repair_after = Vec::new();
+
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    for entity_ref in q.iter(world) {
+        let Some(eid) = entity_ref.get::<ElementId>() else {
+            continue;
+        };
+        if deleted_ids.contains(eid) {
+            continue;
+        }
+
+        if let Some(assembly) = entity_ref.get::<SemanticAssembly>() {
+            if assembly
+                .members
+                .iter()
+                .any(|member| deleted_ids.contains(&member.target))
+            {
+                if let Some(before) = registry.capture_snapshot(&entity_ref, world) {
+                    let mut pruned = assembly.clone();
+                    pruned.members.retain(|m| !deleted_ids.contains(&m.target));
+                    let after = AssemblySnapshot {
+                        element_id: *eid,
+                        assembly: pruned,
+                        refinement_state: entity_ref
+                            .get::<crate::plugins::refinement::RefinementStateComponent>()
+                            .map(|component| component.state),
+                        obligations: entity_ref
+                            .get::<crate::plugins::refinement::ObligationSet>()
+                            .cloned(),
+                        claim_grounding: entity_ref
+                            .get::<crate::plugins::refinement::ClaimGrounding>()
+                            .cloned(),
+                        authoring_provenance: entity_ref
+                            .get::<crate::plugins::refinement::AuthoringProvenance>()
+                            .cloned(),
+                    };
+                    repair_before.push(before);
+                    repair_after.push(BoxedEntity::from(after));
+                }
+            }
+        }
+
+        if let Some(group) = entity_ref.get::<GroupMembers>() {
+            if group
+                .member_ids
+                .iter()
+                .any(|member_id| deleted_ids.contains(member_id))
+            {
+                if let Some(before) = registry.capture_snapshot(&entity_ref, world) {
+                    let after = GroupSnapshot {
+                        element_id: *eid,
+                        name: group.name.clone(),
+                        member_ids: group
+                            .member_ids
+                            .iter()
+                            .copied()
+                            .filter(|member_id| !deleted_ids.contains(member_id))
+                            .collect(),
+                        frame: group.frame,
+                        composite: entity_ref.get::<CompositeSolid>().cloned(),
+                        linked_model: group.linked_model.clone(),
+                        cached_bounds: None,
+                    };
+                    repair_before.push(before);
+                    repair_after.push(BoxedEntity::from(after));
+                }
+            }
+        }
+    }
+
+    (snapshots, repair_before, repair_after)
 }
 
 /// Composite command: delete entities + repair surviving aggregate memberships
@@ -504,7 +531,34 @@ fn queue_end_command_groups(world: &mut World) {
     }
 }
 
+/// Refuse a procedural transaction while any user command event is pending.
+/// These events must not accidentally become part of its rollback/undo group.
 #[cfg(feature = "model-api")]
+pub(crate) fn has_pending_command_events(world: &World) -> bool {
+    macro_rules! pending { ($($ty:ty),*) => { false $(|| world.get_resource::<Messages<$ty>>().is_some_and(|events| !events.is_empty()))* }; }
+    pending!(
+        BeginCommandGroup,
+        EndCommandGroup,
+        CreateEntityCommand,
+        CreateBoxCommand,
+        CreateCylinderCommand,
+        CreateSphereCommand,
+        CreatePlaneCommand,
+        CreatePolylineCommand,
+        CreateTriangleMeshCommand,
+        DeleteEntitiesCommand,
+        ApplyEntityChangesCommand
+    )
+}
+
+/// Flush the existing command/history pipeline for synchronous capability recipes.
+/// Recipes enqueue ordinary commands; this uses the same admissibility gate as
+/// interactive and MCP edits. Call within the owning authoring transaction.
+pub fn flush_queued_commands(world: &mut World) {
+    queue_command_events(world);
+    super::history::apply_pending_history_commands(world);
+}
+
 pub(crate) fn queue_command_events(world: &mut World) {
     queue_begin_command_groups(world);
     queue_create_entity_commands(world);
@@ -530,6 +584,7 @@ pub(crate) fn enqueue_create_box(world: &mut World, command: CreateBoxCommand) -
                 half_extents: command.half_extents,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -554,6 +609,7 @@ pub(crate) fn enqueue_create_cylinder(
                 height: command.height,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -574,6 +630,7 @@ pub(crate) fn enqueue_create_sphere(world: &mut World, command: CreateSphereComm
                 radius: command.radius,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -595,6 +652,7 @@ pub(crate) fn enqueue_create_plane(world: &mut World, command: CreatePlaneComman
                 elevation: command.elevation,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -650,6 +708,16 @@ pub(crate) fn enqueue_create_triangle_mesh(
 }
 
 pub fn enqueue_create_boxed_entity(world: &mut World, snapshot: BoxedEntity) {
+    enqueue_create_entity_in_frame(world, snapshot, true);
+}
+
+/// Create a snapshot already authored in world coordinates while retaining
+/// the same atomic container membership and undo semantics as local creation.
+pub fn enqueue_create_world_entity(world: &mut World, snapshot: BoxedEntity) {
+    enqueue_create_entity_in_frame(world, snapshot, false);
+}
+
+fn enqueue_create_entity_in_frame(world: &mut World, snapshot: BoxedEntity, local: bool) {
     // The edit-context resource is absent in minimal worlds (e.g. unit tests that
     // don't add the selection plugin); treat that as "at root" (identity frame).
     let edit_context = world
@@ -660,7 +728,7 @@ pub fn enqueue_create_boxed_entity(world: &mut World, snapshot: BoxedEntity) {
     // Drawing metadata may reference model entities but never participates in
     // model/group transforms or geometry ownership. This also fixes the same
     // latent boundary violation for dimensions and section planes.
-    let snapshot = if is_drawing_metadata {
+    let snapshot = if is_drawing_metadata || !local {
         snapshot
     } else {
         let frame = active_authoring_frame(world, &edit_context);
@@ -749,17 +817,69 @@ fn active_authoring_frame(world: &World, edit_context: &GroupEditContext) -> Gro
     active_drafting_frame(world).unwrap_or(group_frame)
 }
 
+/// Prepare ordinary authored property edits through the same domain modifier
+/// stage used by interactive occurrence controls. Planning never mutates the world.
+pub fn prepare_entity_changes(
+    world: &World,
+    command: ApplyEntityChangesCommand,
+) -> Result<crate::plugins::authored_edit_plan::modifiers::EditPlanDraft, String> {
+    use crate::plugins::authored_edit_plan::{
+        modifiers::{apply_edit_modifiers, EditModifierRequest, EditPlanDraft},
+        PlanContext,
+    };
+    let mut draft = EditPlanDraft {
+        source_artifacts: Vec::new(),
+        context: PlanContext {
+            planner_id: "core.authored_changes".into(),
+            planner_version: 1,
+            request_kind: "core.authored_changes".into(),
+            mutation_scope: "authored properties and dependent entities".into(),
+            intent: command.label.into(),
+            ..Default::default()
+        },
+        before: command.before,
+        after: command.after,
+        semantic_intents: crate::semantics::SemanticPlan::none(),
+    };
+    apply_edit_modifiers(
+        world,
+        &EditModifierRequest::new("core.authored_changes", &()),
+        &mut draft,
+        &[],
+    );
+    if !draft.context.refusals.is_empty() {
+        return Err(draft.context.refusals.join("; "));
+    }
+    Ok(draft)
+}
+
 pub(crate) fn enqueue_apply_entity_changes(world: &mut World, command: ApplyEntityChangesCommand) {
     if command.before.is_empty() || command.after.is_empty() {
         return;
     }
 
+    let (before, after, refusal) =
+        match prepare_entity_changes(world, command.clone()) {
+            Ok(draft) if draft.source_artifacts.is_empty() && draft.semantic_intents.is_empty() => {
+                (draft.before, draft.after, None)
+            }
+            result => (
+                command.before,
+                command.after,
+                Some(result.err().unwrap_or_else(|| {
+                    "This edit requires an explicit captured semantic plan".into()
+                })),
+            ),
+        };
+    // Queue refusals too: history preflight must reject the entire enclosing
+    // command group, not silently drop one invalid edit while applying siblings.
     world
         .resource_mut::<PendingCommandQueue>()
         .push_command(Box::new(ModifyEntitiesHistoryCommand {
             label: command.label,
-            before: command.before,
-            after: command.after,
+            before,
+            after,
+            refusal,
         }));
 }
 
@@ -839,13 +959,11 @@ pub(crate) fn enqueue_apply_void_placement(world: &mut World, outcome: VoidPlace
 }
 
 pub(crate) fn snapshot_dependency_order(snapshot: &BoxedEntity) -> u8 {
-    snapshot_dependency_order_by_name(snapshot.type_name())
+    snapshot.dependency_order()
 }
 
 pub fn snapshot_dependency_order_by_name(type_name: &str) -> u8 {
     match type_name {
-        "wall" => 0,
-        "opening" => 1,
         "face_profile_feature" | "csg" => 3,
         "semantic_assembly" => 4,
         "semantic_relation" => 5,
@@ -895,7 +1013,13 @@ pub fn despawn_by_element_id(world: &mut World, element_id: ElementId) {
     };
 
     let mesh_asset_id = world.get::<Mesh3d>(entity).map(|mesh| mesh.id());
-    if let Some(mesh_asset_id) = mesh_asset_id {
+    // Cached meshes are shared by other occurrences and retained by the LRU.
+    // Removing one authored root must not invalidate every owner of its mesh.
+    if let Some(mesh_asset_id) = mesh_asset_id.filter(|_| {
+        world
+            .get::<crate::plugins::modeling::occurrence::MeshCacheKey>(entity)
+            .is_none()
+    }) {
         world.resource_mut::<Assets<Mesh>>().remove(mesh_asset_id);
     }
 
@@ -1004,6 +1128,67 @@ mod tests {
             },
         },
     };
+
+    #[test]
+    fn property_modifier_refusal_rejects_the_whole_queued_group() {
+        use crate::plugins::authored_edit_plan::{
+            capture_snapshot,
+            modifiers::{EditPlanModifiers, OrderedEditModifier},
+        };
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PolylineFactory);
+        world.insert_resource(registry);
+        world.init_resource::<PendingCommandQueue>();
+        world.init_resource::<History>();
+        world.init_resource::<Assets<Mesh>>();
+        let mut modifiers = EditPlanModifiers::default();
+        modifiers
+            .register(OrderedEditModifier::new(
+                "test.constraint",
+                10,
+                "core.authored_changes",
+                |_, _, draft| {
+                    if draft.after.iter().any(|s| s.element_id() == ElementId(2)) {
+                        draft
+                            .context
+                            .refusals
+                            .push("dependent geometry would intersect".into());
+                    }
+                },
+            ))
+            .unwrap();
+        world.insert_resource(modifiers);
+        let mut originals = Vec::new();
+        for id in [1, 2] {
+            world.spawn((
+                ElementId(id),
+                Polyline {
+                    points: vec![Vec3::ZERO, Vec3::X],
+                },
+            ));
+            originals.push(capture_snapshot(&world, ElementId(id)).unwrap());
+        }
+        world
+            .resource_mut::<PendingCommandQueue>()
+            .begin_group("two properties");
+        for prior in &originals {
+            enqueue_apply_entity_changes(
+                &mut world,
+                ApplyEntityChangesCommand {
+                    label: "property edit",
+                    before: vec![prior.clone()],
+                    after: vec![prior.translate_by(Vec3::Y)],
+                },
+            );
+        }
+        world.resource_mut::<PendingCommandQueue>().end_group();
+        apply_pending_history_commands(&mut world);
+        assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+        for prior in originals {
+            assert_eq!(capture_snapshot(&world, prior.element_id()).unwrap(), prior);
+        }
+    }
 
     #[test]
     fn delete_entities_command_is_resolved_and_applied() {
@@ -1154,6 +1339,7 @@ mod tests {
                 member_ids: vec![nested_group_id],
                 frame: GroupFrame::identity(),
                 linked_model: Some(LinkedModelRef {
+                    source_root_is_document: false,
                     path: linked_path.to_string_lossy().into_owned(),
                     source_root_id: ElementId(1),
                     source_to_scene_ids: vec![LinkedModelIdMapping {

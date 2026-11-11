@@ -286,6 +286,7 @@ fn write_dim_primitive(out: &mut String, prim: &DimPrimitive) {
             color_hex,
         } => {
             let (text_anchor, baseline) = match anchor_mode {
+                TextAnchor::LeftBaseline => ("start", "alphabetic"),
                 TextAnchor::CenterBaseline => ("middle", "alphabetic"),
                 TextAnchor::Center => ("middle", "middle"),
             };

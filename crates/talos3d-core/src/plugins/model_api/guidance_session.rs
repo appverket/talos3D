@@ -246,6 +246,18 @@ impl GuidanceSessionStore {
             .unwrap_or_default()
     }
 
+    pub fn mark_authoring_guidance(&self, available: bool) {
+        if let Some(session) = self
+            .0
+            .lock()
+            .expect("guidance session lock poisoned")
+            .as_mut()
+        {
+            session.guidance_loaded = available;
+            session.guidance_unavailable = !available;
+        }
+    }
+
     pub fn mark_guidance_packet_loaded(&self, authoritative_guidance_available: bool) {
         let mut guard = self.0.lock().expect("guidance session lock poisoned");
         let Some(session) = guard.as_mut() else {
@@ -296,7 +308,6 @@ impl GuidanceSessionStore {
         };
 
         match tool {
-            "get_authoring_guidance" => session.guidance_loaded = true,
             "get_guidance_card" => {
                 if let Some(card_id) = arguments
                     .and_then(|arguments| arguments.get("card_id"))
@@ -687,7 +698,7 @@ mod tests {
             Vec::new(),
             vec!["Use semantic edits.".to_string()],
         );
-        store.observe_success("get_authoring_guidance", None);
+        store.mark_authoring_guidance(true);
         store.observe_success(
             "get_guidance_card",
             Some(&Map::from_iter([(
@@ -741,7 +752,7 @@ mod tests {
         assert_eq!(initial.phase, GuidancePhase::Bootstrap);
         assert!(store.router_preflight("create_box").is_some());
 
-        store.observe_success("get_authoring_guidance", None);
+        store.mark_authoring_guidance(true);
         store.observe_success(
             "get_guidance_card",
             Some(&Map::from_iter([(

@@ -52,11 +52,14 @@ Also read:
 ## Development Commands
 
 ```bash
-cargo check
-cargo clippy -- -W clippy::all
-cargo test
-cargo run
-cargo run --features model-api
+cargo fmt --all -- --check
+cargo check --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -W clippy::all
+cargo test --locked --workspace
+cargo test --locked --workspace --features talos3d-core/model-api,talos3d-terrain/model-api
+python3 scripts/check_repository.py
+cargo run --locked -p talos3d-core-app
+cargo run --locked -p talos3d-core-app --features model-api
 ```
 
 ## Architectural Rules
@@ -80,9 +83,9 @@ A new feature should usually land as one of:
 When in doubt, prefer explicit capability boundaries over hidden cross-module
 coupling.
 
-The architectural code in this repository is a reference extension. New domain
-packages should be able to follow the same pattern whether they are open-source,
-private, or commercial.
+Specialized editions live outside Core. Keep shared mechanisms here and domain
+entities, knowledge and composition in the owning edition. See
+[Platform Boundaries](./docs/PLATFORM_BOUNDARIES.md) for the allocation guide.
 
 ## Submission Terms
 
@@ -122,5 +125,5 @@ for repository onboarding.
 Before merging a change that affects terminology or architecture, update the
 relevant docs in `docs/` and the root `README.md`.
 
-The `private/` directory is archival material for the maintainer and is not
-part of the intended public repository contents.
+The public workspace must build from this repository alone. Do not introduce
+path dependencies on private sibling repositories or commit runtime state.

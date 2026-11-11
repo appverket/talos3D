@@ -638,7 +638,7 @@ mod inner {
 
         // 7. Insert the NonSend poll state (requires exclusive world access —
         // the system already is exclusive because it takes `&mut World`).
-        world.insert_non_send_resource(WasmCatalogPollState {
+        world.insert_non_send(WasmCatalogPollState {
             base_url,
             account_id,
             cursor: Rc::new(Cell::new(0i64)),

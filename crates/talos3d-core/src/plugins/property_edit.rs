@@ -102,6 +102,12 @@ pub enum SelectionSemanticKind {
 
 #[derive(Resource, Default, Clone)]
 pub struct PropertyPanelData {
+    pub control_editor: crate::plugins::occurrence_controls::OccurrenceControlEditor,
+    pub explanation: Option<crate::plugins::design_explanation::DesignExplanation>,
+    pub explanation_refresh: bool,
+    explanation_source_ticks: Vec<Option<u32>>,
+    explanation_definition_generation:
+        Option<crate::plugins::registry_generation::RegistryGeneration>,
     pub snapshots: Vec<BoxedEntity>,
     pub entity_type: Option<&'static str>,
     pub mixed_selection: bool,
@@ -116,11 +122,83 @@ fn sync_property_panel_data(world: &mut World) {
     };
     let entity_type = selected_snapshots_type(&snapshots);
     let mixed_selection = !snapshots.is_empty() && entity_type.is_none();
-    let semantic_kind = if snapshots.len() == 1 && !mixed_selection {
+    let single_selection = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .count()
+        == 1;
+    let semantic_kind = if single_selection && !mixed_selection {
         compute_selection_semantic_kind(world)
     } else {
         SelectionSemanticKind::Generic
     };
+
+    // A read projection, rebuilt only at selection/revision/registry changes
+    // or explicit refresh. Never scan dependencies in the live drag loop.
+    let single_id = (snapshots.len() == 1 && world.resource::<TransformState>().is_idle())
+        .then(|| snapshots[0].element_id().0);
+    crate::plugins::occurrence_controls::process(world, single_id);
+    let revision = world
+        .get_resource::<crate::plugins::history::History>()
+        .map(|h| h.revision_token());
+    let generation = world
+        .get_resource::<DefinitionRegistry>()
+        .map(DefinitionRegistry::generation);
+    // Legacy metadata writers may change evidence without touching History.
+    // Watch selected source component stamps as well as the model revision.
+    use crate::plugins::{
+        corpus_gap::CorpusPassageRegistry, modeling::dependency_graph::DependencyGraphResource,
+        refinement::*,
+    };
+    let source_ticks = world
+        .try_query_filtered::<EntityRef, With<Selected>>()
+        .and_then(|mut q| {
+            q.single(world).ok().map(|e| {
+                vec![
+                    e.get_ref::<AuthoringProvenance>()
+                        .map(|r| r.last_changed().get()),
+                    e.get_ref::<ClaimGrounding>()
+                        .map(|r| r.last_changed().get()),
+                    e.get_ref::<ObligationSet>().map(|r| r.last_changed().get()),
+                    e.get_ref::<SemanticIntent>()
+                        .map(|r| r.last_changed().get()),
+                    e.get_ref::<SettingOutContract>()
+                        .map(|r| r.last_changed().get()),
+                    e.get_ref::<RefinementStateComponent>()
+                        .map(|r| r.last_changed().get()),
+                    e.get_ref::<OccurrenceIdentity>()
+                        .map(|r| r.last_changed().get()),
+                    e.get_ref::<crate::capability_registry::ElementClassAssignment>()
+                        .map(|r| r.last_changed().get()),
+                    world
+                        .get_resource_ref::<DependencyGraphResource>()
+                        .map(|r| r.last_changed().get()),
+                    world
+                        .get_resource_ref::<CorpusPassageRegistry>()
+                        .map(|r| r.last_changed().get()),
+                ]
+            })
+        })
+        .unwrap_or_default();
+    let previous = world.resource::<PropertyPanelData>();
+    let refresh = previous.explanation_source_ticks != source_ticks
+        || previous.snapshots != snapshots
+        || previous.explanation_refresh
+        || previous.explanation_definition_generation != generation
+        || previous
+            .explanation
+            .as_ref()
+            .map(|e| (e.element_id, &e.model_revision))
+            != single_id.map(|id| (id, &revision));
+    if refresh {
+        let explanation = single_id
+            .and_then(|id| crate::plugins::design_explanation::explain_design(world, id).ok());
+        let mut data = world.resource_mut::<PropertyPanelData>();
+        data.explanation = explanation;
+        data.explanation_source_ticks = source_ticks;
+        data.explanation_refresh = false;
+        data.explanation_definition_generation = generation;
+    }
 
     {
         let mut panel_data = world.resource_mut::<PropertyPanelData>();
@@ -132,7 +210,12 @@ fn sync_property_panel_data(world: &mut World) {
 
     let data = world.resource::<PropertyPanelData>();
     let selection_signature = property_panel_selection_signature(data);
-    let visible = !data.snapshots.is_empty() && !world.resource::<PropertyEditState>().is_active();
+    let visible = (!data.snapshots.is_empty()
+        || matches!(
+            data.semantic_kind,
+            SelectionSemanticKind::GeneratedPart { .. }
+        ))
+        && !world.resource::<PropertyEditState>().is_active();
     let mut panel_state = world.resource_mut::<PropertyPanelState>();
     let hidden_for_current_selection =
         panel_state.hidden_for_selection.as_ref() == Some(&selection_signature);
@@ -658,6 +741,88 @@ mod tests {
             Selected,
         ));
         world
+    }
+
+    #[test]
+    fn generated_part_panel_exposes_controlling_definition_without_fake_snapshot() {
+        let mut world = property_world();
+        let old = world
+            .query_filtered::<Entity, With<Selected>>()
+            .single(&world)
+            .unwrap();
+        world.entity_mut(old).remove::<Selected>();
+        world.init_resource::<DefinitionRegistry>();
+        world.spawn((
+            Selected,
+            GeneratedOccurrencePart {
+                owner: ElementId(10),
+                slot_path: "piece".into(),
+                definition_id: DefinitionId("child".into()),
+            },
+        ));
+        sync_property_panel_data(&mut world);
+        assert!(world.resource::<PropertyPanelState>().visible);
+        let data = world.resource::<PropertyPanelData>();
+        assert!(data.snapshots.is_empty());
+        assert!(
+            matches!(&data.semantic_kind, SelectionSemanticKind::GeneratedPart {
+            controlling_definition_id, .. } if controlling_definition_id == "child")
+        );
+    }
+
+    #[test]
+    fn explanation_matches_shared_projection_and_invalidates_on_document_replace() {
+        use crate::plugins::{
+            design_explanation::explain_design,
+            history::History,
+            refinement::{AuthoringMode, AuthoringProvenance},
+        };
+        let mut world = property_world();
+        world.init_resource::<History>();
+        sync_property_panel_data(&mut world);
+        let first = world
+            .resource::<PropertyPanelData>()
+            .explanation
+            .clone()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(explain_design(&world, 1).unwrap()).unwrap()
+        );
+        world.resource_mut::<History>().clear();
+        sync_property_panel_data(&mut world);
+        assert_ne!(
+            first.model_revision,
+            world
+                .resource::<PropertyPanelData>()
+                .explanation
+                .as_ref()
+                .unwrap()
+                .model_revision
+        );
+        world.increment_change_tick();
+        let entity = world
+            .query_filtered::<Entity, With<Selected>>()
+            .single(&world)
+            .unwrap();
+        world.entity_mut(entity).insert(AuthoringProvenance {
+            mode: AuthoringMode::Freeform,
+            rationale: Some("Human decision".into()),
+        });
+        sync_property_panel_data(&mut world);
+        assert!(world
+            .resource::<PropertyPanelData>()
+            .explanation
+            .as_ref()
+            .unwrap()
+            .sections[0]
+            .rows[0]
+            .text
+            .contains("Human decision"));
+        world.resource_mut::<TransformState>().mode =
+            crate::plugins::transform::TransformMode::Moving;
+        sync_property_panel_data(&mut world);
+        assert!(world.resource::<PropertyPanelData>().explanation.is_none());
     }
 
     #[test]

@@ -29,7 +29,6 @@ use crate::plugins::{
 };
 
 const STATUS_MESSAGE_DURATION_SECONDS: f32 = 2.0;
-#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_EXPORT_FILE_STEM: &str = "drawing";
 const DEFAULT_OFFSCREEN_SCREENSHOT_WIDTH: u32 = 1600;
 const DEFAULT_OFFSCREEN_SCREENSHOT_HEIGHT: u32 = 1000;
@@ -195,7 +194,7 @@ pub(crate) fn pdf_export_available(world: &World) -> bool {
         .unwrap_or(false)
 }
 
-fn require_pdf_export_available(world: &World) -> Result<(), String> {
+pub(crate) fn require_pdf_export_available(world: &World) -> Result<(), String> {
     if pdf_export_available(world) {
         Ok(())
     } else {
@@ -229,8 +228,14 @@ pub(crate) enum ViewportExportScope {
     AppWindow,
 }
 
+#[cfg(feature = "model-api")]
+type MemoryCapture =
+    std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Result<String, String>>>>>;
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingViewportExport {
+    #[cfg(feature = "model-api")]
+    memory_result: Option<MemoryCapture>,
     path: PathBuf,
     stage: PendingViewportExportStage,
     scope: ViewportExportScope,
@@ -392,10 +397,12 @@ pub fn export_drawing_now(world: &mut World) -> Result<Option<PathBuf>, String> 
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn export_drawing_now_with_format(
-    _world: &mut World,
-    _preferred_format: Option<ViewportExportFormat>,
+    world: &mut World,
+    preferred_format: Option<ViewportExportFormat>,
 ) -> Result<Option<PathBuf>, String> {
-    Err("Native drawing export dialogs are not available in the browser shell".to_string())
+    let format = preferred_format.unwrap_or(ViewportExportFormat::Svg);
+    let name = default_export_file_name(None, Some(format));
+    export_drawing_to_path(world, PathBuf::from(name)).map(Some)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -408,7 +415,7 @@ pub(crate) fn export_drawing_now_with_format(
     }
 
     let current_path = world.resource::<DocumentState>().current_path.clone();
-    let mut dialog = rfd::FileDialog::new();
+    let mut dialog = rfd::AsyncFileDialog::new();
     dialog = match preferred_format {
         Some(ViewportExportFormat::Raster(image::ImageFormat::Png)) => dialog
             .add_filter("PNG Image", &["png"])
@@ -461,13 +468,29 @@ pub(crate) fn export_drawing_now_with_format(
         }
     }
 
-    match dialog.save_file() {
-        Some(path) => {
-            let path = export_drawing_to_path(world, path)?;
-            Ok(Some(path))
-        }
-        None => Ok(None),
-    }
+    crate::plugins::native_dialog::request(
+        world,
+        async move {
+            dialog
+                .save_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        },
+        |world, path| {
+            if let Some(path) = path {
+                let message = match export_drawing_to_path(world, path) {
+                    Ok(path) => format!("Exported {}", path.display()),
+                    Err(error) => format!("Export failed: {error}"),
+                };
+                if let Some(mut status) =
+                    world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
+                {
+                    status.set_feedback(message, 5.0);
+                }
+            }
+        },
+    )?;
+    Ok(None)
 }
 
 pub fn export_drawing_to_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
@@ -508,33 +531,77 @@ fn export_sheet_drawing(world: &World, path: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn queue_viewport_export(world: &mut World, path: &Path) -> Result<(), String> {
-    queue_screenshot_export(world, path, ViewportExportScope::Viewport)
+    queue_screenshot_export(
+        world,
+        path,
+        ViewportExportScope::Viewport,
+        #[cfg(feature = "model-api")]
+        None,
+    )
 }
 
 #[cfg(feature = "model-api")]
 pub(crate) fn queue_app_window_export(world: &mut World, path: &Path) -> Result<(), String> {
-    queue_screenshot_export(world, path, ViewportExportScope::AppWindow)
+    queue_screenshot_export(
+        world,
+        path,
+        ViewportExportScope::AppWindow,
+        #[cfg(feature = "model-api")]
+        None,
+    )
+}
+
+#[cfg(feature = "model-api")]
+pub(crate) fn queue_memory_screenshot(
+    world: &mut World,
+    include_ui: bool,
+    response: tokio::sync::oneshot::Sender<Result<String, String>>,
+) {
+    let result = std::sync::Arc::new(std::sync::Mutex::new(Some(response)));
+    let scope = if include_ui {
+        ViewportExportScope::AppWindow
+    } else {
+        ViewportExportScope::Viewport
+    };
+    if let Err(error) = queue_screenshot_export(
+        world,
+        Path::new("browser-memory.png"),
+        scope,
+        Some(result.clone()),
+    ) {
+        if let Some(sender) = result.lock().unwrap().take() {
+            let _ = sender.send(Err(error));
+        }
+    }
 }
 
 fn queue_screenshot_export(
     world: &mut World,
     path: &Path,
     scope: ViewportExportScope,
+    #[cfg(feature = "model-api")] memory_result: Option<MemoryCapture>,
 ) -> Result<(), String> {
     let _ = viewport_export_format_from_path(path)?;
     if world.resource::<ViewportExportState>().pending.is_some() {
         return Err("A viewport export is already in progress.".to_string());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    #[cfg(feature = "model-api")]
+    let writes_file = memory_result.is_none();
+    #[cfg(not(feature = "model-api"))]
+    let writes_file = true;
+    if writes_file {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
     }
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.to_string()),
-    }
-
     world.resource_mut::<ViewportExportState>().pending = Some(PendingViewportExport {
+        #[cfg(feature = "model-api")]
+        memory_result,
         path: path.to_path_buf(),
         stage: PendingViewportExportStage::FlushUiFrame,
         scope,
@@ -542,7 +609,8 @@ fn queue_screenshot_export(
     Ok(())
 }
 
-/// Hide every viewport overlay while a **viewport** export is in flight.
+/// Hide interaction overlays while a **viewport** export is in flight.
+/// Canonical DrawingScene lines are model evidence and remain visible.
 ///
 /// `take_screenshot` is the harness's evidence channel: agents accept or reject
 /// a model by looking at what it returns. The viewport also carries manipulator
@@ -586,6 +654,11 @@ fn suppress_overlays_during_viewport_export(
         }
         if saved.is_empty() {
             for (type_id, config, _) in config_store.iter_mut() {
+                if *type_id
+                    == std::any::TypeId::of::<crate::plugins::drafting_sheet::DrawingSceneGizmos>()
+                {
+                    continue;
+                }
                 saved.push((*type_id, config.enabled));
                 config.enabled = false;
             }
@@ -603,7 +676,8 @@ fn suppress_overlays_during_viewport_export(
     if *saved_overlays {
         *saved_overlays = false;
         for mut visibility in &mut overlay_query {
-            *visibility = Visibility::Visible;
+            // Overlays attached to a source must continue to honor its visibility.
+            *visibility = Visibility::Inherited;
         }
     }
     for (type_id, config, _) in config_store.iter_mut() {
@@ -634,7 +708,18 @@ fn process_pending_viewport_export(world: &mut World) {
         ViewportExportScope::Viewport => capture_viewport(world),
         ViewportExportScope::AppWindow => None,
     };
-    if pending.scope == ViewportExportScope::Viewport {
+    // WebGL captures the presented framebuffer reliably; the secondary image
+    // camera may return an unrendered black target on that backend. Crop the
+    // same window capture used by include_ui=true to the actual viewport.
+    // Drafting text is Bevy UI attached to the primary camera; a secondary
+    // image camera would silently omit it. Capture the presented viewport.
+    let drafting_active = world
+        .get_resource::<crate::plugins::drafting::DraftingWorkspaceState>()
+        .is_some_and(|state| state.is_active());
+    if pending.scope == ViewportExportScope::Viewport
+        && !drafting_active
+        && !cfg!(all(target_arch = "wasm32", feature = "webgl2"))
+    {
         if let Err(error) =
             queue_offscreen_viewport_screenshot(world, pending.clone(), viewport_capture)
         {
@@ -653,6 +738,8 @@ fn process_pending_viewport_export(world: &mut World) {
             pending.path,
             viewport_capture,
             None,
+            #[cfg(feature = "model-api")]
+            pending.memory_result,
         ));
     world.flush();
 }
@@ -698,6 +785,8 @@ fn queue_offscreen_viewport_screenshot(
                 camera_entity,
                 render_target,
             }),
+            #[cfg(feature = "model-api")]
+            pending.memory_result,
         ));
     world.flush();
     Ok(())
@@ -766,6 +855,7 @@ fn save_viewport_export_to_disk_with_cleanup(
     path: PathBuf,
     viewport_capture: Option<ViewportCapture>,
     cleanup: Option<ViewportExportCleanup>,
+    #[cfg(feature = "model-api")] memory_result: Option<MemoryCapture>,
 ) -> impl FnMut(
     bevy::prelude::On<bevy::render::view::screenshot::ScreenshotCaptured>,
     Commands,
@@ -774,24 +864,36 @@ fn save_viewport_export_to_disk_with_cleanup(
     move |screenshot_captured, mut commands, mut images| {
         let img = screenshot_captured.image.clone();
         let source_format = img.texture_descriptor.format;
-        match img.try_into_dynamic() {
+        let result = match img.try_into_dynamic() {
             Ok(dynamic) => {
                 let mut rgb = crop_dynamic_to_viewport(dynamic, viewport_capture);
                 if is_linear_texture_format(source_format) {
                     encode_linear_to_srgb(&mut rgb);
                 }
                 if let Some(warning) = screenshot_quality_warning(&rgb) {
-                    error!(
-                        "Viewport export '{}' produced invalid visual evidence: {warning}",
-                        path.display()
-                    );
+                    error!("Drawing capture is not valid visual evidence: {warning}");
                 }
-                if let Err(error) = write_rgb_to_path(&path, &rgb) {
-                    error!("Cannot save drawing export '{}': {error}", path.display());
+                #[cfg(feature = "model-api")]
+                if memory_result.is_some() {
+                    encode_memory_screenshot(&rgb)
+                } else {
+                    write_rgb_to_path(&path, &rgb).map(|_| path.to_string_lossy().to_string())
                 }
+                #[cfg(not(feature = "model-api"))]
+                write_rgb_to_path(&path, &rgb).map(|_| path.to_string_lossy().to_string())
             }
-            Err(error) => {
-                error!("Cannot save drawing export, screen format cannot be understood: {error}");
+            Err(error) => Err(format!("Screenshot format cannot be understood: {error}")),
+        };
+        if let Err(error) = &result {
+            error!(
+                "Cannot capture drawing export '{}': {error}",
+                path.display()
+            );
+        }
+        #[cfg(feature = "model-api")]
+        if let Some(memory_result) = &memory_result {
+            if let Some(sender) = memory_result.lock().unwrap().take() {
+                let _ = sender.send(result);
             }
         }
         if let Some(cleanup) = cleanup.clone() {
@@ -804,6 +906,27 @@ fn save_viewport_export_to_disk_with_cleanup(
 /// Whether the captured swapchain pixels are already in the sRGB transfer
 /// function. Linear formats store gamma-decoded values and must be re-encoded
 /// before being handed to a viewer that expects sRGB.
+#[cfg(feature = "model-api")]
+fn encode_memory_screenshot(rgb: &RgbImage) -> Result<String, String> {
+    use base64::Engine;
+    if let Some(warning) = screenshot_quality_warning(rgb) {
+        return Err(format!(
+            "Screenshot is not valid visual evidence: {warning}"
+        ));
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(rgb.clone())
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    if bytes.get_ref().len() > 12 * 1024 * 1024 {
+        return Err("Screenshot exceeds inline MCP image limit".into());
+    }
+    Ok(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
+    ))
+}
+
 fn is_linear_texture_format(format: TextureFormat) -> bool {
     matches!(
         format,
@@ -1063,7 +1186,6 @@ fn write_pdf_object(
     Ok(())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn default_export_file_stem(current_path: Option<&Path>) -> String {
     current_path
         .and_then(|path| path.file_stem())
@@ -1071,7 +1193,6 @@ fn default_export_file_stem(current_path: Option<&Path>) -> String {
         .unwrap_or_else(|| DEFAULT_EXPORT_FILE_STEM.to_string())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn default_export_file_name(
     current_path: Option<&Path>,
     preferred_format: Option<ViewportExportFormat>,
@@ -1334,8 +1455,8 @@ mod tests {
     fn screenshot_quality_flags_all_black_file() {
         let path = std::env::temp_dir().join(format!(
             "talos3d-black-screenshot-{}.png",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            crate::time::SystemTime::now()
+                .duration_since(crate::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
@@ -1379,6 +1500,8 @@ mod tests {
     fn annotation_overlays_resume_on_capture_frame() {
         let mut state = ViewportExportState {
             pending: Some(PendingViewportExport {
+                #[cfg(feature = "model-api")]
+                memory_result: None,
                 path: PathBuf::from("/tmp/drawing.png"),
                 stage: PendingViewportExportStage::FlushUiFrame,
                 scope: ViewportExportScope::Viewport,
@@ -1394,9 +1517,56 @@ mod tests {
     }
 
     #[test]
+    fn viewport_capture_preserves_drawing_lines_but_hides_interaction_gizmos() {
+        use crate::plugins::drafting_sheet::DrawingSceneGizmos;
+        let mut app = App::new();
+        let mut configs = GizmoConfigStore::default();
+        configs.insert(
+            Default::default(),
+            bevy::gizmos::config::DefaultGizmoConfigGroup,
+        );
+        configs.insert(Default::default(), DrawingSceneGizmos);
+        app.insert_resource(configs)
+            .insert_resource(ViewportExportState {
+                pending: Some(PendingViewportExport {
+                    #[cfg(feature = "model-api")]
+                    memory_result: None,
+                    path: PathBuf::from("drawing.png"),
+                    stage: PendingViewportExportStage::CaptureNextFrame,
+                    scope: ViewportExportScope::Viewport,
+                }),
+            })
+            .add_systems(Update, suppress_overlays_during_viewport_export);
+        app.update();
+        let configs = app.world().resource::<GizmoConfigStore>();
+        assert!(configs.config::<DrawingSceneGizmos>().0.enabled);
+        assert!(
+            !configs
+                .config::<bevy::gizmos::config::DefaultGizmoConfigGroup>()
+                .0
+                .enabled
+        );
+        app.world_mut()
+            .resource_mut::<ViewportExportState>()
+            .pending = None;
+        for _ in 0..5 {
+            app.update();
+        }
+        assert!(
+            app.world()
+                .resource::<GizmoConfigStore>()
+                .config::<bevy::gizmos::config::DefaultGizmoConfigGroup>()
+                .0
+                .enabled
+        );
+    }
+
+    #[test]
     fn app_window_export_keeps_ui_and_overlays_visible() {
         let state = ViewportExportState {
             pending: Some(PendingViewportExport {
+                #[cfg(feature = "model-api")]
+                memory_result: None,
                 path: PathBuf::from("/tmp/app-window.png"),
                 stage: PendingViewportExportStage::FlushUiFrame,
                 scope: ViewportExportScope::AppWindow,

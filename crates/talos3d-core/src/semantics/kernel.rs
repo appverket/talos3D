@@ -16,7 +16,7 @@
 use crate::plugins::identity::ElementId;
 use crate::plugins::refinement::RefinementState;
 
-use super::graph::{AdmissibilityProposition, PropositionObject};
+use super::graph::{AdmissibilityProposition, Cardinality, PropositionObject};
 use super::ids::{AnchorKindId, ConceptId, PredicateId, PropositionId};
 use super::plan::{BindTarget, PlanIntent, SemanticContext, SemanticPlan};
 use super::registry::SemanticRegistry;
@@ -107,6 +107,7 @@ pub fn evaluate(
                 evaluate_assignment(
                     registry,
                     context,
+                    plan,
                     *entity,
                     concept,
                     &mut refusals,
@@ -116,6 +117,23 @@ pub fn evaluate(
             }
             PlanIntent::RemoveConcept { entity, concept } => {
                 obligations.push(downgrade_obligation(registry, *entity, concept));
+            }
+            PlanIntent::PublishAnchors { entity, anchors } => {
+                let concept = concept_for(context, plan, *entity);
+                if anchors.iter().any(|anchor| {
+                    anchor.role.as_str().trim().is_empty()
+                        || !concept.as_ref().is_some_and(|concept| {
+                            publication_allowed(registry, concept, &anchor.kind, &anchor.role)
+                        })
+                }) {
+                    refusals.push(Refusal {
+                        violated: None,
+                        reason: "The host concept does not publish the requested anchor kind/role.".into(),
+                        observed: format!("entity {} with concept {:?}", entity.0, concept),
+                        repair: "Resolve the intended concept and use its declared publication contract; do not fabricate anchors.".into(),
+                        contrasts: Vec::new(),
+                    });
+                }
             }
             PlanIntent::Bind {
                 subject,
@@ -136,6 +154,15 @@ pub fn evaluate(
         }
     }
 
+    obligations.retain(|obligation| {
+        registry
+            .proposition(&obligation.proposition)
+            .is_none_or(|proposition| {
+                !effective_bindings(context, plan, obligation.entity, &proposition.predicate)
+                    .iter()
+                    .any(|target| binding_satisfies(registry, context, plan, proposition, target))
+            })
+    });
     if !refusals.is_empty() {
         Verdict::Refuse(refusals)
     } else if !obligations.is_empty() {
@@ -150,6 +177,7 @@ pub fn evaluate(
 fn evaluate_assignment(
     registry: &SemanticRegistry,
     context: &impl SemanticContext,
+    plan: &SemanticPlan,
     entity: ElementId,
     concept: &ConceptId,
     refusals: &mut Vec<Refusal>,
@@ -179,14 +207,40 @@ fn evaluate_assignment(
         });
     }
 
+    // Reidentification cannot keep anchors that the new concept cannot offer.
+    if planned_anchors(context, plan, entity)
+        .iter()
+        .any(|anchor| !publication_allowed(registry, concept, &anchor.kind, &anchor.role))
+    {
+        refusals.push(Refusal {
+            violated: None,
+            reason: "The new concept cannot retain these published anchors.".into(),
+            observed: format!("Entity {} would claim `{concept}` with incompatible anchors", entity.0),
+            repair: "Inspect the host and explicitly replace its publications in the same plan, or remove its old concept before reidentifying it.".into(),
+            contrasts: record.contrasts.clone(),
+        });
+    }
     let state = context.refinement_state(entity);
     for proposition in registry.propositions_of_subject(concept, jurisdiction) {
+        let bindings = effective_bindings(context, plan, entity, &proposition.predicate);
+        for target in &bindings {
+            evaluate_binding(
+                registry,
+                context,
+                plan,
+                entity,
+                &proposition.predicate,
+                target,
+                refusals,
+                jurisdiction,
+            );
+        }
         let Some(due_by) = proposition.required_by else {
             continue;
         };
-        let already_bound = !context
-            .existing_bindings(entity, &proposition.predicate)
-            .is_empty();
+        let already_bound = bindings
+            .iter()
+            .any(|target| binding_satisfies(registry, context, plan, proposition, target));
         if already_bound {
             continue;
         }
@@ -267,10 +321,23 @@ fn evaluate_binding(
         return;
     }
 
-    if propositions
+    if let Some(proposition) = propositions
         .iter()
-        .any(|proposition| binding_satisfies(registry, context, plan, proposition, target))
+        .find(|proposition| binding_satisfies(registry, context, plan, proposition, target))
     {
+        if matches!(
+            proposition.cardinality,
+            Cardinality::ExactlyOne | Cardinality::AtMostOne
+        ) && effective_bindings(context, plan, subject, predicate).len() > 1
+        {
+            refusals.push(Refusal {
+                violated: Some(proposition.id.clone()),
+                reason: "The requested binding exceeds the concept's cardinality.".into(),
+                observed: format!("Entity {} would have multiple {} bindings", subject.0, predicate),
+                repair: "Inspect the existing binding. To reidentify explicitly, remove the old concept and reassign it before binding in one plan; this records the downgrade and replaces its old bindings.".into(),
+                contrasts: Vec::new(),
+            });
+        }
         return;
     }
 
@@ -307,13 +374,13 @@ fn binding_satisfies(
             // The anchor must actually be published by its host. A fabricated
             // instance id must not pass.
             let publisher_concept = concept_for(context, plan, instance.publisher);
-            let published = context
-                .published_anchors(instance.publisher)
+            let published = planned_anchors(context, plan, instance.publisher)
                 .iter()
                 .any(|candidate| candidate == instance);
             published
-                && publisher_concept
-                    .is_some_and(|concept| registry.publishes_anchor(&concept, required))
+                && publisher_concept.is_some_and(|concept| {
+                    publication_allowed(registry, &concept, required, &instance.role)
+                })
         }
         (PropositionObject::Concept(required), BindTarget::Entity(entity)) => {
             concept_for(context, plan, *entity).is_some_and(|concept| &concept == required)
@@ -322,6 +389,20 @@ fn binding_satisfies(
         // versa. This is the shape of the bargeboard defect.
         _ => false,
     }
+}
+
+fn publication_allowed(
+    registry: &SemanticRegistry,
+    concept: &ConceptId,
+    kind: &AnchorKindId,
+    role: &super::ids::AnchorRoleId,
+) -> bool {
+    !role.as_str().trim().is_empty()
+        && registry.publications().iter().any(|contract| {
+            &contract.publisher == concept
+                && &contract.anchor_kind == kind
+                && (contract.roles.is_empty() || contract.roles.contains(role))
+        })
 }
 
 fn build_refusal(
@@ -333,7 +414,7 @@ fn build_refusal(
     target: &BindTarget,
 ) -> Refusal {
     let observed = describe_observed(registry, context, plan, target);
-    let repair = match &violated.object {
+    let mut repair = match &violated.object {
         PropositionObject::AnchorKind(kind) => {
             let publishers = registry.publishers_of(kind);
             if publishers.is_empty() {
@@ -357,6 +438,38 @@ fn build_refusal(
             format!("{} Expected concept `{concept}`.", violated.repair_hint)
         }
     };
+
+    if let PropositionObject::AnchorKind(kind) = &violated.object {
+        let mut candidates = context.anchor_candidates(kind);
+        for intent in &plan.intents {
+            if let PlanIntent::PublishAnchors { entity, .. } = intent {
+                candidates.extend(planned_anchors(context, plan, *entity));
+            }
+        }
+        candidates.retain(|candidate| {
+            &candidate.kind == kind
+                && binding_satisfies(
+                    registry,
+                    context,
+                    plan,
+                    violated,
+                    &BindTarget::Anchor(candidate.clone()),
+                )
+        });
+        candidates.sort_by(|a, b| {
+            (a.publisher.0, &a.kind, &a.role).cmp(&(b.publisher.0, &b.kind, &b.role))
+        });
+        candidates.dedup();
+        if !candidates.is_empty() {
+            repair.push_str(" Current compatible anchors: ");
+            repair.push_str(
+                &serde_json::to_string(&candidates[..candidates.len().min(16)]).unwrap_or_default(),
+            );
+            if candidates.len() > 16 {
+                repair.push_str(" (first 16; inspect remaining hosts)");
+            }
+        }
+    }
 
     Refusal {
         violated: Some(violated.id.clone()),
@@ -421,17 +534,73 @@ fn concept_for(
     plan: &SemanticPlan,
     entity: ElementId,
 ) -> Option<ConceptId> {
-    plan.intents
-        .iter()
-        .rev()
-        .find_map(|intent| match intent {
+    for intent in plan.intents.iter().rev() {
+        match intent {
             PlanIntent::AssignConcept {
                 entity: assigned,
                 concept,
-            } if *assigned == entity => Some(concept.clone()),
-            _ => None,
-        })
-        .or_else(|| context.concept_of(entity))
+            } if *assigned == entity => return Some(concept.clone()),
+            PlanIntent::RemoveConcept {
+                entity: removed, ..
+            } if *removed == entity => return None,
+            _ => {}
+        }
+    }
+    context.concept_of(entity)
+}
+
+fn effective_bindings(
+    context: &impl SemanticContext,
+    plan: &SemanticPlan,
+    subject: ElementId,
+    predicate: &PredicateId,
+) -> Vec<BindTarget> {
+    let mut bindings = context.existing_bindings(subject, predicate);
+    for intent in &plan.intents {
+        match intent {
+            PlanIntent::RemoveConcept { entity, .. } if *entity == subject => bindings.clear(),
+            PlanIntent::Bind {
+                subject: bound,
+                predicate: relation,
+                target,
+            } if *bound == subject && relation == predicate => {
+                if !bindings.contains(target) {
+                    bindings.push(target.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    bindings
+}
+
+fn planned_anchors(
+    context: &impl SemanticContext,
+    plan: &SemanticPlan,
+    entity: ElementId,
+) -> Vec<super::plan::AnchorInstanceId> {
+    for intent in plan.intents.iter().rev() {
+        match intent {
+            PlanIntent::PublishAnchors {
+                entity: publisher,
+                anchors,
+            } if *publisher == entity => {
+                return anchors
+                    .iter()
+                    .map(|anchor| super::plan::AnchorInstanceId {
+                        publisher: entity,
+                        kind: anchor.kind.clone(),
+                        role: anchor.role.clone(),
+                    })
+                    .collect();
+            }
+            PlanIntent::RemoveConcept {
+                entity: removed, ..
+            } if *removed == entity => return Vec::new(),
+            _ => {}
+        }
+    }
+    context.published_anchors(entity)
 }
 
 fn describe_object(object: &PropositionObject) -> String {

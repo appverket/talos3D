@@ -13,13 +13,13 @@
 //! - **Compound occurrences** aggregate transient `GeneratedOccurrencePart`
 //!   geometry under the owning occurrence.
 //!
-//! Display labels come from the generic `CapabilityRegistry::capture_snapshot`
+//! Display labels come from the generic `CapabilityRegistry::display_label`
 //! path so any authored entity contributes its own `label()`/`type_name()`
 //! without the outliner knowing about concrete entity kinds.
 
-use std::collections::{HashMap, HashSet};
 #[cfg(feature = "perf-stats")]
-use std::time::Instant;
+use crate::time::Instant;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::world::EntityRef, prelude::*};
 use bevy_egui::egui;
@@ -41,7 +41,7 @@ use crate::plugins::{
         group::{semantic_assembly_physical_group_links, GroupEditContext, GroupMembers},
         occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
     },
-    selection::Selected,
+    selection::{OccurrenceEditContext, Selected},
     ui::StatusBarData,
 };
 
@@ -50,6 +50,10 @@ const OUTLINER_DEFAULT_HEIGHT: f32 = 420.0;
 const OUTLINER_INDENT_PER_DEPTH: f32 = 14.0;
 const OUTLINER_TOGGLE_WIDTH: f32 = 16.0;
 const OUTLINER_ROW_HEIGHT: f32 = 22.0;
+
+#[path = "outliner_interaction.rs"]
+mod interaction;
+use interaction::{can_group_selection, draw_row_context_menu, row_selection_action};
 
 /// What kind of model element a tree row represents. Used only for the row
 /// glyph/styling — selection and traversal do not depend on it.
@@ -67,12 +71,16 @@ pub struct OutlinerNode {
     /// Stable id used to key the per-row collapse state across frames.
     pub node_id: u64,
     /// Entity to (de)select when this row is clicked. Group members select their
-    /// own row entity instead of redirecting to the parent group; generated part
-    /// rows still select the owning occurrence because they are transient rows.
+    /// own row entity, including generated parts inside an occurrence.
     pub select_entity: Option<Entity>,
     pub label: String,
     pub kind: OutlinerKind,
     pub is_linked_model: bool,
+    pub visibility_id: Option<u64>,
+    pub explicitly_hidden: bool,
+    pub effectively_hidden: bool,
+    pub explicitly_locked: bool,
+    pub effectively_locked: bool,
     /// Arena indices of child rows.
     pub children: Vec<usize>,
     /// Arena index of this row's parent, or `None` for a root row. Used to walk
@@ -126,13 +134,19 @@ pub struct OutlinerWindowState {
     /// would yank rows out from under the cursor mid-click; the clicked row is
     /// on screen already, so there is nothing to reveal.
     selection_from_panel: bool,
+    /// A viewport click also reveals an unchanged selection after manual folding.
+    reveal_requested: bool,
+    /// Stable row identity; a Shift range never crosses this row's parent.
+    selection_anchor: Option<u64>,
 }
 
 /// A pending selection change produced by a click on an outliner row.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct OutlinerSelectAction {
     pub target: Entity,
     pub additive: bool,
+    /// Inclusive sibling range. Additive ranges add rather than toggle members.
+    pub range: Option<Vec<Entity>>,
 }
 
 pub struct OutlinerPlugin;
@@ -198,7 +212,7 @@ pub struct OutlineEntry {
     pub node_id: u64,
     /// `ElementId` of the entity, or `None` for a transient generated part.
     pub element_id: Option<u64>,
-    /// Entity to select when this row is activated (the owner, for parts).
+    /// Entity to select when this row is activated, including transient parts.
     pub entity: Entity,
     pub label: String,
     pub kind: OutlinerKind,
@@ -215,6 +229,12 @@ pub fn build_outliner_tree(world: &mut World) {
         .map(|state| state.visible)
         .unwrap_or(false);
     if !visible {
+        if let Some(mut state) = world.get_resource_mut::<OutlinerWindowState>() {
+            state.last_selection.clear();
+            state.pending_reveal = None;
+            state.selection_from_panel = false;
+            state.selection_anchor = None;
+        }
         if let Some(mut tree) = world.get_resource_mut::<OutlinerTree>() {
             tree.clear();
         }
@@ -262,13 +282,23 @@ fn link_parents(nodes: &mut [OutlinerNode]) {
 /// double-clicking in the viewport is a navigation act, and the tree is where
 /// that position should be legible.
 fn mark_edit_context(world: &World, nodes: &mut [OutlinerNode]) {
-    let Some(context) = world.get_resource::<GroupEditContext>() else {
+    let mut stack = world
+        .get_resource::<GroupEditContext>()
+        .map(|context| context.stack.clone())
+        .unwrap_or_default();
+    if let Some(context) = world.get_resource::<OccurrenceEditContext>() {
+        stack.extend(&context.stack);
+    }
+    if let Some(id) = world
+        .get_resource::<crate::plugins::face_edit::FaceEditContext>()
+        .and_then(|context| context.element_id)
+    {
+        stack.push(id);
+    }
+    let Some(active) = stack.last() else {
         return;
     };
-    let Some(active) = context.current_group() else {
-        return;
-    };
-    let ancestors: HashSet<u64> = context.stack.iter().map(|id| id.0).collect();
+    let ancestors: HashSet<u64> = stack.iter().map(|id| id.0).collect();
     for node in nodes.iter_mut() {
         node.edit_context = if node.node_id == active.0 {
             OutlinerEditContext::Active
@@ -282,31 +312,75 @@ fn mark_edit_context(world: &World, nodes: &mut [OutlinerNode]) {
 
 /// `node_id`s of rows whose entity is currently selected, in row order.
 fn selected_node_ids(world: &mut World, nodes: &[OutlinerNode]) -> Vec<u64> {
-    let selected: HashSet<Entity> = world
+    let mut selected: HashSet<Entity> = world
         .query_filtered::<Entity, With<Selected>>()
         .iter(world)
         .collect();
-    nodes
+    if let Some(entity) = world
+        .get_resource::<crate::plugins::face_edit::FaceEditContext>()
+        .and_then(|context| context.entity)
+    {
+        selected.insert(entity);
+    }
+    let mut ids: Vec<u64> = nodes
         .iter()
         .filter(|node| {
             node.select_entity
                 .is_some_and(|entity| selected.contains(&entity))
         })
         .map(|node| node.node_id)
-        .collect()
+        .collect();
+    // A double-click can enter an aggregate and remove its Selected marker in
+    // one frame. Reveal that edit location even when no child has been picked.
+    if ids.is_empty() {
+        let active = world
+            .get_resource::<OccurrenceEditContext>()
+            .and_then(|context| context.stack.last().copied())
+            .or_else(|| {
+                world
+                    .get_resource::<GroupEditContext>()
+                    .and_then(|context| context.current_group())
+            });
+        if let Some(id) = active.filter(|id| nodes.iter().any(|node| node.node_id == id.0)) {
+            ids.push(id.0);
+        }
+    }
+    ids
 }
 
 /// When the selection changes, expand whatever is collapsed above it and queue a
 /// scroll so the row is actually on screen. Without this a selection made in the
 /// viewport can sit inside a collapsed branch, or hundreds of rows away, and the
 /// panel looks like it simply did not respond.
+pub(crate) fn request_selection_reveal(world: &mut World) {
+    if let Some(mut state) = world.get_resource_mut::<OutlinerWindowState>() {
+        state.reveal_requested = true;
+    }
+}
+
 fn reveal_selection_if_changed(world: &mut World, nodes: &[OutlinerNode], selected: Vec<u64>) {
-    let Some(state) = world.get_resource::<OutlinerWindowState>() else {
+    let Some(mut state) = world.get_resource_mut::<OutlinerWindowState>() else {
         return;
     };
-    if state.last_selection == selected {
+    // Consume the origin even for a no-op panel click. Otherwise it suppresses
+    // the *next* viewport selection instead of the panel action that set it.
+    let from_panel = std::mem::take(&mut state.selection_from_panel);
+    let requested = std::mem::take(&mut state.reveal_requested);
+    if from_panel && !requested {
+        state.last_selection = selected;
+        state.pending_reveal = None;
         return;
     }
+    if state.last_selection == selected && !requested {
+        return;
+    }
+    state.selection_anchor = None;
+    let previous: HashSet<u64> = state.last_selection.iter().copied().collect();
+    let focus = selected
+        .iter()
+        .find(|id| !previous.contains(id))
+        .or_else(|| selected.first())
+        .copied();
 
     let index_of: HashMap<u64, usize> = nodes
         .iter()
@@ -326,14 +400,10 @@ fn reveal_selection_if_changed(world: &mut World, nodes: &[OutlinerNode], select
     }
 
     let mut state = world.resource_mut::<OutlinerWindowState>();
-    if std::mem::take(&mut state.selection_from_panel) {
-        state.last_selection = selected;
-        return;
-    }
     for node_id in expand {
         state.collapsed.remove(&node_id);
     }
-    state.pending_reveal = selected.first().copied();
+    state.pending_reveal = focus;
     state.last_selection = selected;
 }
 
@@ -347,17 +417,43 @@ fn flatten_entry(world: &World, entry: &OutlineEntry, nodes: &mut Vec<OutlinerNo
         .collect();
     nodes.push(OutlinerNode {
         node_id: entry.node_id,
-        select_entity: (!world
-            .get_resource::<crate::plugins::layers::LayerRegistry>()
-            .is_some_and(|_| entity_on_locked_layer(world, entry.entity)))
+        select_entity: (!super::object_locks::entity_locked(world, entry.entity)
+            && !world
+                .get_resource::<crate::plugins::layers::LayerRegistry>()
+                .is_some_and(|_| entity_on_locked_layer(world, entry.entity)))
         .then_some(entry.entity),
-        label: entry.label.clone(),
+        label: world
+            .get::<GeneratedOccurrencePart>(entry.entity)
+            .and_then(|part| {
+                world
+                    .get_resource::<crate::plugins::modeling::definition::DefinitionRegistry>()
+                    .and_then(|registry| registry.get(&part.definition_id))
+            })
+            .map(|definition| definition.name.clone())
+            .unwrap_or_else(|| entry.label.clone()),
         kind: entry.kind,
         is_linked_model: matches!(entry.kind, OutlinerKind::Group)
             && world
                 .get::<GroupMembers>(entry.entity)
                 .and_then(|members| members.linked_model.as_ref())
                 .is_some(),
+        visibility_id: entry.element_id.filter(|_| {
+            world
+                .get::<crate::plugins::layers::LayerVisibilityExempt>(entry.entity)
+                .is_none()
+        }),
+        explicitly_hidden: entry.element_id.is_some_and(|id| {
+            world
+                .get_resource::<crate::plugins::layers::ObjectVisibility>()
+                .is_some_and(|state| state.hidden.contains(&ElementId(id)))
+        }),
+        effectively_hidden: crate::plugins::layers::entity_document_hidden(world, entry.entity),
+        explicitly_locked: entry.element_id.is_some_and(|id| {
+            world
+                .get_resource::<super::object_locks::ObjectLocks>()
+                .is_some_and(|state| state.locked.contains(&ElementId(id)))
+        }),
+        effectively_locked: super::object_locks::entity_locked(world, entry.entity),
         children,
         parent: None,
         edit_context: OutlinerEditContext::default(),
@@ -421,37 +517,28 @@ pub fn collect_outline_forest(world: &mut World) -> Vec<OutlineEntry> {
 
     let mut parts_by_owner: HashMap<u64, Vec<(Entity, String)>> = HashMap::new();
     {
-        let mut query = world.query::<&GeneratedOccurrencePart>();
-        // Collect owner -> label only; the part's own entity isn't needed since
-        // clicking a part selects the owner.
-        let mut tmp: Vec<(u64, String)> = Vec::new();
-        for part in query.iter(world) {
-            let label = if part.slot_path.is_empty() {
-                part.definition_id.to_string()
-            } else {
-                part.slot_path.clone()
-            };
-            tmp.push((part.owner.0, label));
-        }
-        for (owner, label) in tmp {
-            if let Some(&owner_entity) = entity_by_eid.get(&owner) {
+        let mut query = world.query::<(Entity, &GeneratedOccurrencePart)>();
+        for (entity, part) in query.iter(world) {
+            if entity_by_eid.contains_key(&part.owner.0) {
                 parts_by_owner
-                    .entry(owner)
+                    .entry(part.owner.0)
                     .or_default()
-                    .push((owner_entity, label));
+                    .push((entity, part.slot_path.clone()));
             }
+        }
+        for parts in parts_by_owner.values_mut() {
+            parts.sort_by(|a, b| a.1.cmp(&b.1));
         }
     }
 
-    // --- Phase B: display labels via the generic snapshot path ---
+    // --- Phase B: display labels via the lightweight metadata path ---
     let mut labels: HashMap<u64, String> = HashMap::new();
     {
         let registry = world.resource::<CapabilityRegistry>();
         for (eid, entity) in &all_eids {
             if let Ok(entity_ref) = world.get_entity(*entity) {
                 let entity_ref: EntityRef = entity_ref;
-                if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
-                    let label = snapshot.label();
+                if let Some(label) = registry.display_label(&entity_ref, world) {
                     if !label.is_empty() {
                         labels.insert(*eid, label);
                     }
@@ -538,11 +625,11 @@ fn build_entry(ctx: &BuildContext, eid: u64, visited: &mut HashSet<u64>) -> Outl
     }
 
     if let Some(parts) = ctx.parts_by_owner.get(&eid) {
-        for (owner_entity, label) in parts {
+        for (part_entity, label) in parts {
             children.push(OutlineEntry {
                 node_id: part_node_id(eid, label),
                 element_id: None,
-                entity: *owner_entity,
+                entity: *part_entity,
                 label: label.clone(),
                 kind: OutlinerKind::Part,
                 children: Vec::new(),
@@ -591,17 +678,24 @@ fn kind_str(kind: OutlinerKind) -> &'static str {
 /// tool. Shares [`collect_outline_forest`] with the panel so the UI and API
 /// can never disagree about the model's structure.
 pub fn outline_tree_json(world: &mut World) -> Value {
-    fn entry_json(entry: &OutlineEntry) -> Value {
+    fn entry_json(world: &World, entry: &OutlineEntry) -> Value {
+        let explicitly_locked = entry.element_id.is_some_and(|id| {
+            world
+                .get_resource::<super::object_locks::ObjectLocks>()
+                .is_some_and(|state| state.locked.contains(&ElementId(id)))
+        });
         serde_json::json!({
             "element_id": entry.element_id,
             "label": entry.label,
             "kind": kind_str(entry.kind),
-            "children": entry.children.iter().map(entry_json).collect::<Vec<_>>(),
+            "locked": super::object_locks::entity_locked(world, entry.entity),
+            "explicitly_locked": explicitly_locked,
+            "children": entry.children.iter().map(|entry| entry_json(world, entry)).collect::<Vec<_>>(),
         })
     }
     let roots = collect_outline_forest(world);
     serde_json::json!({
-        "roots": roots.iter().map(entry_json).collect::<Vec<_>>(),
+        "roots": roots.iter().map(|entry| entry_json(world, entry)).collect::<Vec<_>>(),
     })
 }
 
@@ -648,6 +742,20 @@ pub fn draw_outliner_window(
                     state.collapsed.clear();
                 }
             });
+            let can_group = can_group_selection(tree, selected);
+            if ui
+                .add_enabled(can_group, egui::Button::new("Group Selected").small())
+                .on_disabled_hover_text("Select two or more editable objects under the same parent")
+                .clicked()
+            {
+                queue_command_invocation_resource(
+                    pending_commands,
+                    "modeling.group".to_string(),
+                    serde_json::json!({}),
+                );
+            }
+            ui.small("Shift-click: sibling range · Ctrl/Cmd-click: toggle");
+            ui.small("Checked = shown");
             ui.separator();
             let visible_rows = collect_visible_outliner_rows(tree, state);
             // A selection made outside the panel is only communicated if the row
@@ -657,7 +765,7 @@ pub fn draw_outliner_window(
                 visible_rows
                     .iter()
                     .position(|(index, _)| tree.nodes[*index].node_id == node_id)
-                    .map(|row| row as f32 * OUTLINER_ROW_HEIGHT)
+                    .map(|row| row as f32 * (OUTLINER_ROW_HEIGHT + ui.spacing().item_spacing.y))
             });
             let mut scroll_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
             if let Some(offset) = reveal_offset {
@@ -738,90 +846,97 @@ fn render_outliner_row(
     let node_id = node.node_id;
     let expanded = has_children && !state.collapsed.contains(&node_id);
 
-    ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * OUTLINER_INDENT_PER_DEPTH);
-
-        if has_children {
-            if draw_disclosure_triangle(ui, expanded) {
-                if expanded {
-                    state.collapsed.insert(node_id);
-                } else {
-                    state.collapsed.remove(&node_id);
-                }
-            }
-        } else {
-            ui.add_space(OUTLINER_TOGGLE_WIDTH);
-        }
-
-        let is_selected = node
-            .select_entity
-            .is_some_and(|select_entity| selected.contains(&select_entity));
-        let mut text = egui::RichText::new(format!("{} {}", kind_glyph(node.kind), node.label));
-        // The group being edited is *where you are*, which is a different fact
-        // from what is selected — give it its own weight rather than reusing the
-        // selection highlight and making the two indistinguishable.
-        match node.edit_context {
-            OutlinerEditContext::Active => {
-                text = text.strong().color(ui.visuals().hyperlink_color);
-            }
-            OutlinerEditContext::Ancestor => {
-                text = text.color(ui.visuals().weak_text_color());
-            }
-            OutlinerEditContext::Outside => {}
-        }
-        let response = ui.selectable_label(is_selected, text);
-        if response.clicked() && node.select_entity.is_some() {
-            let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
-            *action = Some(OutlinerSelectAction {
-                target: node.select_entity.expect("checked selectable target"),
-                additive,
-            });
-        }
-        if response.clicked_by(egui::PointerButton::Secondary) && node.select_entity.is_some() {
-            *action = Some(OutlinerSelectAction {
-                target: node.select_entity.expect("checked selectable target"),
-                additive: false,
-            });
-        }
-        if matches!(node.kind, OutlinerKind::Group) {
-            response.context_menu(|ui| {
-                let (command_id, fallback_label) = if node.is_linked_model {
-                    ("modeling.open_linked_model", "Open Linked Model")
-                } else {
-                    (
-                        "modeling.create_linked_model_from_selection",
-                        "Create Linked Model",
-                    )
-                };
-                let label = command_registry
-                    .get(command_id)
-                    .map(|descriptor| descriptor.label.as_str())
-                    .unwrap_or(fallback_label);
-                if ui.button(label).clicked() {
+    ui.push_id(node_id, |ui| {
+        ui.horizontal(|ui| {
+            ui.set_min_height(OUTLINER_ROW_HEIGHT);
+            if let Some(id) = node.visibility_id {
+                let mut shown = !node.explicitly_hidden;
+                let response =
+                    ui.checkbox(&mut shown, "")
+                        .on_hover_text(if node.explicitly_hidden {
+                            "Show this object (hidden parents and layers still apply)"
+                        } else if node.effectively_hidden {
+                            "Hidden by a parent or layer; this object's own visibility is on"
+                        } else {
+                            "Hide this object and its contents"
+                        });
+                if response.changed() {
                     queue_command_invocation_resource(
                         pending_commands,
-                        command_id.to_string(),
-                        serde_json::json!({ "group_id": node.node_id }),
+                        "view.set_object_visibility".to_string(),
+                        serde_json::json!({"element_ids": [id], "visible": shown}),
                     );
-                    ui.close();
                 }
-                if node.is_linked_model {
-                    let command_id = "modeling.refresh_linked_models";
-                    let label = command_registry
-                        .get(command_id)
-                        .map(|descriptor| descriptor.label.as_str())
-                        .unwrap_or("Refresh Linked Model");
-                    if ui.button(label).clicked() {
-                        queue_command_invocation_resource(
-                            pending_commands,
-                            command_id.to_string(),
-                            serde_json::json!({ "group_ids": [node.node_id], "force": true }),
-                        );
-                        ui.close();
+            } else {
+                ui.add_space(20.0);
+            }
+            if let Some(id) = node.visibility_id {
+                let inherited = node.effectively_locked && !node.explicitly_locked;
+                let icon = interaction::padlock_image(ui, node.effectively_locked);
+                let tooltip = if inherited {
+                    "Locked by a parent group; unlock that group first"
+                } else if node.explicitly_locked {
+                    "Unlock this object (parent locks still apply)"
+                } else {
+                    "Lock this object and its contents against viewport interaction"
+                };
+                let response = ui
+                    .add_enabled(!inherited, egui::Button::image(icon).small().frame(false))
+                    .on_hover_text(tooltip)
+                    .on_disabled_hover_text(tooltip);
+                if response.clicked() {
+                    queue_command_invocation_resource(
+                        pending_commands,
+                        "view.set_object_locked".to_string(),
+                        serde_json::json!({"element_ids":[id],"locked":!node.explicitly_locked}),
+                    );
+                }
+            }
+            ui.add_space(depth as f32 * OUTLINER_INDENT_PER_DEPTH);
+
+            if has_children {
+                if draw_disclosure_triangle(ui, expanded) {
+                    if expanded {
+                        state.collapsed.insert(node_id);
+                    } else {
+                        state.collapsed.remove(&node_id);
                     }
                 }
+            } else {
+                ui.add_space(OUTLINER_TOGGLE_WIDTH);
+            }
+
+            let is_selected = node
+                .select_entity
+                .is_some_and(|select_entity| selected.contains(&select_entity));
+            let mut text = egui::RichText::new(format!("{} {}", kind_glyph(node.kind), node.label));
+            // The group being edited is *where you are*, which is a different fact
+            // from what is selected — give it its own weight rather than reusing the
+            // selection highlight and making the two indistinguishable.
+            match node.edit_context {
+                OutlinerEditContext::Active => {
+                    text = text.strong().color(ui.visuals().hyperlink_color);
+                }
+                OutlinerEditContext::Ancestor => {
+                    text = text.color(ui.visuals().weak_text_color());
+                }
+                OutlinerEditContext::Outside => {}
+            }
+            if node.effectively_hidden {
+                text = text.color(ui.visuals().weak_text_color());
+            }
+            let response = ui.selectable_label(is_selected, text);
+            if response.clicked() {
+                *action = row_selection_action(tree, state, idx, ui.input(|i| i.modifiers));
+            }
+            // A context click on an existing selection must preserve the range.
+            if response.clicked_by(egui::PointerButton::Secondary) && !is_selected {
+                *action = row_selection_action(tree, state, idx, egui::Modifiers::NONE);
+            }
+            response.context_menu(|ui| {
+                draw_row_context_menu(ui, node, tree, selected, pending_commands, command_registry);
             });
-        }
+        });
     });
 }
 
@@ -880,25 +995,50 @@ pub fn apply_outliner_selection(
     current: &HashSet<Entity>,
     action: OutlinerSelectAction,
 ) {
-    let OutlinerSelectAction { target, additive } = action;
-    if additive {
-        if current.contains(&target) {
+    let OutlinerSelectAction {
+        target,
+        additive,
+        range,
+    } = action;
+    let toggle = additive && range.is_none();
+    let targets: HashSet<Entity> = range.unwrap_or_else(|| vec![target]).into_iter().collect();
+    commands.queue(move |world: &mut World| {
+        if let Some(part) = world.get::<GeneratedOccurrencePart>(target).cloned() {
+            let already_entered = world
+                .get_resource::<OccurrenceEditContext>()
+                .is_some_and(|context| context.stack.last() == Some(&part.owner));
+            if !already_entered {
+                if let Some(owner) =
+                    crate::plugins::commands::find_entity_by_element_id(world, part.owner)
+                {
+                    world.init_resource::<GroupEditContext>();
+                    world.init_resource::<OccurrenceEditContext>();
+                    crate::plugins::selection::enter_edit_context_for_entity(world, owner);
+                }
+            }
+        }
+    });
+    if !additive {
+        for entity in current {
+            if !targets.contains(entity) {
+                commands.entity(*entity).remove::<Selected>();
+            }
+        }
+    }
+    for target in targets {
+        if toggle && current.contains(&target) {
             commands.entity(target).remove::<Selected>();
         } else {
             commands.entity(target).insert(Selected);
         }
-    } else {
-        for entity in current {
-            if *entity != target {
-                commands.entity(*entity).remove::<Selected>();
-            }
-        }
-        commands.entity(target).insert(Selected);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    mod interaction_tests {
+        include!("outliner_interaction_tests.rs");
+    }
     use super::*;
     use crate::plugins::modeling::{
         assembly::SemanticRelation,
@@ -974,17 +1114,19 @@ mod tests {
     #[test]
     fn occurrences_aggregate_generated_parts() {
         let mut world = World::new();
-        let occ = world
+        let _occ = world
             .spawn((
                 ElementId(10),
                 OccurrenceIdentity::new(DefinitionId("window".to_string()), 1),
             ))
             .id();
-        world.spawn(GeneratedOccurrencePart {
-            owner: ElementId(10),
-            slot_path: "glazing".to_string(),
-            definition_id: DefinitionId("pane".to_string()),
-        });
+        let generated = world
+            .spawn(GeneratedOccurrencePart {
+                owner: ElementId(10),
+                slot_path: "glazing".to_string(),
+                definition_id: DefinitionId("pane".to_string()),
+            })
+            .id();
 
         let tree = build(&mut world);
 
@@ -994,8 +1136,23 @@ mod tests {
         let part = &tree.nodes[occurrence.children[0]];
         assert_eq!(part.kind, OutlinerKind::Part);
         assert_eq!(part.label, "glazing");
-        // Clicking a generated part selects the owning occurrence.
-        assert_eq!(part.select_entity, Some(occ));
+        assert_eq!(part.select_entity, Some(generated));
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        apply_outliner_selection(
+            &mut Commands::new(&mut queue, &world),
+            &HashSet::new(),
+            OutlinerSelectAction {
+                target: generated,
+                additive: false,
+                range: None,
+            },
+        );
+        queue.apply(&mut world);
+        assert!(world.get::<Selected>(generated).is_some());
+        assert_eq!(
+            world.resource::<OccurrenceEditContext>().stack,
+            vec![ElementId(10)]
+        );
     }
 
     #[test]
@@ -1151,6 +1308,181 @@ mod tests {
         assert!(state.collapsed.contains(&3), "user's collapse respected");
     }
 
+    #[test]
+    fn no_op_panel_click_does_not_suppress_next_external_selection() {
+        let mut world = World::new();
+        let first = world.spawn((ElementId(1), Selected)).id();
+        let second = world.spawn(ElementId(2)).id();
+        build(&mut world);
+        world.resource_mut::<OutlinerWindowState>().pending_reveal = None;
+        world
+            .resource_mut::<OutlinerWindowState>()
+            .selection_from_panel = true;
+        build_outliner_tree(&mut world); // clicked the already-selected row
+        world.entity_mut(first).remove::<Selected>();
+        world.entity_mut(second).insert(Selected);
+        build_outliner_tree(&mut world);
+        assert_eq!(
+            world.resource::<OutlinerWindowState>().pending_reveal,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn reopening_panel_and_reclicking_selection_reveal_folded_ancestors() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            GroupMembers {
+                name: "Parent".into(),
+                member_ids: vec![ElementId(2)],
+                frame: default(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((ElementId(2), Selected));
+        build(&mut world);
+        world
+            .resource_mut::<OutlinerWindowState>()
+            .collapsed
+            .insert(1);
+        request_selection_reveal(&mut world);
+        build_outliner_tree(&mut world);
+        assert!(!world
+            .resource::<OutlinerWindowState>()
+            .collapsed
+            .contains(&1));
+        world
+            .resource_mut::<OutlinerWindowState>()
+            .collapsed
+            .insert(1);
+        world.resource_mut::<OutlinerWindowState>().visible = false;
+        build_outliner_tree(&mut world);
+        world.resource_mut::<OutlinerWindowState>().visible = true;
+        build_outliner_tree(&mut world);
+        assert!(!world
+            .resource::<OutlinerWindowState>()
+            .collapsed
+            .contains(&1));
+        assert_eq!(
+            world.resource::<OutlinerWindowState>().pending_reveal,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn additive_selection_reveals_the_new_row_and_face_editing_reveals_its_object() {
+        let mut world = World::new();
+        world.spawn((ElementId(1), Selected));
+        let second = world.spawn(ElementId(2)).id();
+        build(&mut world);
+        world.entity_mut(second).insert(Selected);
+        build_outliner_tree(&mut world);
+        assert_eq!(
+            world.resource::<OutlinerWindowState>().pending_reveal,
+            Some(2)
+        );
+        for id in [1, 2] {
+            let entity =
+                crate::plugins::commands::find_entity_by_element_id_readonly(&world, ElementId(id))
+                    .unwrap();
+            world.entity_mut(entity).remove::<Selected>();
+        }
+        let mut face = crate::plugins::face_edit::FaceEditContext::default();
+        face.enter(second, ElementId(2));
+        world.insert_resource(face);
+        build_outliner_tree(&mut world);
+        assert_eq!(
+            world.resource::<OutlinerWindowState>().pending_reveal,
+            Some(2)
+        );
+        assert_eq!(
+            node_for(world.resource::<OutlinerTree>(), 2)
+                .unwrap()
+                .edit_context,
+            OutlinerEditContext::Active
+        );
+    }
+
+    #[test]
+    fn egui_draw_reveals_a_selected_row_beyond_the_virtualized_first_page() {
+        let mut world = World::new();
+        for id in 1..=300 {
+            world.spawn((
+                ElementId(id),
+                GroupMembers {
+                    name: format!("Group {id:03}"),
+                    member_ids: vec![],
+                    frame: default(),
+                    linked_model: None,
+                },
+            ));
+        }
+        let tree = build(&mut world);
+        let target = tree.nodes.last().unwrap();
+        let target_id = target.node_id;
+        let label = target.label.clone();
+        let selected = HashSet::from([target.select_entity.unwrap()]);
+        let mut state = world.resource::<OutlinerWindowState>().clone();
+        let ctx = egui::Context::default();
+        let mut pending = PendingCommandInvocations::default();
+        let registry = CommandRegistry::default();
+        // Prime the window geometry before requesting the scroll, as in the app.
+        for _ in 0..2 {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    draw_outliner_window(
+                        ui.ctx(),
+                        &mut state,
+                        &tree,
+                        &selected,
+                        &mut pending,
+                        &registry,
+                    );
+                },
+            )
+            .drop_without_applying_deltas();
+        }
+        state.pending_reveal = Some(target_id);
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                draw_outliner_window(
+                    ui.ctx(),
+                    &mut state,
+                    &tree,
+                    &selected,
+                    &mut pending,
+                    &registry,
+                );
+            },
+        );
+        assert!(
+            output.shapes.iter().any(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) =>
+                    text.galley.job.text.contains(&label)
+                        && shape.clip_rect.intersects(text.visual_bounding_rect()),
+                _ => false,
+            }),
+            "the actual egui draw must include the revealed row inside the scroll clip"
+        );
+        assert_eq!(state.pending_reveal, None);
+        output.drop_without_applying_deltas();
+    }
+
     /// The entered group is a different fact from the selection, and the tree is
     /// where the user's position in the hierarchy should be readable.
     #[test]
@@ -1195,6 +1527,47 @@ mod tests {
         assert_eq!(
             node_for(&tree, 3).unwrap().edit_context,
             OutlinerEditContext::Outside
+        );
+    }
+
+    #[test]
+    fn entering_a_collapsed_aggregate_reveals_it_without_a_selected_child() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            GroupMembers {
+                name: "Outer".into(),
+                member_ids: vec![ElementId(2)],
+                frame: default(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            ElementId(2),
+            GroupMembers {
+                name: "Inner".into(),
+                member_ids: vec![],
+                frame: default(),
+                linked_model: None,
+            },
+        ));
+        build(&mut world);
+        world
+            .resource_mut::<OutlinerWindowState>()
+            .collapsed
+            .insert(1);
+        let mut context = GroupEditContext::default();
+        context.enter(ElementId(1));
+        context.enter(ElementId(2));
+        world.insert_resource(context);
+        build_outliner_tree(&mut world);
+        assert!(!world
+            .resource::<OutlinerWindowState>()
+            .collapsed
+            .contains(&1));
+        assert_eq!(
+            world.resource::<OutlinerWindowState>().pending_reveal,
+            Some(2)
         );
     }
 

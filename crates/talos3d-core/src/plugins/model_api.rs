@@ -1,6 +1,11 @@
+use crate::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "model-api")]
 pub mod concept_tools;
+#[cfg(feature = "model-api")]
+mod recipe_history;
 
+#[cfg(test)]
+use crate::plugins::history::apply_pending_history_commands;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[cfg(feature = "model-api")]
@@ -17,8 +22,8 @@ use serde_json::Value;
 use crate::authored_entity::AuthoredEntity;
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::{
-    CapabilityRegistry, FaceId, GeneratedEdgeRef, SelectableSubobjectInfo, SelectableSubobjectRef,
-    SubobjectDisplayOverrides, SubobjectSelection,
+    CapabilityRegistry, FaceId, GeneratedEdgeRef, GeneratedFaceRef, SelectableSubobjectInfo,
+    SelectableSubobjectRef, SubobjectDisplayOverrides, SubobjectSelection,
 };
 #[cfg(feature = "model-api")]
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
@@ -64,22 +69,21 @@ use crate::plugins::modeling::subobject_topology::{
 #[cfg(feature = "model-api")]
 use crate::plugins::render_pipeline::{EdgeDisplayMode, RenderSettings, RenderTonemapping};
 #[cfg(feature = "model-api")]
-use crate::plugins::transform::{apply_transform_plan_modifiers, TransformMode};
+use crate::plugins::transform::{prepare_transform_edit, TransformMode, TransformState};
 #[cfg(feature = "model-api")]
 use crate::plugins::{
     camera::{
-        apply_orbit_state, focus_orbit_camera_on_bounds,
-        perspective_distance_to_orthographic_scale, CameraProjectionMode, OrbitCamera,
+        focus_orbit_camera_on_bounds, perspective_distance_to_orthographic_scale,
+        restore_live_camera, CameraProjectionMode, OrbitCamera,
     },
     commands::{
-        find_entity_by_element_id, queue_command_events, ApplyEntityChangesCommand,
-        BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup,
-        ResolvedDeleteEntitiesCommand,
+        find_entity_by_element_id, ApplyEntityChangesCommand, BeginCommandGroup,
+        CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup, ResolvedDeleteEntitiesCommand,
     },
     dimension_line::constrained_box_edge_dimension_line_point,
     document_properties::DocumentProperties,
     document_state::DocumentState,
-    history::{apply_pending_history_commands, History, HistorySet},
+    history::History,
     import::{import_file_now, ImportRegistry, ImporterDescriptor},
     layers::{LayerAssignment, LayerRegistry, LayerState},
     lighting::{
@@ -104,7 +108,6 @@ use std::{
     path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "model-api")]
@@ -119,7 +122,7 @@ use rmcp::{
     tool, tool_router, transport, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
 };
 
-#[cfg(feature = "model-api")]
+#[cfg(all(feature = "model-api", not(target_arch = "wasm32")))]
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -146,69 +149,111 @@ const CMD_MODEL_API_SET_ENTITY_PROPERTY: &str = "core.set_entity_property";
 #[cfg(feature = "model-api")]
 impl Plugin for ModelApiPlugin {
     fn build(&self, app: &mut App) {
-        let (runtime_info, authentication, http_listener) = match resolve_model_api_runtime() {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("failed to configure model API runtime: {error}");
-                return;
-            }
-        };
-        let (sender, receiver) = mpsc::channel();
-        let request_sender = ModelApiRequestSender::new(sender);
-        configure_model_api_update_mode(app);
-        app.insert_resource(ModelApiReceiver(Mutex::new(receiver)));
-        app.insert_resource(ModelApiWakeHandle(request_sender.clone()));
-        app.insert_resource(runtime_info.clone());
-        app.insert_resource(authentication.clone());
-        app.insert_resource(ModelApiDiscoveryCleanup::new(&runtime_info));
-        // Ensure the Semantic Procedural Session substrate (ADR-051) is
-        // installed so `procedural_session.*` tools have resources to
-        // operate on. Idempotent — `ProceduralSessionMcpPlugin` adds
-        // `ProceduralSessionPlugin` only if not already present.
-        app.add_plugins(crate::plugins::procedural_session_mcp::ProceduralSessionMcpPlugin);
-        // Ensure the parametric component substrate (ParametricRegistry +
-        // ParametricStore) exists so the `parametric.*` tools have resources
-        // to operate on. Idempotent — domain plugins populate the registry.
-        app.add_plugins(crate::plugins::parametric_mcp::ParametricMcpPlugin);
-        // Live UX automation enters through Bevy's input messages, not model
-        // mutation APIs, so agents can verify the same viewport paths users
-        // exercise with pointer and keyboard input.
-        app.add_plugins(crate::plugins::ux_harness::UxHarnessPlugin);
-        // Register agent-grade direct mutation primitives as hidden commands.
-        // The public low-level MCP mutation tools call these commands and
-        // return CommandResult; normal UI surfaces stay on interactive commands.
-        register_model_api_primitive_commands(app);
-        // Register the Model API tools a session may commit, so `eval`
-        // accepts them and commit can route them to real geometry.
+        #[cfg(target_arch = "wasm32")]
         {
-            let mut session_tools =
-                app.world_mut()
-                    .resource_mut::<crate::curation::procedural_session::SessionToolRegistry>();
-            register_model_api_session_tools(&mut session_tools);
+            install_browser_model_api(app);
         }
-        app.add_systems(Update, poll_model_api_requests.before(HistorySet::Queue));
-        app.add_systems(
-            Startup,
-            (
-                install_model_api_wake_proxy,
-                annotate_window_title_with_model_api_instance,
-            )
-                .chain(),
-        );
-        // Load user-installed recipes and passages from disk into their
-        // in-memory registries (Change-3 / Change-7). Runs after all
-        // domain plugins have populated shipped content so installed assets
-        // layer on top.
-        app.add_systems(
-            Startup,
-            (
-                crate::plugins::knowledge_persistence::load_knowledge_on_startup,
-                load_session_recovery_on_startup_system,
-            )
-                .chain(),
-        );
-        spawn_model_api_server(request_sender, runtime_info, authentication, http_listener);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (runtime_info, authentication, http_listener) = match resolve_model_api_runtime() {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("failed to configure model API runtime: {error}");
+                    return;
+                }
+            };
+            let (sender, receiver) = mpsc::channel();
+            let request_sender = ModelApiRequestSender::new(sender);
+            configure_model_api_update_mode(app);
+            app.insert_resource(ModelApiReceiver(Mutex::new(receiver)));
+            app.insert_resource(ModelApiWakeHandle(request_sender.clone()));
+            app.insert_resource(runtime_info.clone());
+            app.insert_resource(authentication.clone());
+            app.insert_resource(ModelApiDiscoveryCleanup::new(&runtime_info));
+            register_shared_model_api_harness(app);
+            // Requests can replace the document. Run at the frame boundary before
+            // Update systems queue presentation work for the current entities;
+            // World::flush cannot drain other systems' deferred command buffers.
+            app.add_systems(First, poll_model_api_requests);
+            app.add_systems(
+                Startup,
+                (
+                    install_model_api_wake_proxy,
+                    annotate_window_title_with_model_api_instance,
+                )
+                    .chain(),
+            );
+            // Load user-installed recipes and passages from disk into their
+            // in-memory registries (Change-3 / Change-7). Runs after all
+            // domain plugins have populated shipped content so installed assets
+            // layer on top.
+            app.add_systems(
+                Startup,
+                (
+                    crate::plugins::knowledge_persistence::load_knowledge_on_startup,
+                    load_session_recovery_on_startup_system,
+                )
+                    .chain(),
+            );
+            spawn_model_api_server(request_sender, runtime_info, authentication, http_listener);
+        }
     }
+}
+
+#[cfg(feature = "model-api")]
+fn register_shared_model_api_harness(app: &mut App) {
+    // Ensure the Semantic Procedural Session substrate (ADR-051) is
+    // installed so `procedural_session.*` tools have resources to
+    // operate on. Idempotent — `ProceduralSessionMcpPlugin` adds
+    // `ProceduralSessionPlugin` only if not already present.
+    app.add_plugins(crate::plugins::procedural_session_mcp::ProceduralSessionMcpPlugin);
+    // Ensure the parametric component substrate (ParametricRegistry +
+    // ParametricStore) exists so the `parametric.*` tools have resources
+    // to operate on. Idempotent — domain plugins populate the registry.
+    app.add_plugins(crate::plugins::parametric_mcp::ParametricMcpPlugin);
+    // Live UX automation enters through Bevy's input messages, not model
+    // mutation APIs, so agents can verify the same viewport paths users
+    // exercise with pointer and keyboard input.
+    app.add_plugins(crate::plugins::ux_harness::UxHarnessPlugin);
+    // Register agent-grade direct mutation primitives as hidden commands.
+    // The public low-level MCP mutation tools call these commands and
+    // return CommandResult; normal UI surfaces stay on interactive commands.
+    register_model_api_primitive_commands(app);
+    register_model_api_edit_requests(app.world_mut());
+    // Register the Model API tools a session may commit, so `eval`
+    // accepts them and commit can route them to real geometry.
+    {
+        let mut session_tools =
+            app.world_mut()
+                .resource_mut::<crate::curation::procedural_session::SessionToolRegistry>();
+        register_model_api_session_tools(&mut session_tools);
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Resource, Clone)]
+pub(crate) struct BrowserModelApi(pub(crate) server::ModelApiServer);
+
+#[cfg(all(feature = "model-api", target_arch = "wasm32"))]
+fn install_browser_model_api(app: &mut App) {
+    let (sender, receiver) = mpsc::channel();
+    let sender = ModelApiRequestSender::new(sender);
+    let server = server::ModelApiServer::for_browser(sender);
+    app.insert_resource(ModelApiReceiver(Mutex::new(receiver)))
+        .insert_resource(BrowserModelApi(server))
+        .insert_resource(ModelApiRuntimeInfo {
+            instance_id: format!("browser-{}", js_sys::Date::now() as u64),
+            app_name: "Talos3D".into(),
+            pid: 0,
+            http_host: "browser".into(),
+            http_port: 0,
+            http_url: "browser://attached-runtime".into(),
+            registry_path: String::new(),
+            started_at_unix_ms: js_sys::Date::now() as u128,
+            requested_port: None,
+        });
+    register_shared_model_api_harness(app);
+    app.add_systems(First, poll_model_api_requests);
 }
 
 #[cfg(feature = "model-api")]
@@ -545,6 +590,9 @@ fn capture_entity_snapshot(
 }
 
 fn entity_details_from_snapshot(world: &World, snapshot: &BoxedEntity) -> EntityDetails {
+    let entity =
+        crate::plugins::commands::find_entity_by_element_id_readonly(world, snapshot.element_id())
+            .and_then(|id| world.get_entity(id).ok());
     EntityDetails {
         element_id: snapshot.element_id().0,
         entity_type: snapshot.type_name().to_string(),
@@ -553,6 +601,20 @@ fn entity_details_from_snapshot(world: &World, snapshot: &BoxedEntity) -> Entity
         geometry_semantics: geometry_semantics_for_snapshot(world, snapshot),
         semantic: semantic_details_for_entity(world, snapshot.element_id()),
         semantic_shadow: semantic_shadow_for_entity(world, snapshot.element_id()),
+        design_concept: entity
+            .as_ref()
+            .and_then(|e| e.get::<crate::semantics::ConceptAssignment>())
+            .cloned(),
+        published_anchors: entity
+            .as_ref()
+            .and_then(|e| e.get::<crate::semantics::PublishedAnchors>())
+            .map(|p| p.anchors.clone())
+            .unwrap_or_default(),
+        anchor_bindings: entity
+            .as_ref()
+            .and_then(|e| e.get::<crate::semantics::SemanticBindings>())
+            .map(|b| b.bindings.clone())
+            .unwrap_or_default(),
         properties: snapshot
             .property_fields()
             .into_iter()
@@ -714,10 +776,10 @@ use request::{
     ResolveObligationRequest, ResolveObligationResult,
 };
 
-#[cfg(feature = "model-api")]
+#[cfg(all(feature = "model-api", not(target_arch = "wasm32")))]
 #[path = "model_api/transport.rs"]
 mod runtime_transport;
-#[cfg(feature = "model-api")]
+#[cfg(all(feature = "model-api", not(target_arch = "wasm32")))]
 use runtime_transport::{
     annotate_window_title_with_model_api_instance, resolve_model_api_runtime,
     spawn_model_api_server, ModelApiDiscoveryCleanup,
@@ -1092,8 +1154,8 @@ fn orbit_from_camera_params(
 ) -> Result<OrbitCamera, String> {
     let live = live_camera_snapshot(world);
 
-    let Some(params) = params else {
-        return Ok(OrbitCamera {
+    overlay_camera_params(
+        OrbitCamera {
             focus: live.focus,
             radius: live.radius,
             orthographic_scale: live.orthographic_scale,
@@ -1101,26 +1163,34 @@ fn orbit_from_camera_params(
             pitch: live.pitch,
             projection_mode: live.projection_mode,
             focal_length_mm: live.focal_length_mm,
-        });
-    };
+        },
+        params,
+    )
+}
 
-    let projection_mode = if let Some(ref proj) = params.projection {
-        projection_mode_from_str(proj)?
-    } else {
-        live.projection_mode
+/// Apply only explicitly supplied fields to the caller's chosen camera baseline.
+#[cfg(feature = "model-api")]
+fn overlay_camera_params(
+    base: OrbitCamera,
+    params: Option<&CameraParams>,
+) -> Result<OrbitCamera, String> {
+    let Some(params) = params else {
+        return Ok(base);
     };
-
     Ok(OrbitCamera {
         focus: params
             .focus
             .map(bevy::math::Vec3::from)
-            .unwrap_or(live.focus),
-        radius: params.radius.unwrap_or(live.radius),
-        orthographic_scale: params.orthographic_scale.unwrap_or(live.orthographic_scale),
-        yaw: params.yaw.unwrap_or(live.yaw),
-        pitch: params.pitch.unwrap_or(live.pitch),
-        projection_mode,
-        focal_length_mm: params.focal_length_mm.unwrap_or(live.focal_length_mm),
+            .unwrap_or(base.focus),
+        radius: params.radius.unwrap_or(base.radius),
+        orthographic_scale: params.orthographic_scale.unwrap_or(base.orthographic_scale),
+        yaw: params.yaw.unwrap_or(base.yaw),
+        pitch: params.pitch.unwrap_or(base.pitch),
+        projection_mode: match &params.projection {
+            Some(projection) => projection_mode_from_str(projection)?,
+            None => base.projection_mode,
+        },
+        focal_length_mm: params.focal_length_mm.unwrap_or(base.focal_length_mm),
     })
 }
 
@@ -1163,12 +1233,7 @@ fn handle_view_restore(world: &mut World, name: String) -> Result<NamedViewInfo,
         (view.to_orbit(), named_view_info_from_view(view))
     };
 
-    // Apply directly to the camera entity — borrow released above.
-    let mut q = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
-    if let Some((mut orbit, mut transform, mut projection)) = q.iter_mut(world).next() {
-        *orbit = orbit_state;
-        apply_orbit_state(&orbit, &mut transform, &mut projection);
-    }
+    restore_live_camera(world, orbit_state)?;
 
     Ok(view_info)
 }
@@ -1181,17 +1246,24 @@ fn handle_view_update(
     description: Option<String>,
     camera_params: Option<CameraParams>,
 ) -> Result<NamedViewInfo, String> {
-    // Resolve camera params against the current live camera or existing view.
-    let orbit = if camera_params.is_some() {
-        orbit_from_camera_params(world, camera_params.as_ref())?
-    } else {
-        // Keep existing camera params from the stored view.
-        world
+    // A flattened optional request can deserialize omitted camera fields as
+    // Some(empty). Both that case and partial updates must retain the saved view,
+    // regardless of where the user has navigated the live camera.
+    let saved = world
+        .resource::<NamedViewRegistry>()
+        .get(&name)
+        .ok_or_else(|| format!("No view named '{name}' exists"))?
+        .to_orbit();
+    let orbit = overlay_camera_params(saved, camera_params.as_ref())?;
+    if let Some(target_name) = &new_name {
+        if world
             .resource::<NamedViewRegistry>()
-            .get(&name)
-            .ok_or_else(|| format!("No view named '{name}' exists"))?
-            .to_orbit()
-    };
+            .get(target_name)
+            .is_some()
+        {
+            return Err(format!("A view named '{target_name}' already exists"));
+        }
+    }
 
     {
         let mut registry = world.resource_mut::<NamedViewRegistry>();
@@ -1420,12 +1492,7 @@ fn handle_delete_material(world: &mut World, id: &str) -> Result<String, String>
             .collect()
     };
     for (entity, assignment) in assignment_updates {
-        let mut entity_mut = world.entity_mut(entity);
-        if let Some(assignment) = assignment {
-            entity_mut.insert(assignment);
-        } else {
-            entity_mut.remove::<MaterialAssignment>();
-        }
+        crate::plugins::materials::set_authored_material_assignment(world, entity, assignment);
     }
     world
         .resource_mut::<MaterialRegistry>()
@@ -1442,16 +1509,20 @@ fn handle_apply_material(world: &mut World, req: ApplyMaterialRequest) -> Result
     {
         return Err(format!("Material '{}' not found", req.material_id));
     }
-    let mut applied = Vec::new();
-    for &eid in &req.element_ids {
-        let entity = find_entity_by_element_id(world, ElementId(eid))
-            .ok_or_else(|| format!("Entity {eid} not found"))?;
-        world
-            .entity_mut(entity)
-            .insert(MaterialAssignment::new(req.material_id.clone()));
-        applied.push(eid);
-    }
-    Ok(applied)
+    let updates = req
+        .element_ids
+        .iter()
+        .map(|&eid| {
+            let entity = find_entity_by_element_id(world, ElementId(eid))
+                .ok_or_else(|| format!("Entity {eid} not found"))?;
+            Ok((
+                entity,
+                Some(MaterialAssignment::new(req.material_id.clone())),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    crate::plugins::materials::edit_material_assignments(world, updates)?;
+    Ok(req.element_ids)
 }
 
 #[cfg(feature = "model-api")]
@@ -1593,14 +1664,16 @@ fn assign_material_texture_ref(
 
 #[cfg(feature = "model-api")]
 fn handle_remove_material(world: &mut World, element_ids: Vec<u64>) -> Result<Vec<u64>, String> {
-    let mut removed = Vec::new();
-    for eid in element_ids {
-        let entity = find_entity_by_element_id(world, ElementId(eid))
-            .ok_or_else(|| format!("Entity {eid} not found"))?;
-        world.entity_mut(entity).remove::<MaterialAssignment>();
-        removed.push(eid);
-    }
-    Ok(removed)
+    let updates = element_ids
+        .iter()
+        .map(|&eid| {
+            let entity = find_entity_by_element_id(world, ElementId(eid))
+                .ok_or_else(|| format!("Entity {eid} not found"))?;
+            Ok((entity, None))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    crate::plugins::materials::edit_material_assignments(world, updates)?;
+    Ok(element_ids)
 }
 
 #[cfg(feature = "model-api")]
@@ -1623,17 +1696,21 @@ fn handle_set_material_assignment(
 ) -> Result<Vec<EntityMaterialAssignmentInfo>, String> {
     crate::plugins::materials::validate_material_assignment(world, &request.assignment)?;
 
-    let mut updated = Vec::new();
-    for element_id in request.element_ids {
-        let entity = find_entity_by_element_id(world, ElementId(element_id))
-            .ok_or_else(|| format!("Entity {element_id} not found"))?;
-        world.entity_mut(entity).insert(request.assignment.clone());
-        updated.push(EntityMaterialAssignmentInfo {
-            element_id,
-            assignment: Some(request.assignment.clone()),
-        });
-    }
-    Ok(updated)
+    let updates = request
+        .element_ids
+        .iter()
+        .map(|&element_id| {
+            let entity = find_entity_by_element_id(world, ElementId(element_id))
+                .ok_or_else(|| format!("Entity {element_id} not found"))?;
+            Ok((entity, Some(request.assignment.clone())))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    crate::plugins::materials::edit_material_assignments(world, updates)?;
+    request
+        .element_ids
+        .into_iter()
+        .map(|id| handle_get_material_assignment(world, id))
+        .collect()
 }
 
 #[cfg(feature = "model-api")]
@@ -1677,7 +1754,10 @@ fn handle_update_texture_mapping(
                 .ok_or_else(|| format!("Entity {element_id} has no material assignment"))?;
             assignment.set_texture_mapping_override(mapping)?;
             crate::plugins::materials::validate_material_assignment(world, &assignment)?;
-            world.entity_mut(entity).insert(assignment);
+            crate::plugins::materials::edit_material_assignments(
+                world,
+                vec![(entity, Some(assignment))],
+            )?;
             element_texture_mapping_info(world, element_id)
         }
     }
@@ -1706,7 +1786,10 @@ fn handle_reset_texture_mapping(
                 .cloned()
                 .ok_or_else(|| format!("Entity {element_id} has no material assignment"))?;
             assignment.clear_texture_mapping_override();
-            world.entity_mut(entity).insert(assignment);
+            crate::plugins::materials::edit_material_assignments(
+                world,
+                vec![(entity, Some(assignment))],
+            )?;
             element_texture_mapping_info(world, element_id)
         }
     }
@@ -3236,14 +3319,7 @@ fn handle_get_camera(world: &World) -> CameraStateInfo {
 #[cfg(feature = "model-api")]
 fn handle_set_camera(world: &mut World, params: CameraParams) -> Result<CameraStateInfo, String> {
     let orbit = orbit_from_camera_params(world, Some(&params))?;
-    {
-        let mut q = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
-        let Some((mut live_orbit, mut transform, mut projection)) = q.iter_mut(world).next() else {
-            return Err("No orbit camera is available".to_string());
-        };
-        *live_orbit = orbit;
-        apply_orbit_state(&live_orbit, &mut transform, &mut projection);
-    }
+    restore_live_camera(world, orbit)?;
     crate::plugins::drafting::workspace::apply_active_draft_camera(world);
     Ok(camera_state_info_from_live(&live_camera_snapshot(world)))
 }
@@ -3327,6 +3403,21 @@ fn parse_alpha_mode(s: &str) -> crate::plugins::materials::MaterialAlphaMode {
 #[cfg(feature = "model-api")]
 fn handle_get_instance_info(world: &World) -> InstanceInfo {
     let mut info = InstanceInfo::from(world.resource::<ModelApiRuntimeInfo>());
+    #[cfg(target_arch = "wasm32")]
+    if let Some(title) = world
+        .iter_entities()
+        .filter_map(|e| e.get::<Window>())
+        .next()
+        .map(|w| w.title.clone())
+    {
+        info.app_name = title;
+    }
+
+    if let Some(releases) =
+        world.get_resource::<crate::curation::corpus_release::InstalledCorpusReleases>()
+    {
+        info.shared_corpus_releases = releases.0.values().cloned().collect();
+    }
     if let Some(document) = world.get_resource::<DocumentState>() {
         info.current_document_path = document
             .current_path
@@ -3430,6 +3521,28 @@ fn handle_list_subobjects(
     let entity_ref = world
         .get_entity(entity)
         .map_err(|_| format!("Element {element_id} entity is not available"))?;
+    if let Some(body) = entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>() {
+        let display = entity_ref.get::<SubobjectDisplayOverrides>();
+        let mut refs: Vec<_> = body
+            .surfaces
+            .iter()
+            .filter_map(|surface| surface.reference.clone())
+            .map(|face| SelectableSubobjectRef::Face { element_id, face })
+            .collect();
+        refs.extend(
+            body.boundary_edges(4096)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(edge, _, _)| SelectableSubobjectRef::Edge { element_id, edge }),
+        );
+        return Ok(refs.into_iter().map(|reference| {
+            let is_edge=matches!(&reference,SelectableSubobjectRef::Edge{..});
+            let hidden=if let SelectableSubobjectRef::Edge{edge,..}=&reference {display.is_some_and(|o|o.is_edge_hidden(edge))} else {false};
+            let editable=crate::plugins::modeling::boundary_edit::resolve(world,&reference).is_some();
+            SelectableSubobjectInfo { label:reference.label(),reference,owner_element_id:element_id,selectable:!hidden,supports_transform:editable,supports_visibility_override:is_edge,hidden,
+                unsupported_reason:(!editable).then(||"This boundary is generated; edit the owning object's parameters. Supported opening boundaries use modeling.edit_boundary or G; hiding changes display only.".into()) }
+        }).collect());
+    }
     let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
         return Ok(vec![SelectableSubobjectInfo {
             reference: SelectableSubobjectRef::Entity { element_id },
@@ -3532,12 +3645,54 @@ fn handle_expand_subobject_selection(
     mode: &str,
 ) -> Result<Vec<SelectableSubobjectRef>, String> {
     validate_subobject_refs(world, std::slice::from_ref(&reference))?;
+
     let element_id = reference.element_id();
     let entity = find_entity_by_element_id(world, ElementId(element_id))
         .ok_or_else(|| format!("Element {element_id} not found"))?;
     let entity_ref = world
         .get_entity(entity)
         .map_err(|_| format!("Element {element_id} entity is not available"))?;
+    if let Some(body) = entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>() {
+        let edges = body
+            .boundary_edges(4096)
+            .ok_or("Boundary topology exceeds the interactive limit")?;
+        let adjacent = |edge: &GeneratedEdgeRef| -> Vec<GeneratedFaceRef> {
+            match edge {
+                GeneratedEdgeRef::BetweenFaces { first, second, .. } => {
+                    vec![first.clone(), second.clone()]
+                }
+                GeneratedEdgeRef::BoundaryOfFace { face, .. } => vec![face.clone()],
+                _ => vec![],
+            }
+        };
+        let mut refs = match (&reference, mode) {
+            (SelectableSubobjectRef::Face { face, .. }, "bounding_edges") => edges
+                .iter()
+                .filter(|(edge, _, _)| adjacent(edge).contains(face))
+                .map(|(edge, _, _)| SelectableSubobjectRef::Edge {
+                    element_id,
+                    edge: edge.clone(),
+                })
+                .collect::<Vec<_>>(),
+            (SelectableSubobjectRef::Edge { edge, .. }, "connected_faces") => adjacent(edge)
+                .into_iter()
+                .map(|face| SelectableSubobjectRef::Face { element_id, face })
+                .collect(),
+            (_, "all_connected") => handle_list_subobjects(world, element_id)?
+                .into_iter()
+                .map(|s| s.reference)
+                .collect(),
+            _ => {
+                return Err(
+                    "Use bounding_edges for faces, connected_faces for edges, or all_connected"
+                        .into(),
+                )
+            }
+        };
+        refs.sort_by_key(SelectableSubobjectRef::label);
+        refs.dedup();
+        return Ok(refs);
+    }
     let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
         return Err(format!(
             "Element {element_id} has no evaluated subobject topology to expand"
@@ -3613,6 +3768,33 @@ fn handle_apply_subobject_edit(
     parameters: Value,
 ) -> Result<SubobjectEditResult, String> {
     validate_subobject_refs(world, std::slice::from_ref(&reference))?;
+    if matches!(
+        operation.as_str(),
+        "move" | "push_pull" | "erase" | "delete" | "close" | "hide" | "show"
+    ) && (matches!(operation.as_str(), "hide" | "show")
+        || crate::plugins::modeling::boundary_edit::resolve(world, &reference).is_some())
+    {
+        crate::plugins::modeling::boundary_edit::execute(
+            world,
+            reference.clone(),
+            &operation,
+            &parameters,
+        )?;
+        flush_model_api_write_pipeline(world);
+        let edit_plan_kind = if matches!(operation.as_str(), "hide" | "show") {
+            "generated_edge_display_override"
+        } else {
+            "authored_boundary_plan"
+        };
+        return Ok(SubobjectEditResult {
+            reference,
+            operation,
+            applied: true,
+            edit_plan_kind: edit_plan_kind.into(),
+            unsupported_reason: None,
+        });
+    }
+
     if let SelectableSubobjectRef::Edge { element_id, edge } = &reference {
         if let Some(hidden) = subobject_visibility_target(&operation, &parameters)? {
             apply_edge_visibility_override(world, *element_id, edge.clone(), hidden)?;
@@ -3718,6 +3900,22 @@ fn validate_subobject_refs(world: &World, refs: &[SelectableSubobjectRef]) -> Re
             SelectableSubobjectRef::Entity { .. } => {}
             SelectableSubobjectRef::Handle { .. } => {}
             SelectableSubobjectRef::Face { face, .. } => {
+                if let Some(body) =
+                    entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>()
+                {
+                    if body
+                        .surfaces
+                        .iter()
+                        .any(|surface| surface.reference.as_ref() == Some(face))
+                    {
+                        continue;
+                    }
+                    return Err(format!(
+                        "Element {} has no surface '{}'",
+                        eid.0,
+                        face.label()
+                    ));
+                }
                 let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
                     return Err(format!("Element {} has no selectable faces", eid.0));
                 };
@@ -3726,6 +3924,19 @@ fn validate_subobject_refs(world: &World, refs: &[SelectableSubobjectRef]) -> Re
                 }
             }
             SelectableSubobjectRef::Edge { edge, .. } => {
+                if let Some(body) =
+                    entity_ref.get::<crate::plugins::modeling::planar_body::PlanarBody>()
+                {
+                    if body
+                        .boundary_edges(4096)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|(candidate, _, _)| candidate == edge)
+                    {
+                        continue;
+                    }
+                    return Err(format!("Element {} has no edge '{}'", eid.0, edge.label()));
+                }
                 let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
                     return Err(format!("Element {} has no selectable edges", eid.0));
                 };
@@ -4207,6 +4418,7 @@ fn handle_split_box_face(
         element_id: id_a,
         primitive: prim_a,
         rotation,
+        layer: None,
         material_assignment: None,
         opening_context: None,
         subobject_display_overrides: None,
@@ -4215,6 +4427,7 @@ fn handle_split_box_face(
         element_id: id_b,
         primitive: prim_b,
         rotation,
+        layer: None,
         material_assignment: None,
         opening_context: None,
         subobject_display_overrides: None,
@@ -4366,7 +4579,7 @@ fn handle_declare_elevation_intent(
             "label": label,
             "declared_elevations": declared,
             "state": "pending",
-            "next": "Author the building. The intent binds automatically when there is one building assembly to bind it to, or one whose label matches; bind it explicitly with bind_elevation_intent when several are in play. run_validation_v2 then reports every elevation whose built result differs from what you declared, and reports an intent that was never bound at all.",
+            "next": "Author the semantic assembly, then bind this intent with bind_elevation_intent. Loaded capabilities may bind it automatically and validate their supported intent fields.",
         }));
     };
 
@@ -4395,8 +4608,8 @@ fn bind_elevation_intent_to_assembly(
         format!(
             "Entity {element_id} is not a semantic assembly. `create_assembly` returns both \
              `assembly_id` and `group_element_id`; elevation intent belongs on the \
-             `assembly_id`. To declare an intent before any building exists, omit `element_id` \
-             entirely - the intent is held until a building is there to bind it to."
+             `assembly_id`. To declare an intent before any assembly exists, omit `element_id` \
+             entirely - the intent is held until an assembly is there to bind it to."
         )
     })?;
     if let Some(map) = assembly.parameters.as_object_mut() {
@@ -4433,11 +4646,24 @@ fn handle_bind_elevation_intent(
 
 #[cfg(feature = "model-api")]
 fn handle_export_drawing(world: &mut World, path: &str) -> Result<String, String> {
-    let path_buf = crate::plugins::drawing_export::export_drawing_to_path(
-        world,
-        std::path::PathBuf::from(path),
-    )?;
-    Ok(path_buf.to_string_lossy().to_string())
+    #[cfg(target_arch = "wasm32")]
+    {
+        if std::path::Path::new(path)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+        {
+            crate::plugins::drawing_export::require_pdf_export_available(world)?;
+        }
+        return crate::plugins::drafting_sheet::export_sheet_to_data_url(world, path.into(), None);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path_buf = crate::plugins::drawing_export::export_drawing_to_path(
+            world,
+            std::path::PathBuf::from(path),
+        )?;
+        Ok(path_buf.to_string_lossy().to_string())
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -4446,12 +4672,21 @@ fn handle_export_drafting_sheet(
     path: &str,
     scale_denominator: Option<f32>,
 ) -> Result<String, String> {
-    let path_buf = crate::plugins::drafting_sheet::export_sheet_to_path(
+    #[cfg(target_arch = "wasm32")]
+    return crate::plugins::drafting_sheet::export_sheet_to_data_url(
         world,
-        std::path::PathBuf::from(path),
+        path.into(),
         scale_denominator,
-    )?;
-    Ok(path_buf.to_string_lossy().to_string())
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path_buf = crate::plugins::drafting_sheet::export_sheet_to_path(
+            world,
+            std::path::PathBuf::from(path),
+            scale_denominator,
+        )?;
+        Ok(path_buf.to_string_lossy().to_string())
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -4620,34 +4855,11 @@ fn handle_save_project(world: &mut World, path: &str) -> Result<String, String> 
 
 #[cfg(feature = "model-api")]
 fn handle_load_project(world: &mut World, path: &str) -> Result<String, String> {
-    let requested_path = std::path::PathBuf::from(path);
-    if world
-        .get_resource::<DocumentState>()
-        .is_some_and(|document| {
-            !document.dirty
-                && document
-                    .current_path
-                    .as_ref()
-                    .is_some_and(|current| paths_identify_same_document(current, &requested_path))
-        })
-    {
-        return Ok(requested_path.to_string_lossy().into_owned());
-    }
-    load_project_from_path(world, requested_path).map(|path| path.to_string_lossy().to_string())
-}
-
-#[cfg(feature = "model-api")]
-fn paths_identify_same_document(current: &std::path::Path, requested: &std::path::Path) -> bool {
-    if current == requested {
-        return true;
-    }
-    match (
-        std::fs::canonicalize(current),
-        std::fs::canonicalize(requested),
-    ) {
-        (Ok(current), Ok(requested)) => current == requested,
-        _ => false,
-    }
+    // An explicit load reads disk and replaces the document, including when
+    // the path is unchanged. Dirty tracking cannot detect external file edits
+    // or all transient authoring state, and is not a content identity check.
+    load_project_from_path(world, std::path::PathBuf::from(path))
+        .map(|path| path.to_string_lossy().to_string())
 }
 
 #[cfg(feature = "model-api")]
@@ -5585,7 +5797,7 @@ fn move_recipe_semantics_from_anchor_to_group(
         if let Some(provenance) = provenance {
             group.insert(provenance);
         }
-        if let Some(obligations) = obligations {
+        if let Some(obligations) = obligations.clone() {
             group.insert(obligations);
         }
     }
@@ -5597,7 +5809,21 @@ fn move_recipe_semantics_from_anchor_to_group(
     anchor.remove::<RefinementStateComponent>();
     anchor.remove::<SemanticIntent>();
     anchor.remove::<AuthoringProvenance>();
+    // The locator retains the dimensional representation evidence governing its
+    // setting-out contract. Other semantic claims belong only to the group.
+    let dimensional = obligations.map(|mut set| {
+        set.entries.retain(|entry| {
+            matches!(
+                entry.id.0.as_str(),
+                "setting_out_reservation" | "coarse_envelope"
+            )
+        });
+        set
+    });
     anchor.remove::<ObligationSet>();
+    if let Some(set) = dimensional.filter(|set| !set.entries.is_empty()) {
+        anchor.insert(set);
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -6605,7 +6831,11 @@ fn build_definition_from_object(
             external_context_requirements: Vec::new(),
         },
         body,
-        material_assignment: None,
+        material_assignment: object
+            .get("material_assignment")
+            .map(crate::plugins::materials::material_assignment_option_from_value)
+            .transpose()?
+            .flatten(),
         visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
         domain_data: object.get("domain_data").cloned().unwrap_or(Value::Null),
     })
@@ -6745,6 +6975,9 @@ pub fn handle_create_definition(world: &mut World, request: Value) -> ApiResult<
         .ok_or_else(|| "definition.create expects a JSON object".to_string())?;
 
     let definition = build_definition_from_object(obj)?;
+    if let Some(assignment) = &definition.material_assignment {
+        crate::plugins::materials::validate_material_assignment(world, assignment)?;
+    }
     let entry = {
         let registry = world.resource::<DefinitionRegistry>();
         registry.validate_definition(&definition)?;
@@ -6834,6 +7067,14 @@ pub fn handle_update_definition(world: &mut World, request: Value) -> ApiResult<
         }
         if obj.contains_key("compound") {
             after.body.compound = parse_optional_compound(obj)?;
+        }
+    }
+
+    if let Some(value) = obj.get("material_assignment") {
+        after.material_assignment =
+            crate::plugins::materials::material_assignment_option_from_value(value)?;
+        if let Some(assignment) = &after.material_assignment {
+            crate::plugins::materials::validate_material_assignment(world, assignment)?;
         }
     }
 
@@ -7889,39 +8130,15 @@ fn quat_value(rotation: Quat) -> Value {
 }
 
 #[cfg(feature = "model-api")]
-fn infer_wall_thickness_from_snapshot(snapshot: &BoxedEntity) -> Option<f32> {
+fn infer_host_thickness_from_snapshot(snapshot: &BoxedEntity) -> Option<f32> {
     let bounds = snapshot.bounds()?;
     let extents = bounds.max - bounds.min;
     Some(extents.x.min(extents.y).min(extents.z))
 }
 
 #[cfg(feature = "model-api")]
-fn extract_wall_axis_from_snapshot(snapshot: &BoxedEntity) -> Option<Vec3> {
-    if snapshot.type_name() != "wall" {
-        return None;
-    }
-
-    let json = snapshot.to_json();
-    let wall = json.get("Wall")?;
-    let start = value_vec3(
-        &serde_json::json!([
-            wall.get("wall")?.get("start")?.get(0)?.as_f64()? as f32,
-            0.0,
-            wall.get("wall")?.get("start")?.get(1)?.as_f64()? as f32
-        ]),
-        "wall.start",
-    )
-    .ok()?;
-    let end = value_vec3(
-        &serde_json::json!([
-            wall.get("wall")?.get("end")?.get(0)?.as_f64()? as f32,
-            0.0,
-            wall.get("wall")?.get("end")?.get(1)?.as_f64()? as f32
-        ]),
-        "wall.end",
-    )
-    .ok()?;
-    (end - start).try_normalize()
+fn extract_host_axis_from_snapshot(snapshot: &BoxedEntity) -> Option<Vec3> {
+    snapshot.hosted_axis()
 }
 
 #[cfg(feature = "model-api")]
@@ -7929,8 +8146,8 @@ fn infer_face_anchors(
     snapshot: &BoxedEntity,
     opening_center: Vec3,
 ) -> Option<(HostedAnchor, HostedAnchor, f32)> {
-    let thickness = infer_wall_thickness_from_snapshot(snapshot)?;
-    let axis = extract_wall_axis_from_snapshot(snapshot).unwrap_or_else(|| {
+    let thickness = infer_host_thickness_from_snapshot(snapshot)?;
+    let axis = extract_host_axis_from_snapshot(snapshot).unwrap_or_else(|| {
         let bounds = snapshot
             .bounds()
             .unwrap_or(crate::authored_entity::EntityBounds {
@@ -7946,64 +8163,25 @@ fn infer_face_anchors(
             Vec3::Z
         }
     });
-    let normal = Vec3::new(-axis.z, 0.0, axis.x)
-        .try_normalize()
-        .unwrap_or(Vec3::Z);
-    let half = thickness * 0.5;
-    Some((
-        HostedAnchor {
-            id: "opening.exterior_face".to_string(),
-            kind: Some("host_exterior_face".to_string()),
-            position: (opening_center - normal * half).to_array(),
-        },
-        HostedAnchor {
-            id: "opening.interior_face".to_string(),
-            kind: Some("host_interior_face".to_string()),
-            position: (opening_center + normal * half).to_array(),
-        },
-        thickness,
-    ))
-}
-
-#[cfg(feature = "model-api")]
-fn infer_position_along_wall(snapshot: &BoxedEntity, point: Vec3) -> Option<f64> {
-    if snapshot.type_name() != "wall" {
-        return None;
-    }
-    let json = snapshot.to_json();
-    let wall = json.get("Wall")?.get("wall")?;
-    let start = Vec2::new(
-        wall.get("start")?.get(0)?.as_f64()? as f32,
-        wall.get("start")?.get(1)?.as_f64()? as f32,
+    let anchors = crate::plugins::hosting_contracts::hosted_face_anchors(
+        opening_center,
+        Some(axis),
+        Some(thickness as f64),
     );
-    let end = Vec2::new(
-        wall.get("end")?.get(0)?.as_f64()? as f32,
-        wall.get("end")?.get(1)?.as_f64()? as f32,
-    );
-    let direction = (end - start).try_normalize()?;
-    let length = start.distance(end);
-    if length <= f32::EPSILON {
-        return None;
-    }
-    Some(((point.xz() - start).dot(direction) / length).clamp(0.0, 1.0) as f64)
+    Some((anchors[1].clone(), anchors[2].clone(), thickness))
 }
 
 #[cfg(feature = "model-api")]
-fn infer_wall_rotation(snapshot: &BoxedEntity) -> Option<Quat> {
-    let axis = extract_wall_axis_from_snapshot(snapshot)?;
-    let planar = Vec2::new(axis.x, axis.z).try_normalize()?;
-    let angle = planar.y.atan2(planar.x);
-    Some(Quat::from_rotation_y(-angle))
+fn infer_position_along_host(snapshot: &BoxedEntity, point: Vec3) -> Option<f64> {
+    snapshot.position_along_host(point)
 }
 
 #[cfg(feature = "model-api")]
-const WALL_OPENING_HOSTING_CONTRACT_KIND: &str = "architecture::wall_opening";
-#[cfg(feature = "model-api")]
-const HOSTED_OPENING_MIN_REMAINING_WALL: f32 = 0.05;
-#[cfg(feature = "model-api")]
-const HOSTED_OPENING_GEOMETRY_TOLERANCE: f32 = 0.01;
-#[cfg(feature = "model-api")]
-const HOSTED_OPENING_PLACEMENT_TOLERANCE: f32 = 0.02;
+fn infer_host_rotation(snapshot: &BoxedEntity) -> Option<Quat> {
+    crate::plugins::hosting_contracts::planar_host_rotation(extract_host_axis_from_snapshot(
+        snapshot,
+    )?)
+}
 
 #[cfg(feature = "model-api")]
 #[derive(Debug, Clone, Copy)]
@@ -8141,7 +8319,8 @@ fn hosted_occurrence_placement_center(world: &World, occurrence_id: ElementId) -
 }
 
 #[cfg(feature = "model-api")]
-fn wall_opening_validation_result(
+fn aperture_host_validation_result(
+    policy: &crate::plugins::hosting_contracts::HostedGeometryPolicy,
     contract_kind: HostingContractKindId,
     host_element_id: ElementId,
     hosted_element_id: ElementId,
@@ -8174,7 +8353,7 @@ fn wall_opening_validation_result(
             "opening.exists",
             "Opening Exists",
             HostingCheckStatus::Failed,
-            "Hosted wall openings require an explicit opening entity.",
+            "Hosted apertures require an explicit opening entity.",
             None,
             None,
             Some("opening"),
@@ -8188,14 +8367,32 @@ fn wall_opening_validation_result(
         };
     };
 
-    let host_bounds = alignment_bounds(&host_snapshot);
-    let opening_bounds = alignment_bounds(&opening_snapshot);
+    // Validate oblique hosts in their authored frame, projecting actual
+    // geometry rather than rotating an already expanded world AABB.
+    let frame = host_snapshot
+        .hosted_axis()
+        .and_then(|axis| axis.try_normalize())
+        .map(|axis| Quat::from_rotation_arc(axis, Vec3::X));
+    let projected = frame.and_then(|rotation| {
+        Some((
+            host_snapshot.0.bounds_in_frame(rotation)?,
+            opening_snapshot.0.bounds_in_frame(rotation)?,
+            hosted_center.map(|center| rotation * center),
+        ))
+    });
+    let (host_bounds, opening_bounds, hosted_center) = projected.unwrap_or_else(|| {
+        (
+            alignment_bounds(&host_snapshot),
+            alignment_bounds(&opening_snapshot),
+            hosted_center,
+        )
+    });
     let Some(axes) = hosted_opening_axes(host_bounds) else {
         checks.push(hosted_opening_check(
             "host.thickness_axis",
             "Host Thickness Axis",
             HostingCheckStatus::Failed,
-            "Host wall must have a measurable thickness axis.",
+            "Host must have a measurable thickness axis.",
             None,
             None,
             Some("host"),
@@ -8209,12 +8406,17 @@ fn wall_opening_validation_result(
         };
     };
 
+    let minimum_remaining_host = host_snapshot
+        .0
+        .hosting_edge_margin()
+        .filter(|margin| margin.is_finite() && *margin >= 0.0)
+        .unwrap_or(policy.minimum_remaining_host);
     let opening_center = opening_bounds.center();
     let host_thickness = axis_extent(host_bounds, axes.normal);
     let opening_thickness = axis_extent(opening_bounds, axes.normal);
 
     let axis_alignment_status =
-        if (opening_thickness - host_thickness).abs() <= HOSTED_OPENING_GEOMETRY_TOLERANCE {
+        if (opening_thickness - host_thickness).abs() <= policy.geometry_tolerance {
             HostingCheckStatus::Passed
         } else {
             HostingCheckStatus::Failed
@@ -8230,7 +8432,7 @@ fn wall_opening_validation_result(
             )
         } else {
             format!(
-                "Opening must span the host wall thickness axis ({}) without rotating out of plane.",
+                "Opening must span the host thickness axis ({}) without rotating out of plane.",
                 axis_name(axes.normal)
             )
         },
@@ -8241,8 +8443,8 @@ fn wall_opening_validation_result(
 
     let normal_min_delta = opening_bounds.min_axis(axes.normal) - host_bounds.min_axis(axes.normal);
     let normal_max_delta = host_bounds.max_axis(axes.normal) - opening_bounds.max_axis(axes.normal);
-    let thickness_status = if normal_min_delta >= -HOSTED_OPENING_GEOMETRY_TOLERANCE
-        && normal_max_delta >= -HOSTED_OPENING_GEOMETRY_TOLERANCE
+    let thickness_status = if normal_min_delta >= -policy.geometry_tolerance
+        && normal_max_delta >= -policy.geometry_tolerance
     {
         HostingCheckStatus::Passed
     } else {
@@ -8253,9 +8455,9 @@ fn wall_opening_validation_result(
         "Opening Thickness Containment",
         thickness_status,
         if thickness_status == HostingCheckStatus::Passed {
-            "Opening depth is contained by the host wall thickness.".to_string()
+            "Opening depth is contained by the host thickness.".to_string()
         } else {
-            "Opening cannot extend outside the host wall thickness.".to_string()
+            "Opening cannot extend outside the host thickness.".to_string()
         },
         Some(validation_measured(opening_thickness as f64, "model_units")),
         Some(validation_measured(host_thickness as f64, "model_units")),
@@ -8265,58 +8467,46 @@ fn wall_opening_validation_result(
     for axis in axes.in_plane {
         let remaining_min = opening_bounds.min_axis(axis) - host_bounds.min_axis(axis);
         let remaining_max = host_bounds.max_axis(axis) - opening_bounds.max_axis(axis);
-        // A vertical (Y-axis) opening whose bottom is flush with the host's
-        // own bottom (remaining_min ~= 0 — a door with sill_height = 0
-        // reaching the floor) is a normal, universal architectural pattern,
-        // not a near-miss placement error. Exempt only that specific edge
-        // from the minimum-remaining-wall margin: the flushness itself
-        // (checked against the tight geometry tolerance, not the wider
-        // minimum-margin threshold) already tells apart "reaches the floor
-        // by design" from "left an ambiguous sliver of wall by mistake".
-        // Every other edge — the top of the same axis, and both sides of
-        // every other in-plane axis (e.g. left/right) — still requires the
-        // full margin, so an edge-to-edge opening on a non-vertical axis, or
-        // one that reaches only partway toward the bottom without actually
-        // being flush, is still rejected exactly as before.
-        let bottom_is_intentionally_flush =
-            axis == SpatialAxis::Y && remaining_min.abs() <= HOSTED_OPENING_GEOMETRY_TOLERANCE;
+        // Only the capability-selected edge can use the flush exception.
+        let bottom_is_intentionally_flush = policy.flush_minimum_axis.as_deref()
+            == Some(axis_name(axis))
+            && remaining_min.abs() <= policy.geometry_tolerance;
         let remaining = if bottom_is_intentionally_flush {
             remaining_max
         } else {
             remaining_min.min(remaining_max)
         };
-        let status =
-            if remaining + HOSTED_OPENING_GEOMETRY_TOLERANCE >= HOSTED_OPENING_MIN_REMAINING_WALL {
-                HostingCheckStatus::Passed
-            } else {
-                HostingCheckStatus::Failed
-            };
+        let status = if remaining + policy.geometry_tolerance >= minimum_remaining_host {
+            HostingCheckStatus::Passed
+        } else {
+            HostingCheckStatus::Failed
+        };
         checks.push(hosted_opening_check(
             &format!("opening.remaining_wall.{}", axis_name(axis)),
-            &format!("Remaining Wall {}", axis_name(axis).to_uppercase()),
+            &format!("Remaining Host {}", axis_name(axis).to_uppercase()),
             status,
             if status == HostingCheckStatus::Passed {
                 if bottom_is_intentionally_flush {
                     format!(
-                        "Opening is flush with the host's bottom edge along {} (e.g. a door reaching the floor) and leaves wall material above.",
+                        "Opening is flush with the host's bottom edge along {} and leaves host material above.",
                         axis_name(axis)
                     )
                 } else {
                     format!(
-                        "Opening leaves wall material on both sides along {}.",
+                        "Opening leaves host material on both sides along {}.",
                         axis_name(axis)
                     )
                 }
             } else {
                 format!(
-                    "Opening must leave at least {:.2} model units of wall on both sides along {} (or be exactly flush with the bottom edge, e.g. a door).",
-                    HOSTED_OPENING_MIN_REMAINING_WALL,
+                    "Opening must leave at least {:.2} model units of host on both sides along {} (or be exactly flush with the bottom edge).",
+                    minimum_remaining_host,
                     axis_name(axis)
                 )
             },
             Some(validation_measured(remaining as f64, "model_units")),
             Some(validation_measured(
-                HOSTED_OPENING_MIN_REMAINING_WALL as f64,
+                minimum_remaining_host as f64,
                 "model_units",
             )),
             Some("host"),
@@ -8331,7 +8521,7 @@ fn wall_opening_validation_result(
         }
         let out_of_plane_delta =
             (axes.normal.component(hosted_center) - axes.normal.component(opening_center)).abs();
-        let in_plane_status = if worst_in_plane_delta <= HOSTED_OPENING_PLACEMENT_TOLERANCE {
+        let in_plane_status = if worst_in_plane_delta <= policy.placement_tolerance {
             HostingCheckStatus::Passed
         } else {
             HostingCheckStatus::Failed
@@ -8350,13 +8540,13 @@ fn wall_opening_validation_result(
                 "model_units",
             )),
             Some(validation_measured(
-                HOSTED_OPENING_PLACEMENT_TOLERANCE as f64,
+                policy.placement_tolerance as f64,
                 "model_units",
             )),
             Some("opening"),
         ));
 
-        let allowed_normal_offset = host_thickness * 0.5 + HOSTED_OPENING_PLACEMENT_TOLERANCE;
+        let allowed_normal_offset = host_thickness * 0.5 + policy.placement_tolerance;
         let normal_status = if out_of_plane_delta <= allowed_normal_offset {
             HostingCheckStatus::Passed
         } else {
@@ -8367,9 +8557,9 @@ fn wall_opening_validation_result(
             "Hosted Center On Wall Depth",
             normal_status,
             if normal_status == HostingCheckStatus::Passed {
-                "Hosted occurrence remains within the wall depth.".to_string()
+                "Hosted occurrence remains within the host depth.".to_string()
             } else {
-                "Hosted occurrence cannot be displaced clear of the wall depth.".to_string()
+                "Hosted occurrence cannot be displaced clear of the host depth.".to_string()
             },
             Some(validation_measured(
                 out_of_plane_delta as f64,
@@ -8410,11 +8600,19 @@ impl EntityBoundsAxisExt for crate::authored_entity::EntityBounds {
 }
 
 #[cfg(feature = "model-api")]
-fn validate_preflight_hosted_wall_opening(
+fn validate_preflight_hosted_aperture(
     world: &World,
     hosted_request: &Value,
     hosted_context: &crate::plugins::modeling::occurrence::HostedOccurrenceContext,
+    relation_type: Option<&str>,
 ) -> ApiResult<()> {
+    let Some(policy) = relation_type.and_then(|relation| {
+        world
+            .get_resource::<crate::plugins::hosting_contracts::HostedGeometryPolicies>()?
+            .for_relation(relation)
+    }) else {
+        return Ok(());
+    };
     let Some(host_id) = hosted_context.host_element_id else {
         return Ok(());
     };
@@ -8426,8 +8624,9 @@ fn validate_preflight_hosted_wall_opening(
         .get("offset")
         .and_then(|value| serde_json::from_value::<[f32; 3]>(value.clone()).ok())
         .map(|[x, y, z]| Vec3::new(x, y, z));
-    let result = wall_opening_validation_result(
-        HostingContractKindId(WALL_OPENING_HOSTING_CONTRACT_KIND.to_string()),
+    let result = aperture_host_validation_result(
+        policy,
+        HostingContractKindId(policy.contract_kind.clone()),
         host_id,
         ElementId(0),
         capture_entity_snapshot(world, host_id),
@@ -8444,7 +8643,7 @@ fn validate_preflight_hosted_wall_opening(
             .collect::<Vec<_>>()
             .join("; ");
         return Err(format!(
-            "Hosted wall opening failed building sanity checks: {failed}"
+            "Hosted wall opening failed host sanity checks: {failed}"
         ));
     }
 
@@ -8653,6 +8852,17 @@ fn prepare_hosted_occurrence_request(
 
     let host_element_id = parse_hosting_element_id(hosting, "host_element_id")?;
     let opening_element_id = parse_hosting_element_id(hosting, "opening_element_id")?;
+    let policies =
+        world.get_resource::<crate::plugins::hosting_contracts::HostedGeometryPolicies>();
+    let relation_type = hosting
+        .get("relation_type")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| host_element_id.and_then(|_| policies?.default_relation_type.clone()));
+    let policy = relation_type
+        .as_deref()
+        .and_then(|relation| policies?.for_relation(relation));
+    let thickness_parameter = policy.and_then(|policy| policy.thickness_parameter.as_deref());
 
     let mut anchors_by_id: HashMap<String, HostedAnchor> = HashMap::new();
     if let Some(anchor_object) = hosting.get("anchors").and_then(Value::as_object) {
@@ -8682,8 +8892,8 @@ fn prepare_hosted_occurrence_request(
             });
     }
 
-    let mut inferred_wall_thickness = hosting
-        .get("wall_thickness")
+    let mut inferred_host_thickness = thickness_parameter
+        .and_then(|parameter| hosting.get(parameter))
         .and_then(Value::as_f64)
         .map(|value| value as f32);
 
@@ -8699,8 +8909,8 @@ fn prepare_hosted_occurrence_request(
         {
             anchors_by_id.entry(exterior.id.clone()).or_insert(exterior);
             anchors_by_id.entry(interior.id.clone()).or_insert(interior);
-            if inferred_wall_thickness.is_none() {
-                inferred_wall_thickness = Some(thickness);
+            if inferred_host_thickness.is_none() {
+                inferred_host_thickness = Some(thickness);
             }
         }
     }
@@ -8737,11 +8947,16 @@ fn prepare_hosted_occurrence_request(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    if !overrides.contains_key("wall_thickness") {
-        if let Some(parameter) = definition.interface.parameters.get("wall_thickness") {
+    if let Some(thickness_parameter) =
+        thickness_parameter.filter(|parameter| !overrides.contains_key(*parameter))
+    {
+        if let Some(parameter) = definition.interface.parameters.get(thickness_parameter) {
             if parameter.override_policy != OverridePolicy::Locked {
-                if let Some(thickness) = inferred_wall_thickness {
-                    overrides.insert("wall_thickness".to_string(), Value::from(thickness as f64));
+                if let Some(thickness) = inferred_host_thickness {
+                    overrides.insert(
+                        thickness_parameter.to_string(),
+                        Value::from(thickness as f64),
+                    );
                 }
             }
         }
@@ -8750,7 +8965,7 @@ fn prepare_hosted_occurrence_request(
     let mut request_object = object.clone();
     if let Some(host_id) = host_element_id {
         if let Some(host_snapshot) = capture_entity_snapshot(world, host_id) {
-            if let Some(rotation) = infer_wall_rotation(&host_snapshot) {
+            if let Some(rotation) = infer_host_rotation(&host_snapshot) {
                 request_object
                     .entry("rotation".to_string())
                     .or_insert_with(|| quat_value(rotation));
@@ -8776,11 +8991,6 @@ fn prepare_hosted_occurrence_request(
         serde_json::to_value(&hosted_context).map_err(|error| error.to_string())?,
     );
 
-    let relation_type = hosting
-        .get("relation_type")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| host_element_id.map(|_| "hosted_on".to_string()));
     let mut relation_parameters = hosting
         .get("relation_parameters")
         .cloned()
@@ -8800,11 +9010,15 @@ fn prepare_hosted_occurrence_request(
         if let Some(host_snapshot) = capture_entity_snapshot(world, host_id) {
             if let Some(opening_center) = hosted_context.anchor_position("opening.center") {
                 if let Some(position_along_wall) =
-                    infer_position_along_wall(&host_snapshot, opening_center)
+                    infer_position_along_host(&host_snapshot, opening_center)
                 {
-                    object
-                        .entry("position_along_wall".to_string())
-                        .or_insert(Value::from(position_along_wall));
+                    if let Some(parameter) =
+                        policy.and_then(|policy| policy.position_parameter.as_ref())
+                    {
+                        object
+                            .entry(parameter.clone())
+                            .or_insert(Value::from(position_along_wall));
+                    }
                 }
             }
             validate_relation_descriptor(
@@ -8876,7 +9090,12 @@ pub fn handle_instantiate_hosted_definition(
             })?;
         }
     }
-    validate_preflight_hosted_wall_opening(world, &hosted_request, &hosted_context)?;
+    validate_preflight_hosted_aperture(
+        world,
+        &hosted_request,
+        &hosted_context,
+        relation_type.as_deref(),
+    )?;
     let (element_id, occurrence_snapshot) =
         build_occurrence_snapshot_for_place(world, hosted_request)?;
 
@@ -9003,6 +9222,7 @@ fn build_occurrence_snapshot_for_place(
     {
         let registry = world.resource::<DefinitionRegistry>();
         registry.validate_overrides(&identity.definition_id, &identity.overrides)?;
+        crate::plugins::modeling::occurrence::validate_occurrence_geometry(registry, &identity)?;
     }
 
     let label = obj
@@ -9037,76 +9257,99 @@ pub fn handle_update_occurrence_overrides(
     element_id: u64,
     overrides: Value,
 ) -> ApiResult<Value> {
-    use crate::plugins::commands::enqueue_apply_entity_changes;
-    use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+    use crate::plugins::{authored_edit_plan::AuthoredEditPlanRegistry, history::History};
+    crate::plugins::authored_edit_plan::requests::ensure_authored_base(world)?;
+    let draft = prepare_occurrence_override_request(world, element_id, overrides)?;
+    let result = draft.after[0].to_json();
+    let plan = draft
+        .capture(world, None, world.resource::<History>().revision_token())
+        .map_err(|error| error.to_string())?;
+    let plan = world
+        .resource_mut::<AuthoredEditPlanRegistry>()
+        .publish(plan)
+        .map_err(|error| error.to_string())?;
+    apply_captured_plan_and_flush(world, &plan)?;
+    Ok(result)
+}
 
+#[cfg(feature = "model-api")]
+pub fn prepare_occurrence_override_request(
+    world: &World,
+    element_id: u64,
+    overrides: Value,
+) -> Result<crate::plugins::authored_edit_plan::modifiers::EditPlanDraft, String> {
+    use crate::plugins::{
+        authored_edit_plan::{modifiers::EditPlanDraft, PlanContext},
+        modeling::{
+            definition::DefinitionRegistry,
+            occurrence::{validate_occurrence_geometry, OccurrenceSnapshot},
+        },
+    };
     let eid = ElementId(element_id);
-
-    // Capture before snapshot
+    ensure_user_editable_entity(world, eid, "edited")?;
+    let map = overrides
+        .as_object()
+        .ok_or("Occurrence overrides must be an object")?;
+    if map.is_empty() || map.len() > 128 {
+        return Err("Supply between 1 and 128 occurrence overrides".into());
+    }
     let before = capture_entity_snapshot(world, eid)
         .ok_or_else(|| format!("Entity {element_id} not found"))?;
-
-    // Verify it is an occurrence
-    let mut q = world.try_query::<EntityRef>().unwrap();
-    let has_identity = q
-        .iter(world)
-        .find(|e| e.get::<ElementId>().copied() == Some(eid))
-        .map(|e| e.get::<OccurrenceIdentity>().is_some())
-        .unwrap_or(false);
-    drop(q);
-
-    if !has_identity {
-        return Err(format!("Entity {element_id} is not an occurrence"));
-    }
-
-    // Apply overrides through the AuthoredEntity set_property_json pathway for each key.
-    let mut after = before.clone();
-    if let Some(map) = overrides.as_object() {
-        for (k, v) in map {
-            after = after
-                .set_property_json(k, v)
-                .map_err(|e| format!("Failed to set '{k}': {e}"))?;
-        }
-    }
-
-    if let Some(snapshot) = after
+    let mut next = before
         .0
         .as_any()
-        .downcast_ref::<crate::plugins::modeling::occurrence::OccurrenceSnapshot>()
-    {
-        let registry = world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
-        registry.validate_overrides(
-            &snapshot.identity.definition_id,
-            &snapshot.identity.overrides,
-        )?;
-    }
-
-    let after_json = after.to_json();
-    let mut before_snapshots = vec![before];
-    let mut after_snapshots = vec![after];
-    let occurrence_after = after_snapshots
-        .first()
-        .ok_or_else(|| "Updated occurrence snapshot missing".to_string())?
+        .downcast_ref::<OccurrenceSnapshot>()
+        .ok_or_else(|| format!("Entity {element_id} is not an occurrence"))?
         .clone();
+    let original_identity = next.identity.clone();
+    for (name, value) in map {
+        next.identity.overrides.set(name.clone(), value.clone());
+    }
+    let registry = world.resource::<DefinitionRegistry>();
+    registry.validate_overrides(&next.identity.definition_id, &next.identity.overrides)?;
+    validate_occurrence_geometry(registry, &next.identity)?;
+    crate::plugins::modeling::occurrence::validate_geometry_control_changes(
+        registry,
+        &original_identity,
+        &next.identity,
+    )?;
+    let after: BoxedEntity = next.into();
+    let mut before_snapshots = vec![before];
+    let mut after_snapshots = vec![after.clone()];
     append_host_opening_sync_snapshots(
         world,
         eid,
-        &occurrence_after,
+        &after,
         &mut before_snapshots,
         &mut after_snapshots,
     )?;
-
-    enqueue_apply_entity_changes(
-        world,
-        ApplyEntityChangesCommand {
-            label: "Update occurrence overrides",
-            before: before_snapshots,
-            after: after_snapshots,
+    let mut draft = EditPlanDraft {
+        source_artifacts: Vec::new(),
+        context: PlanContext {
+            planner_id: "core.occurrence_parameters".into(),
+            planner_version: 1,
+            request_kind: "core.occurrence_parameters".into(),
+            mutation_scope: "occurrence controls and dependent openings".into(),
+            intent: "Edit occurrence parameters".into(),
+            ..Default::default()
         },
+        before: before_snapshots,
+        after: after_snapshots,
+        semantic_intents: crate::semantics::SemanticPlan::none(),
+    };
+    crate::plugins::authored_edit_plan::modifiers::apply_edit_modifiers(
+        world,
+        &crate::plugins::authored_edit_plan::modifiers::EditModifierRequest::new(
+            "core.occurrence_parameters",
+            &eid,
+        ),
+        &mut draft,
+        &[],
     );
-
-    flush_model_api_write_pipeline(world);
-    Ok(after_json)
+    if !draft.context.refusals.is_empty() {
+        return Err(draft.context.refusals.join("; "));
+    }
+    Ok(draft)
 }
 
 #[cfg(feature = "model-api")]
@@ -9486,12 +9729,16 @@ pub fn handle_occurrence_validate_host_fit(
         return Ok((descriptor.validator)(validation_request, world));
     }
 
-    if contract_kind.0 == WALL_OPENING_HOSTING_CONTRACT_KIND {
+    if let Some(policy) = world
+        .get_resource::<crate::plugins::hosting_contracts::HostedGeometryPolicies>()
+        .and_then(|policies| policies.for_contract(&contract_kind.0))
+    {
         let opening_id = opening_id_from_contract_parameters(
             &validation_request.contract_parameters,
         )
         .or_else(|| opening_id_from_occurrence(world, validation_request.hosted_element_id));
-        return Ok(wall_opening_validation_result(
+        return Ok(aperture_host_validation_result(
+            policy,
             validation_request.contract_kind,
             validation_request.host_element_id,
             validation_request.hosted_element_id,
@@ -9650,6 +9897,10 @@ pub fn handle_explain_occurrence(
         resolved_parameters: serde_json::to_value(resolved).unwrap_or(Value::Null),
         anchors,
         generated_parts,
+        evaluation_error: crate::plugins::modeling::occurrence::validate_occurrence_geometry(
+            registry, &identity,
+        )
+        .err(),
     })
 }
 
@@ -10112,8 +10363,7 @@ fn build_mirror_plane(
 
 #[cfg(feature = "model-api")]
 pub(crate) fn flush_model_api_write_pipeline(world: &mut World) {
-    queue_command_events(world);
-    apply_pending_history_commands(world);
+    crate::plugins::commands::flush_queued_commands(world);
 }
 
 /// `SessionStepExecutor` that routes committed Semantic Procedural Session
@@ -10132,6 +10382,25 @@ pub struct ModelApiStepExecutor;
 
 #[cfg(feature = "model-api")]
 impl crate::plugins::procedural_session_mcp::SessionStepExecutor for ModelApiStepExecutor {
+    fn supports_atomic_step(&self, tool: &crate::curation::McpToolId) -> bool {
+        matches!(
+            tool.as_str(),
+            "create_box"
+                | "create_entity"
+                | "definition.create"
+                | "definition.instantiate"
+                | "occurrence.place"
+                | "set_property"
+                | "model_summary"
+                | "run_validation_v2"
+        )
+    }
+    fn prepare_transaction(&self, world: &World) -> Result<(), String> {
+        if crate::plugins::commands::has_pending_command_events(world) {
+            return Err("Pending user command events must finish before procedural commit".into());
+        }
+        Ok(())
+    }
     fn execute(
         &mut self,
         world: &mut World,
@@ -10885,6 +11154,130 @@ fn handle_transform_with_modified(
     world: &mut World,
     request: TransformToolRequest,
 ) -> Result<(Vec<u64>, Vec<Value>), String> {
+    use crate::plugins::authored_edit_plan::AuthoredEditPlanRegistry;
+    crate::plugins::authored_edit_plan::requests::ensure_authored_base(world)?;
+    let draft = prepare_transform_request(world, request)?;
+    let changed = draft.before != draft.after;
+    let plan = draft
+        .capture(
+            world,
+            None,
+            world
+                .resource::<crate::plugins::history::History>()
+                .revision_token(),
+        )
+        .map_err(|e| e.to_string())?;
+    let plan = world
+        .resource_mut::<AuthoredEditPlanRegistry>()
+        .publish(plan)
+        .map_err(|e| e.to_string())?;
+    let modified = if changed {
+        plan.after_snapshots()
+            .iter()
+            .map(|s| s.element_id().0)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let snapshots = plan.after_snapshots().iter().map(|s| s.to_json()).collect();
+    if changed {
+        apply_captured_plan_and_flush(world, &plan)?;
+    }
+    Ok((modified, snapshots))
+}
+
+#[cfg(feature = "model-api")]
+fn apply_captured_plan_and_flush(
+    world: &mut World,
+    plan: &crate::plugins::authored_edit_plan::AuthoredEditPlan,
+) -> Result<(), String> {
+    use crate::plugins::{authored_edit_plan::queue_captured_plan, history::History};
+    let revision = world.resource::<History>().revision_token();
+    let depth = world.resource::<History>().undo_stack_len();
+    queue_captured_plan(world, plan.plan_id()).map_err(|e| e.to_string())?;
+    flush_model_api_write_pipeline(world);
+    if world.resource::<History>().undo_stack_len() != depth + 1
+        || world.resource::<History>().revision_token().revision != revision.revision + 1
+    {
+        return Err("Captured edit was refused by the history preflight".into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+/// Register the built-in edit request planners without starting a transport.
+/// Headless domain integrations must also install commands, history and their
+/// authored entity factories. Call once per app composition.
+pub fn register_model_api_edit_requests(world: &mut World) {
+    world.init_resource::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>();
+    crate::plugins::foreign_source::register_requests(world);
+    world.resource_mut::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>()
+        .register(crate::plugins::authored_edit_plan::requests::EditRequestDescriptor::new(
+            "core.occurrence_parameters", 1,
+            "Preview typed Definition occurrence control edits, complete body evaluation and dependent openings. Apply the captured plan_id; unknown, locked, invalid or stale edits are refused.",
+            json!({"type":"object", "required":["element_id","overrides"], "additionalProperties":false,
+                "properties":{"element_id":{"type":"integer","minimum":0}, "overrides":{"type":"object","minProperties":1,"maxProperties":128}}}),
+            |world, parameters| {
+                let id = parameters.get("element_id").and_then(Value::as_u64).ok_or("element_id must be a non-negative integer")?;
+                let overrides = parameters.get("overrides").cloned().ok_or("overrides is required")?;
+                prepare_occurrence_override_request(world, id, overrides)
+            },
+        )).expect("unique occurrence parameters request");
+
+    world.resource_mut::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>()
+        .register(crate::plugins::authored_edit_plan::requests::EditRequestDescriptor::new(
+            "core.semantic", 1,
+            "Preview concept assignment/downgrade, declared anchor publication, and explicit anchor binding. Captures existing semantic components; does not place geometry or claim a geometry resolver. Apply only the returned plan_id.",
+            serde_json::to_value(rmcp::schemars::schema_for!(crate::semantics::SemanticPlan)).expect("semantic schema"),
+            |world, parameters| {
+                let semantic_intents: crate::semantics::SemanticPlan = serde_json::from_value(parameters)
+                    .map_err(|error| format!("Invalid semantic request: {error}"))?;
+                if semantic_intents.intents.is_empty() || semantic_intents.intents.len() > 128 {
+                    return Err("Supply between 1 and 128 semantic intents".into());
+                }
+                for intent in &semantic_intents.intents {
+                    if let crate::semantics::PlanIntent::PublishAnchors { anchors, .. } = intent {
+                        if anchors.len() > 128 {
+                            return Err("At most 128 anchor identities may be published per intent".into());
+                        }
+                    }
+                    let id = match intent {
+                        crate::semantics::PlanIntent::AssignConcept { entity, .. }
+                        | crate::semantics::PlanIntent::RemoveConcept { entity, .. }
+                        | crate::semantics::PlanIntent::PublishAnchors { entity, .. } => *entity,
+                        crate::semantics::PlanIntent::Bind { subject, .. } => *subject,
+                    };
+                    ensure_user_editable_entity(world, id, "semantically edited")?;
+                }
+                Ok(crate::plugins::authored_edit_plan::modifiers::EditPlanDraft {
+                    source_artifacts: Vec::new(),
+                    context: crate::plugins::authored_edit_plan::PlanContext {
+                        planner_id: "core.semantic".into(), planner_version: 1,
+                        request_kind: "core.semantic".into(), mutation_scope: "semantic components".into(),
+                        intent: "Edit declared meaning and anchor bindings".into(),
+                        assumptions: vec!["Declared anchor identity does not prove resolved geometry or engineering validity".into()],
+                        ..Default::default()
+                    },
+                    before: Vec::new(), after: Vec::new(), semantic_intents,
+                })
+            },
+        )).expect("unique core semantic request");
+    world.resource_mut::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>()
+            .register(crate::plugins::authored_edit_plan::requests::EditRequestDescriptor::new(
+                "core.transform", 1, "Move, rotate or scale authored selection with registered semantic modifiers and dependent snapshots.",
+                serde_json::to_value(rmcp::schemars::schema_for!(TransformToolRequest)).expect("transform schema"),
+                |world, parameters| {
+                    let request = serde_json::from_value(parameters).map_err(|e| format!("Invalid transform request: {e}"))?;
+                    prepare_transform_request(world, request)
+                },
+            )).expect("unique core transform request");
+}
+
+#[cfg(feature = "model-api")]
+fn prepare_transform_request(
+    world: &World,
+    request: TransformToolRequest,
+) -> Result<crate::plugins::authored_edit_plan::modifiers::EditPlanDraft, String> {
     for element_id in &request.element_ids {
         ensure_user_editable_entity(world, ElementId(*element_id), "transformed")?;
     }
@@ -10934,27 +11327,19 @@ fn handle_transform_with_modified(
             ))
         }
     };
-    apply_transform_plan_modifiers(world, mode, &mut before, &mut after);
-    let modified = after
+    let initial_snapshots = before
         .iter()
-        .map(|snapshot| snapshot.element_id().0)
+        .filter_map(|snapshot| {
+            find_entity_by_element_id_readonly(world, snapshot.element_id())
+                .map(|entity| (entity, snapshot.clone()))
+        })
         .collect();
-
-    send_event(
-        world,
-        ApplyEntityChangesCommand {
-            label: "AI transform",
-            before,
-            after: after.clone(),
-        },
-    );
-    flush_model_api_write_pipeline(world);
-
-    let snapshots = after
-        .into_iter()
-        .map(|snapshot| snapshot.to_json())
-        .collect();
-    Ok((modified, snapshots))
+    let state = TransformState {
+        mode,
+        initial_snapshots,
+        ..Default::default()
+    };
+    Ok(prepare_transform_edit(world, &state, before, after))
 }
 
 #[cfg(feature = "model-api")]
@@ -10966,16 +11351,36 @@ pub fn handle_set_property(
 ) -> Result<Value, String> {
     ensure_user_editable_entity(world, ElementId(element_id), "edited")?;
     let snapshot = capture_snapshot_by_id(world, ElementId(element_id))?;
+    if snapshot.type_name() == "occurrence" && property_name != "label" {
+        let mut overrides = serde_json::Map::new();
+        overrides.insert(property_name.to_string(), value);
+        return handle_update_occurrence_overrides(world, element_id, Value::Object(overrides));
+    }
+    crate::plugins::authored_edit_plan::requests::ensure_authored_base(world)?;
     let updated = snapshot.set_property_json(property_name, &value)?;
-    send_event(
+    let draft = crate::plugins::commands::prepare_entity_changes(
         world,
         ApplyEntityChangesCommand {
             label: "AI set property",
             before: vec![snapshot],
             after: vec![updated.clone()],
         },
-    );
-    flush_model_api_write_pipeline(world);
+    )?;
+    let plan = draft
+        .capture(
+            world,
+            None,
+            world
+                .resource::<crate::plugins::history::History>()
+                .revision_token(),
+        )
+        .map_err(|error| error.to_string())?;
+    world.init_resource::<crate::plugins::authored_edit_plan::AuthoredEditPlanRegistry>();
+    let plan = world
+        .resource_mut::<crate::plugins::authored_edit_plan::AuthoredEditPlanRegistry>()
+        .publish(plan)
+        .map_err(|error| error.to_string())?;
+    apply_captured_plan_and_flush(world, &plan)?;
     Ok(updated.to_json())
 }
 
@@ -11541,6 +11946,7 @@ pub(crate) fn transform_rotation(
     let radians = scalar_from_value(&request.value)?.to_radians();
     Ok(match parse_axis(request.axis.as_deref())? {
         Some(AxisName::X) => Quat::from_rotation_x(radians),
+        Some(AxisName::Y) => Quat::from_rotation_y(radians),
         Some(AxisName::Z) => Quat::from_rotation_z(radians),
         _ => Quat::from_axis_angle(authoring_rotation_axis(authoring), radians),
     })
@@ -11747,7 +12153,20 @@ fn transform_group_as_unit(
     let mut pivoted = request.clone();
     pivoted.pivot = Some([pivot.x as f64, pivot.y as f64, pivot.z as f64]);
     let leaf_snaps = capture_snapshots_by_ids(world, &leaf_ids)?;
-    let leaf_after = apply_transform_request(&leaf_snaps, &pivoted, authoring)?;
+    use crate::plugins::transform::{rigid_after, TransformMotion};
+    let motion = match normalized_transform_operation(&request.operation).as_str() {
+        "move" => Some(TransformMotion::Move(transform_move_delta(
+            request, authoring,
+        )?)),
+        "rotate" => Some(TransformMotion::Rotate(transform_rotation(
+            request, authoring,
+        )?)),
+        _ => None,
+    };
+    let leaf_after = match motion {
+        Some(motion) => rigid_after(leaf_snaps.iter().map(|(_, s)| s), motion, pivot),
+        None => apply_transform_request(&leaf_snaps, &pivoted, authoring)?,
+    };
 
     let mut before: Vec<BoxedEntity> = leaf_snaps.into_iter().map(|(_, s)| s).collect();
     let mut after: Vec<BoxedEntity> = leaf_after;
@@ -12185,7 +12604,7 @@ fn handle_get_authoring_provenance(
         })
         .unwrap_or_else(|| AuthoringProvenanceInfo {
             element_id,
-            mode: "Freeform".to_string(),
+            mode: "Unrecorded".to_string(),
             rationale: None,
         });
 
@@ -12302,6 +12721,38 @@ fn promote_refinement_structured(
     recipe_id: Option<String>,
     overrides: serde_json::Value,
 ) -> Result<PromoteRefinementResult, crate::plugins::refinement::PromoteError> {
+    use crate::plugins::refinement::PromoteError;
+    if crate::plugins::commands::has_pending_command_events(world) {
+        return Err(PromoteError::Other(
+            "Pending user command events must finish before promotion".into(),
+        ));
+    }
+    let transaction =
+        crate::plugins::history::HistoryTransaction::begin(world).map_err(PromoteError::Other)?;
+    let result = promote_refinement_in_transaction(
+        world,
+        element_id,
+        target_state_str,
+        recipe_id,
+        overrides,
+    );
+    flush_model_api_write_pipeline(world);
+    // An obligation block deliberately retains discoverable obligations and any
+    // explicitly reported partial result. Other failures roll back all effects.
+    let retain =
+        result.is_ok() || matches!(&result, Err(PromoteError::ObligationsUnsatisfied { .. }));
+    transaction.finish_named(world, retain, "Promote refinement");
+    result
+}
+
+#[cfg(feature = "model-api")]
+fn promote_refinement_in_transaction(
+    world: &mut World,
+    element_id: u64,
+    target_state_str: String,
+    recipe_id: Option<String>,
+    overrides: serde_json::Value,
+) -> Result<PromoteRefinementResult, crate::plugins::refinement::PromoteError> {
     use crate::plugins::refinement::{
         apply_promote_refinement, ClaimPath, PromoteError, PromoteRefinementRequest, RecipeId,
         RefinementState, RefinementStateComponent,
@@ -12320,9 +12771,9 @@ fn promote_refinement_structured(
         .ok_or_else(|| format!("Entity {element_id} not found"))?;
     let setting_out_evaluation = world
         .get::<crate::capability_registry::ElementClassAssignment>(entity)
-        .filter(|assignment| assignment.element_class.0 == "wall_assembly")
+        .filter(|assignment| setting_out_policy_applies(world, entity, &assignment.element_class.0))
         .map(|assignment| {
-            evaluate_wall_setting_out(world, entity, eid, &assignment.element_class.0, &overrides)
+            evaluate_setting_out(world, entity, eid, &assignment.element_class.0, &overrides)
         });
     if setting_out_evaluation.as_ref().is_some_and(|evaluation| {
         matches!(
@@ -12330,9 +12781,9 @@ fn promote_refinement_structured(
             crate::plugins::refinement::SettingOutThicknessSource::CorpusGap
         )
     }) {
-        ensure_wall_thickness_corpus_gap(world, element_id)?;
+        ensure_setting_out_thickness_corpus_gap(world, element_id)?;
         return Err(crate::plugins::refinement::PromoteError::Other(
-            "Cannot promote under-specified wall: a durable CorpusGap was recorded because no explicit SettingOutContract, authored stack/physical thickness, or evidence-backed thickness prior exists".to_string(),
+            "Cannot promote under-specified element: a durable CorpusGap was recorded because no explicit SettingOutContract, authored stack/physical thickness, or evidence-backed thickness prior exists".to_string(),
         ));
     }
     if let Some(impact) = setting_out_evaluation
@@ -12524,9 +12975,7 @@ fn promote_refinement_structured(
         created_element_ids.sort_unstable();
         if script_steps_run > 0 || !created_element_ids.is_empty() {
             if let Some(contract) = resolved_setting_out_contract.clone() {
-                if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
-                    world.entity_mut(entity).insert(contract);
-                }
+                apply_recipe_setting_out_contract(world, eid, contract)?;
             }
             return Ok(PromoteRefinementResult {
                 element_id,
@@ -12570,9 +13019,7 @@ fn promote_refinement_structured(
     match promote_result {
         Ok(new_state) => {
             if let Some(contract) = resolved_setting_out_contract.clone() {
-                if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
-                    world.entity_mut(entity).insert(contract);
-                }
+                apply_recipe_setting_out_contract(world, eid, contract)?;
             }
             Ok(PromoteRefinementResult {
                 element_id,
@@ -12588,9 +13035,7 @@ fn promote_refinement_structured(
             message,
         }) if script_steps_run > 0 || !created_element_ids.is_empty() => {
             if let Some(contract) = resolved_setting_out_contract {
-                if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
-                    world.entity_mut(entity).insert(contract);
-                }
+                apply_recipe_setting_out_contract(world, eid, contract)?;
             }
             Ok(PromoteRefinementResult {
                 element_id,
@@ -12617,6 +13062,34 @@ fn promote_refinement_structured(
     }
 }
 
+/// Recipe-resolved reservations participate in the same compound history entry.
+#[cfg(feature = "model-api")]
+fn apply_recipe_setting_out_contract(
+    world: &mut World,
+    id: ElementId,
+    contract: crate::plugins::refinement::SettingOutContract,
+) -> ApiResult<()> {
+    use crate::plugins::refinement::{SettingOutContract, SettingOutContractSnapshot};
+    let entity = find_entity_by_element_id_readonly(world, id)
+        .ok_or_else(|| format!("Entity {} not found", id.0))?;
+    if world.get::<SettingOutContract>(entity) == Some(&contract) {
+        return Ok(());
+    }
+    let before = SettingOutContractSnapshot::capture(world, entity, id);
+    world.entity_mut(entity).insert(contract);
+    let after = SettingOutContractSnapshot::capture(world, entity, id);
+    send_event(
+        world,
+        ApplyEntityChangesCommand {
+            label: "Resolve recipe setting-out",
+            before: vec![before.into()],
+            after: vec![after.into()],
+        },
+    );
+    flush_model_api_write_pipeline(world);
+    Ok(())
+}
+
 /// `instantiate_recipe`: one-call path from a discovered recipe family to placed
 /// geometry. Creates a coarse semantic root of `target_class` (the identity
 /// anchor) carrying the recipe parameters, then runs the recipe's `generate`
@@ -12624,6 +13097,36 @@ fn promote_refinement_structured(
 /// recipe created. Thin wrapper — no generation logic is duplicated here.
 #[cfg(feature = "model-api")]
 fn handle_instantiate_recipe(
+    world: &mut World,
+    request: InstantiateRecipeRequest,
+) -> ApiResult<InstantiateRecipeResult> {
+    let family = crate::capability_registry::RecipeFamilyId(request.family_id.clone());
+    let installed = world
+        .get_resource::<crate::curation::RecipeArtifactRegistry>()
+        .is_some_and(|registry| registry.get_by_family(&family).is_some());
+    let native = world
+        .get_resource::<CapabilityRegistry>()
+        .is_some_and(|registry| registry.recipe_family_descriptor(&family).is_some());
+    if !installed && !native {
+        return Err(format!(
+            "Recipe '{}' is not installed or registered. Use select_recipe/discover_curated_paths for an executable path; draft or unknown recipe IDs cannot create ViaRecipe provenance.",
+            request.family_id
+        ));
+    }
+    // The recipe needs intermediate results to place and group its outputs.
+    // Isolate that history, then accept one complete edit or restore the prior
+    // undo/redo branch on failure. Pending human commands must not join it.
+    if crate::plugins::commands::has_pending_command_events(world) {
+        return Err("Pending user command events must finish before recipe creation".into());
+    }
+    let transaction = crate::plugins::history::HistoryTransaction::begin(world)?;
+    let result = instantiate_recipe_in_transaction(world, request);
+    transaction.finish_named(world, result.is_ok(), "Instantiate recipe");
+    result
+}
+
+#[cfg(feature = "model-api")]
+fn instantiate_recipe_in_transaction(
     world: &mut World,
     request: InstantiateRecipeRequest,
 ) -> ApiResult<InstantiateRecipeResult> {
@@ -12850,10 +13353,17 @@ fn handle_instantiate_recipe(
         );
         send_event(world, CreateEntityCommand { snapshot });
         flush_model_api_write_pipeline(world);
-        move_recipe_semantics_from_anchor_to_group(world, ElementId(root), group_id);
         select_only_element(world, group_id);
         Some(group_id.0)
     };
+
+    recipe_history::finalize(
+        world,
+        ElementId(root),
+        &created_element_ids,
+        group_element_id.map(ElementId),
+        &request.family_id,
+    );
 
     // 5. Run validation on the semantic aggregate when the recipe produced one.
     //    Failures here are surfaced as structured findings, not as a hard error:
@@ -13106,36 +13616,43 @@ pub fn handle_run_validation(
             })
             .collect();
 
-    // A conceptual wall is allowed to render as one plain body, but that body
-    // must still occupy the full envelope reserved by its setting-out
-    // contract. Catch datum/envelope drift before a later refinement silently
-    // changes exterior dimensions or interior clearances.
+    // A recipe locator may reserve a physical envelope represented by a linked
+    // authored entity. Resolve only explicit, active and structurally connected
+    // satisfaction evidence; never compare the locator glyph to that envelope.
     if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
-        let is_wall = world
-            .get::<crate::capability_registry::ElementClassAssignment>(entity)
-            .is_some_and(|assignment| assignment.element_class.0 == "wall_assembly");
-        if is_wall {
-            if let (Some(contract), Some(actual_thickness_mm)) = (
-                world.get::<crate::plugins::refinement::SettingOutContract>(entity),
-                authored_physical_thickness_mm(world, eid),
-            ) {
-                let reserved_thickness_mm = contract.reserved_thickness_mm();
-                let drift_mm = (actual_thickness_mm - reserved_thickness_mm).abs();
-                if drift_mm > contract.tolerance_mm {
-                    infos.push(ValidationFindingInfo {
-                        finding_id: format!("setting_out_contract_drift:{element_id}"),
-                        entity_element_id: element_id,
-                        validator: "SettingOutContractDrift".to_string(),
-                        severity: "Error".to_string(),
-                        message: format!(
-                            "Wall thickness is {actual_thickness_mm:.1} mm but its setting-out contract reserves {reserved_thickness_mm:.1} mm (drift {drift_mm:.1} mm exceeds tolerance {:.1} mm)",
-                            contract.tolerance_mm
-                        ),
-                        rationale: "Refinement must preserve the governing datum and locked dimensions; conceptual geometry reserves the full future envelope rather than growing when layers or framing are resolved".to_string(),
-                        obligation_id: None,
-                        passage_ref: contract.source_ref.clone(),
-                    });
+        if let Some(contract) = world.get::<crate::plugins::refinement::SettingOutContract>(entity)
+        {
+            match governing_physical_thickness_mm(world, eid) {
+                Ok(Some(actual_thickness_mm)) => {
+                    let reserved_thickness_mm = contract.reserved_thickness_mm();
+                    let drift_mm = (actual_thickness_mm - reserved_thickness_mm).abs();
+                    if drift_mm > contract.tolerance_mm {
+                        infos.push(ValidationFindingInfo {
+                            finding_id: format!("setting_out_contract_drift:{element_id}"),
+                            entity_element_id: element_id,
+                            validator: "SettingOutContractDrift".into(), severity: "Error".into(),
+                            message: format!("Element thickness is {actual_thickness_mm:.1} mm but its setting-out contract reserves {reserved_thickness_mm:.1} mm (drift {drift_mm:.1} mm exceeds tolerance {:.1} mm)", contract.tolerance_mm),
+                            rationale: "Refinement must preserve the governing datum and locked dimensions; measure the explicit active physical representation rather than a recipe locator".into(),
+                            obligation_id: None, passage_ref: contract.source_ref.clone(),
+                        });
+                    }
                 }
+                Err(reason) => infos.push(ValidationFindingInfo {
+                    finding_id: format!("setting_out_physical_binding:{element_id}"),
+                    entity_element_id: element_id,
+                    validator: "SettingOutPhysicalBinding".into(), severity: "Error".into(),
+                    message: reason,
+                    rationale: "An explicit physical representation must resolve uniquely to an active authored member of this refinement; broken evidence cannot fall back to a locator".into(),
+                    obligation_id: None, passage_ref: contract.source_ref.clone(),
+                }),
+                Ok(None) => infos.push(ValidationFindingInfo {
+                    finding_id: format!("setting_out_physical_binding:{element_id}"),
+                    entity_element_id: element_id,
+                    validator: "SettingOutPhysicalBinding".into(), severity: "Error".into(),
+                    message: format!("Element {element_id} has no measurable authored physical representation for its setting-out contract"),
+                    rationale: "A reserved envelope requires an authored physical body or an explicit active representation binding".into(),
+                    obligation_id: None, passage_ref: contract.source_ref.clone(),
+                }),
             }
         }
     }
@@ -13523,8 +14040,11 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         })
         .unwrap_or_default();
     must_read_guidance_card_ids.extend(proactive_passage_card_ids.iter().cloned());
-    must_read_guidance_card_ids.push("dkg.building_skeleton".into());
-    must_read_guidance_card_ids.push("dkg.visual_morphology".into());
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::authoring_guidance::GuidanceCardRegistry>()
+    {
+        must_read_guidance_card_ids.extend(registry.cards().map(|card| card.id.clone()));
+    }
     if let Some(guidance) = world.get_resource::<AuthoringGuidance>() {
         if !guidance.is_empty() {
             let id = authoring_guidance_card_id(&guidance.guidance_id);
@@ -13548,6 +14068,8 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     }
     // Proactive skill cards are decisive must-reads and must not be truncated
     // away by the base guidance budget; extend the budget by their count.
+    let mut seen_cards = std::collections::HashSet::new();
+    must_read_guidance_card_ids.retain(|id| seen_cards.insert(id.clone()));
     must_read_guidance_card_ids.truncate(guidance_limit + proactive_passage_card_ids.len());
 
     // Session-contract guarantee: the snapshot must never advertise a guidance
@@ -13691,6 +14213,10 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
 #[cfg(feature = "model-api")]
 fn capability_snapshot_next_tools() -> Vec<String> {
     [
+        "list_edit_requests",
+        "preview_edit_plan",
+        "inspect_edit_plan",
+        "apply_edit_plan",
         "list_element_classes",
         "discover_curated_paths",
         "select_recipe",
@@ -14511,7 +15037,8 @@ pub fn handle_discover_curated_paths(
             ElementClassResolution::NativeNonClass { .. }
         )
     });
-    let guidance_card_ids = guidance_card_ids_for_discovery(request.element_class.as_deref());
+    let guidance_card_ids =
+        guidance_card_ids_for_discovery(world, request.element_class.as_deref());
     let requested_jurisdiction = requested_jurisdiction(&request.context);
     let mut related_asset_ids = Vec::new();
     if let Some(registry) = world.get_resource::<RecipeDraftRegistry>() {
@@ -14549,6 +15076,7 @@ pub fn handle_discover_curated_paths(
     let mut parametric_types = Vec::new();
     let mut definition_assets = Vec::new();
     let mut curated_assets = discover_matching_curated_assets(
+        world,
         world
             .get_resource::<CuratedManifestRegistry>()
             .into_iter()
@@ -14681,7 +15209,7 @@ pub fn handle_discover_curated_paths(
         }
         "parametric" => {
             curated_assets.retain(|asset| {
-                curated_path_matches_request(asset, request.element_class.as_deref())
+                curated_path_matches_request(world, asset, request.element_class.as_deref())
                     && jurisdiction_matches_request(
                         asset.jurisdiction.as_deref(),
                         requested_jurisdiction.as_deref(),
@@ -14695,10 +15223,20 @@ pub fn handle_discover_curated_paths(
                 .map(|registry| {
                     let mut assets = Vec::new();
                     for library in registry.list() {
+                        let mut resolver = world.get_resource::<crate::plugins::modeling::definition::DefinitionRegistry>()
+                            .cloned().unwrap_or_default();
                         for definition in library.definitions.values() {
+                            resolver.insert(definition.clone());
+                        }
+
+                        for definition in library.definitions.values() {
+                            if !definition.visibility.is_public() {
+                                continue;
+                            }
                             let definition_kind = format!("{:?}", definition.definition_kind);
                             if !request.element_class.as_deref().is_none_or(|needle| {
                                 curated_path_text_matches(
+            world,
                                     needle,
                                     &[
                                         library.id.0.as_str(),
@@ -14711,21 +15249,28 @@ pub fn handle_discover_curated_paths(
                             }) {
                                 continue;
                             }
-                            let how_to_instantiate = if definition
-                                .interface
-                                .void_declaration
-                                .is_some()
-                            {
-                                format!(
-                                    "Call definition.instantiate_hosted with definition_id {:?} and library_id {:?} after creating the native host and its opening; this Definition declares a void and must not be placed as an unhosted occurrence or substituted with boxes.",
-                                    definition.id.to_string(),
-                                    library.id.to_string(),
-                                )
+                            let effective = resolver.effective_definition(&definition.id);
+                            let hosted = effective.as_ref().is_ok_and(|definition| definition.interface.void_declaration.is_some());
+                            let tool = if hosted {
+                                "definition.instantiate_hosted"
                             } else {
-                                format!(
-                                    "Call occurrence.create with definition_id {:?}; use definition.library.get first if parameters or hosted contracts must be inspected.",
-                                    definition.id.to_string()
-                                )
+                                // Library assets require import before occurrence placement.
+                                "definition.instantiate"
+                            };
+                            let instantiate_tool = (effective.is_ok() && profile_tool_catalog().router.has_route(tool))
+                                .then(|| tool.to_string());
+                            let how_to_instantiate = match effective {
+                                Err(error) => format!("Definition is not executable: {error}. Repair its library dependencies before instantiation."),
+                                Ok(_) if instantiate_tool.is_none() => "No registered instantiation tool; inspect guidance and report the missing capability.".to_string(),
+                                Ok(_) => format!(
+                                    "Call {tool} with definition_id {:?} and library_id {:?}.{}",
+                                    definition.id.to_string(), library.id.to_string(),
+                                    if hosted {
+                                        " First create the native host and its opening, then supply hosting; this Definition declares a void and must not be placed unhosted or substituted with boxes."
+                                    } else {
+                                        " Inspect definition.library.get for parameter controls; library_id imports the Definition when needed."
+                                    }
+                                ),
                             };
                             assets.push(DefinitionPathInfo {
                                 library_id: library.id.to_string(),
@@ -14733,6 +15278,8 @@ pub fn handle_discover_curated_paths(
                                 definition_id: definition.id.to_string(),
                                 name: definition.name.clone(),
                                 definition_kind,
+                                instantiate_tool,
+                                required_profile: None,
                                 how_to_instantiate,
                             });
                         }
@@ -14824,13 +15371,20 @@ pub fn handle_discover_curated_paths(
         );
     let has_materializable_path = recipe_rankings.iter().any(|ranking| ranking.executable)
         || parametric_types.iter().any(|path| path.executable)
-        || !definition_assets.is_empty()
+        || definition_assets
+            .iter()
+            .any(|asset| asset.instantiate_tool.is_some())
         || !generation_priors.is_empty();
-    let has_hosted_definition_path = definition_assets.iter().any(|asset| {
-        asset
-            .how_to_instantiate
-            .starts_with("Call definition.instantiate_hosted")
-    });
+    let definition_next_tool = definition_assets
+        .iter()
+        .filter_map(|asset| asset.instantiate_tool.as_deref())
+        .min_by_key(|tool| {
+            if *tool == "definition.instantiate_hosted" {
+                0
+            } else {
+                1
+            }
+        });
     related_asset_ids.extend(curated_assets.iter().map(|asset| asset.asset_id.clone()));
     related_asset_ids.extend(
         parametric_types
@@ -14858,10 +15412,8 @@ pub fn handle_discover_curated_paths(
             related_installed_or_learned_asset_ids: related_asset_ids.clone(),
         });
     let suggested_next_tool = if let Some(non_class_term) = &non_class_term {
-        if path_kind == "definition" && has_hosted_definition_path {
-            "definition.instantiate_hosted"
-        } else if path_kind == "definition" && !definition_assets.is_empty() {
-            "occurrence.create"
+        if let ("definition", Some(tool)) = (path_kind.as_str(), definition_next_tool) {
+            tool
         } else if non_class_term.native_entity_types.is_empty() {
             "list_vocabulary"
         } else {
@@ -14884,7 +15436,7 @@ pub fn handle_discover_curated_paths(
             "parametric" if parametric_types.iter().any(|path| path.executable) => {
                 "parametric.create"
             }
-            "definition" if !definition_assets.is_empty() => "occurrence.create",
+            "definition" => definition_next_tool.unwrap_or("get_guidance_card"),
             "prior" if !generation_priors.is_empty() => "list_generation_priors",
             _ => "get_guidance_card",
         }
@@ -14892,6 +15444,7 @@ pub fn handle_discover_curated_paths(
         "request_corpus_expansion"
     };
 
+    let suggested_next_tool = suggested_next_tool.to_string();
     Ok(CuratedPathDiscoveryInfo {
         path_kind,
         element_class: request.element_class,
@@ -14903,7 +15456,8 @@ pub fn handle_discover_curated_paths(
         related_asset_ids,
         no_curated_path,
         non_class_term,
-        suggested_next_tool: suggested_next_tool.into(),
+        suggested_next_tool,
+        required_profile: None,
         guidance_card_ids,
     })
 }
@@ -14992,6 +15546,7 @@ fn query_specific_derivation_only_parametric_beats_paths(
 
 #[cfg(feature = "model-api")]
 fn discover_matching_curated_assets<'a>(
+    world: &World,
     manifests: impl Iterator<Item = &'a crate::curation::CuratedManifest>,
     element_class: Option<&str>,
     requested_jurisdiction: Option<&str>,
@@ -15011,6 +15566,7 @@ fn discover_matching_curated_assets<'a>(
             }
             element_class.is_none_or(|needle| {
                 curated_path_text_matches(
+            world,
                     needle,
                     &[
                         manifest.meta.id.as_str(),
@@ -15141,6 +15697,8 @@ fn bridged_recipe_relevance(
     ));
     bridge_terms
         .iter()
+        // A target-class token alone is not evidence of compatible content.
+        .filter(|term| !class_text_contains_token(target_class, term))
         .filter(|term| haystack.iter().any(|candidate| candidate == *term))
         .count()
 }
@@ -15180,7 +15738,6 @@ fn bridge_tokens(value: &str) -> Vec<String> {
         "system",
         "target",
         "type",
-        "wall",
     ];
     let mut tokens: Vec<String> = value
         .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -15215,9 +15772,14 @@ fn curated_manifest_target_types(body: &Value) -> Vec<String> {
 }
 
 #[cfg(feature = "model-api")]
-fn curated_path_matches_request(asset: &CuratedAssetPathInfo, element_class: Option<&str>) -> bool {
+fn curated_path_matches_request(
+    world: &World,
+    asset: &CuratedAssetPathInfo,
+    element_class: Option<&str>,
+) -> bool {
     element_class.is_none_or(|needle| {
         curated_path_text_matches(
+            world,
             needle,
             &[
                 &asset.asset_id,
@@ -15230,8 +15792,8 @@ fn curated_path_matches_request(asset: &CuratedAssetPathInfo, element_class: Opt
 }
 
 #[cfg(feature = "model-api")]
-fn curated_path_text_matches(needle: &str, haystacks: &[&str]) -> bool {
-    let aliases = curated_path_aliases(needle);
+fn curated_path_text_matches(world: &World, needle: &str, haystacks: &[&str]) -> bool {
+    let aliases = curated_path_aliases(world, needle);
     haystacks.iter().any(|haystack| {
         let normalized = normalize_curated_path_text(haystack);
         aliases
@@ -15241,19 +15803,12 @@ fn curated_path_text_matches(needle: &str, haystacks: &[&str]) -> bool {
 }
 
 #[cfg(feature = "model-api")]
-fn curated_path_aliases(needle: &str) -> Vec<String> {
-    let normalized = normalize_curated_path_text(needle);
-    let mut aliases = vec![normalized.clone()];
-    match normalized.as_str() {
-        "roofsystem" => aliases.extend(["roof", "gable", "truss"].map(str::to_string)),
-        "wallassembly" => aliases.extend(["wall", "lightframe", "cavity"].map(str::to_string)),
-        "foundationsystem" => {
-            aliases.extend(["foundation", "slab", "crawlspace"].map(str::to_string))
-        }
-        "window" => aliases.extend(["window", "opening", "glazing"].map(str::to_string)),
-        "door" => aliases.extend(["door", "opening", "entrance"].map(str::to_string)),
-        "house" => aliases.extend(["house", "building", "siteplan"].map(str::to_string)),
-        _ => {}
+fn curated_path_aliases(world: &World, needle: &str) -> Vec<String> {
+    let mut aliases = vec![normalize_curated_path_text(needle)];
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::authoring_guidance::DiscoveryAliases>()
+    {
+        aliases.extend(registry.aliases(needle).iter().cloned());
     }
     aliases.sort();
     aliases.dedup();
@@ -15270,7 +15825,7 @@ fn normalize_curated_path_text(value: &str) -> String {
 }
 
 #[cfg(feature = "model-api")]
-fn guidance_card_ids_for_discovery(element_class: Option<&str>) -> Vec<String> {
+fn guidance_card_ids_for_discovery(world: &World, element_class: Option<&str>) -> Vec<String> {
     let mut ids = vec![
         "dkg.snapshot.start".into(),
         "dkg.authoring_run_contract".into(),
@@ -15280,26 +15835,18 @@ fn guidance_card_ids_for_discovery(element_class: Option<&str>) -> Vec<String> {
         "dkg.no_curated_path".into(),
         "dkg.close_gap".into(),
     ];
-    if element_class.is_some_and(|class| {
-        [
-            "house",
-            "villa",
-            "dwelling",
-            "foundation",
-            "wall",
-            "wall_assembly",
-            "roof",
-            "roof_system",
-            "truss",
-            "rafter",
-            "top_plate",
-            "load_path",
-        ]
-        .iter()
-        .any(|needle| class.contains(needle))
-    }) {
-        ids.insert(2, "dkg.building_skeleton".into());
-        ids.insert(3, "dkg.visual_morphology".into());
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::authoring_guidance::GuidanceCardRegistry>()
+    {
+        ids.extend(
+            registry
+                .cards()
+                .filter(|card| {
+                    element_class
+                        .is_some_and(|class| card.task_tags.iter().any(|tag| class.contains(tag)))
+                })
+                .map(|card| card.id.clone()),
+        );
     }
     ids
 }
@@ -15353,6 +15900,14 @@ fn proactive_passage_card_id(passage_ref: &str) -> String {
 #[cfg(feature = "model-api")]
 fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
     let mut cards = dkc_guidance_cards();
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::authoring_guidance::GuidanceCardRegistry>()
+    {
+        for card in registry.cards() {
+            cards.retain(|existing| existing.id != card.id);
+            cards.push(card.clone());
+        }
+    }
     // Data-driven proactive "skill" cards: any corpus passage that flagged
     // itself proactive (in its JSON) is surfaced as an up-front must-read
     // guidance card. Core stays domain-neutral — it never inspects which
@@ -15440,7 +15995,13 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
             }
         }
     }
+    // Active guidance and chapters override summary cards with the same id.
     cards
+        .into_iter()
+        .map(|card| (card.id.clone(), card))
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_values()
+        .collect()
 }
 
 #[cfg(feature = "model-api")]
@@ -15483,26 +16044,36 @@ pub fn handle_save_agent_skill_draft(
         world.insert_resource(AgentSkillRegistry::default());
     }
     let skill = request.into_skill();
-    world
-        .resource_mut::<AgentSkillRegistry>()
-        .insert(skill.clone());
-    Ok(skill)
+    if world
+        .resource::<AgentSkillRegistry>()
+        .get(&skill.id)
+        .is_some_and(|s| {
+            s.trust_level == crate::plugins::agent_skills::AgentSkillTrustLevel::Shipped
+        })
+    {
+        return Err(
+            "A draft cannot overwrite a shipped skill; contribute a new cloud revision".into(),
+        );
+    }
+    let before = world.resource::<AgentSkillRegistry>().clone();
+    let mut after = before.clone();
+    after.insert_private(skill.clone())?;
+    crate::plugins::knowledge_assets::apply_knowledge_update(
+        world,
+        before,
+        after,
+        "Save project agent skill",
+    );
+    Ok(world
+        .resource::<AgentSkillRegistry>()
+        .get(&skill.id)
+        .unwrap()
+        .clone())
 }
 
 #[cfg(feature = "model-api")]
 fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
     vec![
-        GuidanceCardInfo {
-            id: "authoring_guidance:architecture.component_structure".into(),
-            title: "Architecture Component Structure".into(),
-            task_tags: vec!["architecture".into(), "authoring".into()],
-            summary: "Read get_authoring_guidance and treat its prompt_text as the active architectural COMPONENT_STRUCTURE contract before editing models.".into(),
-            referenced_tool_ids: vec!["get_authoring_guidance".into()],
-            next_card_ids: vec!["dkg.snapshot.start".into()],
-            json_examples: vec![serde_json::json!({})],
-            body_markdown: None,
-        ..GuidanceCardInfo::default()
-        },
         GuidanceCardInfo {
             id: "mcp_tool:select_recipe".into(),
             title: "Select Recipe".into(),
@@ -15511,7 +16082,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             referenced_tool_ids: vec!["select_recipe".into()],
             next_card_ids: vec!["mcp_tool:discover_curated_paths".into(), "dkg.no_curated_path".into()],
             json_examples: vec![serde_json::json!({
-                "element_class": "roof_system",
+                "element_class": "component",
                 "context": { "target_state": "Constructible", "include_session_drafts": true }
             })],
             body_markdown: None,
@@ -15538,12 +16109,12 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             json_examples: vec![
                 serde_json::json!({
                     "path_kind": "parametric",
-                    "element_class": "roof_system",
+                    "element_class": "component",
                     "context": { "target_state": "Constructible" }
                 }),
                 serde_json::json!({
                     "path_kind": "definition",
-                    "element_class": "window"
+                    "element_class": "component"
                 }),
             ],
             body_markdown: None,
@@ -15553,11 +16124,11 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "mcp_tool:request_corpus_expansion".into(),
             title: "Request Corpus Expansion".into(),
             task_tags: vec!["gap".into(), "curation".into()],
-            summary: "Record missing domain knowledge as a CorpusGap before acquiring or drafting new construction knowledge.".into(),
+            summary: "Record missing domain knowledge as a CorpusGap before acquiring or drafting new domain knowledge.".into(),
             referenced_tool_ids: vec!["request_corpus_expansion".into()],
             next_card_ids: vec!["dkg.close_gap".into()],
             json_examples: vec![serde_json::json!({
-                "element_class": "roof_system",
+                "element_class": "component",
                 "missing_artifact_kind": "executable_parametric_or_recipe",
                 "target_state": "Constructible"
             })],
@@ -15568,7 +16139,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "mcp_tool:definition.create".into(),
             title: "Create Definition".into(),
             task_tags: vec!["definition".into(), "authoring".into()],
-            summary: "Author reusable families when no matching Definition exists and the construction knowledge has been grounded.".into(),
+            summary: "Author reusable families when no matching Definition exists and the domain knowledge has been grounded.".into(),
             referenced_tool_ids: vec!["definition.create".into()],
             next_card_ids: vec!["dkg.close_gap".into()],
             json_examples: vec![serde_json::json!({ "name": "Grounded family name" })],
@@ -15587,24 +16158,10 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
         ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
-            id: "parametric_substrate:roof_system".into(),
-            title: "Roof System Parametrics".into(),
-            task_tags: vec!["roof".into(), "parametric".into()],
-            summary: "Use public roof-system parametric types when available; if a truss or roof family lacks representation, treat that as a CorpusGap.".into(),
-            referenced_tool_ids: vec!["discover_curated_paths".into(), "parametric.create".into()],
-            next_card_ids: vec!["dkg.no_curated_path".into()],
-            json_examples: vec![serde_json::json!({
-                "path_kind": "parametric",
-                "element_class": "roof_system"
-            })],
-            body_markdown: None,
-        ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
             id: "canonical_decision:decisions/ADR-042-Agentic-Knowledge-Curation-And-Construction-Expertise.md".into(),
             title: "ADR-042 Curation Gate".into(),
             task_tags: vec!["anti_bluff".into(), "curation".into()],
-            summary: "Construction expertise must be represented as evidence-backed curation assets; missing executable knowledge blocks promotion instead of allowing primitive substitutions.".into(),
+            summary: "Domain expertise must be represented as evidence-backed curation assets; missing executable knowledge blocks promotion instead of allowing primitive substitutions.".into(),
             referenced_tool_ids: vec!["request_corpus_expansion".into(), "save_recipe_draft".into(), "save_assembly_pattern_draft".into()],
             next_card_ids: vec!["dkg.no_curated_path".into()],
             json_examples: Vec::new(),
@@ -15622,8 +16179,6 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "dkg.trajectory_eval".into(),
                 "dkg.design_resources".into(),
                 "dkg.no_curated_path".into(),
-                "dkg.building_skeleton".into(),
-                "dkg.visual_morphology".into(),
             ],
             json_examples: vec![serde_json::json!({ "expanded": false })],
             body_markdown: None,
@@ -15816,7 +16371,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "dkg.design_resources".into(),
             title: "Start From Design Resources".into(),
             task_tags: vec![
-                "architecture".into(),
+                "design".into(),
                 "authoring".into(),
                 "discovery".into(),
                 "morphology".into(),
@@ -15840,7 +16395,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "dkg.executable_asset".into(),
             ],
             json_examples: vec![serde_json::json!({
-                "element_class": "house",
+                "element_class": "component",
                 "path_kind": "prior",
                 "context": {
                     "target_state": "Conceptual",
@@ -15867,125 +16422,6 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
-            id: "dkg.building_skeleton".into(),
-            title: "Houses Need A Structural Skeleton".into(),
-            task_tags: vec![
-                "house".into(),
-                "villa".into(),
-                "dwelling".into(),
-                "foundation".into(),
-                "wall_assembly".into(),
-                "roof_system".into(),
-                "truss".into(),
-                "load_path".into(),
-            ],
-            summary: "For Schematic+ house authoring, the agent must discover or acquire the foundation -> wall frame/top plate -> roof framing/truss load path and assemble validation-relevant generated geometry, not recipe marker boxes. Missing roof/truss anatomy, bearing points, executable paths, or generated aggregate membership are CorpusGaps, not permission to draw decorative sticks or stripes.".into(),
-            referenced_tool_ids: vec![
-                "discover_curated_paths".into(),
-                "request_corpus_expansion".into(),
-                "acquire_corpus_passage".into(),
-                "save_assembly_pattern_draft".into(),
-                "save_recipe_draft".into(),
-                "materialize_learned_asset".into(),
-                "create_assembly".into(),
-                "create_relation".into(),
-                "run_validation_v2".into(),
-                "take_screenshot".into(),
-            ],
-            next_card_ids: vec![
-                "dkg.design_resources".into(),
-                "dkg.no_curated_path".into(),
-                "dkg.close_gap".into(),
-                "dkg.executable_asset".into(),
-                "dkg.visual_morphology".into(),
-            ],
-            json_examples: vec![
-                serde_json::json!({
-                    "path_kind": "recipe",
-                    "element_class": "roof_system",
-                    "context": {
-                        "target_state": "Constructible",
-                        "required_support_stack": [
-                            "foundation_system",
-                            "wall_assembly",
-                            "top_plate",
-                            "roof_system",
-                            "truss_or_rafter"
-                        ]
-                    }
-                }),
-                serde_json::json!({
-                    "element_class": "truss",
-                    "kind": "recipe_or_assembly_pattern",
-                    "rationale": "Roof is being promoted past schematic but no truss family with top chord, bottom chord, web members, panel points, and bearing-on-top-plate relation is available."
-                }),
-                serde_json::json!({
-                    "after_instantiate_recipe": {
-                        "group_element_id_is_the_semantic_aggregate_for": ["refinement", "obligations", "house_assembly_membership", "validation", "screenshots"],
-                        "root_element_id_is_a_locator": "refinement-goal inference resolves a selected recipe locator to its semantic aggregate",
-                        "created_element_ids_are_members_for": ["targeted inspection"]
-                    },
-                    "whole_building_refinement": {
-                        "scope": "the registered semantic house assembly",
-                        "behavior": "preview member obligations, materialize the missing systems, then apply the same scoped goal"
-                    }
-                }),
-            ],
-            body_markdown: None,
-        ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
-            id: "dkg.visual_morphology".into(),
-            title: "Houses Must Read As Houses".into(),
-            task_tags: vec![
-                "house".into(),
-                "villa".into(),
-                "dwelling".into(),
-                "visual".into(),
-                "morphology".into(),
-            ],
-            summary: "For house/villa/dwelling authoring, use visual precedent and typology resources to build a positive morphology checklist before geometry; target-framed screenshots verify the result rather than serving as a brute-force rejection loop.".into(),
-            referenced_tool_ids: vec![
-                "discover_curated_paths".into(),
-                "acquire_corpus_passage".into(),
-                "request_corpus_expansion".into(),
-                "take_screenshot".into(),
-                "set_selection".into(),
-                "run_validation_v2".into(),
-            ],
-            next_card_ids: vec!["dkg.close_gap".into(), "dkg.executable_asset".into()],
-            json_examples: vec![serde_json::json!({
-                "element_class": "house",
-                "path_kind": "prior",
-                "context": {
-                    "target_state": "Schematic",
-                    "visual_morphology_required": true
-                }
-            })],
-            body_markdown: Some(
-                "Visual morphology is a design resource, not a blacklist. For a house, villa, \
-                 dwelling, or cottage, acquire precedent or curated priors, then extract \
-                 positive invariants: overall massing, roof/wall/foundation relationships, \
-                 opening rhythm or intentional absence of openings, material/trim cues, climate \
-                 response, and site relationship. Prompt-specified visible finish cues must be \
-                 represented in the model or left as explicit unresolved gaps; color alone does \
-                 not satisfy a requested pattern such as boards, seams, battens, courses, or \
-                 trim. Author from that checklist before taking screenshots. Frame the authored \
-                 target so it occupies the image and the requested cues are inspectable; if the \
-                 screenshot mostly shows terrain, shadow, cropped roof, or unrelated context, \
-                 reframe/repair and retake before claiming success. Clear selection before the \
-                 final evidence capture unless selection feedback is itself under test, so \
-                 outlines, handles, and rotation guides do not obscure morphology. Inspect the \
-                 inline raster image returned by `take_screenshot`; a saved path alone is not \
-                 visual evidence for a network-only agent. If the necessary \
-                 morphology knowledge is not discoverable, acquire it and save it as a prior, \
-                 assembly pattern, recipe draft, Definition, validator, or agent skill so the \
-                 next agent can find it through MCP."
-                    .into(),
-            ),
-            ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
             id: "dkg.no_curated_path".into(),
             title: "No Curated Path Is A Gap".into(),
             task_tags: vec!["gap".into(), "anti_bluff".into()],
@@ -15997,7 +16433,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             next_card_ids: vec!["dkg.close_gap".into()],
             json_examples: vec![serde_json::json!({
                 "path_kind": "recipe",
-                "element_class": "roof_system",
+                "element_class": "component",
                 "context": { "target_state": "Constructible" }
             })],
             body_markdown: None,
@@ -16026,16 +16462,17 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             next_card_ids: vec!["dkg.executable_asset".into()],
             json_examples: vec![serde_json::json!({
                 "scope": "project",
-                "label": "Learned roof system",
-                "target_class": "roof_system",
+                "label": "Learned component family",
+                "target_class": "component",
                 "jurisdiction": "<region-or-jurisdiction-if-known>",
                 "source_passage_refs": []
             })],
             body_markdown: Some(
-                "When construction practice affects geometry, semantics, validation, or procurement, close the gap as scoped knowledge, not as a local modeling trick.\n\nScope every claim before saving it: generic physical principle; jurisdiction or region; code/standard/regulatory source; manufacturer or product line; off-the-shelf catalog row; or project-only assumption. Use the most specific applicable scope. Do not hard-code any country into the harness: infer the project/request region when explicit, otherwise keep the knowledge generic or ask/record the region gap. For framing dimensions, center-to-center spacing, boards, trusses, fasteners, foundations, wall/floor/roof systems, windows, and doors, prefer region-applicable regulations, standards, supplier catalogs, and manufacturer instructions before generic defaults.\n\nRetrieve progressively and narrowly. First discover by element class, path kind, target state, region/jurisdiction when known, and the natural user terms plus normalized terms. Read only the guidance cards, passages, catalog rows, and Definitions needed for the next authoring decision; do not flood the agent context with a whole regional corpus.\n\nChoose the corpus asset by reuse shape: parametric family for sized systems such as framing modules or layered assemblies; Definition library entry for composable parts such as windows, doors, fixtures, hosted components, and reusable product assemblies; recipe or assembly pattern for construction sequences and layered systems; catalog row/material spec for procurement and BOM identity; validator or rule pack for hard requirements.\n\nBOM-relevant knowledge must preserve catalog/provider identity and off-the-shelf dimensions where available. Do not invent nominal lumber, stud spacing, board thickness, truss geometry, fastener schedules, or product sizes from generic memory when the prompt or project locale implies a regional supply chain. If evidence is missing, record the CorpusGap and leave the value as an explicit assumption instead of promoting it.\n\nAfter saving passages/drafts/Definitions/catalog-backed assets, rediscover using the natural user terms and the normalized English terms, then use the discovered executable or consultable path.".into(),
+                "When domain practice affects geometry, semantics, validation, or procurement, close the gap as scoped knowledge, not as a local modeling trick.\n\nScope every claim before saving it: generic physical principle; jurisdiction or region; code/standard/regulatory source; manufacturer or product line; off-the-shelf catalog row; or project-only assumption. Use the most specific applicable scope. Do not hard-code any country into the harness: infer the project/request region when explicit, otherwise keep the knowledge generic or ask/record the region gap. For physical dimensions, interfaces, materials, tolerances and product configurations, prefer region-applicable regulations, standards, supplier catalogs, and manufacturer instructions before generic defaults.\n\nRetrieve progressively and narrowly. First discover by element class, path kind, target state, region/jurisdiction when known, and the natural user terms plus normalized terms. Read only the guidance cards, passages, catalog rows, and Definitions needed for the next authoring decision; do not flood the agent context with a whole regional corpus.\n\nChoose the corpus asset by reuse shape: parametric family for sized systems such as repeated components or layered assemblies; Definition library entry for composable parts such as parts, fixtures, hosted components, and reusable product assemblies; recipe or assembly pattern for domain procedures and layered systems; catalog row/material spec for procurement and BOM identity; validator or rule pack for hard requirements.\n\nBOM-relevant knowledge must preserve catalog/provider identity and off-the-shelf dimensions where available. Do not invent component dimensions, material thicknesses, connection requirements or product sizes from generic memory when the prompt or project locale implies a regional supply chain. If evidence is missing, record the CorpusGap and leave the value as an explicit assumption instead of promoting it.\n\nAfter saving passages/drafts/Definitions/catalog-backed assets, rediscover using the natural user terms and the normalized English terms, then use the discovered executable or consultable path.".into(),
             ),
         ..GuidanceCardInfo::default()
         },
+
         GuidanceCardInfo {
             id: "dkg.executable_asset".into(),
             title: "Executable Learned Assets".into(),
@@ -16088,120 +16525,6 @@ reports the active frame. ADR-058.".into(),
             ],
             body_markdown: None,
         ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
-            id: "dkg.site_from_survey".into(),
-            title: "Build A Terrain Surface From A Survey".into(),
-            task_tags: vec!["site".into(), "terrain".into(), "import".into()],
-            summary: "If you start from a survey/plot drawing (DWG/DXF), import it with import_file — \
-it creates polylines on named layers. The ground is encoded as height-contour polylines (layers \
-named like HOJDKURVA / contour / elevation / levelcurve), each carrying its elevation. SELECT only \
-those contour polylines with set_selection (NOT property-boundary/building/road layers), then run \
-the terrain command `terrain.prepare_site_surface` via invoke_command to repair the contours, make \
-elevation curves, and drape a Delaunay TIN `terrain_surface` over them — it auto-recenters the \
-survey to local origin. The terrain commands are not standalone tools: discover them with \
-list_commands (terrain.convert_to_elevation_curves, terrain.generate_surface, \
-terrain.prepare_site_surface, terrain.cut_fill_analysis). The resulting terrain_surface is the \
-existing ground; build on it and drape a foundation (see dkg.terrain_foundation). If a project \
-already contains a terrain_surface, skip this and go straight to dkg.terrain_foundation.".into(),
-            referenced_tool_ids: vec![
-                "import_file".into(),
-                "list_importers".into(),
-                "set_selection".into(),
-                "invoke_command".into(),
-                "list_commands".into(),
-            ],
-            next_card_ids: vec!["dkg.terrain_foundation".into()],
-            json_examples: vec![
-                serde_json::json!({ "path": "/path/to/plot.dwg" }),
-                serde_json::json!({ "element_ids": ["<contour_polyline_ids>"] }),
-                serde_json::json!({ "command_id": "terrain.prepare_site_surface", "parameters": {} }),
-            ],
-            body_markdown: None,
-        ..GuidanceCardInfo::default()
-        },
-        GuidanceCardInfo {
-            id: "dkg.terrain_foundation".into(),
-            title: "Plant A Building On Terrain With A Hugging Foundation".into(),
-            task_tags: vec!["site".into(), "terrain".into(), "foundation".into()],
-            summary: "To seat a building on a `terrain_surface` so it FOLLOWS the ground, do NOT use \
-a flat box slab or split the building into different coordinate frames. First author one \
-local-coordinate building assembly/group: wall bases, openings, roof, trim, and any temporary base \
-share one floor datum. Then either create a `conforming_solid` under that footprint or call \
-`invoke_command` with `command_id:\"terrain.plant_structure\"` on the semantic structure and \
-terrain, or `invoke_command` with `command_id:\"terrain.plant_on_surface\"` on the grouped building, \
-so the whole assembly is raised onto the foundation top and the conforming \
-foundation belongs to the planted group/assembly. A semantic `structure` plant converts the existing \
-bottom foundation body into the terrain-conforming foundation and records the planting contract. \
-The structure is the semantic prompt/refinement target and the foundation is a semantic \
-`foundation_system`. \
-`terrain.release_planted_structure` detaches terrain-following behavior without deleting geometry; \
-`terrain.demote_conforming_foundation` freezes the foundation_system body as either a snapshot mesh \
-or a max-height box. A terrain AABB is only a flat datum plane; real height comes from `elevation_at`. \
-After planting, sample terrain at the footprint and verify every visible ground-bearing child AABB \
-is at or above the planted assembly datum / sampled grade. If walls remain at world Y=0 while \
-terrain grade is metres above Y=0, the building is buried even if a separate foundation exists.".into(),
-            referenced_tool_ids: vec![
-                "create_entity".into(),
-                "invoke_command".into(),
-                "elevation_at".into(),
-                "get_world_aabb".into(),
-                "take_screenshot".into(),
-            ],
-            next_card_ids: Vec::new(),
-            json_examples: vec![serde_json::json!({
-                "type": "conforming_solid",
-                "surface_id": "<terrain_surface_id>",
-                "position": [3.4, -7.25],
-                "half_extents": [3.35, 3.75],
-                "min_thickness": 0.5,
-                "max_depth": 3.0
-            }), serde_json::json!({
-                "command_id": "terrain.plant_structure",
-                "parameters": {
-                    "structure_id": "<semantic_structure_id>",
-                    "surface_id": "<terrain_surface_id>",
-                    "min_thickness": 0.5
-                }
-            }), serde_json::json!({
-                "command_id": "terrain.plant_on_surface",
-                "parameters": {
-                    "target_id": "<grouped_building_id>",
-                    "surface_id": "<terrain_surface_id>",
-                    "min_thickness": 0.5,
-                    "hide_element_id": "<temporary_flat_base_id_if_any>"
-                }
-            }), serde_json::json!({
-                "command_id": "terrain.demote_conforming_foundation",
-                "parameters": {
-                    "target_id": "<foundation_structure_id>",
-                    "mode": "snapshot"
-                }
-            }), serde_json::json!({
-                "command_id": "terrain.release_planted_structure",
-                "parameters": {
-                    "target_id": "<planted_group_id>"
-                }
-            })],
-            body_markdown: Some(
-                "The terrain placement contract is assembly-wide: a foundation at terrain \
-height does not fix walls or roofs authored later at world Y=0. Author the cottage in one \
-local frame, group it, make it a semantic `structure` with a bottom foundation body, then use \
-`invoke_command { command_id: \"terrain.plant_structure\", parameters: {...} }` with the structure and \
-terrain ids; from the UI, select the visible structure/group and terrain surface, then run Plant \
-Structure. Verify child AABBs against sampled \
-terrain elevations and the planted foundation top. The resulting semantic `structure` is the prompt \
-target for refinement; its nested semantic `foundation_system` is the foundation target. The \
-selected/movable planted group is the behavior target for movement; it must include both the \
-conforming foundation body and the superstructure, so later moves re-seat the house instead of \
-stranding the foundation behind. Use `terrain.demote_conforming_foundation` when the adaptive \
-foundation should become fixed geometry: `snapshot` preserves the current conforming underside, \
-while `max_height_box` uses one rectangular body whose height equals the current maximum thickness. \
-`check_floating` may use a y=0 fallback, so it is \
-not sufficient for terrain-seated buildings unless paired with `elevation_at` samples."
-                    .into(),
-            ),
-            ..GuidanceCardInfo::default()
         },
     ]
 }
@@ -16396,7 +16719,7 @@ fn handle_preview_promotion(
         overrides,
     )?;
     if plan.corpus_gap_required {
-        ensure_wall_thickness_corpus_gap(world, element_id)?;
+        ensure_setting_out_thickness_corpus_gap(world, element_id)?;
     }
 
     Ok(PreviewPromotionResult {
@@ -16409,12 +16732,15 @@ fn handle_preview_promotion(
 }
 
 #[cfg(feature = "model-api")]
-fn ensure_wall_thickness_corpus_gap(world: &mut World, element_id: u64) -> ApiResult<()> {
+fn ensure_setting_out_thickness_corpus_gap(world: &mut World, element_id: u64) -> ApiResult<()> {
+    let element_class = find_entity_by_element_id_readonly(world, ElementId(element_id))
+        .and_then(|entity| world.get::<crate::capability_registry::ElementClassAssignment>(entity))
+        .map(|assignment| assignment.element_class.0.clone());
     let already_recorded = world
         .get_resource::<crate::plugins::corpus_gap::CorpusGapQueue>()
         .is_some_and(|queue| {
             queue.list().iter().any(|gap| {
-                gap.element_class.as_deref() == Some("wall_assembly")
+                gap.element_class == element_class
                     && gap.missing_artifact_kind == "setting_out_thickness_prior"
             })
         });
@@ -16423,11 +16749,11 @@ fn ensure_wall_thickness_corpus_gap(world: &mut World, element_id: u64) -> ApiRe
     }
     handle_request_corpus_expansion(
         world,
-        Some("wall_assembly".to_string()),
+        element_class,
         active_jurisdiction(world, &serde_json::Value::Null),
         "setting_out_thickness_prior".to_string(),
         format!(
-            "Entity {element_id} needs a new wall envelope reservation but has no explicit SettingOutContract, authored stack/physical thickness, or evidence-backed construction-system/jurisdiction prior"
+            "Entity {element_id} needs a new envelope reservation but has no explicit SettingOutContract, authored stack/physical thickness, or evidence-backed construction-system/jurisdiction prior"
         ),
     )?;
     Ok(())
@@ -16496,22 +16822,28 @@ fn override_text<'a>(overrides: &'a serde_json::Value, keys: &[&str]) -> Option<
 }
 
 #[cfg(feature = "model-api")]
-fn authored_stack_thickness_mm(overrides: &serde_json::Value) -> Option<f64> {
-    if let Some(thickness) = override_number(
-        overrides,
-        &[
-            "stack_thickness_mm",
-            "wall_thickness_mm",
-            "wall/thickness_mm",
-            "total_thickness_mm",
-        ],
-    ) {
+fn authored_stack_thickness_mm(
+    overrides: &serde_json::Value,
+    policy: Option<&crate::plugins::refinement::SettingOutPolicy>,
+) -> Option<f64> {
+    let mut thickness_keys = vec!["stack_thickness_mm", "total_thickness_mm"];
+    thickness_keys.extend(
+        policy
+            .into_iter()
+            .flat_map(|policy| policy.thickness_aliases.iter().map(String::as_str)),
+    );
+    if let Some(thickness) = override_number(overrides, &thickness_keys) {
         return (thickness > 0.0).then_some(thickness);
     }
     let layers = overrides
         .as_object()?
         .get("layers")
-        .or_else(|| overrides.as_object()?.get("wall_layers"))?
+        .or_else(|| {
+            policy?
+                .layer_aliases
+                .iter()
+                .find_map(|key| overrides.get(key))
+        })?
         .as_array()?;
     let thickness = layers
         .iter()
@@ -16530,14 +16862,157 @@ fn authored_stack_thickness_mm(overrides: &serde_json::Value) -> Option<f64> {
     (thickness > 0.0).then_some(thickness)
 }
 
+/// Resolve physical representation through existing refinement satisfaction
+/// evidence. Assembly membership is generic; no wall parameter or class is used.
+#[cfg(feature = "model-api")]
+fn governing_physical_thickness_mm(world: &World, root: ElementId) -> Result<Option<f64>, String> {
+    use crate::plugins::{
+        modeling::assembly::SemanticAssembly,
+        refinement::{
+            is_parked_refinement_entity, query_refined_into, ObligationSet, ObligationStatus,
+        },
+    };
+    fn in_active_scope(world: &World, root: ElementId, target: ElementId) -> bool {
+        let mut visited = std::collections::BTreeSet::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id.0) || is_parked_refinement_entity(world, id) {
+                continue;
+            }
+            if id == target {
+                return true;
+            }
+            pending.extend(query_refined_into(world, id));
+            if let Some(entity) = find_entity_by_element_id_readonly(world, id) {
+                if let Some(assembly) = world.get::<SemanticAssembly>(entity) {
+                    pending.extend(assembly.members.iter().map(|member| member.target));
+                }
+            }
+        }
+        false
+    }
+    let mut visited = std::collections::BTreeSet::new();
+    let mut current = root;
+    loop {
+        if !visited.insert(current.0) {
+            return Err(format!(
+                "Cyclic setting-out physical representation at element {}",
+                current.0
+            ));
+        }
+        let entity = find_entity_by_element_id_readonly(world, current).ok_or_else(|| {
+            format!(
+                "Setting-out physical representation {} is missing",
+                current.0
+            )
+        })?;
+        if is_parked_refinement_entity(world, current) {
+            return Err(format!(
+                "Setting-out physical representation {} is parked",
+                current.0
+            ));
+        }
+        let direct_bindings = world.get::<ObligationSet>(entity);
+        // Older instantiate_recipe captures relocated all obligations onto the
+        // owner group. Resolve that persisted evidence, never the locator AABB.
+        // A unique semantic owner is required and the target is still checked
+        // against this locator's active refinement subtree below.
+        let legacy_owners: Vec<_> = if direct_bindings.is_none() {
+            world
+                .iter_entities()
+                .filter(|candidate| {
+                    candidate
+                        .get::<crate::plugins::modeling::group::GroupMembers>()
+                        .is_some_and(|group| group.member_ids.contains(&current))
+                        && candidate
+                            .get::<crate::capability_registry::ElementClassAssignment>()
+                            .is_some()
+                        && candidate
+                            .get::<ElementId>()
+                            .is_some_and(|id| !is_parked_refinement_entity(world, *id))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if legacy_owners.len() > 1 {
+            return Err(format!(
+                "Ambiguous semantic owners for setting-out locator {}",
+                current.0
+            ));
+        }
+        let bindings = direct_bindings.or_else(|| {
+            legacy_owners
+                .first()
+                .and_then(|owner| owner.get::<ObligationSet>())
+        });
+        let targets = bindings
+            .into_iter()
+            .flat_map(|set| &set.entries)
+            .filter(|entry| {
+                matches!(
+                    entry.id.0.as_str(),
+                    "setting_out_reservation" | "coarse_envelope"
+                )
+            })
+            .filter_map(|entry| match entry.status {
+                ObligationStatus::SatisfiedBy(id) => Some(id),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if targets.len() > 1 {
+            return Err(format!(
+                "Ambiguous setting-out physical representations for element {}: {:?}",
+                current.0, targets
+            ));
+        }
+        let Some(target) = targets.into_iter().next().map(ElementId) else {
+            let thickness = direct_authored_physical_thickness_mm(world, current);
+            return if current != root && thickness.is_none() {
+                Err(format!(
+                    "Setting-out physical representation {} has no measurable authored thickness",
+                    current.0
+                ))
+            } else {
+                Ok(thickness)
+            };
+        };
+        if target == current {
+            return direct_authored_physical_thickness_mm(world, current).map(Some)
+                .ok_or_else(|| format!("Setting-out physical representation {} has no measurable authored thickness", current.0));
+        }
+        if find_entity_by_element_id_readonly(world, target).is_none() {
+            return Err(format!(
+                "Setting-out physical representation {} is missing",
+                target.0
+            ));
+        }
+        if !in_active_scope(world, current, target) {
+            return Err(format!(
+                "Setting-out physical representation {} is not an active member of refinement {}",
+                target.0, current.0
+            ));
+        }
+        current = target;
+    }
+}
+
 #[cfg(feature = "model-api")]
 fn authored_physical_thickness_mm(world: &World, element_id: ElementId) -> Option<f64> {
+    governing_physical_thickness_mm(world, element_id)
+        .ok()
+        .flatten()
+}
+
+#[cfg(feature = "model-api")]
+fn direct_authored_physical_thickness_mm(world: &World, element_id: ElementId) -> Option<f64> {
     let snapshot = capture_entity_snapshot(world, element_id)?;
-    if let Some(thickness) = snapshot
-        .property_fields()
-        .into_iter()
-        .find(|field| field.name == "total_thickness" || field.name == "thickness")
-        .and_then(|field| field.value)
+    let fields = snapshot.property_fields();
+    if let Some(thickness) = fields
+        .iter()
+        .find(|field| field.name == "total_thickness")
+        .or_else(|| fields.iter().find(|field| field.name == "thickness"))
+        .and_then(|field| field.value.clone())
         .and_then(|value| match value {
             crate::authored_entity::PropertyValue::Scalar(value) => Some(value as f64),
             _ => None,
@@ -16545,7 +17020,7 @@ fn authored_physical_thickness_mm(world: &World, element_id: ElementId) -> Optio
     {
         return (thickness > 0.0).then_some(thickness * 1_000.0);
     }
-    infer_wall_thickness_from_snapshot(&snapshot)
+    infer_host_thickness_from_snapshot(&snapshot)
         .map(|thickness| thickness as f64 * 1_000.0)
         .filter(|thickness| *thickness > 0.0)
 }
@@ -16617,7 +17092,7 @@ fn contract_for_dimension_choice(
 }
 
 #[cfg(feature = "model-api")]
-fn evaluate_wall_setting_out(
+fn evaluate_setting_out(
     world: &World,
     entity: Entity,
     element_id: ElementId,
@@ -16631,36 +17106,25 @@ fn evaluate_wall_setting_out(
     };
 
     let existing_contract = world.get::<SettingOutContract>(entity).cloned();
-    let stack_thickness = authored_stack_thickness_mm(overrides);
+    let policy = world
+        .get_resource::<crate::plugins::refinement::SettingOutPolicies>()
+        .and_then(|registry| registry.for_class(element_class));
+    let stack_thickness = authored_stack_thickness_mm(overrides, policy);
     let physical_thickness = authored_physical_thickness_mm(world, element_id);
-    let construction_system = override_text(
-        overrides,
-        &[
-            "construction_system",
-            "construction_system_id",
-            "top_level_construction_system",
-            "wall_system",
-            "structural_system",
-        ],
-    )
-    .map(str::to_string)
-    .or_else(|| {
-        world
-            .get::<crate::plugins::refinement::SemanticIntent>(entity)
-            .and_then(|intent| {
-                override_text(
-                    &intent.parameters,
-                    &[
-                        "construction_system",
-                        "construction_system_id",
-                        "top_level_construction_system",
-                        "wall_system",
-                        "structural_system",
-                    ],
-                )
-            })
-            .map(str::to_string)
-    });
+    let mut system_keys = vec!["system", "system_id"];
+    system_keys.extend(
+        policy
+            .into_iter()
+            .flat_map(|policy| policy.system_aliases.iter().map(String::as_str)),
+    );
+    let construction_system = override_text(overrides, &system_keys)
+        .map(str::to_string)
+        .or_else(|| {
+            world
+                .get::<crate::plugins::refinement::SemanticIntent>(entity)
+                .and_then(|intent| override_text(&intent.parameters, &system_keys))
+                .map(str::to_string)
+        });
     let jurisdiction = active_jurisdiction(world, overrides);
     let prior = world
         .get_resource::<SettingOutThicknessPriorRegistry>()
@@ -16856,9 +17320,9 @@ fn build_refinement_promotion_plan(
 
     let setting_out_evaluation = assignment
         .as_ref()
-        .filter(|assignment| assignment.element_class.0 == "wall_assembly")
+        .filter(|assignment| setting_out_policy_applies(world, entity, &assignment.element_class.0))
         .map(|assignment| {
-            evaluate_wall_setting_out(world, entity, eid, &assignment.element_class.0, &overrides)
+            evaluate_setting_out(world, entity, eid, &assignment.element_class.0, &overrides)
         });
 
     let mut missing_inputs = Vec::new();
@@ -16869,7 +17333,7 @@ fn build_refinement_promotion_plan(
         )
     }) {
         missing_inputs.push(
-            "CorpusGap: no explicit setting-out contract, authored wall stack/physical thickness, or evidence-backed wall-thickness prior"
+            "CorpusGap: no explicit setting-out contract, authored stack/physical thickness, or evidence-backed thickness prior"
                 .to_string(),
         );
     }
@@ -16879,7 +17343,7 @@ fn build_refinement_promotion_plan(
         .filter(|impact| impact.accepted_choice.is_none())
     {
         missing_inputs.push(format!(
-            "DimensionImpact: required wall stack is {:.1} mm but reservation is {:.1} mm; explicitly choose preserve_exterior_envelope, preserve_interior_clear, or preserve_governing_grid",
+            "DimensionImpact: required stack is {:.1} mm but reservation is {:.1} mm; explicitly choose preserve_exterior_envelope, preserve_interior_clear, or preserve_governing_grid",
             impact.required_thickness_mm, impact.reserved_thickness_mm
         ));
     }
@@ -17546,7 +18010,7 @@ pub(crate) fn handle_create_refinement_goal(
                 target.overrides.clone(),
             )?;
             if plan.corpus_gap_required {
-                ensure_wall_thickness_corpus_gap(world, eid.0)?;
+                ensure_setting_out_thickness_corpus_gap(world, eid.0)?;
             }
             target_plans.push(plan);
         }
@@ -18042,7 +18506,7 @@ pub fn handle_request_corpus_expansion(
 ) -> ApiResult<CorpusGapInfo> {
     use crate::curation::AssetKindId;
     use crate::plugins::corpus_gap::{CorpusGap, CorpusGapId, CorpusGapQueue};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::time::{SystemTime, UNIX_EPOCH};
 
     // Defect 1 (vocabulary surfaces must agree): a recognised native modeling
     // term (e.g. `door`/`window`, authored as `opening` entities) is not a
@@ -18126,6 +18590,8 @@ pub fn handle_lookup_source_passage(
         .ok_or_else(|| format!("passage '{passage_ref}' not found in CorpusPassageRegistry"))?;
 
     Ok(PassageLookupInfo {
+        scope: crate::plugins::knowledge_assets::scope_as_str(entry.scope).into(),
+        trust: format!("{:?}", entry.trust).to_ascii_lowercase(),
         passage_ref,
         text: entry.text.clone(),
         source: entry.provenance.source.clone(),
@@ -18272,7 +18738,7 @@ pub fn handle_save_recipe_draft(
     request: SaveRecipeDraftRequest,
 ) -> ApiResult<RecipeDraftInfo> {
     use crate::plugins::corpus_gap::{CorpusGapQueue, CorpusPassageRegistry};
-    use crate::plugins::knowledge_assets::{parse_scope, KnowledgeResidency};
+    use crate::plugins::knowledge_assets::KnowledgeResidency;
     use crate::plugins::recipe_drafts::{
         recipe_draft_meta_for, RecipeDraftArtifact, RecipeDraftParameter, RecipeDraftRegistry,
         RecipeDraftStatus,
@@ -18319,7 +18785,7 @@ pub fn handle_save_recipe_draft(
             })
             .unwrap_or(RecipeDraftStatus::Drafted),
     };
-    let scope = parse_scope(request.scope.as_deref())?;
+    let scope = crate::plugins::knowledge_assets::parse_draft_scope(request.scope.as_deref())?;
 
     world.init_resource::<RecipeDraftRegistry>();
     let saved = world
@@ -18448,7 +18914,7 @@ pub fn handle_save_assembly_pattern_draft(
         AssemblyPatternDraftRegistry, AssemblyPatternDraftStatus,
     };
     use crate::plugins::corpus_gap::{CorpusGapQueue, CorpusPassageRegistry};
-    use crate::plugins::knowledge_assets::{parse_scope, KnowledgeResidency};
+    use crate::plugins::knowledge_assets::KnowledgeResidency;
 
     if let Some(ref gap_id) = request.gap_id {
         let Some(queue) = world.get_resource::<CorpusGapQueue>() else {
@@ -18495,7 +18961,7 @@ pub fn handle_save_assembly_pattern_draft(
             })
             .unwrap_or(AssemblyPatternDraftStatus::Drafted),
     };
-    let scope = parse_scope(request.scope.as_deref())?;
+    let scope = crate::plugins::knowledge_assets::parse_draft_scope(request.scope.as_deref())?;
 
     world.init_resource::<AssemblyPatternDraftRegistry>();
     let saved =
@@ -18653,8 +19119,8 @@ pub fn handle_materialize_learned_asset(
     }
 
     let response = crate::plugins::parametric_mcp::world_create(world, parametric_request)?;
-    let last_verified = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let last_verified = crate::time::SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0);
 
@@ -19264,3 +19730,374 @@ pub fn handle_check_clearance(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "model-api")]
+fn setting_out_policy_applies(world: &World, entity: Entity, class: &str) -> bool {
+    world
+        .get::<crate::plugins::refinement::SettingOutContract>(entity)
+        .is_some()
+        || world
+            .get_resource::<crate::plugins::refinement::SettingOutPolicies>()
+            .is_some_and(|registry| registry.for_class(class).is_some())
+}
+
+#[cfg(feature = "model-api")]
+pub(crate) fn browser_tool_definitions(server: &server::ModelApiServer) -> Vec<Value> {
+    server::profile_tool_catalog()
+        .tools_for(server.profile_state.get())
+        .iter()
+        .map(|tool| serde_json::to_value(tool).expect("MCP tool schema is serializable"))
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+pub(super) fn constant_time_bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+#[cfg(feature = "model-api")]
+fn handle_list_project_knowledge(world: &World, request: ProjectKnowledgeIndexRequest) -> Value {
+    let mut rows = Vec::new();
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
+    {
+        for (id, p) in registry.iter().filter(|(_, p)| {
+            matches!(
+                p.scope,
+                crate::curation::Scope::Session | crate::curation::Scope::Project
+            )
+        }) {
+            rows.push(json!({"kind":"passage","id":id,"scope":crate::plugins::knowledge_assets::scope_as_str(p.scope),"trust":format!("{:?}",p.trust).to_ascii_lowercase(),"next_tool":"lookup_source_passage","arguments":{"passage_ref":id}}));
+        }
+    }
+    if let Some(registry) = world.get_resource::<crate::curation::RecipeArtifactRegistry>() {
+        for p in registry.iter().filter(|p| {
+            matches!(
+                p.meta.scope,
+                crate::curation::Scope::Session | crate::curation::Scope::Project
+            )
+        }) {
+            rows.push(json!({"kind":"recipe","id":p.meta.id.0,"scope":crate::plugins::knowledge_assets::scope_as_str(p.meta.scope),"trust":format!("{:?}",p.meta.trust).to_ascii_lowercase(),"target_class":p.target_class,"next_tool":"discover_curated_paths","arguments":{"element_class":p.target_class,"path_kind":"recipe"}}));
+        }
+    }
+    rows.sort_by(|a, b| {
+        a["kind"]
+            .as_str()
+            .cmp(&b["kind"].as_str())
+            .then(a["id"].as_str().cmp(&b["id"].as_str()))
+    });
+    let total = rows.len();
+    let limit = request.limit.unwrap_or(40).clamp(1, 100);
+    let offset = request.offset.min(total);
+    let page: Vec<_> = rows.into_iter().skip(offset).take(limit).collect();
+    let end = offset + page.len();
+    json!({"layer":"private_project_context","items":page,"total":total,"next_offset":if end<total {Some(end)} else {None},"publication":"none; shared releases require separate confidentiality, rights and evidence review"})
+}
+
+#[cfg(all(test, feature = "model-api"))]
+mod explicit_rotation_axis_tests {
+    use super::*;
+    #[test]
+    fn explicit_y_is_world_axis_in_an_elevation_draft() {
+        let frame = GroupFrame {
+            translation: Vec3::ZERO,
+            rotation: Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        };
+        let mut request = TransformToolRequest {
+            element_ids: vec![1],
+            operation: "rotate".into(),
+            axis: Some("Y".into()),
+            value: json!(90),
+            pivot: None,
+        };
+        let explicit = transform_rotation(&request, &frame).unwrap();
+        assert!((explicit * Vec3::X).distance(Vec3::NEG_Z) < 1e-5);
+        request.axis = None;
+        let unconstrained = transform_rotation(&request, &frame).unwrap();
+        assert!((unconstrained * Vec3::X).distance(Vec3::Y) < 1e-5);
+    }
+}
+
+#[cfg(all(test, feature = "model-api"))]
+mod setting_out_physical_binding_tests {
+    use super::*;
+    use crate::plugins::refinement::RefinementState;
+    use crate::plugins::{
+        modeling::{
+            assembly::{AssemblyMemberRef, SemanticAssembly, SemanticRelation},
+            generic_factory::PrimitiveFactory,
+            primitives::{BoxPrimitive, ShapeRotation},
+        },
+        refinement::{
+            Obligation, ObligationId, ObligationSet, ObligationStatus, SemanticRole,
+            SettingOutContract, SettingOutDatum, SettingOutSource,
+        },
+    };
+    fn obligation(id: &str, target: u64) -> Obligation {
+        Obligation {
+            id: ObligationId(id.into()),
+            role: SemanticRole("envelope".into()),
+            required_by_state: RefinementState::Conceptual,
+            status: ObligationStatus::SatisfiedBy(target),
+        }
+    }
+    #[test]
+    fn physical_binding_measures_active_member_and_reports_drift_or_broken_evidence() {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+        let root = world
+            .spawn((
+                ElementId(1),
+                BoxPrimitive {
+                    centre: Vec3::ZERO,
+                    half_extents: Vec3::splat(0.01),
+                },
+                ShapeRotation::default(),
+                ObligationSet {
+                    entries: vec![
+                        obligation("setting_out_reservation", 2),
+                        obligation("coarse_envelope", 2),
+                    ],
+                },
+                SettingOutContract {
+                    revision: 1,
+                    datum: SettingOutDatum::Centreline,
+                    locked_dimensions: Default::default(),
+                    reserved_negative_offset_mm: 139.1,
+                    reserved_positive_offset_mm: 139.1,
+                    source: SettingOutSource::User,
+                    confidence: 1.0,
+                    tolerance_mm: 0.5,
+                    source_ref: None,
+                },
+            ))
+            .id();
+        let physical = world
+            .spawn((
+                ElementId(2),
+                BoxPrimitive {
+                    centre: Vec3::ZERO,
+                    half_extents: Vec3::new(2.0, 1.5, 0.1391),
+                },
+                ShapeRotation::default(),
+            ))
+            .id();
+        let assembly = world
+            .spawn((
+                ElementId(3),
+                SemanticAssembly {
+                    assembly_type: "arbitrary_capability".into(),
+                    label: "Envelope representation".into(),
+                    members: vec![AssemblyMemberRef {
+                        target: ElementId(2),
+                        role: "physical_body".into(),
+                    }],
+                    parameters: json!({}),
+                    metadata: json!({}),
+                },
+            ))
+            .id();
+        let branch = world
+            .spawn((
+                ElementId(4),
+                SemanticRelation {
+                    source: ElementId(1),
+                    target: ElementId(3),
+                    relation_type: "refined_into".into(),
+                    parameters: json!({}),
+                },
+            ))
+            .id();
+        assert!(
+            (governing_physical_thickness_mm(&world, ElementId(1))
+                .unwrap()
+                .unwrap()
+                - 278.2)
+                .abs()
+                < 1e-3
+        );
+        assert!(!handle_run_validation(&world, 1)
+            .unwrap()
+            .iter()
+            .any(|f| f.validator.starts_with("SettingOut")));
+        // Exercise the exact final instantiate_recipe metadata grouping stage,
+        // not only the preceding promotion. The locator contract survives it.
+        use crate::capability_registry::{ElementClassAssignment, ElementClassId};
+        use crate::plugins::modeling::group::GroupMembers;
+        world.entity_mut(root).insert(ElementClassAssignment {
+            element_class: ElementClassId("arbitrary_capability".into()),
+            active_recipe: None,
+        });
+        world
+            .get_mut::<ObligationSet>(root)
+            .unwrap()
+            .entries
+            .push(obligation("other_claim", 3));
+        let group = world
+            .spawn((
+                ElementId(5),
+                GroupMembers {
+                    name: "Recipe outputs".into(),
+                    member_ids: vec![ElementId(1), ElementId(3)],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        move_recipe_semantics_from_anchor_to_group(&mut world, ElementId(1), ElementId(5));
+        assert_eq!(world.get::<ObligationSet>(root).unwrap().entries.len(), 2);
+        assert_eq!(world.get::<ObligationSet>(group).unwrap().entries.len(), 3);
+        assert!(world.get::<ElementClassAssignment>(root).is_none());
+        assert!(
+            (governing_physical_thickness_mm(&world, ElementId(1))
+                .unwrap()
+                .unwrap()
+                - 278.2)
+                .abs()
+                < 1e-3
+        );
+        // A saved project from before this repair has bindings only on the group.
+        let retained = world.get::<ObligationSet>(root).unwrap().clone();
+        world.entity_mut(root).remove::<ObligationSet>();
+        assert!(
+            (governing_physical_thickness_mm(&world, ElementId(1))
+                .unwrap()
+                .unwrap()
+                - 278.2)
+                .abs()
+                < 1e-3
+        );
+        world.get_mut::<ObligationSet>(group).unwrap().entries[0] =
+            obligation("setting_out_reservation", 999);
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("Ambiguous"));
+        world.entity_mut(group).insert(retained.clone());
+        let duplicate = world
+            .spawn((
+                ElementId(6),
+                world.get::<GroupMembers>(group).unwrap().clone(),
+                world.get::<ElementClassAssignment>(group).unwrap().clone(),
+            ))
+            .id();
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("Ambiguous semantic owners"));
+        world.despawn(duplicate);
+        world.entity_mut(root).insert(retained);
+        world.despawn(group);
+        world
+            .get_mut::<BoxPrimitive>(physical)
+            .unwrap()
+            .half_extents
+            .z = 0.15;
+        assert!(handle_run_validation(&world, 1)
+            .unwrap()
+            .iter()
+            .any(|f| f.validator == "SettingOutContractDrift"));
+        world
+            .get_mut::<BoxPrimitive>(physical)
+            .unwrap()
+            .half_extents
+            .z = 0.1391;
+        world.get_mut::<ObligationSet>(root).unwrap().entries[1] = obligation("coarse_envelope", 3);
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("Ambiguous"));
+        world.get_mut::<ObligationSet>(root).unwrap().entries =
+            vec![obligation("setting_out_reservation", 999)];
+        assert!(handle_run_validation(&world, 1)
+            .unwrap()
+            .iter()
+            .any(|f| f.validator == "SettingOutPhysicalBinding" && f.message.contains("missing")));
+        world.get_mut::<ObligationSet>(root).unwrap().entries =
+            vec![obligation("setting_out_reservation", 2)];
+        world
+            .get_mut::<SemanticAssembly>(assembly)
+            .unwrap()
+            .members
+            .clear();
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("not an active member"));
+        world
+            .get_mut::<SemanticAssembly>(assembly)
+            .unwrap()
+            .members
+            .push(AssemblyMemberRef {
+                target: ElementId(2),
+                role: "body".into(),
+            });
+        world.entity_mut(physical).insert((
+            ObligationSet {
+                entries: vec![obligation("setting_out_reservation", 1)],
+            },
+            SemanticAssembly {
+                assembly_type: "bad_cycle".into(),
+                label: "Invalid".into(),
+                members: vec![AssemblyMemberRef {
+                    target: ElementId(1),
+                    role: "body".into(),
+                }],
+                parameters: json!({}),
+                metadata: json!({}),
+            },
+        ));
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("Cyclic"));
+        world
+            .entity_mut(physical)
+            .remove::<(ObligationSet, SemanticAssembly)>();
+        world
+            .entity_mut(branch)
+            .insert(crate::plugins::refinement::RefinementBranch {
+                root_element_id: 1,
+                parent_element_id: 1,
+                child_element_id: 3,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                status: crate::plugins::refinement::RefinementBranchStatus::Parked,
+                basis: Default::default(),
+            });
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("not an active member"));
+        world
+            .entity_mut(branch)
+            .remove::<crate::plugins::refinement::RefinementBranch>();
+        world.entity_mut(physical).remove::<BoxPrimitive>();
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("no measurable authored thickness"));
+        world.despawn(branch);
+        assert!(governing_physical_thickness_mm(&world, ElementId(1))
+            .unwrap_err()
+            .contains("not an active member"));
+        world.entity_mut(root).remove::<ObligationSet>();
+        assert!(
+            (governing_physical_thickness_mm(&world, ElementId(1))
+                .unwrap()
+                .unwrap()
+                - 20.0)
+                .abs()
+                < 1e-3,
+            "an undelegated physical body must still be measured directly"
+        );
+        world.entity_mut(root).remove::<BoxPrimitive>();
+        assert!(handle_run_validation(&world, 1)
+            .unwrap()
+            .iter()
+            .any(|f| f.validator == "SettingOutPhysicalBinding"));
+    }
+}

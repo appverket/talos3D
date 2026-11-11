@@ -1,3 +1,4 @@
+use crate::time::{SystemTime, UNIX_EPOCH};
 /// Material browser and editor panel.
 ///
 /// Follows the same floating-window pattern as `definition_browser`.
@@ -6,12 +7,11 @@ use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bevy::{
     asset::AssetServer,
-    prelude::{Assets, Handle, Image},
+    prelude::{Assets, DetectChangesMut, Handle, Image, ResMut},
 };
 use bevy_egui::{egui, EguiContexts, EguiTextureHandle};
 
@@ -137,6 +137,8 @@ impl BrowsableAsset for SourceRegistryEntry {
 
 #[derive(bevy::prelude::Resource, Default, Debug, Clone)]
 pub struct MaterialsWindowState {
+    #[cfg(not(target_arch = "wasm32"))]
+    texture_picker: Option<TexturePicker>,
     pub visible: bool,
     pub search: String,
     pub selected_id: Option<String>,
@@ -467,8 +469,8 @@ pub fn draw_materials_window(
     contexts: &mut EguiContexts,
     ctx: &egui::Context,
     state: &mut MaterialsWindowState,
-    registry: &mut MaterialRegistry,
-    texture_registry: &mut TextureRegistry,
+    registry: &mut ResMut<MaterialRegistry>,
+    texture_registry: &mut ResMut<TextureRegistry>,
     source_registry: &mut SourceRegistry,
     nomination_queue: &mut NominationQueue,
     asset_server: &AssetServer,
@@ -476,21 +478,45 @@ pub fn draw_materials_window(
     pending: &mut PendingCommandInvocations,
     selected_assignments: &[(u64, Option<MaterialAssignment>)],
 ) {
-    state.visible = MATERIALS_BROWSER_WINDOW.show(ctx, state.visible, |ui| {
-        draw_browser_panel(
-            ui,
-            contexts,
-            state,
-            registry,
-            texture_registry,
-            source_registry,
-            nomination_queue,
-            asset_server,
-            images,
-            pending,
-            selected_assignments,
-        );
+    #[cfg(not(target_arch = "wasm32"))]
+    poll_texture_picker(ctx, state);
+    edit_browser_registries(registry, texture_registry, |registry, texture_registry| {
+        state.visible = MATERIALS_BROWSER_WINDOW.show(ctx, state.visible, |ui| {
+            draw_browser_panel(
+                ui,
+                contexts,
+                state,
+                registry,
+                texture_registry,
+                source_registry,
+                nomination_queue,
+                asset_server,
+                images,
+                pending,
+                selected_assignments,
+            );
+        });
     });
+}
+
+// Browsing is not an authored change. Every texture mutation in this window
+// belongs to Apply, which also mutates the material and bumps its generation.
+// Preserve ECS change ticks on navigation frames; otherwise all material
+// handles, mesh extraction and bounds are rebuilt even with this window closed.
+fn edit_browser_registries(
+    registry: &mut ResMut<MaterialRegistry>,
+    textures: &mut ResMut<TextureRegistry>,
+    edit: impl FnOnce(&mut MaterialRegistry, &mut TextureRegistry),
+) {
+    let before = registry.generation();
+    edit(
+        registry.bypass_change_detection(),
+        textures.bypass_change_detection(),
+    );
+    if registry.generation() != before {
+        registry.set_changed();
+        textures.set_changed();
+    }
 }
 
 // ─── Browser panel (left list + right editor) ─────────────────────────────────
@@ -754,7 +780,7 @@ fn draw_material_editor(
     });
 }
 
-fn form_grid(id: impl std::hash::Hash, ui: &mut egui::Ui, add_rows: impl FnOnce(&mut egui::Ui)) {
+fn form_grid(id: impl egui::AsIdSalt, ui: &mut egui::Ui, add_rows: impl FnOnce(&mut egui::Ui)) {
     egui::Grid::new(id)
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -2000,6 +2026,10 @@ fn draw_textures_tab(
                     asset_server,
                     texture_registry,
                     images,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    &mut state.texture_picker,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    state.selected_id.as_deref(),
                     "Base Color",
                     &mut state.base_color_tex,
                     &mut state.dirty,
@@ -2011,6 +2041,10 @@ fn draw_textures_tab(
                     asset_server,
                     texture_registry,
                     images,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    &mut state.texture_picker,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    state.selected_id.as_deref(),
                     "Normal Map",
                     &mut state.normal_map_tex,
                     &mut state.dirty,
@@ -2022,6 +2056,10 @@ fn draw_textures_tab(
                     asset_server,
                     texture_registry,
                     images,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    &mut state.texture_picker,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    state.selected_id.as_deref(),
                     "Metallic/Roughness",
                     &mut state.metallic_roughness_tex,
                     &mut state.dirty,
@@ -2033,6 +2071,10 @@ fn draw_textures_tab(
                     asset_server,
                     texture_registry,
                     images,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    &mut state.texture_picker,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    state.selected_id.as_deref(),
                     "Emissive",
                     &mut state.emissive_tex,
                     &mut state.dirty,
@@ -2044,6 +2086,10 @@ fn draw_textures_tab(
                     asset_server,
                     texture_registry,
                     images,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    &mut state.texture_picker,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    state.selected_id.as_deref(),
                     "Occlusion",
                     &mut state.occlusion_tex,
                     &mut state.dirty,
@@ -2061,6 +2107,8 @@ fn texture_row(
     asset_server: &AssetServer,
     texture_registry: &TextureRegistry,
     images: &mut Assets<Image>,
+    #[cfg(not(target_arch = "wasm32"))] picker: &mut Option<TexturePicker>,
+    #[cfg(not(target_arch = "wasm32"))] material_id: Option<&str>,
     label: &str,
     slot: &mut Option<TextureRef>,
     dirty: &mut bool,
@@ -2103,9 +2151,20 @@ fn texture_row(
 
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Upload").clicked() {
-                    if let Some(tex) = pick_texture_file() {
-                        *slot = Some(tex);
-                        *dirty = true;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if picker.is_none() {
+                        *picker = Some(TexturePicker {
+                            future: std::sync::Arc::new(std::sync::Mutex::new(Box::pin(async {
+                                rfd::AsyncFileDialog::new()
+                                    .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+                                    .pick_file()
+                                    .await
+                                    .map(|file| file.path().to_path_buf())
+                            }))),
+                            material_id: material_id.map(str::to_owned),
+                            slot: label.to_owned(),
+                        });
+                        ui.ctx().request_repaint();
                     }
                 }
                 if slot.is_some() && ui.button("Clear").clicked() {
@@ -2232,24 +2291,66 @@ fn material_swatch_color(def: &MaterialDef) -> egui::Color32 {
     )
 }
 
-/// Open a native file picker and return a `TextureRef::Embedded` for the
-/// chosen image file, or `None` if the user cancelled or an error occurred.
-#[cfg(target_arch = "wasm32")]
-fn pick_texture_file() -> Option<TextureRef> {
-    None
+#[cfg(not(target_arch = "wasm32"))]
+type TextureFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<std::path::PathBuf>> + Send>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+struct TexturePicker {
+    future: std::sync::Arc<std::sync::Mutex<TextureFuture>>,
+    material_id: Option<String>,
+    slot: String,
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for TexturePicker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TexturePicker")
+            .field("slot", &self.slot)
+            .finish_non_exhaustive()
+    }
 }
 
-/// Open a native file picker and return a `TextureRef::Embedded` for the
-/// chosen image file, or `None` if the user cancelled or an error occurred.
 #[cfg(not(target_arch = "wasm32"))]
-fn pick_texture_file() -> Option<TextureRef> {
+fn poll_texture_picker(ctx: &egui::Context, state: &mut MaterialsWindowState) {
+    use std::task::{Context, Poll, Waker};
+    let Some(picker) = &state.texture_picker else {
+        return;
+    };
+    let result = picker
+        .future
+        .lock()
+        .unwrap()
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()));
+    let Poll::Ready(file) = result else {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        return;
+    };
+    let picker = state.texture_picker.take().unwrap();
+    // A later selection must not receive another material's upload.
+    if picker.material_id != state.selected_id {
+        return;
+    }
+    let Some(texture) = file.and_then(|path| texture_from_path(&path)) else {
+        return;
+    };
+    let slot = match picker.slot.as_str() {
+        "Base Color" => &mut state.base_color_tex,
+        "Normal Map" => &mut state.normal_map_tex,
+        "Metallic/Roughness" => &mut state.metallic_roughness_tex,
+        "Emissive" => &mut state.emissive_tex,
+        "Occlusion" => &mut state.occlusion_tex,
+        _ => return,
+    };
+    *slot = Some(texture);
+    state.dirty = true;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn texture_from_path(path: &std::path::Path) -> Option<TextureRef> {
     use base64::prelude::*;
-
-    let path = rfd::FileDialog::new()
-        .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
-        .pick_file()?;
-
-    let bytes = std::fs::read(&path).ok()?;
+    let bytes = std::fs::read(path).ok()?;
     let mime = match path
         .extension()
         .and_then(|e| e.to_str())
@@ -2261,10 +2362,9 @@ fn pick_texture_file() -> Option<TextureRef> {
         "webp" => "image/webp",
         _ => "image/png",
     };
-
     Some(TextureRef::Embedded {
         data: BASE64_STANDARD.encode(&bytes),
-        mime: mime.to_string(),
+        mime: mime.into(),
     })
 }
 
@@ -2326,6 +2426,92 @@ fn idx_to_texture_projection(idx: usize) -> TextureProjection {
 mod tests {
     use super::*;
     use crate::curation::{SourceLicense, SourceTier};
+
+    #[test]
+    fn browser_reads_preserve_change_ticks_and_apply_invalidates_both_registries() {
+        use bevy::prelude::*;
+        #[derive(Resource, Default)]
+        struct Observed(Vec<(bool, bool)>);
+        #[derive(Resource, Default)]
+        struct Apply(bool);
+        let mut app = App::new();
+        app.init_resource::<MaterialRegistry>()
+            .init_resource::<TextureRegistry>()
+            .init_resource::<Observed>()
+            .init_resource::<Apply>()
+            .add_systems(
+                Update,
+                (
+                    |mut registry: ResMut<MaterialRegistry>,
+                     mut textures: ResMut<TextureRegistry>,
+                     apply: Res<Apply>| {
+                        edit_browser_registries(&mut registry, &mut textures, |registry, _| {
+                            if apply.0 {
+                                registry.create("User material");
+                            } else {
+                                // The same read-only path used while the browser is hidden
+                                // or showing its material list.
+                                assert_eq!(registry.count(), registry.all().count());
+                            }
+                        });
+                    },
+                    |registry: Res<MaterialRegistry>,
+                     textures: Res<TextureRegistry>,
+                     mut observed: ResMut<Observed>| {
+                        observed
+                            .0
+                            .push((registry.is_changed(), textures.is_changed()));
+                    },
+                )
+                    .chain(),
+            );
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<Observed>().0.last(),
+            Some(&(false, false))
+        );
+        app.world_mut().resource_mut::<Apply>().0 = true;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Observed>().0.last(),
+            Some(&(true, true))
+        );
+        app.world_mut().resource_mut::<Apply>().0 = false;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Observed>().0.last(),
+            Some(&(false, false))
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn texture_dialog_completion_updates_only_its_original_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("texture.png");
+        std::fs::write(&path, b"test-image").unwrap();
+        let picker = |path: std::path::PathBuf| TexturePicker {
+            future: std::sync::Arc::new(std::sync::Mutex::new(Box::pin(async { Some(path) }))),
+            material_id: Some("original".into()),
+            slot: "Base Color".into(),
+        };
+        let mut state = MaterialsWindowState {
+            selected_id: Some("other".into()),
+            texture_picker: Some(picker(path.clone())),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        poll_texture_picker(&ctx, &mut state);
+        assert!(state.base_color_tex.is_none());
+        assert!(!state.dirty);
+        assert!(state.texture_picker.is_none());
+        state.selected_id = Some("original".into());
+        state.texture_picker = Some(picker(path));
+        poll_texture_picker(&ctx, &mut state);
+        assert!(state.base_color_tex.is_some());
+        assert!(state.dirty);
+    }
 
     #[test]
     fn source_draft_builds_entry_with_optional_fields() {

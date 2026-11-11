@@ -6,6 +6,8 @@
 //! through the identical function without pushing, which is what makes
 //! preview/commit parity true by construction rather than by test discipline.
 
+use serde::{Deserialize, Serialize};
+
 use crate::curation::JurisdictionTag;
 use crate::plugins::identity::ElementId;
 use crate::plugins::refinement::RefinementState;
@@ -17,7 +19,9 @@ use super::ids::{AnchorKindId, AnchorRoleId, ConceptId, PredicateId};
 /// Deliberately excludes coordinates. Identity is publisher + kind + role, so a
 /// roof regenerated at a new pitch keeps the *same* anchor instances with a new
 /// revision — dependents are invalidated, never silently detached (ADR-064 §1).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct AnchorInstanceId {
     pub publisher: ElementId,
     pub kind: AnchorKindId,
@@ -39,7 +43,9 @@ impl AnchorInstanceId {
 }
 
 /// What a binding points at.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub enum BindTarget {
     /// The well-formed case: resolve against a published anchor.
     Anchor(AnchorInstanceId),
@@ -48,8 +54,19 @@ pub enum BindTarget {
     Entity(ElementId),
 }
 
+/// An authored anchor identity; revision counters are maintained by Talos.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AnchorPublication {
+    pub kind: AnchorKindId,
+    pub role: AnchorRoleId,
+}
+
 /// One unit of semantic intent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub enum PlanIntent {
     /// Claiming a concept is what arms the kernel (agreement §7).
     AssignConcept {
@@ -60,6 +77,12 @@ pub enum PlanIntent {
     RemoveConcept {
         entity: ElementId,
         concept: ConceptId,
+    },
+    /// Replace this host's declared anchor identities. This does not invent
+    /// anchor geometry or claim a domain evaluator exists.
+    PublishAnchors {
+        entity: ElementId,
+        anchors: Vec<AnchorPublication>,
     },
     /// Bind a concept-bearing entity through a registered predicate.
     Bind {
@@ -74,7 +97,9 @@ pub enum PlanIntent {
 /// [`SemanticPlan::none`] is the default an `EditorCommand` returns when it
 /// makes no semantic claim, which keeps the existing command population
 /// untouched and geometry-only commands geometry-only.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SemanticPlan {
     pub intents: Vec<PlanIntent>,
 }
@@ -121,6 +146,12 @@ pub trait SemanticContext {
 
     /// Anchor instances an entity actually publishes right now.
     fn published_anchors(&self, entity: ElementId) -> Vec<AnchorInstanceId>;
+
+    /// Actual published candidates for actionable discovery/refusal. Bounded
+    /// contexts may return a subset; absence is not permission to invent one.
+    fn anchor_candidates(&self, _kind: &AnchorKindId) -> Vec<AnchorInstanceId> {
+        Vec::new()
+    }
 
     /// Refinement state governing `entity`.
     fn refinement_state(&self, entity: ElementId) -> RefinementState;

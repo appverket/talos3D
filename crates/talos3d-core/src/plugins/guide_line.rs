@@ -169,15 +169,13 @@ impl GuideLineSnapshot {
             .clone()
             .unwrap_or_else(|| "Guide Line".to_string())
     }
-
-    fn effective_endpoints(&self) -> (Vec3, Vec3) {
-        let half = self.finite_length.unwrap_or(GUIDE_LINE_HALF_LENGTH);
-        let dir = self.direction.normalize_or_zero();
-        (self.anchor - dir * half, self.anchor + dir * half)
-    }
 }
 
 impl AuthoredEntity for GuideLineSnapshot {
+    fn isolated_snapshot_preview(&self) -> bool {
+        true
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -239,22 +237,25 @@ impl AuthoredEntity for GuideLineSnapshot {
                 Some(PropertyValue::Text(self.visible.to_string())),
             ),
         ];
-        if let Some(length) = self.finite_length {
-            fields.push(property_field(
-                "length",
-                PropertyValueKind::Scalar,
-                Some(PropertyValue::Scalar(length)),
-            ));
-        }
-        if let Some(label) = &self.label {
+        // Keep these editable even on a new, unnamed infinite guide. Length is
+        // historically the distance on EACH side of the anchor; preserve files
+        // and API values and make that convention explicit in the inspector.
+        if self.finite_length != Some(0.) {
             fields.push(property_field_with(
-                "label",
-                "Label",
-                PropertyValueKind::Text,
-                Some(PropertyValue::Text(label.clone())),
+                "length",
+                "Half-length (0 = infinite)",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.finite_length.unwrap_or(0.0))),
                 true,
             ));
         }
+        fields.push(property_field_with(
+            "label",
+            "Label",
+            PropertyValueKind::Text,
+            Some(PropertyValue::Text(self.label.clone().unwrap_or_default())),
+            true,
+        ));
         fields
     }
 
@@ -306,27 +307,14 @@ impl AuthoredEntity for GuideLineSnapshot {
     }
 
     fn handles(&self) -> Vec<HandleInfo> {
-        let (start, end) = self.effective_endpoints();
-        vec![
-            HandleInfo {
-                id: "anchor".to_string(),
-                position: self.anchor,
-                kind: HandleKind::Center,
-                label: "Anchor".to_string(),
-            },
-            HandleInfo {
-                id: "start".to_string(),
-                position: start,
-                kind: HandleKind::Vertex,
-                label: "Start".to_string(),
-            },
-            HandleInfo {
-                id: "end".to_string(),
-                position: end,
-                kind: HandleKind::Vertex,
-                label: "End".to_string(),
-            },
-        ]
+        // The anchor is the actual move control. The rendered endpoints of an
+        // infinite guide are clipping conveniences, not editable vertices.
+        vec![HandleInfo {
+            id: "anchor".to_string(),
+            position: self.anchor,
+            kind: HandleKind::Center,
+            label: "Move guide anchor".to_string(),
+        }]
     }
 
     fn drag_handle(&self, handle_id: &str, cursor: Vec3) -> Option<BoxedEntity> {
@@ -536,18 +524,19 @@ impl AuthoredEntityFactory for GuideLineFactory {
         let mut query = world.try_query::<(Entity, &ElementId, &GuideLineNode)>()?;
         query
             .iter(world)
-            .filter(|(_, _, node)| node.visible)
+            .filter(|(entity, _, node)| {
+                node.visible && !crate::plugins::object_locks::entity_locked(world, *entity)
+            })
             .filter_map(|(entity, _element_id, node)| {
                 let half = node.finite_length.unwrap_or(GUIDE_LINE_HALF_LENGTH);
                 let dir = node.direction.normalize_or_zero();
                 let start = node.anchor - dir * half;
                 let end = node.anchor + dir * half;
-                let dist = ray_segment_distance(ray.origin, ray.direction.into(), start, end)?;
+                let (dist, t) = ray_segment_distance(ray.origin, ray.direction.into(), start, end)?;
                 if dist > GUIDE_LINE_HIT_RADIUS {
                     return None;
                 }
-                let t = (node.anchor - ray.origin).dot(ray.direction.into());
-                if t < 0.0 {
+                if t <= 0.0 {
                     return None;
                 }
                 Some(HitCandidate {
@@ -578,7 +567,7 @@ impl AuthoredEntityFactory for GuideLineFactory {
                 element_id: None,
                 label: None,
             });
-            if let Some(length) = node.finite_length {
+            if let Some(length) = node.finite_length.filter(|length| *length > 0.) {
                 let dir = node.direction.normalize_or_zero();
                 out.push(SnapPoint {
                     position: node.anchor - dir * length,
@@ -607,7 +596,7 @@ impl AuthoredEntityFactory for GuideLineFactory {
             return;
         };
         for (element_id, node) in query.iter(world) {
-            if !node.visible {
+            if !node.visible || node.finite_length == Some(0.) {
                 continue;
             }
             let half = node.finite_length.unwrap_or(GUIDE_LINE_HALF_LENGTH);
@@ -1078,30 +1067,103 @@ fn ray_segment_distance(
     ray_dir: Vec3,
     seg_start: Vec3,
     seg_end: Vec3,
-) -> Option<f32> {
-    let d = seg_end - seg_start;
-    let w = ray_origin - seg_start;
-    let a = ray_dir.dot(ray_dir);
-    let b = ray_dir.dot(d);
-    let c = d.dot(d);
-    let denom = a * c - b * b;
-    if denom.abs() < 1e-10 {
-        return None; // parallel
+) -> Option<(f32, f32)> {
+    // Work in metres rather than a 0..1 parameter on a kilometre-long guide.
+    // Clamp the segment first, then recompute the closest point on the ray;
+    // independently clamping both unconstrained parameters misses endpoints.
+    let segment = seg_end - seg_start;
+    let length = segment.length();
+    let Some(direction) = segment.try_normalize() else {
+        let t = (seg_start - ray_origin).dot(ray_dir).max(0.);
+        return Some(((ray_origin + ray_dir * t).distance(seg_start), t));
+    };
+    let offset = ray_origin - seg_start;
+    let parallel = ray_dir.dot(direction);
+    let along_ray = ray_dir.dot(offset);
+    let along_segment = direction.dot(offset);
+    let denominator = 1.0 - parallel * parallel;
+    let mut segment_t = if denominator > 1e-6 {
+        (along_segment - parallel * along_ray) / denominator
+    } else {
+        along_segment
     }
-    let e_val = ray_dir.dot(w);
-    let f_val = d.dot(w);
-    let mut s = (b * f_val - c * e_val) / denom;
-    let mut t = (a * f_val - b * e_val) / denom;
-    s = s.max(0.0);
-    t = t.clamp(0.0, 1.0);
-    let closest_on_ray = ray_origin + ray_dir * s;
-    let closest_on_seg = seg_start + d * t;
-    Some(closest_on_ray.distance(closest_on_seg))
+    .clamp(0.0, length);
+    let ray_t = (parallel * segment_t - along_ray).max(0.0);
+    if ray_t == 0.0 {
+        segment_t = along_segment.clamp(0.0, length);
+    }
+    let on_ray = ray_origin + ray_dir * ray_t;
+    let on_segment = seg_start + direction * segment_t;
+    Some((on_ray.distance(on_segment), ray_t))
 }
 
 // ---------------------------------------------------------------------------
 // Command: toggle visibility
 // ---------------------------------------------------------------------------
+
+/// A finite guide of zero extent is a construction point. Its anchor uses the
+/// same draw, snap, command, persistence and undo paths as a construction line.
+fn execute_find_center(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    use crate::plugins::{
+        drafting::{
+            draft::draft_snapshot_for_member,
+            primitive::{DraftPrimitiveGeometry, DraftPrimitiveNode},
+        },
+        modeling::primitives::{CylinderPrimitive, ShapeRotation},
+        selection::Selected,
+    };
+    let (entity, id) = world
+        .query_filtered::<(Entity, &ElementId), With<Selected>>()
+        .single(world)
+        .map(|(e, id)| (e, *id))
+        .map_err(|_| "Select one circle or cylinder cap")?;
+    let (anchor, direction) = if let Some(node) = world.get::<DraftPrimitiveNode>(entity) {
+        let DraftPrimitiveGeometry::Circle(circle) = &node.geometry else {
+            return Err("Select a circle".into());
+        };
+        let draft = draft_snapshot_for_member(world, id).ok_or("Circle has no Draft plane")?;
+        (
+            draft.node.plane.to_world(circle.center),
+            draft.node.plane.normal,
+        )
+    } else if let Some(cylinder) = world.get::<CylinderPrimitive>(entity) {
+        let axis = world
+            .get::<ShapeRotation>(entity)
+            .copied()
+            .unwrap_or_default()
+            .0
+            * Vec3::Y;
+        let face = world
+            .get_resource::<FaceEditContext>()
+            .filter(|c| c.entity == Some(entity))
+            .and_then(|c| c.selected_face.as_ref());
+        let sign = match face.map(|f| f.face_id.0) {
+            None | Some(0) => 1.,
+            Some(1) => -1.,
+            _ => return Err("Select a circular end cap".into()),
+        };
+        (
+            cylinder.centre + axis * (sign * cylinder.height * 0.5),
+            axis,
+        )
+    } else {
+        return Err("Select a Draft circle or a cylinder cap".into());
+    };
+    let element_id = world.resource::<ElementIdAllocator>().next_id();
+    let snapshot = GuideLineSnapshot {
+        element_id,
+        anchor,
+        direction,
+        finite_length: Some(0.),
+        visible: true,
+        label: Some("Circle center".into()),
+    };
+    crate::plugins::commands::enqueue_create_world_entity(world, snapshot.into());
+    Ok(CommandResult {
+        created: vec![element_id.0],
+        ..default()
+    })
+}
 
 fn execute_toggle_guide_line_visibility(
     world: &mut World,
@@ -1488,6 +1550,13 @@ impl Plugin for GuideLinePlugin {
                 license: None,
                 repository: None,
             })
+            .register_command(CommandDescriptor {
+                id:"guide_lines.find_center".into(), label:"Find Center".into(),
+                description:"Place a construction point at the center of a selected Draft circle or cylinder cap.".into(),
+                category:CommandCategory::Create, parameters:None, default_shortcut:None,icon:None,
+                hint:Some("Select a circle or circular end cap".into()),requires_selection:true,show_in_menu:true,
+                version:1, activates_tool:None, capability_id:Some("guide_lines".into()),
+            }, execute_find_center)
             .register_command(
                 CommandDescriptor {
                     id: "guide_lines.place".to_string(),
@@ -1564,6 +1633,92 @@ impl Plugin for GuideLinePlugin {
 mod tests {
     use super::*;
     use crate::capability_registry::AuthoredEntityFactory;
+
+    #[test]
+    fn guide_picking_uses_clicked_depth_even_with_anchor_behind_camera() {
+        let mut world = World::new();
+        world.insert_resource(GuideLineVisibility::default());
+        let sloped = world
+            .spawn((
+                ElementId(1),
+                GuideLineNode {
+                    // Crosses the viewing ray at z=5, although the anchor is behind it.
+                    anchor: Vec3::new(-10.0, 0.0, -5.0),
+                    direction: Vec3::new(1.0, 0.0, 1.0).normalize(),
+                    ..default()
+                },
+            ))
+            .id();
+        world.spawn((
+            ElementId(2),
+            GuideLineNode {
+                anchor: Vec3::Z * 8.0,
+                direction: Vec3::X,
+                ..default()
+            },
+        ));
+        let ray = Ray3d::new(Vec3::ZERO, Dir3::Z);
+        let hit = GuideLineFactory.hit_test(&world, ray).unwrap();
+        assert_eq!(hit.entity, sloped);
+        assert!((hit.distance - 5.0).abs() < 0.001);
+        // Moving the anchor along the same infinite line cannot change depth.
+        world.get_mut::<GuideLineNode>(sloped).unwrap().anchor = Vec3::new(10.0, 0.0, 15.0);
+        let hit = GuideLineFactory.hit_test(&world, ray).unwrap();
+        assert_eq!(hit.entity, sloped);
+        assert!((hit.distance - 5.0).abs() < 0.001);
+        world.resource_mut::<GuideLineVisibility>().show_all = false;
+        assert!(GuideLineFactory.hit_test(&world, ray).is_none());
+    }
+
+    #[test]
+    fn guide_picking_reprojects_clamped_endpoints_and_handles_parallel_rays() {
+        let (distance, depth) = ray_segment_distance(
+            Vec3::ZERO,
+            Vec3::Z,
+            Vec3::new(0.1, 0.0, 5.0),
+            Vec3::new(1.1, 0.0, 15.0),
+        )
+        .unwrap();
+        assert!((distance - 0.1).abs() < 1e-5);
+        assert!((depth - 5.0).abs() < 1e-5);
+        let (distance, depth) = ray_segment_distance(
+            Vec3::ZERO,
+            Vec3::Z,
+            Vec3::new(0.1, 0.0, 5.0),
+            Vec3::new(0.1, 0.0, 15.0),
+        )
+        .unwrap();
+        assert!((distance - 0.1).abs() < 1e-5);
+        assert_eq!(depth, 5.0);
+        let (distance, depth) = ray_segment_distance(
+            Vec3::ZERO,
+            Vec3::Z,
+            Vec3::new(-1.0, 0.0, -5.0),
+            Vec3::new(1.0, 0.0, -5.0),
+        )
+        .unwrap();
+        assert_eq!(distance, 5.0);
+        assert_eq!(depth, 0.0);
+    }
+
+    #[test]
+    fn new_guides_expose_name_and_extent_without_changing_saved_length_semantics() {
+        let mut world = World::new();
+        world.insert_resource(ElementIdAllocator::default());
+        let snapshot = GuideLineFactory
+            .from_create_request(&world, &json!({"direction": [1.0, 0.0, 0.0]}))
+            .unwrap();
+        let fields = snapshot.property_fields();
+        for name in ["label", "length"] {
+            assert!(fields
+                .iter()
+                .any(|field| field.name == name && field.editable));
+        }
+        let finite = snapshot.set_property_json("length", &json!(2.5)).unwrap();
+        assert_eq!(finite.to_json()["finite_length"], 2.5);
+        let infinite = finite.set_property_json("length", &json!(0)).unwrap();
+        assert!(infinite.to_json()["finite_length"].is_null());
+    }
 
     #[test]
     fn create_request_normalizes_direction_and_supports_length_alias() {

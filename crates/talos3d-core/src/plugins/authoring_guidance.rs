@@ -212,3 +212,90 @@ impl AuthoringGuidanceAppExt for App {
         self
     }
 }
+
+/// A guidance card contributed by the platform or a loaded capability.
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GuidanceCardInfo {
+    pub id: String,
+    pub title: String,
+    pub task_tags: Vec<String>,
+    pub summary: String,
+    pub referenced_tool_ids: Vec<String>,
+    pub next_card_ids: Vec<String>,
+    pub json_examples: Vec<serde_json::Value>,
+    /// Full chapter markdown. Present on chapter cards; `None` on summary-only
+    /// cards. Clients that only need the summary may ignore this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_markdown: Option<String>,
+    /// SDLC phase this card primarily supports (`requirements`, `design`,
+    /// `implementation`, `qa`, `review`, `maintenance`) when useful.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Tool calls that should appear in a well-formed agent trajectory before
+    /// the card's claim is considered satisfied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_trajectory_tool_ids: Vec<String>,
+    /// Output/evidence rubric for this card. These are agent-facing eval
+    /// criteria, not deterministic validators by themselves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub success_criteria: Vec<String>,
+    /// Conditions where the agent should stop, record a gap, or ask the user
+    /// instead of improvising.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_conditions: Vec<String>,
+    /// Evidence that should be visible in the agent run trace or final report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observability_events: Vec<String>,
+    /// Recommended capability profile for the card's task shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_profile: Option<String>,
+}
+
+/// Capability-owned discovery guidance. Cards from unloaded domains are absent.
+#[derive(Resource, Debug, Default)]
+pub struct GuidanceCardRegistry {
+    cards: std::collections::BTreeMap<String, GuidanceCardInfo>,
+}
+
+impl GuidanceCardRegistry {
+    pub fn insert(&mut self, card: GuidanceCardInfo) {
+        self.cards.insert(card.id.clone(), card);
+    }
+
+    /// Reference capabilities provide defaults without replacing domain guidance.
+    pub fn insert_if_absent(&mut self, card: GuidanceCardInfo) {
+        self.cards.entry(card.id.clone()).or_insert(card);
+    }
+
+    pub fn cards(&self) -> impl Iterator<Item = &GuidanceCardInfo> {
+        self.cards.values()
+    }
+}
+
+/// Domain-owned search aliases consumed by generic curated-path discovery.
+#[derive(Resource, Debug, Default)]
+pub struct DiscoveryAliases(std::collections::BTreeMap<String, Vec<String>>);
+
+impl DiscoveryAliases {
+    pub fn register(&mut self, term: &str, aliases: &[&str]) {
+        let entries = self.0.entry(normalize_discovery_term(term)).or_default();
+        entries.extend(aliases.iter().map(|alias| normalize_discovery_term(alias)));
+        entries.sort();
+        entries.dedup();
+    }
+
+    pub fn aliases(&self, term: &str) -> &[String] {
+        self.0
+            .get(&normalize_discovery_term(term))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
+
+fn normalize_discovery_term(term: &str) -> String {
+    term.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect()
+}

@@ -17,6 +17,8 @@ const MODEL_API_MCP_CONFIG_PATHS_ENV: &str = "TALOS3D_MCP_CONFIG_PATHS";
 #[cfg(feature = "model-api")]
 const MODEL_API_WRITE_MCP_CONFIG_ENV: &str = "TALOS3D_WRITE_MCP_CONFIG";
 #[cfg(feature = "model-api")]
+const MODEL_API_MCP_HEADERS_HELPER_ENV: &str = "TALOS3D_MCP_HEADERS_HELPER";
+#[cfg(feature = "model-api")]
 const MODEL_API_MCP_SERVER_NAME: &str = "talos3d";
 #[cfg(feature = "model-api")]
 const MODEL_API_TOKEN_ENV: &str = "TALOS3D_MODEL_API_TOKEN";
@@ -131,56 +133,13 @@ pub(super) fn spawn_model_api_server(
 
             runtime.block_on(async move {
                 let ct = tokio_util::sync::CancellationToken::new();
-                let sender = http_sender;
-                let config = StreamableHttpServerConfig::default()
-                    .with_stateful_mode(false)
-                    .with_json_response(true)
-                    .with_cancellation_token(ct.clone());
-
-                // One MCP service per capability profile plus the default
-                // `/mcp` endpoint (profile from TALOS3D_MCP_PROFILE, default
-                // `authoring`). Each endpoint owns one shared
-                // SessionProfileState: the transport runs stateless (a fresh
-                // server per request), so connect-time profile selection is
-                // the endpoint path, and `set_session_profile` switches that
-                // endpoint's state for subsequent requests.
-                let profile_service = |profile: CapabilityProfile| {
-                    let state = SessionProfileState::new(profile);
-                    let guidance_state = GuidanceSessionStore::default();
-                    let sender = sender.clone();
-                    let service: StreamableHttpService<ModelApiServer, LocalSessionManager> =
-                        StreamableHttpService::new(
-                            move || {
-                                Ok(ModelApiServer::with_authenticated_http_profile_state(
-                                    sender.clone(),
-                                    state.clone(),
-                                    guidance_state.clone(),
-                                ))
-                            },
-                            Default::default(),
-                            config.clone(),
-                        );
-                    service
-                };
-
-                let guard =
-                    LocalAccessGuard::for_port(runtime_info.http_port, authentication.clone());
-                let mut router = axum::Router::new()
-                    .route_service("/mcp", profile_service(default_profile_from_env()));
-                for profile in CapabilityProfile::ALL {
-                    router = router.route_service(
-                        format!("/mcp/{}", profile.name()).as_str(),
-                        profile_service(profile),
-                    );
-                }
-                let pairing_router = axum::Router::new()
-                    .route("/mcp/pair", axum::routing::post(redeem_local_pairing))
-                    .with_state(authentication);
-                let router = router.merge(pairing_router);
-                let router = router.layer(axum::middleware::from_fn_with_state(
-                    guard,
-                    enforce_local_access,
-                ));
+                let router = model_api_http_router(
+                    http_sender,
+                    runtime_info.http_port,
+                    authentication,
+                    default_profile_from_env(),
+                    ct.clone(),
+                );
                 let addr = format!("{}:{}", runtime_info.http_host, runtime_info.http_port);
                 let tcp_listener = match tokio::net::TcpListener::from_std(http_listener) {
                     Ok(listener) => listener,
@@ -219,6 +178,56 @@ pub(super) fn spawn_model_api_server(
 /// A random per-process bearer credential is enforced after these browser and
 /// host checks. The two layers are complementary: authentication does not make
 /// an attacker-controlled `Origin` or rebinding `Host` acceptable.
+/// The same authenticated router is used in production and HTTP contract tests.
+/// A service is created once per MCP initialize, never once per endpoint.
+#[cfg(feature = "model-api")]
+pub(super) fn model_api_http_router(
+    sender: ModelApiRequestSender,
+    port: u16,
+    authentication: ModelApiAuthentication,
+    default_profile: CapabilityProfile,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> axum::Router {
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(true)
+        .with_cancellation_token(cancellation);
+    let profile_service = |profile: CapabilityProfile| {
+        let sender = sender.clone();
+        let mut manager = LocalSessionManager::default();
+        // Bound abandoned clients; DELETE closes promptly. Reinitialize after
+        // expiry (404) to obtain a new session at the endpoint's initial profile.
+        manager.session_config.keep_alive = Some(std::time::Duration::from_secs(30 * 60));
+        StreamableHttpService::new(
+            move || {
+                Ok(ModelApiServer::with_authenticated_http_profile_state(
+                    sender.clone(),
+                    SessionProfileState::new(profile),
+                ))
+            },
+            std::sync::Arc::new(manager),
+            config.clone(),
+        )
+    };
+    let guard = LocalAccessGuard::for_port(port, authentication.clone());
+    let mut router = axum::Router::new().route_service("/mcp", profile_service(default_profile));
+    for profile in CapabilityProfile::ALL {
+        router = router.route_service(
+            format!("/mcp/{}", profile.name()).as_str(),
+            profile_service(profile),
+        );
+    }
+    router
+        .merge(
+            axum::Router::new()
+                .route("/mcp/pair", axum::routing::post(redeem_local_pairing))
+                .with_state(authentication),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            guard,
+            enforce_local_access,
+        ))
+}
+
 #[cfg(feature = "model-api")]
 #[derive(Clone)]
 struct LocalAccessGuard {
@@ -244,19 +253,6 @@ impl LocalAccessGuard {
             authentication,
         }
     }
-}
-
-#[cfg(feature = "model-api")]
-pub(super) fn constant_time_bytes_equal(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
 }
 
 #[cfg(feature = "model-api")]
@@ -598,7 +594,11 @@ fn write_mcp_client_config(path: &Path, http_url: &str) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.to_string()),
     };
-    let config = merged_mcp_client_config(existing.as_deref(), http_url)?;
+    let headers_helper = env::var(MODEL_API_MCP_HEADERS_HELPER_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let config =
+        merged_mcp_client_config(existing.as_deref(), http_url, headers_helper.as_deref())?;
     let bytes = serde_json::to_vec_pretty(&config)
         .map_err(|error| format!("failed to serialize MCP client config: {error}"))?;
     fs::write(path, [bytes.as_slice(), b"\n"].concat()).map_err(|error| error.to_string())
@@ -638,6 +638,7 @@ fn remove_matching_mcp_client_config(path: &Path, http_url: &str) -> Result<(), 
 fn merged_mcp_client_config(
     existing: Option<&str>,
     http_url: &str,
+    headers_helper: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let mut root = match existing {
         Some(contents) if !contents.trim().is_empty() => {
@@ -656,13 +657,24 @@ fn merged_mcp_client_config(
     if !servers.is_object() {
         *servers = serde_json::json!({});
     }
-    servers
+    // Refresh discovery facts in place so client-owned fields on the entry,
+    // such as auth headers, survive a relaunch.
+    let server = servers
         .as_object_mut()
         .expect("mcpServers was normalized to object")
-        .insert(
-            MODEL_API_MCP_SERVER_NAME.to_string(),
-            serde_json::json!({ "url": http_url }),
-        );
+        .entry(MODEL_API_MCP_SERVER_NAME)
+        .or_insert_with(|| serde_json::json!({}));
+    if !server.is_object() {
+        *server = serde_json::json!({});
+    }
+    let server = server
+        .as_object_mut()
+        .expect("talos3d server was normalized to object");
+    server.insert("type".into(), "http".into());
+    server.insert("url".into(), http_url.into());
+    if let Some(helper) = headers_helper {
+        server.insert("headersHelper".into(), helper.into());
+    }
     Ok(root)
 }
 
@@ -851,7 +863,7 @@ mod tests {
   }
 }"#;
 
-        let config = merged_mcp_client_config(Some(existing), "http://127.0.0.1:24842/mcp")
+        let config = merged_mcp_client_config(Some(existing), "http://127.0.0.1:24842/mcp", None)
             .expect("config should merge");
 
         assert_eq!(
@@ -859,6 +871,37 @@ mod tests {
             "http://127.0.0.1:24842/mcp"
         );
         assert_eq!(config["mcpServers"]["other"]["command"], "other-mcp");
+    }
+
+    #[test]
+    fn mcp_client_config_merge_refreshes_url_and_keeps_client_fields() {
+        let existing = r#"{
+  "mcpServers": {
+    "talos3d": {
+      "url": "http://127.0.0.1:24917/mcp",
+      "headers": { "X-Client": "kept" }
+    }
+  }
+}"#;
+
+        let config = merged_mcp_client_config(Some(existing), "http://127.0.0.1:24842/mcp", None)
+            .expect("config should merge");
+        let server = &config["mcpServers"]["talos3d"];
+        assert_eq!(server["type"], "http");
+        assert_eq!(server["url"], "http://127.0.0.1:24842/mcp");
+        assert_eq!(server["headers"]["X-Client"], "kept");
+        assert!(server.get("headersHelper").is_none());
+
+        let config = merged_mcp_client_config(
+            Some(existing),
+            "http://127.0.0.1:24842/mcp",
+            Some("/opt/talos3d/mcp-auth headers"),
+        )
+        .expect("config should merge");
+        assert_eq!(
+            config["mcpServers"]["talos3d"]["headersHelper"],
+            "/opt/talos3d/mcp-auth headers"
+        );
     }
 
     #[test]

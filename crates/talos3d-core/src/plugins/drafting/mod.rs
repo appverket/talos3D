@@ -39,7 +39,7 @@ pub mod kind;
 pub mod migration;
 pub mod plugin;
 pub mod primitive;
-mod primitive_tool;
+pub(crate) mod primitive_tool;
 pub mod render;
 pub mod style;
 pub mod visibility;

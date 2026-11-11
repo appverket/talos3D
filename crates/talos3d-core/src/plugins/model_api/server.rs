@@ -2,7 +2,7 @@ use super::*;
 
 #[cfg(feature = "model-api")]
 #[derive(Debug, Clone)]
-pub(super) struct ModelApiServer {
+pub(crate) struct ModelApiServer {
     pub(super) sender: ModelApiRequestSender,
     pub(super) tool_router: ToolRouter<Self>,
     /// Active capability profile gating which tools this session advertises
@@ -21,12 +21,20 @@ pub(super) struct ModelApiServer {
 pub(super) enum ModelApiTransportSecurity {
     LocalStdio,
     InstanceBearerHttp,
+    BrowserAttachedRelay,
 }
 
 #[cfg(feature = "model-api")]
 impl ModelApiTransportSecurity {
     pub(super) fn session_info(self, loopback: bool) -> SessionSecurityInfo {
         match self {
+            Self::BrowserAttachedRelay => SessionSecurityInfo {
+                transport_scope: "browser_attached_relay".into(),
+                authentication_assurance: "authenticated_host_and_session_bound_relay_bearer".into(),
+                authorization_assurance: "attached_browser_session_only".into(),
+                delegated_identity: false, capability_profile_is_authorization: false,
+                note: "Browser executor inherits access from the hosted application and session-bound relay. Profiles filter tools; they do not grant access to another user's project.".into(),
+            },
             Self::LocalStdio => SessionSecurityInfo {
                 transport_scope: "local_stdio_process_channel".to_string(),
                 authentication_assurance: "inherited_parent_process_channel".to_string(),
@@ -53,6 +61,37 @@ impl ModelApiTransportSecurity {
                     .to_string(),
             },
         }
+    }
+}
+
+#[cfg(feature = "model-api")]
+impl ModelApiServer {
+    async fn corpus_connection(&self) -> crate::plugins::agent_skills::AgentCorpusConnection {
+        self.round_trip(ModelApiRequest::AgentCorpusConnection)
+            .await
+            .unwrap_or_default()
+    }
+    async fn cloud_skill_list(
+        &self,
+        filter: crate::plugins::agent_skills::AgentSkillSearch,
+    ) -> (Vec<crate::plugins::agent_skills::AgentSkillSummary>, Value) {
+        use crate::plugins::agent_skill_cloud as cloud;
+        let local = self.request_list_agent_skills(filter.clone()).await;
+        let index = cloud::index(&self.corpus_connection().await).await;
+        let status = cloud::status(&index);
+        let mut by_id = local
+            .into_iter()
+            .map(|s| (s.id.clone(), s))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if let Ok(index) = index {
+            for id in &index.withdrawn_skill_ids {
+                by_id.remove(id);
+            }
+            for skill in index.filter(&filter) {
+                by_id.insert(skill.id.clone(), skill);
+            }
+        }
+        (by_id.into_values().collect(), status)
     }
 }
 
@@ -177,7 +216,16 @@ fn sanitize_schema_node(node: &mut serde_json::Value) {
 }
 
 #[cfg(feature = "model-api")]
+tokio::task_local! { static REQUIRES_AUTHORED_BASE: bool; }
+
+#[cfg(feature = "model-api")]
 impl ModelApiServer {
+    pub(super) fn for_browser(sender: ModelApiRequestSender) -> Self {
+        let mut server = Self::new(sender);
+        server.transport_security = ModelApiTransportSecurity::BrowserAttachedRelay;
+        server
+    }
+
     pub(super) fn new(sender: ModelApiRequestSender) -> Self {
         Self {
             sender,
@@ -189,8 +237,7 @@ impl ModelApiServer {
     }
 
     /// Build a server bound to an existing session profile state. The HTTP
-    /// transport passes one shared state per endpoint so its per-request
-    /// (stateless-mode) instances behave as one profile session.
+    /// transport creates one state for each initialized MCP session.
     #[cfg(test)]
     pub(super) fn with_profile_state(
         sender: ModelApiRequestSender,
@@ -208,15 +255,34 @@ impl ModelApiServer {
     pub(super) fn with_authenticated_http_profile_state(
         sender: ModelApiRequestSender,
         profile_state: SessionProfileState,
-        guidance_state: GuidanceSessionStore,
     ) -> Self {
         Self {
             sender,
             tool_router: profile_tool_catalog().router.clone(),
             profile_state,
-            guidance_state,
+            guidance_state: GuidanceSessionStore::default(),
             transport_security: ModelApiTransportSecurity::InstanceBearerHttp,
         }
+    }
+
+    /// Native MCP and the peerless browser adapter must enforce the same admission
+    /// and observe exactly the same successful calls. The authored-base guard
+    /// remains scoped to the actual dispatch to avoid races with native gestures.
+    async fn dispatch_checked(
+        &self,
+        name: &str,
+        observed: Option<serde_json::Map<String, Value>>,
+        call: impl std::future::Future<Output = Result<CallToolResult, McpError>>,
+    ) -> Result<CallToolResult, McpError> {
+        self.tool_call_allowed(name)?;
+        self.guidance_call_allowed(name)?;
+        let result = REQUIRES_AUTHORED_BASE
+            .scope(tool_requires_authored_base(name), call)
+            .await?;
+        if result.is_error != Some(true) {
+            self.guidance_state.observe_success(name, observed.as_ref());
+        }
+        Ok(result)
     }
 
     /// Gate for incoming tool calls: a tool outside the active profile is
@@ -267,10 +333,36 @@ impl ModelApiServer {
         &self,
         build: impl FnOnce(oneshot::Sender<T>) -> ModelApiRequest,
     ) -> Result<T, String> {
-        let (response, mut receiver) = oneshot::channel();
+        let (response, receiver) = oneshot::channel();
+        let mut request = build(response);
+        let guarded = REQUIRES_AUTHORED_BASE
+            .try_with(|value| *value)
+            .unwrap_or(false);
+        let guard_receiver = if guarded {
+            let (response, receiver) = oneshot::channel();
+            request = ModelApiRequest::Guarded {
+                request: Box::new(request),
+                response,
+            };
+            Some(receiver)
+        } else {
+            None
+        };
         self.sender
-            .send(build(response))
+            .send(request)
             .map_err(|_| "model API request channel closed".to_string())?;
+        if let Some(receiver) = guard_receiver {
+            self.receive_with_wake(receiver).await??;
+        }
+        self.receive_with_wake(receiver).await
+    }
+
+    async fn receive_with_wake<T>(&self, mut receiver: oneshot::Receiver<T>) -> Result<T, String> {
+        #[cfg(target_arch = "wasm32")]
+        return receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string());
+        #[cfg(not(target_arch = "wasm32"))]
         loop {
             tokio::select! {
                 result = &mut receiver => {
@@ -321,6 +413,17 @@ impl ModelApiServer {
             response,
         })
         .await
+    }
+
+    async fn request_explain_design(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<crate::plugins::design_explanation::DesignExplanation> {
+        self.round_trip(|response| ModelApiRequest::ExplainDesign {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_get_entity_details(
@@ -1236,15 +1339,24 @@ impl ModelApiServer {
             })
             .await??;
 
-        wait_for_written_file(&saved_path, &self.sender).await?;
-        if let Some(warning) = crate::plugins::drawing_export::screenshot_quality_warning_for_path(
-            std::path::Path::new(&saved_path),
-        )? {
-            return Err(format!(
-                "Screenshot '{saved_path}' is not valid visual evidence: {warning}"
-            ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(saved_path)
         }
-        Ok(saved_path)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            wait_for_written_file(&saved_path, &self.sender).await?;
+            if let Some(warning) =
+                crate::plugins::drawing_export::screenshot_quality_warning_for_path(
+                    std::path::Path::new(&saved_path),
+                )?
+            {
+                return Err(format!(
+                    "Screenshot '{saved_path}' is not valid visual evidence: {warning}"
+                ));
+            }
+            Ok(saved_path)
+        }
     }
 
     async fn request_export_drawing(&self, path: String) -> ApiResult<String> {
@@ -1252,6 +1364,7 @@ impl ModelApiServer {
             .round_trip(|response| ModelApiRequest::ExportDrawing { path, response })
             .await??;
 
+        #[cfg(not(target_arch = "wasm32"))]
         wait_for_written_file(&saved_path, &self.sender).await?;
         Ok(saved_path)
     }
@@ -1269,6 +1382,7 @@ impl ModelApiServer {
             })
             .await??;
 
+        #[cfg(not(target_arch = "wasm32"))]
         wait_for_written_file(&saved_path, &self.sender).await?;
         Ok(saved_path)
     }
@@ -1723,8 +1837,11 @@ impl ModelApiServer {
         &self,
         request: CuratedPathDiscoveryRequest,
     ) -> ApiResult<CuratedPathDiscoveryInfo> {
-        self.round_trip(|response| ModelApiRequest::DiscoverCuratedPaths { request, response })
-            .await?
+        let mut result = self
+            .round_trip(|response| ModelApiRequest::DiscoverCuratedPaths { request, response })
+            .await??;
+        result.for_profile(self.profile_state.get());
+        Ok(result)
     }
 
     async fn request_instantiate_recipe(
@@ -2645,9 +2762,30 @@ fn structured_json_tool_result<T: Serialize>(value: T) -> Result<CallToolResult,
 }
 
 #[cfg(feature = "model-api")]
+pub(super) fn drawing_export_tool_result(path: String) -> Result<CallToolResult, McpError> {
+    if let Some((mime, data)) = path
+        .strip_prefix("data:")
+        .and_then(|s| s.split_once(";base64,"))
+    {
+        return json_tool_result(
+            serde_json::json!({"transport":"browser_memory", "mime_type":mime, "data_base64":data}),
+        );
+    }
+    json_tool_result(serde_json::json!({"path":path}))
+}
+
+#[cfg(feature = "model-api")]
 pub(super) fn screenshot_tool_result(path: String) -> Result<CallToolResult, McpError> {
     use base64::Engine as _;
 
+    if let Some(encoded) = path.strip_prefix("data:image/png;base64,") {
+        return Ok(CallToolResult::success(vec![
+            Content::json(
+                serde_json::json!({"transport":"browser_memory","mime_type":"image/png"}),
+            )?,
+            Content::image(encoded.to_string(), "image/png"),
+        ]));
+    }
     let mime_type = std::path::Path::new(&path)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -2680,6 +2818,43 @@ pub(super) fn screenshot_tool_result(path: String) -> Result<CallToolResult, Mcp
     Ok(CallToolResult::success(content))
 }
 
+#[cfg(feature = "model-api")]
+fn guidance_observation(
+    name: &str,
+    args: Option<&serde_json::Map<String, Value>>,
+) -> Option<serde_json::Map<String, Value>> {
+    // Never clone model payloads just to track bootstrap progress.
+    let key = match name {
+        "get_guidance_card" => "card_id",
+        "get_agent_skill" => "skill_id",
+        "discover_curated_paths" => "path_kind",
+        _ => return None,
+    };
+    Some(serde_json::Map::from_iter([(
+        key.to_owned(),
+        args?.get(key)?.clone(),
+    )]))
+}
+
+#[cfg(feature = "model-api")]
+fn tool_requires_authored_base(name: &str) -> bool {
+    use super::profiles::{tool_category, ToolCategory};
+    // Guard in the app world, in the same dispatch as the request. A
+    // separate precheck RPC could race a new native gesture.
+    let guarded = !matches!(
+        tool_category(name),
+        ToolCategory::SessionContract
+            | ToolCategory::Capture
+            | ToolCategory::Discovery
+            | ToolCategory::UxAutomation
+            | ToolCategory::Presentation
+    );
+    guarded && !matches!(name, "list_edit_requests" | "inspect_edit_plan")
+}
+
+#[cfg(feature = "model-api")]
+include!(concat!(env!("OUT_DIR"), "/mcp_without_peer.rs"));
+
 // Hand-written (instead of `#[tool_handler]`) so tools/list and tools/call are
 // gated by the session's active capability profile.
 #[cfg(feature = "model-api")]
@@ -2689,8 +2864,14 @@ impl ServerHandler for ModelApiServer {
         let catalog = profile_tool_catalog();
         let mut info = ServerInfo::default();
         info.instructions = Some(format!(
-            "Read and write access to the Talos3D authored model. The tool surface is \
-             gated by a capability profile; this session advertises the '{}' profile \
+            "Read and write access to the Talos3D authored model. \
+             Before editing: get_instance_info, negotiate_agent_session with your task, then \
+             get_agent_guidance_packet and the discovery paths it requests. \
+             list_agent_skills/get_agent_skill read released cloud knowledge; check \
+             get_agent_corpus_status at task boundaries for newer revisions. Reusable new \
+             procedures belong in contribute_agent_skill with generalized references/evidence; \
+             private project facts belong in project knowledge, never local-only skills. \
+             The tool surface is gated by a capability profile; this session advertises the '{}' profile \
              ({} of {} tools). Call set_session_profile to switch profiles \
              (authoring, inspection, curation, ux-automation, full).",
             profile.name(),
@@ -2710,16 +2891,10 @@ impl ServerHandler for ModelApiServer {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let tool_name = request.name.to_string();
-        let arguments = request.arguments.clone();
-        self.tool_call_allowed(&tool_name)?;
-        self.guidance_call_allowed(&tool_name)?;
+        let observed = guidance_observation(&tool_name, request.arguments.as_ref());
         let tcc = ToolCallContext::new(self, request, context);
-        let result = self.tool_router.call(tcc).await?;
-        if result.is_error != Some(true) {
-            self.guidance_state
-                .observe_success(&tool_name, arguments.as_ref());
-        }
-        Ok(result)
+        self.dispatch_checked(&tool_name, observed, self.tool_router.call(tcc))
+            .await
     }
 
     async fn list_tools(
@@ -2748,7 +2923,7 @@ impl ServerHandler for ModelApiServer {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(super) struct SetSessionProfileRequest {
     /// Profile to activate: `authoring` (default), `inspection`, `curation`,
-    /// `ux-automation`, or `full`. Omit to report the current profile without
+    /// `ux-automation`, `focused-authoring`, or `full`. Omit to report the current profile without
     /// changing it.
     #[serde(default)]
     pub(super) profile: Option<String>,
@@ -2890,7 +3065,7 @@ pub struct AgentGuidancePacket {
     pub authoritative_guidance_available: bool,
     pub guidance: AuthoringGuidance,
     pub required_cards: Vec<GuidanceCardInfo>,
-    pub required_skills: Vec<crate::plugins::agent_skills::AgentSkill>,
+    pub required_skills: Vec<serde_json::Value>,
     pub state: AgentGuidanceState,
 }
 
@@ -2900,9 +3075,8 @@ fn relevant_agent_skills(
     must_read_ids: &[String],
     skills: Vec<crate::plugins::agent_skills::AgentSkillSummary>,
 ) -> Vec<crate::plugins::agent_skills::AgentSkillSummary> {
-    if !hello.supports.agent_skills {
-        return Vec::new();
-    }
+    // Every MCP client can fetch procedure text through get_agent_skill.
+    // Native provider skill support must not gate the shared learning route.
     const STOP_WORDS: &[&str] = &[
         "and", "the", "for", "with", "from", "into", "inspect", "author", "create", "make",
         "model", "system",
@@ -3081,11 +3255,15 @@ pub(super) fn assemble_agent_welcome(
             "list_guidance_cards".to_string(),
             "get_guidance_card".to_string(),
             "get_agent_skill".to_string(),
+            "get_agent_skill_resource".to_string(),
+            "get_agent_corpus_status".to_string(),
             "discover_curated_paths".to_string(),
         ],
         bootstrap_steps,
         required_invariants: vec![
             "Confirm AgentWelcome.instance.instance_id before acting.".to_string(),
+            "Check get_agent_corpus_status at task boundaries, after learning and before authoring; fetch changed skill revisions and their pinned resources. Cloud outage means freshness is unverified.".to_string(),
+            "Contribute useful generalized new procedures through contribute_agent_skill, including resources, applicability, limitations, rights and regression evidence. Private facts stay in project knowledge; domain assets use recipes/Definitions/catalogs/validators. Do not leave reusable Talos3D knowledge only in local provider skills.".to_string(),
             "Treat get_authoring_guidance from the running instance as authoritative."
                 .to_string(),
             "Use curated recipes, parametrics, definitions, and priors when present; report a CorpusGap instead of bluffing missing construction knowledge."
@@ -3217,6 +3395,20 @@ pub struct TransformToolRequest {
     /// place. Ignored for non-rotate operations.
     #[serde(default)]
     pub pivot: Option<[f64; 3]>,
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PreviewEditPlanRequest {
+    request_kind: String,
+    parameters: Value,
+}
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct EditPlanIdRequest {
+    plan_id: String,
 }
 
 #[cfg(feature = "model-api")]
@@ -4154,7 +4346,8 @@ pub struct ObligationInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AuthoringProvenanceInfo {
     pub element_id: u64,
-    /// `"Freeform"`, `"ViaRecipe:<id>"`, `"Imported:<ref>"`, or `"Refined:<id>"`.
+    /// `"Unrecorded"` when no component exists; otherwise `"Freeform"`,
+    /// `"ViaRecipe:<id>"`, `"Imported:<ref>"`, or `"Refined:<id>"`.
     pub mode: String,
     pub rationale: Option<String>,
 }
@@ -4285,6 +4478,8 @@ pub struct CorpusGapInfo {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PassageLookupInfo {
+    pub scope: String,
+    pub trust: String,
     pub passage_ref: String,
     pub text: String,
     pub source: String,
@@ -4780,7 +4975,59 @@ pub struct CuratedPathDiscoveryInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_class_term: Option<NonClassTermInfo>,
     pub suggested_next_tool: String,
+    /// Switch to this profile before continuing with the discovered execution path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_profile: Option<String>,
     pub guidance_card_ids: Vec<String>,
+}
+
+impl CuratedPathDiscoveryInfo {
+    /// Project recommendations through the same composed catalog used for calls.
+    /// A gated path is a profile transition, not a corpus gap or a made-up tool.
+    pub(super) fn for_profile(&mut self, profile: CapabilityProfile) {
+        let catalog = profile_tool_catalog();
+        let required_profile = |tool: &str| {
+            if catalog
+                .tools_for(profile)
+                .iter()
+                .any(|entry| entry.name == tool)
+            {
+                None
+            } else {
+                CapabilityProfile::ALL
+                    .into_iter()
+                    .find(|candidate| {
+                        catalog
+                            .tools_for(*candidate)
+                            .iter()
+                            .any(|entry| entry.name == tool)
+                    })
+                    .map(|candidate| candidate.name().to_string())
+            }
+        };
+        if !catalog.router.has_route(&self.suggested_next_tool) {
+            self.suggested_next_tool = "get_guidance_card".into();
+        } else if let Some(required) = required_profile(&self.suggested_next_tool) {
+            self.required_profile = Some(required);
+            self.suggested_next_tool = "set_session_profile".into();
+        }
+        for asset in &mut self.definition_assets {
+            if let Some(tool) = asset.instantiate_tool.as_deref() {
+                asset.required_profile = required_profile(tool);
+                if let Some(required) = &asset.required_profile {
+                    asset.how_to_instantiate = format!(
+                        "First call set_session_profile with profile {required:?}. {}",
+                        asset.how_to_instantiate
+                    );
+                }
+            }
+        }
+        if let Some(gap) = &mut self.no_curated_path {
+            if required_profile(&gap.suggested_next_tool).is_some() {
+                gap.suggested_next_tool = "set_session_profile".into();
+            }
+        }
+    }
 }
 
 /// Describes a requested term that is not a registered element class but does
@@ -4821,6 +5068,10 @@ pub struct DefinitionPathInfo {
     pub definition_id: String,
     pub name: String,
     pub definition_kind: String,
+    /// Registered execution path. None means the current app cannot instantiate it.
+    pub instantiate_tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_profile: Option<String>,
     pub how_to_instantiate: String,
 }
 
@@ -4864,64 +5115,7 @@ pub(super) struct GetAgentSkillRequest {
     pub(super) skill_id: String,
 }
 
-#[cfg_attr(feature = "model-api", derive(JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GuidanceCardInfo {
-    pub id: String,
-    pub title: String,
-    pub task_tags: Vec<String>,
-    pub summary: String,
-    pub referenced_tool_ids: Vec<String>,
-    pub next_card_ids: Vec<String>,
-    pub json_examples: Vec<serde_json::Value>,
-    /// Full chapter markdown. Present on chapter cards; `None` on summary-only
-    /// cards. Clients that only need the summary may ignore this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body_markdown: Option<String>,
-    /// SDLC phase this card primarily supports (`requirements`, `design`,
-    /// `implementation`, `qa`, `review`, `maintenance`) when useful.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    /// Tool calls that should appear in a well-formed agent trajectory before
-    /// the card's claim is considered satisfied.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_trajectory_tool_ids: Vec<String>,
-    /// Output/evidence rubric for this card. These are agent-facing eval
-    /// criteria, not deterministic validators by themselves.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub success_criteria: Vec<String>,
-    /// Conditions where the agent should stop, record a gap, or ask the user
-    /// instead of improvising.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stop_conditions: Vec<String>,
-    /// Evidence that should be visible in the agent run trace or final report.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub observability_events: Vec<String>,
-    /// Recommended capability profile for the card's task shape.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_profile: Option<String>,
-}
-
-impl Default for GuidanceCardInfo {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            title: String::new(),
-            task_tags: Vec::new(),
-            summary: String::new(),
-            referenced_tool_ids: Vec::new(),
-            next_card_ids: Vec::new(),
-            json_examples: Vec::new(),
-            body_markdown: None,
-            phase: None,
-            required_trajectory_tool_ids: Vec::new(),
-            success_criteria: Vec::new(),
-            stop_conditions: Vec::new(),
-            observability_events: Vec::new(),
-            recommended_profile: None,
-        }
-    }
-}
+pub use crate::plugins::authoring_guidance::GuidanceCardInfo;
 
 // --- PP74 request parameter structs ---
 
@@ -5447,9 +5641,30 @@ pub(super) struct MirrorEntityRequest {
     pub(super) element_id: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub(super) struct GetAgentSkillResourceRequest {
+    pub content_hash: String,
+    pub path: String,
+}
+
 #[cfg(feature = "model-api")]
 #[tool_router(router = tool_router)]
 impl ModelApiServer {
+    #[tool(
+        name = "list_project_knowledge",
+        description = "List private project/session passages and learned recipes separately from shipped corpus (curation/full profile). Bounded index only; use returned next tools for content. This does not publish or share anything."
+    )]
+    pub(super) async fn list_project_knowledge_tool(
+        &self,
+        Parameters(request): Parameters<ProjectKnowledgeIndexRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let index = self
+            .round_trip(|response| ModelApiRequest::ListProjectKnowledge { request, response })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        json_tool_result(index)
+    }
+
     #[tool(
         name = "get_instance_info",
         description = "Get runtime identification for this Talos3D instance, including instance_id, MCP HTTP port, URL, registry manifest path, and pid."
@@ -5475,8 +5690,8 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         let snapshot = self.request_get_capability_snapshot(false).await;
-        let skills = self
-            .request_list_agent_skills(crate::plugins::agent_skills::AgentSkillSearch::default())
+        let (skills, cloud_status) = self
+            .cloud_skill_list(crate::plugins::agent_skills::AgentSkillSearch::default())
             .await;
         let loopback = matches!(
             instance.http_host.as_str(),
@@ -5505,7 +5720,10 @@ impl ModelApiServer {
         if welcome.hello.supports.lifecycle_hooks {
             welcome.lifecycle_hook_projection = Some(LifecycleHookProjection::codex());
         }
-        json_tool_result(welcome)
+        let mut value = serde_json::to_value(welcome)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        value["cloud_corpus"] = cloud_status;
+        json_tool_result(value)
     }
 
     #[tool(
@@ -5534,9 +5752,10 @@ impl ModelApiServer {
         let mut required_skills = Vec::new();
         for skill_id in self.guidance_state.required_skills() {
             let skill = self
-                .request_get_agent_skill(skill_id)
-                .await
-                .map_err(|error| McpError::internal_error(error, None))?;
+                .get_agent_skill_tool(Parameters(GetAgentSkillRequest { skill_id }))
+                .await?
+                .into_typed::<serde_json::Value>()
+                .map_err(|error| McpError::internal_error(error.to_string(), None))?;
             required_skills.push(skill);
         }
         let authoritative_guidance_available = !guidance.is_empty();
@@ -5675,14 +5894,34 @@ impl ModelApiServer {
             advertised MCP tool surface. Profiles: 'authoring' (default; the standard \
             authoring loop), 'inspection' (read-only inspection + validation + capture), \
             'curation' (knowledge curation: drafts, libraries, specs, passages), \
-            'ux-automation' (UI/view/clip-plane/toolbar automation), 'full' (every tool). \
+            'ux-automation' (UI/view/clip-plane/toolbar automation), 'focused-authoring' (bounded semantic/curated loop), 'full' (every tool). \
             Omit 'profile' to report the current profile without changing it. On change the \
-            server emits tools/list_changed so clients refresh their tool list."
+            stdio emits tools/list_changed; HTTP clients should re-fetch tools/list."
     )]
     pub(super) async fn set_session_profile_tool(
         &self,
         Parameters(params): Parameters<SetSessionProfileRequest>,
         context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let before = self.profile_state.get();
+        let result = self.set_session_profile_without_peer(params).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if before != self.profile_state.get()
+            && context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .is_none()
+        {
+            let _ = context.peer.notify_tool_list_changed().await;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (context, before);
+        Ok(result)
+    }
+
+    async fn set_session_profile_without_peer(
+        &self,
+        params: SetSessionProfileRequest,
     ) -> Result<CallToolResult, McpError> {
         let mut changed = false;
         if let Some(requested) = params.profile.as_deref() {
@@ -5698,20 +5937,8 @@ impl ModelApiServer {
                 )
             })?;
             changed = self.profile_state.set(profile);
-            // Notify only stream-capable transports (stdio). Our streamable
-            // HTTP transport runs stateless with JSON responses, where the
-            // FIRST server->client message becomes the HTTP body — a
-            // notification emitted here would replace the tool result, and no
-            // HTTP client is listening for notifications between requests
-            // anyway. The HTTP transport marks its requests by injecting
-            // `http::request::Parts` into the request extensions.
-            let over_http = context
-                .extensions
-                .get::<axum::http::request::Parts>()
-                .is_some();
-            if changed && !over_http {
-                let _ = context.peer.notify_tool_list_changed().await;
-            }
+            // HTTP callers re-fetch tools/list from the explicit changed result.
+            // This also supports clients without a standalone SSE listener.
         }
         let catalog = profile_tool_catalog();
         let active = self.profile_state.get();
@@ -5758,6 +5985,121 @@ impl ModelApiServer {
                 McpError::invalid_params(format!("entity {} not found", params.element_id), None)
             })?;
         json_tool_result(snapshot)
+    }
+
+    #[tool(
+        name = "list_edit_requests",
+        description = "Discover capability-owned semantic edit requests and their typed schemas. Preview a request, inspect its exact captured plan, then apply its plan_id."
+    )]
+    pub(super) async fn list_edit_requests_tool(&self) -> Result<CallToolResult, McpError> {
+        let parameters = Value::Null;
+        let value = self
+            .round_trip(|response| ModelApiRequest::EditPlan {
+                action: "list".into(),
+                parameters,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "preview_edit_plan",
+        description = "Capture an immutable edit candidate through the same semantic modifiers as the viewport. Does not mutate the authored model. Returns exact snapshots, digest, base revision and admissibility; geometry_reviewed remains false."
+    )]
+    pub(super) async fn preview_edit_plan_tool(
+        &self,
+        Parameters(params): Parameters<PreviewEditPlanRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let parameters = serde_json::to_value(params)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let value = self
+            .round_trip(|response| ModelApiRequest::EditPlan {
+                action: "preview".into(),
+                parameters,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "inspect_edit_plan",
+        description = "Inspect a retained immutable candidate by plan_id. Superseded, consumed and evicted IDs fail. This does not replan or revalidate."
+    )]
+    pub(super) async fn inspect_edit_plan_tool(
+        &self,
+        Parameters(params): Parameters<EditPlanIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let parameters = serde_json::to_value(params)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let value = self
+            .round_trip(|response| ModelApiRequest::EditPlan {
+                action: "inspect".into(),
+                parameters,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "apply_edit_plan",
+        description = "Apply an exact captured plan_id once, as one undoable history item. Refuses stale bases, active gestures and semantic refusals. Never replans."
+    )]
+    pub(super) async fn apply_edit_plan_tool(
+        &self,
+        Parameters(params): Parameters<EditPlanIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let parameters = serde_json::to_value(params)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let value = self
+            .round_trip(|response| ModelApiRequest::EditPlan {
+                action: "apply".into(),
+                parameters,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "get_foreign_sources",
+        description = "Inspect retained foreign source manifests, producer/release/license assertions and typed import losses. Supply a digest and include_bytes=true for exact retained input bytes (max 64 KiB). Read-only; native interpretation requires a reviewed edit plan."
+    )]
+    pub(super) async fn get_foreign_sources_tool(
+        &self,
+        Parameters(request): Parameters<crate::plugins::foreign_source::GetForeignSourcesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .round_trip(|response| ModelApiRequest::GetForeignSources { request, response })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "explain_design",
+        description = "Explain one element's controls, recorded creation, direct dependencies, evidence and unresolved choices. Same bounded read projection as the property inspector; includes model revision, omitted counts and last validation sweep. Evidence presence is not proof of applicability. Refresh after changes; does not perform edits or validation."
+    )]
+    pub(super) async fn explain_design_tool(
+        &self,
+        Parameters(params): Parameters<GetEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_explain_design(params.element_id)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
     }
 
     #[tool(
@@ -7349,7 +7691,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "apply_subobject_edit",
-        description = "Validate a stable subobject ref and attempt an edge/face/handle edit. PP-SUBSEL-1 returns structured unsupported results until representation-specific edit plans land."
+        description = "Edit a stable generated boundary through its authored owner. Rectangular opening reveals and face-profile sides support move/push_pull (parameters.distance in metres along the boundary normal, or delta [x,y,z]); erase/delete/close removes the owning opening or feature. hide/show persist edge visibility only. Unsupported and hosted-product boundaries return an explanation. Use modeling.inspect_boundary via invoke_command to discover the target, axis and capabilities."
     )]
     pub(super) async fn apply_subobject_edit_tool(
         &self,
@@ -7436,7 +7778,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "ux_press_key",
-        description = "Queue a key press and release through the live Bevy input path. Supports letters, KeyG-style names, Escape, Delete, Backspace, Enter, ShiftLeft, and ShiftRight."
+        description = "Queue a key press and release through the live Bevy input path. Supports letters, digits, KeyG/Digit1-style names, period, minus, Tab, Escape, Delete, Backspace, Enter, ShiftLeft, and ShiftRight."
     )]
     pub(super) async fn ux_press_key_tool(
         &self,
@@ -7545,7 +7887,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "export_drawing",
-        description = "Export the current cropped drawing viewport to PNG, PDF, or SVG. SVG is also accepted via the legacy `svd` file extension alias. Returns the file path where the drawing was saved."
+        description = "Export the current cropped drawing viewport to PNG, PDF, or SVG. SVG is also accepted via the legacy `svd` file extension alias. Returns the saved path on native; browsers return transport=browser_memory, mime_type and data_base64. Browser drawing exports require an orthographic camera."
     )]
     pub(super) async fn export_drawing_tool(
         &self,
@@ -7555,12 +7897,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .request_export_drawing(params.path)
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
-        json_tool_result(serde_json::json!({ "path": path }))
+        drawing_export_tool_result(path)
     }
 
     #[tool(
         name = "export_drafting_sheet",
-        description = "Capture the current orthographic camera into a paper-mm DraftingSheet and export it. Extension selects the writer: .svg (paper-mm native), .pdf, .dxf (mm), or .png. Optional `scale_denominator` sets the drawing scale (1:N), defaulting to 1:50. Refuses perspective cameras."
+        description = "Capture the current orthographic camera into a paper-mm DraftingSheet and export it. Extension selects the writer: .svg (paper-mm native), .pdf, .dxf (mm), or .png. Optional `scale_denominator` sets the drawing scale (1:N), defaulting to 1:50. Refuses perspective cameras. Native returns path; browsers return transport=browser_memory, mime_type and data_base64."
     )]
     pub(super) async fn export_drafting_sheet_tool(
         &self,
@@ -7570,7 +7912,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .request_export_drafting_sheet(params.path, params.scale_denominator)
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
-        json_tool_result(serde_json::json!({ "path": path }))
+        drawing_export_tool_result(path)
     }
 
     #[tool(
@@ -7624,7 +7966,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "declare_elevation_intent",
-        description = "Say what each elevation of a building will look like BEFORE authoring its geometry, in the terms a builder would use. Describing a house is something you do well; composing one through an unfamiliar API is not, and this gives the second thing a target to hit. Call it FIRST - omit `element_id` entirely, since nothing has been built yet to attach a description to. It returns an `intent_id` and binds itself once a building exists: automatically when there is one building assembly, or one whose label matches the `label` you passed; otherwise call `bind_elevation_intent`. Pass an array of objects, one per elevation: {\"elevation\": \"south\", \"apex_count\": 1, \"apex_on_centreline\": true, \"finish_changes_at_eave_line\": false, \"roof_projects_past_wall\": true, \"dominant_finish\": \"<material id>\", \"description\": \"free text\"}. Every field is optional except `elevation`; only what you declare is checked, so a partial description is useful. NOTE on `finish_changes_at_eave_line`: normally FALSE on a gable elevation, where the facade runs unbroken from grade to rake, and TRUE on an eave elevation, where the wall stops and the roof begins - it is a per-elevation fact, not a building-wide one. run_validation_v2 then reports every elevation whose built result differs from what you said, and reports an intent you declared and never bound."
+        description = "Declare per-view design intent before geometry exists. Omit element_id to create a pending intent_id, or supply a semantic assembly id to persist the intent on it. elevations is an array of capability-defined intent objects; Core stores them verbatim. Bind a pending record with bind_elevation_intent. Loaded capabilities define automatic binding and validation; consult their guidance for supported fields and obligations."
     )]
     pub(super) async fn declare_elevation_intent_tool(
         &self,
@@ -7639,7 +7981,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "bind_elevation_intent",
-        description = "Attach a pending elevation intent to a building assembly, when automatic binding cannot tell which is which - that is, when several intents are pending and none carries a label matching the assembly. Pass the `intent_id` from declare_elevation_intent and the assembly's `assembly_id` (not its `group_element_id`). Binding writes the description into the assembly, so it persists with the project from then on."
+        description = "Attach a pending view intent to a semantic assembly using intent_id and element_id. Use the assembly_id returned by create_assembly. The description persists with that assembly; capability validators interpret its fields."
     )]
     pub(super) async fn bind_elevation_intent_tool(
         &self,
@@ -7654,7 +7996,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "get_elevation_profile",
-        description = "Derive one orthographic elevation of the model from the authored geometry: the outline height at every sample column, the apexes standing proud of it, the material bands down the centreline, and each material's share of the visible area. This is the representation a builder reasons in, and the one to check archetypal form against - a gable elevation has exactly one apex on the centreline, the roof outline extends past the wall outline on both rakes, and the facade shows NO material change at the eave line. Unlike take_screenshot this is computed from geometry, not from the viewport, so it contains no gizmos or overlays and is directly comparable between runs. Use it to verify form and finish; use take_screenshot to look."
+        description = "Project authored geometry into an orthographic elevation profile: sampled outline heights, apexes, material bands and visible material coverage. This geometry-derived representation excludes viewport gizmos and overlays. Use it to compare shape and appearance between runs; loaded capabilities define domain-specific form obligations."
     )]
     pub(super) async fn get_elevation_profile_tool(
         &self,
@@ -7669,7 +8011,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "set_surface_debug_render",
-        description = "Toggle the false-colour envelope pass, then take_screenshot to inspect it. Every mesh is painted a flat unlit colour derived from the material it actually resolves to, and anything with NO resolved material is painted MAGENTA. Use it whenever you need to know which surfaces are genuinely finished: a shaded render cannot distinguish an unfinished near-white surface from a deliberately pale one, and that is how bare gable fields and unclad panels survive review. NOTE: magenta means 'no resolved material', which is broader than 'defect'. Concealed substrate - sheathing, underlayment, battens, buried slab faces - is legitimately unfinished and will also show magenta, usually as thin slivers at exposed edges. Magenta on a broad outward-facing surface is the signal; read it alongside the domain finish validator, which is what decides whether a given surface is required to carry a finish. Presentation only - no authored data changes. Disable it again before continuing to author."
+        description = "Toggle the false-colour material diagnostic pass, then inspect with take_screenshot. Resolved material ids receive distinct flat colours; surfaces without resolved materials appear magenta. This reports appearance assignments, not domain finish obligations. Capability validators determine which surfaces require materials. Presentation only; disable it before further authoring."
     )]
     pub(super) async fn set_surface_debug_render_tool(
         &self,
@@ -7682,7 +8024,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         json_tool_result(serde_json::json!({
             "surface_debug_render": enabled,
             "legend": "magenta = no resolved material; every other flat colour is one distinct resolved material id",
-            "reading_it": "Magenta on a broad outward-facing surface is a defect. Magenta on thin slivers at exposed edges is usually concealed substrate (sheathing, underlayment, battens, buried slab faces), which is legitimately unfinished. This pass reports resolved materials, not obligations - the domain finish validator decides which surfaces must carry one, so a clean validation run does not imply zero magenta.",
+            "reading_it": "Magenta means no resolved material. Capability validators determine whether a surface requires a finish; a clean validation run does not imply zero magenta.",
         }))
     }
 
@@ -7745,7 +8087,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "load_project",
-        description = "Open a Talos3D project from a specific path and return the resolved file path. This call is idempotent when the same clean document is already open; inspect Agent Welcome / get_instance_info.current_document_path and document_dirty before requesting a redundant reload."
+        description = "Explicitly reload a Talos3D project from disk, even when the same clean document is already open, and return its resolved path. Replaces unsaved state and invalidates old edit proposals. Inspect get_instance_info to read the current path without reloading."
     )]
     pub(super) async fn load_project_tool(
         &self,
@@ -8151,7 +8493,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "inspect_refinement_branches",
-        description = "List active and parked refinement branches for an entity. Parked branches are dormant but inspectable and can be reactivated by promoting to the same target state."
+        description = "List active and parked refinement branches for an entity. Parked branches are dormant but inspectable. Reactivation requires compatible native inputs and the same target state; inspect compatibility and available_actions. Changed native inputs or legacy basis require regeneration."
     )]
     pub(super) async fn inspect_refinement_branches_tool(
         &self,
@@ -8166,7 +8508,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "rebase_refinement_branch",
-        description = "Explicitly three-way rebase a PARKED refinement branch over current generator controls. The stored branch basis is the merge base. Supply current authored controls and the new generator controls. Conflicts are returned without mutation unless each path is listed in confirm_authored_wins; confirmed authored values win and are never silently dropped. The branch remains parked after rebase."
+        description = "Explicitly three-way rebase a PARKED refinement branch over current generator controls. The stored branch basis is the merge base. Supply current authored controls and the new generator controls. Conflicts are returned without mutation unless each path is listed in confirm_authored_wins; confirmed authored values win and are never silently dropped. The branch remains parked after rebase. Changed native inputs, dimensional contracts or legacy basis require regeneration; parameter-only rebase cannot validate old geometry."
     )]
     pub(super) async fn rebase_refinement_branch_tool(
         &self,
@@ -8181,7 +8523,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "regenerate_refinement_branch",
-        description = "Explicitly replace a PARKED stale refinement branch with current generator output. This permanently discards the parked subtree before regenerating, so confirm_discard_parked_branch must be true. Use rebase_refinement_branch instead when authored overrides must be carried forward."
+        description = "Explicitly replace a PARKED stale refinement branch with current generator output. This permanently discards the parked subtree before regenerating, so confirm_discard_parked_branch must be true. Inspect available_actions first; parameter-only rebase is available only when native inputs and dimensional contracts remain compatible. Preserve required authored choices explicitly before discarding."
     )]
     pub(super) async fn regenerate_refinement_branch_tool(
         &self,
@@ -8332,7 +8674,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "instantiate_recipe",
         description = "Create a semantic element and immediately run a curated recipe to generate \
-            its sub-element geometry in a single call. This is the preferred one-call alternative \
+            its sub-element geometry as one undo/redo operation, with recipe provenance on every output. This is the preferred one-call alternative \
             to the two-step pattern of `create_entity` + `promote_refinement { recipe_id }`. \
             \n\nRequired: `family_id` (recipe family id from `select_recipe`), `target_class` \
             (element class, e.g. `\"wall_assembly\"`), `parameters` (recipe-specific driver map, \
@@ -8345,12 +8687,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             as the visible wall/roof/foundation member of a larger building assembly when \
             `group_element_id` or `created_element_ids` are present. For validation-relevant \
             assemblies, add the aggregate `group_element_id` or the actual generated elements \
-            as members, and use `root_element_id` for refinement/obligation operations. \
+            as members. The aggregate carries the recipe's semantics when present. \
             \n\nIf the response carries `promotion_blocked`, the geometry WAS created (it is \
             listed in `created_element_ids`) but the promotion gate blocked the refinement \
             claim on the listed `unsatisfied_obligations`. Do NOT retry this call — that \
             duplicates geometry. Resolve each obligation with `resolve_obligation` on \
-            `root_element_id`, then call `promote_refinement`."
+            `promotion_blocked.obligation_element_id`, then call `promote_refinement` on that element."
     )]
     pub(super) async fn instantiate_recipe_tool(
         &self,
@@ -8759,8 +9101,13 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<ListAgentSkillsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let skills = self.request_list_agent_skills(params.into()).await;
-        json_tool_result(skills)
+        let (skills, status) = self.cloud_skill_list(params.into()).await;
+        let mut result = json_tool_result(skills)?;
+        result.content.push(rmcp::model::Content::text(format!(
+            "Cloud corpus: {}",
+            status
+        )));
+        Ok(result)
     }
 
     #[tool(
@@ -8772,8 +9119,13 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<ListAgentSkillsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let skills = self.request_list_agent_skills(params.into()).await;
-        json_tool_result(skills)
+        let (skills, status) = self.cloud_skill_list(params.into()).await;
+        let mut result = json_tool_result(skills)?;
+        result.content.push(rmcp::model::Content::text(format!(
+            "Cloud corpus: {}",
+            status
+        )));
+        Ok(result)
     }
 
     #[tool(
@@ -8785,17 +9137,166 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<GetAgentSkillRequest>,
     ) -> Result<CallToolResult, McpError> {
+        use crate::plugins::agent_skill_cloud as cloud;
+        let connection = self.corpus_connection().await;
+        let index = cloud::index(&connection).await;
+        if let Ok(index) = &index {
+            if index.withdrawn_skill_ids.contains(&params.skill_id) {
+                return Err(McpError::invalid_params(
+                    "Skill withdrawn from cloud corpus; bundled fallback is suppressed",
+                    None,
+                ));
+            }
+            if let Some(entry) = index.skills.iter().find(|e| e.skill.id == params.skill_id) {
+                let mut bundle = cloud::bundle(&connection, &entry.content_hash)
+                    .await
+                    .map_err(|e| McpError::internal_error(e, None))?;
+                if bundle.skill.id.0 != params.skill_id {
+                    return Err(McpError::internal_error(
+                        "Cloud skill identity mismatch",
+                        None,
+                    ));
+                }
+                bundle.skill.trust_level =
+                    crate::plugins::agent_skills::AgentSkillTrustLevel::Shipped;
+                let mut value = serde_json::to_value(bundle.skill)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                value["publication_evidence"] = bundle.provenance;
+                value["corpus_revision"] = json!(entry.content_hash);
+                value["corpus_epoch"] = json!(index.epoch);
+                value["resources"] = json!(bundle
+                    .resources
+                    .iter()
+                    .map(|(path, r)| json!({"path":path,"media_type":r.media_type}))
+                    .collect::<Vec<_>>());
+                let catalog = profile_tool_catalog();
+                let available = catalog
+                    .tools_for(CapabilityProfile::Full)
+                    .iter()
+                    .map(|t| t.name.as_ref())
+                    .collect::<std::collections::HashSet<_>>();
+                let missing = value["required_tool_ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str())
+                    .filter(|id| !available.contains(id))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                value["runtime_compatibility"] = json!({"required_tools_available":missing.is_empty(),"missing_required_tool_ids":missing,"note":"A corpus update does not add runtime tools. Treat missing tools as a capability gap; profile filters may require an explicit switch."});
+                value["resource_tool"] = json!("get_agent_skill_resource");
+                return json_tool_result(value);
+            }
+        }
         let skill = self
             .request_get_agent_skill(params.skill_id)
             .await
-            .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(skill)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let mut value = serde_json::to_value(skill)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        value["cloud_corpus"] = cloud::status(&index);
+        value["delivery"] = json!("bundled_or_private_fallback");
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "get_agent_corpus_status",
+        description = "Check the live cloud skill corpus epoch. Check on onboarding, at task boundaries, after learning/contribution, and before authoring. Re-fetch changed skill revisions; existing context is not updated automatically. An unavailable cloud means freshness is unverified, not current."
+    )]
+    pub(super) async fn get_agent_corpus_status_tool(&self) -> Result<CallToolResult, McpError> {
+        use crate::plugins::agent_skill_cloud as cloud;
+        json_tool_result(cloud::status(
+            &cloud::index(&self.corpus_connection().await).await,
+        ))
+    }
+
+    #[tool(
+        name = "get_agent_skill_resource",
+        description = "Fetch a reference, schema or helper source from the immutable cloud corpus revision returned by get_agent_skill. Resources are returned as text, never automatically executed; use their declared runtime and inspect applicability."
+    )]
+    pub(super) async fn get_agent_skill_resource_tool(
+        &self,
+        Parameters(params): Parameters<GetAgentSkillResourceRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let bundle = crate::plugins::agent_skill_cloud::bundle(
+            &self.corpus_connection().await,
+            &params.content_hash,
+        )
+        .await
+        .map_err(|e| McpError::internal_error(e, None))?;
+        let resource = bundle
+            .resources
+            .get(&params.path)
+            .ok_or_else(|| McpError::invalid_params("Skill resource not found", None))?;
+        json_tool_result(
+            json!({"content_hash":params.content_hash,"path":params.path,"media_type":resource.media_type,"content":resource.content}),
+        )
+    }
+
+    #[tool(
+        name = "contribute_agent_skill",
+        description = "Durably contribute a generalized reusable procedure and supporting references/helper sources to the shared cloud corpus using the signed-in host account. Include applicability, limitations, evidence/regression results and redistribution rights; remove private project facts. Contributions await operator review before global discovery. Reuse this for useful skills learned during work instead of leaving them only in a provider's local skill directory. No code is executed and no private project is uploaded automatically."
+    )]
+    pub(super) async fn contribute_agent_skill_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::agent_skill_cloud::SkillContribution>,
+    ) -> Result<CallToolResult, McpError> {
+        let response =
+            crate::plugins::agent_skill_cloud::contribute(&self.corpus_connection().await, params)
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(response)
+    }
+
+    #[tool(
+        name = "list_agent_skill_contributions",
+        description = "List durable skill candidates awaiting review in the cloud corpus. Requires an authenticated publisher account; ordinary authoring agents cannot enumerate unpublished contributions."
+    )]
+    pub(super) async fn list_agent_skill_contributions_tool(
+        &self,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(
+            crate::plugins::agent_skill_cloud::contribution_index(&self.corpus_connection().await)
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?,
+        )
+    }
+    #[tool(
+        name = "get_agent_skill_contribution",
+        description = "Publisher-only inspection of an unpublished skill bundle and its resources by the immutable hash from list_agent_skill_contributions. Read exact candidate content and evidence before reviewing; fetching does not install or release it."
+    )]
+    pub(super) async fn get_agent_skill_contribution_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::agent_skill_cloud::SkillRevisionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(
+            crate::plugins::agent_skill_cloud::candidate_bundle(
+                &self.corpus_connection().await,
+                &params.content_hash,
+            )
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?,
+        )
+    }
+    #[tool(
+        name = "review_agent_skill_contribution",
+        description = "Publisher-only release/reject/withdraw of an immutable cloud skill contribution. Review the exact content hash for confidentiality, redistribution rights and regression evidence. A candidate is not released merely because it was used successfully. Requires the signed-in host's existing publisher authorization."
+    )]
+    pub(super) async fn review_agent_skill_contribution_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::agent_skill_cloud::SkillReview>,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(
+            crate::plugins::agent_skill_cloud::review(&self.corpus_connection().await, params)
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?,
+        )
     }
 
     #[tool(
         name = "save_agent_skill_draft",
-        description = "Save a session-scoped agent skill draft. Use this for new operating \
-            procedures learned during an MCP session; shipped or project promotion remains a \
+        description = "Save a private project-scoped agent skill draft (undoable and persisted with the project). Use this for new operating \
+            private procedures learned during an MCP session. Reusable generalized procedures should use contribute_agent_skill; shipped promotion remains a \
             separate curation step."
     )]
     pub(super) async fn save_agent_skill_draft_tool(
@@ -9568,6 +10069,8 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .request_get_authoring_guidance()
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
+        self.guidance_state
+            .mark_authoring_guidance(!guidance.is_empty());
         json_tool_result(guidance)
     }
 
@@ -9898,5 +10401,34 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .await
             .map_err(|e| McpError::invalid_params(e, None))?;
         json_tool_result(result)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn without_peer_tool_names() -> &'static [&'static str] {
+    WITHOUT_PEER_TOOL_NAMES
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub(super) struct ProjectKnowledgeIndexRequest {
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[cfg(test)]
+mod cloud_skill_client_compatibility {
+    use super::*;
+    #[test]
+    fn ordinary_mcp_clients_receive_relevant_procedure_recommendations() {
+        let hello: AgentHello =
+            serde_json::from_value(serde_json::json!({"task":"inspect edge interfaces"})).unwrap();
+        assert!(!hello.supports.agent_skills);
+        let skill:crate::plugins::agent_skills::AgentSkill=serde_json::from_value(serde_json::json!({"id":"core.edge.review","title":"Edge inspection","summary":"Review edge interfaces","body_markdown":"Inspect interfaces."})).unwrap();
+        let found = relevant_agent_skills(&hello, &[], vec![skill.summary_info()]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "core.edge.review");
     }
 }

@@ -6,11 +6,32 @@ pub(super) struct ModelApiReceiver(pub(super) Mutex<mpsc::Receiver<ModelApiReque
 
 #[cfg(feature = "model-api")]
 pub(super) enum ModelApiRequest {
+    Guarded {
+        request: Box<ModelApiRequest>,
+        response: oneshot::Sender<ApiResult<()>>,
+    },
+    EditPlan {
+        action: String,
+        parameters: Value,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     GetInstanceInfo(oneshot::Sender<InstanceInfo>),
+    ListProjectKnowledge {
+        request: ProjectKnowledgeIndexRequest,
+        response: oneshot::Sender<Value>,
+    },
     ListEntities(oneshot::Sender<Vec<EntityEntry>>),
     GetEntity {
         element_id: u64,
         response: oneshot::Sender<Option<serde_json::Value>>,
+    },
+    GetForeignSources {
+        request: crate::plugins::foreign_source::GetForeignSourcesRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    ExplainDesign {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<crate::plugins::design_explanation::DesignExplanation>>,
     },
     GetEntityDetails {
         element_id: u64,
@@ -948,6 +969,7 @@ pub(super) enum ModelApiRequest {
         card_id: String,
         response: oneshot::Sender<ApiResult<GuidanceCardInfo>>,
     },
+    AgentCorpusConnection(oneshot::Sender<crate::plugins::agent_skills::AgentCorpusConnection>),
     ListAgentSkills {
         filter: crate::plugins::agent_skills::AgentSkillSearch,
         response: oneshot::Sender<Vec<crate::plugins::agent_skills::AgentSkillSummary>>,
@@ -1226,6 +1248,23 @@ pub(super) type ApiResult<T> = Result<T, String>;
 #[cfg(feature = "model-api")]
 pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
     match request {
+        ModelApiRequest::Guarded { request, response } => {
+            let result = crate::plugins::authored_edit_plan::requests::ensure_authored_base(world);
+            if result.is_ok() {
+                handle_model_api_request(world, *request);
+            }
+            let _ = response.send(result);
+        }
+        ModelApiRequest::EditPlan {
+            action,
+            parameters,
+            response,
+        } => {
+            let _ = response.send(handle_edit_plan_request(world, &action, parameters));
+        }
+        ModelApiRequest::ListProjectKnowledge { request, response } => {
+            let _ = response.send(handle_list_project_knowledge(world, request));
+        }
         ModelApiRequest::GetInstanceInfo(response) => {
             let _ = response.send(handle_get_instance_info(world));
         }
@@ -1237,6 +1276,19 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             response,
         } => {
             let _ = response.send(get_entity_snapshot(world, ElementId(element_id)));
+        }
+        ModelApiRequest::GetForeignSources { request, response } => {
+            let _ = response.send(crate::plugins::foreign_source::inspect_sources(
+                world, request,
+            ));
+        }
+        ModelApiRequest::ExplainDesign {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(crate::plugins::design_explanation::explain_design(
+                world, element_id,
+            ));
         }
         ModelApiRequest::GetEntityDetails {
             element_id,
@@ -1720,7 +1772,17 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             include_ui,
             response,
         } => {
-            let _ = response.send(handle_take_screenshot(world, &path, include_ui));
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = path;
+                crate::plugins::drawing_export::queue_memory_screenshot(
+                    world, include_ui, response,
+                );
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let _ = response.send(handle_take_screenshot(world, &path, include_ui));
+            }
         }
         ModelApiRequest::ExportDrawing { path, response } => {
             let _ = response.send(handle_export_drawing(world, &path));
@@ -2456,6 +2518,14 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         ModelApiRequest::GetGuidanceCard { card_id, response } => {
             let _ = response.send(handle_get_guidance_card(world, card_id));
         }
+        ModelApiRequest::AgentCorpusConnection(response) => {
+            let _ = response.send(
+                world
+                    .get_resource::<crate::plugins::agent_skills::AgentCorpusConnection>()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+        }
         ModelApiRequest::ListAgentSkills { filter, response } => {
             let _ = response.send(handle_list_agent_skills(world, filter));
         }
@@ -2554,8 +2624,7 @@ fn handle_install_recipe_from_session_export(
     use crate::capability_registry::RecipeFamilyId;
     use crate::curation::provenance::Confidence;
     use crate::curation::{
-        AssetId, AssetKindId, CurationMeta, Provenance, RecipeArtifact, RecipeArtifactRegistry,
-        RecipeBody, Scope, Trust,
+        AssetId, AssetKindId, CurationMeta, Provenance, RecipeArtifact, RecipeBody, Scope, Trust,
     };
     use crate::plugins::refinement::{AgentId, AuthoringMode};
 
@@ -2585,6 +2654,9 @@ fn handle_install_recipe_from_session_export(
     };
 
     let scope_str = request.scope.as_deref().unwrap_or("Project");
+    if scope_str.eq_ignore_ascii_case("shipped") {
+        return Err("Shipped recipes require a reviewed corpus release".into());
+    }
     let scope = if scope_str == "Session" {
         Scope::Session
     } else {
@@ -2624,8 +2696,14 @@ fn handle_install_recipe_from_session_export(
         tests: Vec::new(),
     };
 
+    let before = world
+        .get_resource::<crate::curation::RecipeArtifactRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    let mut after = before.clone();
+    after.insert_private(artifact.clone())?;
     // Persist to disk if scope != Session.
-    let persisted_path = if scope != Scope::Session {
+    let persisted_path = if scope != Scope::Session && !cfg!(target_arch = "wasm32") {
         let path = crate::plugins::knowledge_persistence::persist_recipe(&artifact)?;
         Some(path.display().to_string())
     } else {
@@ -2633,9 +2711,12 @@ fn handle_install_recipe_from_session_export(
     };
 
     // Insert into the in-memory registry.
-    world
-        .resource_mut::<RecipeArtifactRegistry>()
-        .insert(artifact);
+    crate::plugins::knowledge_assets::apply_knowledge_update(
+        world,
+        before,
+        after,
+        "Install private learned recipe",
+    );
 
     Ok(InstallRecipeResult {
         family_id: request.family_id,
@@ -2691,11 +2772,11 @@ fn handle_acquire_corpus_passage(
     world: &mut World,
     request: AcquireCorpusPassageRequest,
 ) -> Result<AcquireCorpusPassageResult, String> {
-    use crate::capability_registry::PassageRef;
     use crate::plugins::corpus_gap::CorpusPassageRegistry;
     use crate::plugins::knowledge_persistence::{persist_passage, PersistedPassage};
 
     let persisted = PersistedPassage {
+        meta: None,
         passage_ref: request.passage_ref.clone(),
         text: request.text.clone(),
         citation: request.citation.clone(),
@@ -2708,22 +2789,26 @@ fn handle_acquire_corpus_passage(
         proactive_guidance: None,
     };
 
-    let persisted_path = if request.persist {
+    let before = world
+        .get_resource::<CorpusPassageRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    let mut after = before.clone();
+    after.register_private(persisted.clone())?;
+    let registry_size = after.len();
+    let persisted_path = if request.persist && !cfg!(target_arch = "wasm32") {
         let path = persist_passage(&persisted)?;
         Some(path.display().to_string())
     } else {
         None
     };
 
-    let provenance =
-        crate::plugins::knowledge_persistence::build_provenance_for_passage(&persisted);
-    let passage_ref = PassageRef(request.passage_ref.clone());
-
-    let registry_size = {
-        let mut registry = world.resource_mut::<CorpusPassageRegistry>();
-        registry.register(passage_ref, request.text, provenance);
-        registry.len()
-    };
+    crate::plugins::knowledge_assets::apply_knowledge_update(
+        world,
+        before,
+        after,
+        "Acquire private source passage",
+    );
 
     Ok(AcquireCorpusPassageResult {
         passage_ref: request.passage_ref,
@@ -2731,4 +2816,46 @@ fn handle_acquire_corpus_passage(
         registry_size,
         persisted_path,
     })
+}
+
+#[cfg(feature = "model-api")]
+pub(super) fn handle_edit_plan_request(
+    world: &mut World,
+    action: &str,
+    parameters: Value,
+) -> ApiResult<Value> {
+    use crate::plugins::authored_edit_plan::{requests, AuthoredEditPlanRegistry, PlanId};
+    match action {
+        "list" => {
+            Ok(json!({"requests":world.resource::<requests::EditRequestRegistry>().descriptors()}))
+        }
+        "preview" => {
+            let kind = parameters["request_kind"]
+                .as_str()
+                .ok_or("request_kind is required")?;
+            let plan = requests::preview(world, kind, parameters["parameters"].clone())?;
+            Ok(requests::inspect(world, &plan))
+        }
+        "inspect" | "apply" => {
+            let id = PlanId(
+                parameters["plan_id"]
+                    .as_str()
+                    .ok_or("plan_id is required")?
+                    .into(),
+            );
+            let plan = world
+                .resource::<AuthoredEditPlanRegistry>()
+                .get(&id)
+                .ok_or("Unknown, superseded, consumed or evicted plan")?;
+            if action == "apply" {
+                requests::ensure_authored_base(world)?;
+                apply_captured_plan_and_flush(world, &plan)?;
+                Ok(json!({"applied":true,"plan_id":id,"digest":plan.digest(),
+                    "model_revision":world.resource::<crate::plugins::history::History>().revision_token()}))
+            } else {
+                Ok(requests::inspect(world, &plan))
+            }
+        }
+        _ => Err("Unknown edit-plan action".into()),
+    }
 }

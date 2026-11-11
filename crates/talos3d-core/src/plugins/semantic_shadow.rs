@@ -14,9 +14,11 @@ pub struct SemanticShadow {
     pub gaps: Vec<SemanticShadowGap>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct SemanticShadowSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_source: Option<super::foreign_source::SourceReference>,
     pub kind: String,
     pub format_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,6 +100,7 @@ pub fn semantic_shadow_for_import_request(
         .unwrap_or_else(|| format_name.to_string());
     Some(SemanticShadow {
         source: SemanticShadowSource {
+            retained_source: None,
             kind: "foreign_import".to_string(),
             format_name: format_name.to_string(),
             source_name: source_name.map(ToOwned::to_owned),

@@ -181,6 +181,28 @@ impl SemanticContext for WorldSemanticContext<'_> {
             .unwrap_or_default()
     }
 
+    fn anchor_candidates(&self, kind: &AnchorKindId) -> Vec<AnchorInstanceId> {
+        let Some(mut query) = self.world.try_query::<(&ElementId, &PublishedAnchors)>() else {
+            return Vec::new();
+        };
+        let mut candidates: Vec<_> = query
+            .iter(self.world)
+            .flat_map(|(entity, published)| {
+                published
+                    .anchors
+                    .iter()
+                    .filter(|anchor| &anchor.kind == kind)
+                    .map(|anchor| AnchorInstanceId {
+                        publisher: *entity,
+                        kind: anchor.kind.clone(),
+                        role: anchor.role.clone(),
+                    })
+            })
+            .collect();
+        candidates.sort_by(|a, b| (a.publisher.0, &a.role).cmp(&(b.publisher.0, &b.role)));
+        candidates
+    }
+
     fn refinement_state(&self, entity: ElementId) -> RefinementState {
         self.entity_ref(entity)
             .and_then(|entity_ref| entity_ref.get::<RefinementStateComponent>())

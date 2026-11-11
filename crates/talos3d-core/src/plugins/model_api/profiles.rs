@@ -40,15 +40,19 @@ pub enum CapabilityProfile {
     UxAutomation = 3,
     /// The entire tool surface, including tools not yet classified.
     Full = 4,
+    /// Bounded semantic authoring: curated creation, concepts/anchors, captured
+    /// edits, explanation and verification. Escalate explicitly for other work.
+    FocusedAuthoring = 5,
 }
 
 impl CapabilityProfile {
-    pub const ALL: [CapabilityProfile; 5] = [
+    pub const ALL: [CapabilityProfile; 6] = [
         CapabilityProfile::Authoring,
         CapabilityProfile::Inspection,
         CapabilityProfile::Curation,
         CapabilityProfile::UxAutomation,
         CapabilityProfile::Full,
+        CapabilityProfile::FocusedAuthoring,
     ];
 
     pub const DEFAULT: CapabilityProfile = CapabilityProfile::Authoring;
@@ -60,6 +64,7 @@ impl CapabilityProfile {
             CapabilityProfile::Curation => "curation",
             CapabilityProfile::UxAutomation => "ux-automation",
             CapabilityProfile::Full => "full",
+            CapabilityProfile::FocusedAuthoring => "focused-authoring",
         }
     }
 
@@ -82,6 +87,7 @@ impl CapabilityProfile {
                  toolbars, command invocation, plus inspection and capture."
             }
             CapabilityProfile::Full => "The entire MCP tool surface.",
+            CapabilityProfile::FocusedAuthoring => "Bounded semantic authoring: curated paths, concepts and live anchors, captured preview/apply, explanation, validation and save/reload. Use full for advanced diagnostics.",
         }
     }
 
@@ -94,6 +100,7 @@ impl CapabilityProfile {
             "curation" => Some(CapabilityProfile::Curation),
             "ux-automation" | "ux_automation" => Some(CapabilityProfile::UxAutomation),
             "full" => Some(CapabilityProfile::Full),
+            "focused-authoring" | "focused_authoring" => Some(CapabilityProfile::FocusedAuthoring),
             _ => None,
         }
     }
@@ -116,6 +123,9 @@ impl CapabilityProfile {
         use ToolCategory::*;
         match self {
             CapabilityProfile::Full => true,
+            CapabilityProfile::FocusedAuthoring => {
+                matches!(category, SessionContract | Validation | Capture | Commands)
+            }
             CapabilityProfile::Authoring => matches!(
                 category,
                 SessionContract
@@ -206,6 +216,7 @@ pub(super) enum ToolCategory {
 pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     // --- Session contract (every profile) ---
     ("get_instance_info", ToolCategory::SessionContract),
+    ("list_project_knowledge", ToolCategory::CurationExtended),
     ("negotiate_agent_session", ToolCategory::SessionContract),
     ("get_agent_guidance_packet", ToolCategory::SessionContract),
     ("get_agent_guidance_state", ToolCategory::SessionContract),
@@ -227,6 +238,21 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("list_agent_skills", ToolCategory::SessionContract),
     ("find_agent_skills", ToolCategory::SessionContract),
     ("get_agent_skill", ToolCategory::SessionContract),
+    ("get_agent_corpus_status", ToolCategory::SessionContract),
+    ("get_agent_skill_resource", ToolCategory::SessionContract),
+    ("contribute_agent_skill", ToolCategory::CurationExtended),
+    (
+        "list_agent_skill_contributions",
+        ToolCategory::CurationExtended,
+    ),
+    (
+        "get_agent_skill_contribution",
+        ToolCategory::CurationExtended,
+    ),
+    (
+        "review_agent_skill_contribution",
+        ToolCategory::CurationExtended,
+    ),
     // --- Inspection (core reads) ---
     ("list_entities", ToolCategory::Inspection),
     ("get_entity", ToolCategory::Inspection),
@@ -322,7 +348,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("list_corpus_gaps", ToolCategory::Discovery),
     ("request_corpus_expansion", ToolCategory::Discovery),
     ("acquire_corpus_passage", ToolCategory::Discovery),
-    ("lookup_source_passage", ToolCategory::Discovery),
+    ("lookup_source_passage", ToolCategory::Inspection),
     ("catalog_query", ToolCategory::Discovery),
     ("list_catalog_providers", ToolCategory::Discovery),
     ("save_recipe_draft", ToolCategory::Discovery),
@@ -332,7 +358,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("save_agent_skill_draft", ToolCategory::Discovery),
     // --- Definitions / occurrences / hosted placement ---
     ("definition.create", ToolCategory::Definitions),
-    ("definition.explain", ToolCategory::Definitions),
+    ("definition.explain", ToolCategory::Inspection),
     ("definition.get", ToolCategory::Definitions),
     ("definition.instantiate", ToolCategory::Definitions),
     ("definition.instantiate_hosted", ToolCategory::Definitions),
@@ -350,7 +376,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
         ToolCategory::Definitions,
     ),
     ("occurrence.place", ToolCategory::Definitions),
-    ("occurrence.resolve", ToolCategory::Definitions),
+    ("occurrence.resolve", ToolCategory::Inspection),
     ("occurrence.explain", ToolCategory::Definitions),
     ("occurrence.validate_host_fit", ToolCategory::Definitions),
     ("bim_void.declare_for_definition", ToolCategory::Definitions),
@@ -361,8 +387,8 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("frame_model", ToolCategory::Capture),
     ("set_surface_debug_render", ToolCategory::Capture),
     ("get_elevation_profile", ToolCategory::Inspection),
-    ("declare_elevation_intent", ToolCategory::SessionContract),
-    ("bind_elevation_intent", ToolCategory::SessionContract),
+    ("declare_elevation_intent", ToolCategory::Editing),
+    ("bind_elevation_intent", ToolCategory::Editing),
     ("get_camera", ToolCategory::Capture),
     ("set_camera", ToolCategory::Capture),
     // --- Project I/O ---
@@ -397,8 +423,14 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("list_material_specs", ToolCategory::CurationExtended),
     ("save_material_spec", ToolCategory::CurationExtended),
     ("publish_material_spec", ToolCategory::CurationExtended),
-    ("get_authoring_provenance", ToolCategory::CurationExtended),
-    ("get_claim_grounding", ToolCategory::CurationExtended),
+    ("explain_design", ToolCategory::Inspection),
+    ("get_foreign_sources", ToolCategory::Inspection),
+    ("list_edit_requests", ToolCategory::Inspection),
+    ("inspect_edit_plan", ToolCategory::Inspection),
+    ("preview_edit_plan", ToolCategory::Editing),
+    ("apply_edit_plan", ToolCategory::Editing),
+    ("get_authoring_provenance", ToolCategory::Inspection),
+    ("get_claim_grounding", ToolCategory::Inspection),
     ("definition.compile", ToolCategory::CurationExtended),
     // --- Modeling extended ---
     ("align_execute", ToolCategory::ModelingExtended),
@@ -503,9 +535,78 @@ pub(super) fn tool_category(name: &str) -> ToolCategory {
     ToolCategory::Unclassified
 }
 
+/// Generic focused workflow, independent of any domain vocabulary. The shared
+/// session contract remains available; unsupported next steps return the normal
+/// profile-switch diagnostic instead of silently expanding the surface.
+pub(super) const FOCUSED_AUTHORING_TOOLS: &[&str] = &[
+    "infer_refinement_goal",
+    "apply_refinement_goal",
+    "list_refinement_goals",
+    "plan_refinement_goal",
+    "promote_refinement",
+    "resolve_obligation",
+    "create_assembly",
+    "get_assembly",
+    "list_assembly_members",
+    "list_entities",
+    "get_entity",
+    "get_entity_details",
+    "get_entities_details",
+    "model_summary",
+    "get_selection",
+    "set_selection",
+    "entity_dependencies",
+    "query_relations",
+    "explain_design",
+    "get_foreign_sources",
+    "get_authoring_provenance",
+    "get_claim_grounding",
+    "lookup_source_passage",
+    "resolve_domain_term",
+    "assign_concept",
+    "publish_anchors",
+    "list_edit_requests",
+    "preview_edit_plan",
+    "inspect_edit_plan",
+    "apply_edit_plan",
+    "list_element_classes",
+    "list_vocabulary",
+    "select_recipe",
+    "list_recipe_families",
+    "list_generation_priors",
+    "instantiate_recipe",
+    "request_corpus_expansion",
+    "list_corpus_gaps",
+    "definition.list",
+    "definition.get",
+    "definition.explain",
+    "definition.instantiate",
+    "definition.instantiate_hosted",
+    "definition.library.list",
+    "definition.library.get",
+    "occurrence.explain",
+    "occurrence.resolve",
+    "parametric.list_types",
+    "parametric.create",
+    "parametric.inspect",
+    "parametric.explain",
+    "get_refinement_state",
+    "get_obligations",
+    "save_project",
+    "load_project",
+];
+
 /// Whether `tool_name` is advertised and callable under `profile`.
 pub(super) fn profile_allows(profile: CapabilityProfile, tool_name: &str) -> bool {
-    profile == CapabilityProfile::Full || profile.includes(tool_category(tool_name))
+    // Keep the deprecated duplicate callable in full for old clients; compact
+    // profiles advertise the canonical set_property schema once.
+    if profile != CapabilityProfile::Full && tool_name == "set_entity_property" {
+        return false;
+    }
+    profile == CapabilityProfile::Full
+        || profile.includes(tool_category(tool_name))
+        || (profile == CapabilityProfile::FocusedAuthoring
+            && FOCUSED_AUTHORING_TOOLS.contains(&tool_name))
 }
 
 /// Profiles (other than `full`) that include `tool_name`, for gate errors.
@@ -520,10 +621,9 @@ pub(super) fn profiles_containing(tool_name: &str) -> Vec<&'static str> {
 
 /// Shared, atomically-switchable active profile for one MCP session scope.
 ///
-/// stdio gets one per connection; each HTTP profile endpoint shares one across
-/// its (stateless-mode) requests, so `set_session_profile` persists for that
-/// endpoint. Talos3D is a single-user local app, so endpoint scope is an
-/// acceptable session approximation.
+/// stdio gets one per connection; HTTP gets one per MCP session id. Endpoint
+/// paths choose the initial profile only. Clients sharing a bearer and endpoint
+/// do not share mutable profile state.
 #[derive(Debug, Clone)]
 pub(super) struct SessionProfileState(Arc<AtomicU8>);
 

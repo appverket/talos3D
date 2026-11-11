@@ -12,3 +12,8 @@ private/
 
 # Fiberplane local issue tracking
 .fp/
+
+# Generated documentation and Python bytecode
+/site/
+__pycache__/
+*.pyc

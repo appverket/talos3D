@@ -33,7 +33,14 @@ pub struct HitCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum GeneratedFaceRef {
-    BoxFace { axis: u8, positive: bool },
+    /// Capability-owned semantic surface key, independent of triangle indices.
+    CapabilitySurface {
+        key: String,
+    },
+    BoxFace {
+        axis: u8,
+        positive: bool,
+    },
     CylinderTop,
     CylinderBottom,
     CylinderSide,
@@ -53,6 +60,7 @@ pub enum GeneratedFaceRef {
 impl GeneratedFaceRef {
     pub fn label(&self) -> String {
         match self {
+            Self::CapabilitySurface { key } => key.clone(),
             Self::BoxFace { axis, positive } => {
                 let axis_label = match axis {
                     0 => "x",
@@ -1163,6 +1171,24 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
 
     fn capture_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity>;
 
+    /// Capture authored equality/history state without optional derived bounds.
+    fn capture_edit_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity> {
+        self.capture_snapshot(entity_ref, world)
+    }
+
+    /// Lightweight display metadata. Geometry-heavy factories should override
+    /// this so browsing labels never copies mesh buffers or computes bounds.
+    fn display_label(&self, entity_ref: &EntityRef, world: &World) -> Option<String> {
+        self.capture_snapshot(entity_ref, world)
+            .map(|snapshot| snapshot.label())
+    }
+
+    /// Opt in only for a primitive whose faces form its editing surface. Raw
+    /// imported meshes and composite results must not hijack object selection.
+    fn allows_automatic_face_edit(&self, _entity_ref: &EntityRef) -> bool {
+        false
+    }
+
     fn capture_role(&self, _entity_ref: &EntityRef, _world: &World) -> SnapshotCaptureRole {
         SnapshotCaptureRole::PrimaryAuthored
     }
@@ -1178,6 +1204,9 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
         0
     }
 
+    /// Choose the nearest interactive hit. Exclude candidates with
+    /// `plugins::object_locks::entity_locked` before reducing to the nearest;
+    /// filtering only the returned hit would make locks block objects behind them.
     fn hit_test(&self, _world: &World, _ray: Ray3d) -> Option<HitCandidate> {
         None
     }
@@ -1190,6 +1219,15 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
         _entity: Entity,
         _ray: Ray3d,
     ) -> Option<FaceHitCandidate> {
+        None
+    }
+
+    /// Resolve a generated boundary to the authored feature that controls it.
+    fn boundary_binding(
+        &self,
+        _world: &World,
+        _reference: &SelectableSubobjectRef,
+    ) -> Option<crate::plugins::modeling::boundary_edit::BoundaryBinding> {
         None
     }
 
@@ -1535,7 +1573,7 @@ impl CapabilityRegistry {
     where
         F: AuthoredEntityFactory,
     {
-        let factory = Arc::new(factory);
+        let factory = Arc::new(crate::authored_material::MaterialFactory(factory));
         self.factories_by_type
             .insert(factory.type_name(), factory.clone());
         self.ordered_factories.push(factory);
@@ -1559,6 +1597,43 @@ impl CapabilityRegistry {
                 SnapshotCaptureRole::PrimaryAuthored => return Some(snapshot),
                 SnapshotCaptureRole::DerivedGeometry => {
                     derived.get_or_insert(snapshot);
+                }
+            }
+        }
+        derived
+    }
+
+    pub fn capture_edit_snapshot(
+        &self,
+        entity_ref: &EntityRef,
+        world: &World,
+    ) -> Option<BoxedEntity> {
+        let mut derived = None;
+        for factory in &self.ordered_factories {
+            let Some(snapshot) = factory.capture_edit_snapshot(entity_ref, world) else {
+                continue;
+            };
+            match factory.capture_role(entity_ref, world) {
+                SnapshotCaptureRole::PrimaryAuthored => return Some(snapshot),
+                SnapshotCaptureRole::DerivedGeometry => {
+                    derived.get_or_insert(snapshot);
+                }
+            }
+        }
+        derived
+    }
+
+    /// Resolve labels with the same primary/derived precedence as snapshots.
+    pub fn display_label(&self, entity_ref: &EntityRef, world: &World) -> Option<String> {
+        let mut derived = None;
+        for factory in &self.ordered_factories {
+            let Some(label) = factory.display_label(entity_ref, world) else {
+                continue;
+            };
+            match factory.capture_role(entity_ref, world) {
+                SnapshotCaptureRole::PrimaryAuthored => return Some(label),
+                SnapshotCaptureRole::DerivedGeometry => {
+                    derived.get_or_insert(label);
                 }
             }
         }

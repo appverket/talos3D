@@ -417,6 +417,47 @@ fn primary_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     }
 }
 
+/// Recover modifier state at each press, rather than at the end of the frame.
+/// A native Cmd+Z press and both releases can all arrive between two renders.
+fn pressed_chords(
+    keys: &ButtonInput<KeyCode>,
+    events: &[bevy::input::keyboard::KeyboardInput],
+) -> Vec<KeyChord> {
+    use bevy::input::ButtonState;
+    let chord = |state: &ButtonInput<KeyCode>, key| KeyChord {
+        key,
+        primary: primary_pressed(state),
+        shift: state.pressed(KeyCode::ShiftLeft) || state.pressed(KeyCode::ShiftRight),
+        alt: state.pressed(KeyCode::AltLeft) || state.pressed(KeyCode::AltRight),
+    };
+    if events.is_empty() {
+        return keys
+            .get_just_pressed()
+            .map(|key| chord(keys, *key))
+            .collect();
+    }
+    let mut state = keys.clone();
+    for event in events.iter().rev().filter(|e| !e.repeat) {
+        match event.state {
+            ButtonState::Pressed => state.release(event.key_code),
+            ButtonState::Released => state.press(event.key_code),
+        }
+    }
+    let mut result = Vec::new();
+    for event in events {
+        match event.state {
+            ButtonState::Pressed => {
+                state.press(event.key_code);
+                if !event.repeat {
+                    result.push(chord(&state, event.key_code));
+                }
+            }
+            ButtonState::Released => state.release(event.key_code),
+        }
+    }
+    result
+}
+
 /// The single dispatch path for command/tool keyboard shortcuts. Reads the
 /// resolved [`Keymap`], matches the pressed chord against the current context,
 /// and queues the command for execution.
@@ -424,6 +465,10 @@ fn primary_pressed(keys: &ButtonInput<KeyCode>) -> bool {
 pub fn dispatch_command_shortcuts(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     keymap: Res<Keymap>,
+    events: Option<Res<Messages<bevy::input::keyboard::KeyboardInput>>>,
+    mut event_cursor: Local<
+        bevy::ecs::message::MessageCursor<bevy::input::keyboard::KeyboardInput>,
+    >,
     chrome_capture: Option<Res<ChromeInputCapture>>,
     egui_wants_input: Option<Res<EguiWantsInput>>,
     ownership: Option<Res<InputOwnership>>,
@@ -432,9 +477,15 @@ pub fn dispatch_command_shortcuts(
     face_edit_context: Option<Res<FaceEditContext>>,
     mut pending: ResMut<PendingCommandInvocations>,
 ) {
+    // Drain even while a modal or text field owns input: shortcuts must never
+    // replay when that owner releases the keyboard.
+    let events = events
+        .map(|events| event_cursor.read(&events).cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
     let Some(keys) = keys else {
         return;
     };
+    let chords = pressed_chords(&keys, &events);
     if chrome_capture
         .map(|capture| capture.wants_any_keyboard_input())
         .unwrap_or(false)
@@ -448,10 +499,6 @@ pub fn dispatch_command_shortcuts(
         return;
     }
 
-    let primary = primary_pressed(&keys);
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-
     let in_select = active_tool
         .map(|tool| *tool.get() == ActiveTool::Select)
         .unwrap_or(true);
@@ -462,15 +509,29 @@ pub fn dispatch_command_shortcuts(
 
     for binding in &keymap.bindings {
         let chord = binding.chord;
-        if !keys.just_pressed(chord.key) {
+        if !chords.contains(&chord) {
             continue;
         }
-        if chord.primary != primary || chord.shift != shift || chord.alt != alt {
+        if face_editing
+            && matches!(
+                chord.key,
+                KeyCode::KeyL | KeyCode::KeyC | KeyCode::KeyP | KeyCode::KeyG
+            )
+            && !chord.primary
+            && !chord.alt
+            && !chord.shift
+        {
             continue;
         }
         let allowed = match binding.context {
             ShortcutContext::Global | ShortcutContext::Tool => true,
-            ShortcutContext::Select => in_select && transform_idle && !face_editing,
+            // Move is also the way out of a drawing tool with a selection.
+            // Otherwise M silently does nothing and later clicks keep drawing.
+            ShortcutContext::Select => {
+                (in_select || binding.command_id == "modeling.move")
+                    && transform_idle
+                    && !face_editing
+            }
             ShortcutContext::Modal => false,
         };
         if allowed {
@@ -504,6 +565,135 @@ mod tests {
             activates_tool: activates_tool.map(str::to_string),
             capability_id: None,
         }
+    }
+
+    #[test]
+    fn move_can_leave_guide_creation_but_never_steals_a_modal_gesture() {
+        let mut app = App::new();
+        app.insert_resource(State::new(ActiveTool::PlaceGuideLine))
+            .insert_resource(Keymap {
+                bindings: descriptor_bindings(&descriptor("modeling.move", "M", None)),
+            })
+            .init_resource::<InputOwnership>()
+            .init_resource::<PendingCommandInvocations>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .add_systems(Update, dispatch_command_shortcuts);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyM);
+        app.update();
+        assert!(!app
+            .world()
+            .resource::<PendingCommandInvocations>()
+            .is_empty());
+        app.world_mut()
+            .insert_resource(PendingCommandInvocations::default());
+        app.world_mut().insert_resource(InputOwnership::Modal(
+            crate::plugins::input_ownership::ModalKind::Transform,
+        ));
+        app.update();
+        assert!(app
+            .world()
+            .resource::<PendingCommandInvocations>()
+            .is_empty());
+    }
+
+    #[test]
+    fn face_editing_owns_shape_and_push_pull_shortcuts() {
+        let mut app = App::new();
+        let bindings = [
+            descriptor("guide", "G", Some("GuideLine")),
+            descriptor("circle", "C", Some("Circle")),
+        ]
+        .iter()
+        .flat_map(descriptor_bindings)
+        .collect();
+        app.insert_resource(Keymap {
+            bindings,
+            ..Default::default()
+        });
+        app.init_resource::<PendingCommandInvocations>();
+        app.init_resource::<ButtonInput<KeyCode>>();
+        let mut context = FaceEditContext::default();
+        context.entity = Some(Entity::PLACEHOLDER);
+        app.insert_resource(context);
+        app.add_systems(Update, dispatch_command_shortcuts);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyG);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyC);
+        app.update();
+        assert!(app
+            .world()
+            .resource::<PendingCommandInvocations>()
+            .is_empty());
+    }
+
+    #[test]
+    fn native_shortcut_keeps_modifiers_when_the_whole_chord_arrives_in_one_frame() {
+        use bevy::input::{
+            keyboard::{Key, KeyboardInput},
+            ButtonState,
+        };
+        let primary = if cfg!(target_os = "macos") {
+            KeyCode::SuperLeft
+        } else {
+            KeyCode::ControlLeft
+        };
+        let event = |key_code, state| KeyboardInput {
+            key_code,
+            state,
+            logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        };
+        let events = [
+            event(primary, ButtonState::Pressed),
+            event(KeyCode::KeyZ, ButtonState::Pressed),
+            event(KeyCode::KeyZ, ButtonState::Released),
+            event(primary, ButtonState::Released),
+        ];
+        let result = pressed_chords(&ButtonInput::default(), &events);
+        assert!(result.contains(&KeyChord {
+            key: KeyCode::KeyZ,
+            primary: true,
+            shift: false,
+            alt: false
+        }));
+        assert!(!result.contains(&KeyChord {
+            key: KeyCode::KeyZ,
+            primary: false,
+            shift: false,
+            alt: false
+        }));
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<PendingCommandInvocations>()
+            .add_message::<KeyboardInput>()
+            .insert_resource(Keymap {
+                bindings: descriptor_bindings(&descriptor("core.undo", "Ctrl/Cmd+Z", None)),
+            })
+            .add_systems(Update, dispatch_command_shortcuts);
+        for event in events {
+            app.world_mut().write_message(event);
+        }
+        app.update();
+        assert!(!app
+            .world()
+            .resource::<PendingCommandInvocations>()
+            .is_empty());
+        app.world_mut()
+            .insert_resource(PendingCommandInvocations::default());
+        app.update();
+        assert!(
+            app.world()
+                .resource::<PendingCommandInvocations>()
+                .is_empty(),
+            "no replay next frame"
+        );
     }
 
     #[test]

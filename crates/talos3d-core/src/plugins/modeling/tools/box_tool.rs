@@ -17,6 +17,7 @@ impl Plugin for BoxToolPlugin {
             .add_systems(
                 Update,
                 (cancel_box_tool, handle_box_clicks, draw_box_preview)
+                    .after(crate::plugins::snap::SnapSystems::Resolve)
                     .run_if(in_state(ActiveTool::PlaceBox)),
             );
     }

@@ -1,27 +1,9 @@
-//! Orthographic elevation profiles derived from authored geometry.
+//! Deterministic orthographic shape and material profiles from authored meshes.
 //!
-//! An elevation is the representation a builder, a planner and a child drawing
-//! a house all reason in: the outline you see standing square on to one face,
-//! and the material regions inside it. Almost everything anyone recognises as
-//! "wrong" about a building at a glance is a property of that outline — an apex
-//! off the centreline, a roof that fails to project past the wall, a material
-//! that changes where no joint exists.
-//!
-//! This module computes that representation **from the authored meshes**, not
-//! from the viewport. That matters for two reasons:
-//!
-//! 1. `take_screenshot` returns the viewport *with its overlays* — pivot
-//!    markers, selection outlines, rotation rings, the compass. A dark pivot
-//!    marker sitting on a ridge is indistinguishable from a hole in the roof.
-//!    Evidence used to accept or reject a model must not contain them.
-//! 2. A profile is machine-comparable. "Does this match the archetype?" and
-//!    "does this match what I said I was going to build?" are both diffs over
-//!    this structure, and neither is answerable from pixels.
-//!
-//! The implementation is a small deterministic software rasteriser: project
-//! every mesh triangle onto the elevation plane, keep the nearest surface per
-//! cell, and read the outline and material regions off the result. No GPU, no
-//! camera, no frame timing, and identical output for identical input.
+//! Offline analysis projects mesh triangles into a nearest-surface raster, then
+//! reports outlines, peaks and material regions without viewport overlays.
+//! Domain capabilities interpret these measurements and may supply dimensional
+//! peak-filtering thresholds. The default analysis scales with the object.
 
 use bevy::{
     prelude::*,
@@ -32,7 +14,14 @@ use serde::{Deserialize, Serialize};
 use crate::curation::material_specs::MaterialSpecRegistry;
 use crate::plugins::materials::MaterialAssignment;
 
-/// Which face of the building the viewer is square on to.
+/// Optional physical thresholds supplied by a capability; None scales with the profile.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct ElevationAnalysisPolicy {
+    pub prominence_m: Option<f32>,
+    pub neighbourhood_m: Option<f32>,
+}
+
+/// Orthographic view direction.
 ///
 /// Talos3D cardinal convention at `north_axis_deg = 0`: North = +Z, East = -X,
 /// South = -Z, West = +X. "South elevation" means the viewer stands to the
@@ -164,7 +153,10 @@ pub fn compute_elevation_profile(
 
 /// Project only `subject`, when given. A validator checking one building must
 /// not have its outline confounded by terrain, neighbouring structures, or
-/// anything else that happens to share the view.
+/// anything else that happens to share the view. An explicit subject measures
+/// authored geometry regardless of display visibility; hiding the roof for
+/// floor-plan work must not change a building validation verdict. The unscoped
+/// inspection path retains the visible-scene behavior.
 pub fn compute_elevation_profile_for(
     world: &World,
     direction: ElevationDirection,
@@ -190,7 +182,7 @@ pub fn compute_elevation_profile_for(
     let (view_dir, u_axis) = direction.axes();
 
     for (entity, mesh_handle, transform, assignment, visibility) in query.iter(world) {
-        if visibility.is_some_and(|v| *v == Visibility::Hidden) {
+        if subject.is_none() && visibility.is_some_and(|v| *v == Visibility::Hidden) {
             continue;
         }
         if subject.is_some_and(|allowed| !allowed.contains(&entity)) {
@@ -343,7 +335,12 @@ pub fn compute_elevation_profile_for(
         width_at_row_m[row] = covered as f32 * cell_width;
     }
 
-    let apexes = find_apexes(&upper, cell_width, columns);
+    let apexes = find_apexes_with_policy(
+        &upper,
+        cell_width,
+        columns,
+        world.get_resource::<ElevationAnalysisPolicy>(),
+    );
 
     Some(ElevationProfile {
         direction: direction.label().to_string(),
@@ -362,16 +359,29 @@ pub fn compute_elevation_profile_for(
     })
 }
 
-/// Peaks in the upper outline. A gable elevation has exactly one, on the
-/// centreline; a hip has none; a saltbox has one off-centre. Small ripples from
-/// rasterisation are ignored by requiring a peak to stand clear of its
-/// neighbourhood.
-fn find_apexes(upper: &[Option<f32>], cell_width: f32, columns: usize) -> Vec<Apex> {
-    // A peak must stand at least this far above the outline at the edge of its
-    // neighbourhood, so seam and trim detail never registers as a roof form.
-    const PROMINENCE_M: f32 = 0.15;
-    // How far either side counts as the neighbourhood.
-    let window = ((0.75 / cell_width.max(1e-4)).round() as usize).clamp(2, columns.max(4) / 2);
+/// Peaks that stand clear of a configurable neighbourhood.
+fn find_apexes_with_policy(
+    upper: &[Option<f32>],
+    cell_width: f32,
+    columns: usize,
+    policy: Option<&ElevationAnalysisPolicy>,
+) -> Vec<Apex> {
+    let height_range = upper
+        .iter()
+        .flatten()
+        .copied()
+        .fold((f32::MAX, f32::MIN), |(min, max), value| {
+            (min.min(value), max.max(value))
+        });
+    let prominence = policy
+        .and_then(|policy| policy.prominence_m)
+        .unwrap_or((height_range.1 - height_range.0).max(0.0) * 0.03)
+        .max(f32::EPSILON);
+    let neighbourhood = policy
+        .and_then(|policy| policy.neighbourhood_m)
+        .unwrap_or(cell_width * columns as f32 * 0.075);
+    let window = ((neighbourhood / cell_width.max(f32::EPSILON)).round() as usize)
+        .clamp(2, columns.max(4) / 2);
 
     let mut apexes = Vec::new();
     let mut index = 0usize;
@@ -383,7 +393,7 @@ fn find_apexes(upper: &[Option<f32>], cell_width: f32, columns: usize) -> Vec<Ap
         // Extend across a flat run so a ridge seen exactly end-on reports once.
         let mut end = index;
         while end + 1 < columns
-            && upper[end + 1].is_some_and(|next| (next - height).abs() < PROMINENCE_M * 0.2)
+            && upper[end + 1].is_some_and(|next| (next - height).abs() < prominence * 0.2)
         {
             end += 1;
         }
@@ -416,7 +426,7 @@ fn find_apexes(upper: &[Option<f32>], cell_width: f32, columns: usize) -> Vec<Ap
         .into_iter()
         .flatten()
         .fold(f32::MAX, f32::min);
-        let stands_proud = edge_height == f32::MAX || height - edge_height >= PROMINENCE_M;
+        let stands_proud = edge_height == f32::MAX || height - edge_height >= prominence;
 
         if is_local_max && stands_proud {
             apexes.push(Apex {
@@ -503,8 +513,87 @@ fn mesh_triangle_indices(mesh: &Mesh, vertex_count: usize) -> Option<Vec<u32>> {
 }
 
 #[cfg(test)]
+fn find_apexes(upper: &[Option<f32>], cell_width: f32, columns: usize) -> Vec<Apex> {
+    find_apexes_with_policy(upper, cell_width, columns, None)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_subject_profile_is_unchanged_when_roof_is_hidden() {
+        use crate::plugins::materials::MaterialBinding;
+        use bevy::platform::collections::HashSet;
+
+        let mut world = World::new();
+        let mut meshes = Assets::<Mesh>::default();
+        let wall_mesh = meshes.add(Cuboid::new(5.0, 2.3, 6.0));
+        let roof_mesh = meshes.add(Cuboid::new(5.6, 0.8, 6.6));
+        world.insert_resource(meshes);
+        let wall = world
+            .spawn((
+                Mesh3d(wall_mesh),
+                GlobalTransform::from_translation(Vec3::new(0.0, 1.15, 0.0)),
+                MaterialAssignment::Single(MaterialBinding::render_only("wall_white")),
+                Visibility::Visible,
+            ))
+            .id();
+        let roof = world
+            .spawn((
+                Mesh3d(roof_mesh),
+                GlobalTransform::from_translation(Vec3::new(0.0, 2.7, 0.0)),
+                MaterialAssignment::Single(MaterialBinding::render_only("roof_black")),
+                Visibility::Visible,
+            ))
+            .id();
+        // Unrelated hidden geometry must not enter the explicit building subject.
+        let unrelated_mesh = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::new(100.0, 100.0, 100.0));
+        let unrelated = world
+            .spawn((
+                Mesh3d(unrelated_mesh),
+                GlobalTransform::IDENTITY,
+                Visibility::Hidden,
+            ))
+            .id();
+        let subject = HashSet::from_iter([wall, roof]);
+        let visible =
+            compute_elevation_profile_for(&world, ElevationDirection::East, 128, Some(&subject))
+                .unwrap();
+        assert!(visible
+            .centre_bands
+            .iter()
+            .any(|band| band.material_id.as_deref() == Some("roof_black")
+                && (band.from_height_m - 2.3).abs() < 0.05));
+        world.entity_mut(roof).insert(Visibility::Hidden);
+        let hidden =
+            compute_elevation_profile_for(&world, ElevationDirection::East, 128, Some(&subject))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(&visible).unwrap(),
+            serde_json::to_value(&hidden).unwrap()
+        );
+        let displayed = compute_elevation_profile(&world, ElevationDirection::East, 128).unwrap();
+        assert!(displayed.height_m < 2.31);
+        assert!(displayed
+            .centre_bands
+            .iter()
+            .all(|band| band.material_id.as_deref() != Some("roof_black")));
+        // Actually removing the roof still removes its finish boundary; visibility
+        // independence must not invent missing material or authored geometry.
+        world.despawn(roof);
+        world.despawn(unrelated);
+        let missing =
+            compute_elevation_profile_for(&world, ElevationDirection::East, 128, Some(&subject))
+                .unwrap();
+        assert!(missing.height_m < 2.31);
+        assert!(missing
+            .centre_bands
+            .iter()
+            .all(|band| band.material_id.as_deref() != Some("roof_black")));
+    }
 
     #[test]
     fn cardinal_axes_follow_the_talos3d_compass() {
@@ -600,5 +689,17 @@ mod tests {
         let columns = 101;
         let upper: Vec<Option<f32>> = vec![Some(3.0); columns];
         assert!(find_apexes(&upper, 0.05, columns).is_empty());
+    }
+    #[test]
+    fn default_peak_detection_scales_to_small_and_large_models() {
+        let columns = 101;
+        for scale in [0.01, 1.0, 100.0] {
+            let upper: Vec<_> = (0..columns)
+                .map(|i| Some((2.0 - (i as f32 - 50.0).abs() * 0.03) * scale))
+                .collect();
+            let apexes = find_apexes(&upper, 0.05 * scale, columns);
+            assert_eq!(apexes.len(), 1, "scale {scale}: {apexes:?}");
+            assert!((apexes[0].position_ratio - 0.5).abs() < 0.01);
+        }
     }
 }

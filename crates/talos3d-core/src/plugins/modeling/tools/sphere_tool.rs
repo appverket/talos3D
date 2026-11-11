@@ -21,6 +21,7 @@ impl Plugin for SphereToolPlugin {
                     handle_sphere_clicks,
                     draw_sphere_preview,
                 )
+                    .after(crate::plugins::snap::SnapSystems::Resolve)
                     .run_if(in_state(ActiveTool::PlaceSphere)),
             );
     }

@@ -24,8 +24,9 @@ use talos3d_core::{
         commands::{
             despawn_by_element_id, find_entity_by_element_id, find_entity_by_element_id_readonly,
         },
-        history::{EditorCommand, HistorySet, PendingCommandQueue},
+        history::{EditorCommand, History, HistorySet, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
+        layers::ObjectVisibility,
         modeling::assembly::{
             AssemblyMemberRef, AssemblySnapshot, RelationSnapshot, SemanticAssembly,
         },
@@ -40,6 +41,7 @@ use talos3d_core::{
             linked_model_placement_subject, plan_linked_model_placement,
             LinkedModelPlacementOperation,
         },
+        modeling::occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
         modeling::primitives::{BoxPrimitive, ShapeRotation, TriangleMesh},
         modeling::snapshots::TriangleMeshSnapshot,
         selection::Selected,
@@ -58,7 +60,7 @@ use crate::{
 };
 
 /// Link recording how an object was planted, so the operation can be reversed.
-#[derive(Component, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PlantedOnSurface {
     /// The conforming foundation created under the object.
     pub foundation_id: ElementId,
@@ -97,6 +99,7 @@ struct PlantLinkedOnSurfaceHistoryCommand {
     planted_structure: PlantedStructure,
     hidden_foundation: Option<ElementId>,
     previous_hidden_visibility: Option<Visibility>,
+    previously_document_hidden: bool,
 }
 
 impl EditorCommand for PlantLinkedOnSurfaceHistoryCommand {
@@ -116,6 +119,7 @@ impl EditorCommand for PlantLinkedOnSurfaceHistoryCommand {
             world.entity_mut(target).insert(self.planted_structure);
         }
         if let Some(hidden_id) = self.hidden_foundation {
+            set_foundation_document_hidden(world, hidden_id, true);
             if let Some(entity) = find_entity_by_element_id(world, hidden_id) {
                 world.entity_mut(entity).insert(Visibility::Hidden);
             }
@@ -134,6 +138,7 @@ impl EditorCommand for PlantLinkedOnSurfaceHistoryCommand {
             world.entity_mut(target).remove::<PlantedStructure>();
         }
         if let Some(hidden_id) = self.hidden_foundation {
+            set_foundation_document_hidden(world, hidden_id, self.previously_document_hidden);
             if let Some(entity) = find_entity_by_element_id(world, hidden_id) {
                 if let Some(visibility) = self.previous_hidden_visibility {
                     world.entity_mut(entity).insert(visibility);
@@ -141,6 +146,21 @@ impl EditorCommand for PlantLinkedOnSurfaceHistoryCommand {
                     world.entity_mut(entity).remove::<Visibility>();
                 }
             }
+        }
+    }
+}
+
+// Use document visibility so compound occurrence parts and regenerated meshes
+// follow the same exclusion as their authored base. Raw Bevy visibility alone
+// is overwritten by layer reconciliation and misses detached generated parts.
+fn set_foundation_document_hidden(world: &mut World, id: ElementId, hidden: bool) {
+    world.init_resource::<ObjectVisibility>();
+    if world.resource::<ObjectVisibility>().hidden.contains(&id) != hidden {
+        let mut visibility = world.resource_mut::<ObjectVisibility>();
+        if hidden {
+            visibility.hidden.insert(id);
+        } else {
+            visibility.hidden.remove(&id);
         }
     }
 }
@@ -320,6 +340,7 @@ impl Plugin for PlantingPlugin {
                 reseat_planted_structures,
             )
                 .chain()
+                .run_if(planting_inputs_changed)
                 .after(HistorySet::Apply),
         );
     }
@@ -374,13 +395,23 @@ fn find_heightfield(world: &mut World, surface_id: ElementId) -> Option<TerrainH
         .or_else(|| flat_heightfield_from_surface(world, surface_id))
 }
 
-fn find_heightfield_readonly(world: &World, surface_id: ElementId) -> Option<TerrainHeightfield> {
-    let mut query = world.try_query::<(&ElementId, &TerrainHeightfield)>()?;
-    query
-        .iter(world)
-        .find(|(id, _)| id.0 == surface_id.0)
-        .map(|(_, hf)| hf.clone())
-        .or_else(|| flat_heightfield_from_surface_readonly(world, surface_id))
+fn support_top_on_surface(
+    world: &World,
+    solid: &ConformingSolid,
+    surface_id: ElementId,
+) -> Option<f32> {
+    if let Some(hf) = world
+        .try_query::<(&ElementId, &TerrainHeightfield)>()
+        .and_then(|mut query| {
+            query
+                .iter(world)
+                .find(|(id, _)| **id == surface_id)
+                .map(|(_, hf)| hf)
+        })
+    {
+        return solid.top_on(hf);
+    }
+    solid.top_on(&flat_heightfield_from_surface_readonly(world, surface_id)?)
 }
 
 fn flat_heightfield_from_surface(
@@ -437,8 +468,16 @@ fn semantic_assembly_by_id(world: &mut World, element_id: ElementId) -> Option<S
     world.get::<SemanticAssembly>(entity).cloned()
 }
 
-fn is_structure_assembly_type(assembly_type: &str) -> bool {
-    matches!(assembly_type, "structure" | "house" | "building")
+fn is_structure_assembly_type(world: &World, assembly_type: &str) -> bool {
+    world
+        .get_resource::<talos3d_core::plugins::surface_placement::SurfacePlacementVocabulary>()
+        .map(|vocabulary| {
+            vocabulary
+                .structure_assembly_types
+                .iter()
+                .any(|kind| kind == assembly_type)
+        })
+        .unwrap_or(assembly_type == "structure")
 }
 
 fn is_foundation_body(world: &mut World, element_id: ElementId) -> bool {
@@ -455,7 +494,7 @@ fn structure_ids_referencing_target(world: &mut World, target_id: ElementId) -> 
     query
         .iter(world)
         .filter(|(_, assembly)| {
-            is_structure_assembly_type(&assembly.assembly_type)
+            is_structure_assembly_type(world, &assembly.assembly_type)
                 && assembly
                     .members
                     .iter()
@@ -469,7 +508,7 @@ fn selected_structure_candidates(world: &mut World, selected_ids: &[ElementId]) 
     let mut candidates = Vec::new();
     for selected_id in selected_ids {
         if semantic_assembly_by_id(world, *selected_id)
-            .is_some_and(|assembly| is_structure_assembly_type(&assembly.assembly_type))
+            .is_some_and(|assembly| is_structure_assembly_type(world, &assembly.assembly_type))
         {
             candidates.push(*selected_id);
             continue;
@@ -528,7 +567,7 @@ fn resolve_plant_structure_args(
             }
         })?;
     if semantic_assembly_by_id(world, structure_id)
-        .is_none_or(|assembly| !is_structure_assembly_type(&assembly.assembly_type))
+        .is_none_or(|assembly| !is_structure_assembly_type(world, &assembly.assembly_type))
     {
         return Err(format!(
             "Plant Structure: structure_id {} is not a semantic structure/house/building assembly.",
@@ -816,10 +855,11 @@ fn foundation_top(
     surface_id: ElementId,
 ) -> Option<f32> {
     let foundation_entity = find_entity_by_element_id(world, foundation_id)?;
-    let solid = world.get::<ConformingSolid>(foundation_entity)?.clone();
-    let heightfield = find_heightfield(world, surface_id)?;
-    let (max_grade, _) = heightfield.max_over(&solid.world_corners())?;
-    Some(max_grade + solid.min_thickness)
+    support_top_on_surface(
+        world,
+        world.get::<ConformingSolid>(foundation_entity)?,
+        surface_id,
+    )
 }
 
 fn preview_foundation_top(
@@ -827,13 +867,11 @@ fn preview_foundation_top(
     foundation: &BoxedEntity,
     surface_id: ElementId,
 ) -> Option<f32> {
-    if foundation.type_name() != "conforming_solid" {
-        return None;
-    }
-    let foundation =
-        serde_json::from_value::<ConformingSolidSnapshot>(foundation.to_json()).ok()?;
-    let heightfield = find_heightfield_readonly(world, surface_id)?;
-    conforming_metrics(&foundation.solid, &heightfield).map(|metrics| metrics.y_top)
+    let foundation = foundation
+        .0
+        .as_any()
+        .downcast_ref::<ConformingSolidSnapshot>()?;
+    support_top_on_surface(world, &foundation.solid, surface_id)
 }
 
 fn preview_member_bounds(
@@ -995,7 +1033,7 @@ fn adjust_planted_structure_transform_preview(
     state: &TransformState,
     after: &mut Vec<BoxedEntity>,
 ) {
-    if state.mode != TransformMode::Moving || after.is_empty() {
+    if !matches!(state.mode, TransformMode::Moving | TransformMode::Rotating) || after.is_empty() {
         return;
     }
 
@@ -1016,22 +1054,33 @@ fn adjust_planted_structure_transform_preview(
     };
 
     for (group_id, planted) in planted {
+        // A whole planted group already has its rotated members in the shared
+        // plan. A rotation of a single child must not move the entire group.
+        if state.mode == TransformMode::Rotating
+            && !(initial_by_id.contains_key(&group_id)
+                && initial_by_id.contains_key(&planted.foundation_id))
+        {
+            continue;
+        }
         let Some(placement) = PlantedPlacement::from_world(world, group_id, planted) else {
             continue;
         };
         let member_set = placement.recursive_member_set();
-        let contract_ids = placement.contract_id_set();
-        if contains_specialized_hosted_edit(&initial_by_id, after, &contract_ids) {
-            continue;
-        }
-        let Some(direct_delta) = direct_preview_delta(&initial_by_id, after, &contract_ids) else {
-            continue;
-        };
-        if direct_delta.length_squared() <= f32::EPSILON {
-            continue;
-        }
+        if state.mode == TransformMode::Moving {
+            let contract_ids = placement.contract_id_set();
+            if contains_specialized_hosted_edit(&initial_by_id, after, &contract_ids) {
+                continue;
+            }
+            let Some(direct_delta) = direct_preview_delta(&initial_by_id, after, &contract_ids)
+            else {
+                continue;
+            };
+            if direct_delta.length_squared() <= f32::EPSILON {
+                continue;
+            }
 
-        ensure_planted_contract_in_preview(world, after, &placement, direct_delta);
+            ensure_planted_contract_in_preview(world, after, &placement, direct_delta);
+        }
 
         let mut member_set_without_foundation = member_set.clone();
         member_set_without_foundation.remove(&placement.foundation_id);
@@ -1060,6 +1109,55 @@ fn translate_group_frame(world: &mut World, group_id: ElementId, delta: Vec3) {
     }
 }
 
+/// Placement-time measurement only. Transform generated vertices into the authored
+/// group frame before bounding; inverse-transforming a world AABB inflates a
+/// rotated occurrence twice. No meshes are rebuilt and no per-frame work is added.
+fn occurrence_footprint_bounds(
+    world: &World,
+    owner: ElementId,
+    frame: GroupFrame,
+) -> Option<EntityBounds> {
+    let entity = find_entity_by_element_id_readonly(world, owner)?;
+    world.get::<OccurrenceIdentity>(entity)?;
+    let meshes = world.get_resource::<Assets<Mesh>>()?;
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    let mut any = false;
+    let inverse = frame.rotation.inverse();
+    let mut include = |handle: &Mesh3d, transform: &GlobalTransform| {
+        let Some(positions) = meshes
+            .get(handle.id())
+            .and_then(|mesh| mesh.attribute(Mesh::ATTRIBUTE_POSITION))
+            .and_then(|positions| positions.as_float3())
+        else {
+            return;
+        };
+        for point in positions {
+            let local =
+                inverse * (transform.transform_point(Vec3::from(*point)) - frame.translation);
+            min = min.min(local);
+            max = max.max(local);
+            any = true;
+        }
+    };
+    if let (Some(mesh), Some(transform)) = (
+        world.get::<Mesh3d>(entity),
+        world.get::<GlobalTransform>(entity),
+    ) {
+        include(mesh, transform);
+    }
+    if let Some(mut query) =
+        world.try_query::<(&GeneratedOccurrencePart, &Mesh3d, &GlobalTransform)>()
+    {
+        for (part, mesh, transform) in query.iter(world) {
+            if part.owner == owner {
+                include(mesh, transform);
+            }
+        }
+    }
+    any.then_some(EntityBounds { min, max })
+}
+
 fn foundation_footprint_from_body(
     world: &mut World,
     foundation_body_id: ElementId,
@@ -1072,8 +1170,14 @@ fn foundation_footprint_from_body(
     if let Some(group_id) = find_group_for_member(world, foundation_body_id) {
         if let Some(frame) = group_frame(world, group_id) {
             if !frame.is_identity() {
-                if let Some(bounds) =
-                    compute_group_bounds_in_frame_from_world(world, &[foundation_body_id], &frame)
+                if let Some(bounds) = occurrence_footprint_bounds(world, foundation_body_id, frame)
+                    .or_else(|| {
+                        compute_group_bounds_in_frame_from_world(
+                            world,
+                            &[foundation_body_id],
+                            &frame,
+                        )
+                    })
                 {
                     let local_center = bounds.center();
                     let world_center = frame.point_to_world(local_center);
@@ -1150,11 +1254,12 @@ fn create_foundation_structure_assembly(
     foundation_id: ElementId,
     surface_id: ElementId,
 ) -> ElementId {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let foundation_structure_id = world.resource::<ElementIdAllocator>().next_id();
     AssemblySnapshot {
         element_id: foundation_structure_id,
         assembly: SemanticAssembly {
-            assembly_type: "foundation_system".to_string(),
+            assembly_type: vocabulary.support_assembly_type.clone(),
             label: "Terrain-conforming foundation system".to_string(),
             members: vec![AssemblyMemberRef {
                 target: foundation_id,
@@ -1166,7 +1271,7 @@ fn create_foundation_structure_assembly(
                 "adaptive": true,
             }),
             metadata: json!({
-                "kind": "foundation_system",
+                "kind": vocabulary.support_assembly_type,
                 "placement_kind": "terrain_conforming_foundation",
                 "body_id": foundation_id.0,
             }),
@@ -1191,8 +1296,9 @@ fn foundation_body_from_system(
     world: &mut World,
     foundation_structure_id: ElementId,
 ) -> Option<ElementId> {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let assembly = semantic_assembly_by_id(world, foundation_structure_id)?;
-    if assembly.assembly_type != "foundation_system" {
+    if assembly.assembly_type != vocabulary.support_assembly_type {
         return None;
     }
     assembly
@@ -1275,13 +1381,14 @@ fn direct_foundation_body_from_structure(
     structure: &SemanticAssembly,
     explicit_foundation_id: Option<ElementId>,
 ) -> Option<ElementId> {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     if explicit_foundation_id.is_some_and(|id| is_foundation_body(world, id)) {
         return explicit_foundation_id;
     }
     structure
         .members
         .iter()
-        .filter(|member| member.role.contains("foundation"))
+        .filter(|member| member.role.contains(&vocabulary.support_member_role))
         .find(|member| is_foundation_body(world, member.target))
         .map(|member| member.target)
 }
@@ -1290,58 +1397,77 @@ fn foundation_system_from_structure(
     world: &mut World,
     structure: &SemanticAssembly,
 ) -> Option<ElementId> {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     structure.members.iter().find_map(|member| {
         let assembly = semantic_assembly_by_id(world, member.target)?;
-        (assembly.assembly_type == "foundation_system").then_some(member.target)
+        (assembly.assembly_type == vocabulary.support_assembly_type).then_some(member.target)
     })
 }
 
+/// Resolve coverage from the containment graph once, rather than recursively
+/// visiting every candidate group and doing a world-wide ID lookup per member.
+/// Intersecting ancestor sets preserves the requirement for a unique covering
+/// group, including ambiguity and cycle handling for legacy documents.
 fn movable_group_from_structure(
     world: &mut World,
     structure: &SemanticAssembly,
     explicit_group_id: Option<ElementId>,
 ) -> Option<ElementId> {
-    let covers_structure = |world: &World, group_id: ElementId| {
-        let mut covered = collect_group_members_recursive(world, group_id)
-            .into_iter()
-            .collect::<HashSet<_>>();
-        covered.insert(group_id);
-        structure
+    let mut query = world.query::<(Entity, &ElementId, Option<&GroupMembers>)>();
+    let mut entities = HashMap::new();
+    let mut groups = HashSet::new();
+    let mut parents: HashMap<ElementId, Vec<ElementId>> = HashMap::new();
+    for (entity, id, members) in query.iter(world) {
+        entities.insert(*id, entity);
+        if let Some(members) = members {
+            groups.insert(*id);
+            for member in &members.member_ids {
+                parents.entry(*member).or_default().push(*id);
+            }
+        }
+    }
+    if explicit_group_id.is_some_and(|id| !groups.contains(&id)) {
+        return None;
+    }
+    if explicit_group_id.is_none() {
+        if let Some(member) = structure
             .members
             .iter()
-            .filter(|member| {
-                is_group(world, member.target)
-                    || capture_by_id(world, member.target)
-                        .and_then(|snapshot| snapshot.bounds())
-                        .is_some()
-            })
-            .all(|member| covered.contains(&member.target))
-    };
-    if let Some(group_id) = explicit_group_id {
-        return (is_group(world, group_id) && covers_structure(world, group_id))
-            .then_some(group_id);
+            .find(|member| member.role == "superstructure_group" && groups.contains(&member.target))
+        {
+            return Some(member.target);
+        }
     }
-    if let Some(group_id) = structure
-        .members
-        .iter()
-        .find(|member| member.role == "superstructure_group" && is_group(world, member.target))
-        .map(|member| member.target)
-    {
-        return Some(group_id);
+    let registry = world.resource::<CapabilityRegistry>();
+    let mut candidates = explicit_group_id.map_or_else(|| groups.clone(), |id| HashSet::from([id]));
+    for member in &structure.members {
+        let physical = groups.contains(&member.target)
+            || entities.get(&member.target).is_some_and(|entity| {
+                world
+                    .get_entity(*entity)
+                    .ok()
+                    .and_then(|entity| {
+                        registry
+                            .capture_snapshot(&entity, world)
+                            .and_then(|snapshot| snapshot.bounds())
+                    })
+                    .is_some()
+            });
+        if !physical {
+            continue;
+        }
+        let mut ancestors = HashSet::new();
+        let mut stack = vec![member.target];
+        while let Some(id) = stack.pop() {
+            if ancestors.insert(id) {
+                stack.extend(parents.get(&id).into_iter().flatten().copied());
+            }
+        }
+        candidates.retain(|id| ancestors.contains(id));
+        if candidates.is_empty() {
+            return None;
+        }
     }
-
-    // `create_assembly` emits a sibling physical group for the same member
-    // targets and returns it as `group_element_id`; that group is not itself a
-    // semantic member. Resolve it by coverage rather than falling back to the
-    // first group-valued member (which is often only the foundation branch).
-    let group_ids = {
-        let mut query = world.query::<(&ElementId, &GroupMembers)>();
-        query.iter(world).map(|(id, _)| *id).collect::<Vec<_>>()
-    };
-    let candidates = group_ids
-        .into_iter()
-        .filter(|group_id| covers_structure(world, *group_id))
-        .collect::<HashSet<_>>();
     (candidates.len() == 1).then(|| *candidates.iter().next().expect("one candidate"))
 }
 
@@ -1352,6 +1478,7 @@ fn ensure_structure_has_foundation_system_member(
     foundation_body_id: ElementId,
     surface_id: ElementId,
 ) {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let Some(entity) = find_entity_by_element_id(world, structure_id) else {
         return;
     };
@@ -1365,7 +1492,7 @@ fn ensure_structure_has_foundation_system_member(
     {
         assembly.members.push(AssemblyMemberRef {
             target: foundation_structure_id,
-            role: "foundation".to_string(),
+            role: vocabulary.support_member_role.clone(),
         });
     }
     if !assembly
@@ -1395,6 +1522,7 @@ fn update_foundation_system_as_adaptive(
     foundation_body_id: ElementId,
     surface_id: ElementId,
 ) {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let Some(entity) = find_entity_by_element_id(world, foundation_structure_id) else {
         return;
     };
@@ -1419,7 +1547,7 @@ fn update_foundation_system_as_adaptive(
         "adaptive": true,
     });
     assembly.metadata = json!({
-        "kind": "foundation_system",
+        "kind": vocabulary.support_assembly_type,
         "placement_kind": "terrain_conforming_foundation",
         "body_id": foundation_body_id.0,
     });
@@ -1434,7 +1562,7 @@ fn resolve_structure_plant_target(
 ) -> Result<StructurePlantTarget, String> {
     let structure = semantic_assembly_by_id(world, structure_id)
         .ok_or_else(|| format!("Structure {} was not found.", structure_id.0))?;
-    if !is_structure_assembly_type(&structure.assembly_type) {
+    if !is_structure_assembly_type(world, &structure.assembly_type) {
         return Err(format!(
             "Plant Structure: {} is a '{}' assembly, not a structure/house/building.",
             structure_id.0, structure.assembly_type
@@ -1478,8 +1606,10 @@ fn create_structure_assembly(
     surface_id: ElementId,
     y_delta: f32,
     hidden_foundation: Option<ElementId>,
+    base_offset_from_foundation_top: f32,
     label: String,
 ) -> ElementId {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let structure_id = world.resource::<ElementIdAllocator>().next_id();
     AssemblySnapshot {
         element_id: structure_id,
@@ -1493,7 +1623,7 @@ fn create_structure_assembly(
                 },
                 AssemblyMemberRef {
                     target: foundation_structure_id,
-                    role: "foundation".to_string(),
+                    role: vocabulary.support_member_role.clone(),
                 },
                 AssemblyMemberRef {
                     target: foundation_id,
@@ -1505,6 +1635,7 @@ fn create_structure_assembly(
                 "surface_id": surface_id.0,
                 "y_delta": y_delta,
                 "hidden_foundation_id": hidden_foundation.map(|id| id.0),
+                "base_offset_from_foundation_top": base_offset_from_foundation_top,
             }),
             metadata: json!({
                 "kind": "structure",
@@ -1522,11 +1653,12 @@ fn create_structure_assembly(
 }
 
 fn find_foundation_structure_for_body(world: &mut World, body_id: ElementId) -> Option<ElementId> {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let mut query = world.query::<(&ElementId, &SemanticAssembly)>();
     query
         .iter(world)
         .find(|(_, assembly)| {
-            assembly.assembly_type == "foundation_system"
+            assembly.assembly_type == vocabulary.support_assembly_type
                 && assembly
                     .members
                     .iter()
@@ -1542,8 +1674,8 @@ struct PersistedPlantedStructure {
     planted_on_surface: PlantedOnSurface,
 }
 
-fn is_persisted_planted_structure(assembly: &SemanticAssembly) -> bool {
-    if !is_structure_assembly_type(&assembly.assembly_type) {
+fn is_persisted_planted_structure(world: &World, assembly: &SemanticAssembly) -> bool {
+    if !is_structure_assembly_type(world, &assembly.assembly_type) {
         return false;
     }
     if let Some(placement_kind) = assembly
@@ -1642,7 +1774,7 @@ fn persisted_planted_structures(world: &mut World) -> Vec<PersistedPlantedStruct
         let mut query = world.query::<(&ElementId, &SemanticAssembly)>();
         query
             .iter(world)
-            .filter(|(_, assembly)| is_persisted_planted_structure(assembly))
+            .filter(|(_, assembly)| is_persisted_planted_structure(world, assembly))
             .map(|(id, assembly)| (*id, assembly.clone()))
             .collect::<Vec<_>>()
     };
@@ -1701,7 +1833,78 @@ fn same_planted_structure(left: PlantedStructure, right: PlantedStructure) -> bo
             <= 0.001
 }
 
+/// Planting is a derived model contract, not camera presentation. Reconcile only
+/// when its authored inputs, render bounds, or restored runtime components
+/// change. History also covers domain-specific authored components unknown to
+/// this capability. Component changes cover preview, loading and async terrain
+/// derivation before/without a history commit. Camera transforms have no
+/// ElementId and therefore cannot invalidate planting.
+#[allow(clippy::type_complexity)]
+fn planting_inputs_changed(
+    mut initialized: Local<bool>,
+    transform: Option<Res<TransformState>>,
+    history: Option<Res<History>>,
+    vocabulary: Option<Res<talos3d_core::plugins::surface_placement::SurfacePlacementVocabulary>>,
+    changed: Query<
+        (),
+        (
+            With<ElementId>,
+            Or<(
+                Changed<ElementId>,
+                Changed<SemanticAssembly>,
+                Changed<GroupMembers>,
+                Changed<ConformingSolid>,
+                Changed<TerrainHeightfield>,
+                Changed<PlantedStructure>,
+                Changed<PlantedOnSurface>,
+                Changed<BoxPrimitive>,
+                Changed<TriangleMesh>,
+                Changed<Transform>,
+                Changed<bevy::camera::primitives::Aabb>,
+            )>,
+        ),
+    >,
+    mut removed_ids: RemovedComponents<ElementId>,
+    mut removed_groups: RemovedComponents<GroupMembers>,
+    mut removed_assemblies: RemovedComponents<SemanticAssembly>,
+    mut removed_foundations: RemovedComponents<ConformingSolid>,
+    mut removed_terrain: RemovedComponents<TerrainHeightfield>,
+    mut removed_contracts: RemovedComponents<PlantedStructure>,
+    mut removed_surface_links: RemovedComponents<PlantedOnSurface>,
+) -> bool {
+    // The shared plan seats the live preview. Defer document maintenance
+    // until commit or cancel restores the authored scene, including any
+    // asynchronous terrain changes that arrived during the gesture.
+    if transform.is_some_and(|state| !state.is_idle()) {
+        *initialized = false;
+        return false;
+    }
+    let first_run = !*initialized;
+    *initialized = true;
+    // Always drain every reader, even when another dependency already changed.
+    let removed = removed_ids.read().count()
+        + removed_groups.read().count()
+        + removed_assemblies.read().count()
+        + removed_foundations.read().count()
+        + removed_terrain.read().count()
+        + removed_contracts.read().count()
+        + removed_surface_links.read().count();
+    first_run
+        || history.is_some_and(|h| h.is_changed())
+        || removed != 0
+        || !changed.is_empty()
+        || vocabulary.is_some_and(|v| v.is_changed())
+}
+
+#[cfg(test)]
+#[derive(Resource, Default)]
+struct PlantingMaintenanceRuns(usize);
+
 fn rehydrate_planted_structure_components(world: &mut World) {
+    #[cfg(test)]
+    if let Some(mut runs) = world.get_resource_mut::<PlantingMaintenanceRuns>() {
+        runs.0 += 1;
+    }
     let planted = persisted_planted_structures(world);
     for contract in planted {
         if !rehydrate_demoted_foundation_as_conforming(
@@ -1721,12 +1924,17 @@ fn rehydrate_planted_structure_components(world: &mut World) {
         {
             world.entity_mut(group_entity).insert(contract.planted);
         }
-        world
-            .entity_mut(group_entity)
-            .insert(contract.planted_on_surface);
+        if world.get::<PlantedOnSurface>(group_entity) != Some(&contract.planted_on_surface) {
+            world
+                .entity_mut(group_entity)
+                .insert(contract.planted_on_surface);
+        }
         if let Some(hidden_id) = contract.planted_on_surface.hidden_foundation {
+            set_foundation_document_hidden(world, hidden_id, true);
             if let Some(hidden_entity) = find_entity_by_element_id(world, hidden_id) {
-                world.entity_mut(hidden_entity).insert(Visibility::Hidden);
+                if world.get::<Visibility>(hidden_entity) != Some(&Visibility::Hidden) {
+                    world.entity_mut(hidden_entity).insert(Visibility::Hidden);
+                }
             }
         }
     }
@@ -1736,6 +1944,7 @@ fn resolve_conforming_foundation_target(
     world: &mut World,
     target_id: ElementId,
 ) -> Result<(Option<ElementId>, ElementId), String> {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let target_entity = find_entity_by_element_id(world, target_id)
         .ok_or_else(|| "target not found".to_string())?;
     if world.get::<ConformingSolid>(target_entity).is_some() {
@@ -1752,7 +1961,7 @@ fn resolve_conforming_foundation_target(
                 .to_string()
         })?
         .clone();
-    if assembly.assembly_type != "foundation_system" {
+    if assembly.assembly_type != vocabulary.support_assembly_type {
         return Err("target semantic assembly is not a foundation_system".to_string());
     }
     for member in &assembly.members {
@@ -1787,6 +1996,7 @@ fn update_foundation_structure_after_demote(
     representation: &str,
     metrics: crate::conforming::ConformingMetrics,
 ) {
+    let vocabulary = talos3d_core::plugins::surface_placement::placement_vocabulary(world);
     let Some(entity) = find_entity_by_element_id(world, foundation_structure_id) else {
         return;
     };
@@ -1811,7 +2021,7 @@ fn update_foundation_structure_after_demote(
         "max_thickness": metrics.max_thickness,
     });
     assembly.metadata = json!({
-        "kind": "foundation_system",
+        "kind": vocabulary.support_assembly_type,
         "placement_kind": "demoted_conforming_foundation",
         "body_id": body_id.0,
         "demoted_representation": representation,
@@ -1844,6 +2054,7 @@ fn replace_conforming_foundation_with_min_height_box(
             ),
         },
         rotation: ShapeRotation(Quat::from_rotation_y(solid.yaw)),
+        layer: None,
         material_assignment: None,
         opening_context: None,
         subobject_display_overrides: None,
@@ -2143,32 +2354,51 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         target_before.0.bounds()
     }
     .ok_or_else(|| "target has no bounds".to_string())?;
-    let footprint_bounds = hide_id
-        .and_then(|id| capture_by_id(world, id).and_then(|snapshot| snapshot.bounds()))
-        .unwrap_or(bounds);
-    let center = Vec2::new(
-        (footprint_bounds.min.x + footprint_bounds.max.x) * 0.5,
-        (footprint_bounds.min.z + footprint_bounds.max.z) * 0.5,
-    );
-    let half_extents = Vec2::new(
-        ((footprint_bounds.max.x - footprint_bounds.min.x) * 0.5).max(0.05),
-        ((footprint_bounds.max.z - footprint_bounds.min.z) * 0.5).max(0.05),
-    );
-    let base_y = bounds.min.y;
-
+    // Replacing a base seats its upper face on the new support. Hidden source
+    // references may extend below it; preserve their aggregate offset for every
+    // later reseat, preview, reload and undo/redo through the shared contract.
+    let (center, half_extents, yaw, seating_y) = if let Some(id) = hide_id {
+        let base = capture_by_id(world, id)
+            .and_then(|snapshot| snapshot.bounds())
+            .ok_or_else(|| "original foundation has no bounds".to_string())?;
+        let (center, half_extents, yaw) = foundation_footprint_from_body(world, id)?;
+        (center, half_extents, yaw, base.max.y)
+    } else {
+        (
+            Vec2::new(bounds.center().x, bounds.center().z),
+            Vec2::new(
+                ((bounds.max.x - bounds.min.x) * 0.5).max(0.05),
+                ((bounds.max.z - bounds.min.z) * 0.5).max(0.05),
+            ),
+            0.0,
+            bounds.min.y,
+        )
+    };
+    let retained_base_y = if is_group(world, target_id) {
+        member_bounds_excluding(world, &group_member_ids(world, target_id), ElementId(0))
+            .map(|bounds| bounds.min.y)
+            .unwrap_or(bounds.min.y)
+    } else {
+        bounds.min.y
+    };
+    let base_offset_from_foundation_top = retained_base_y - seating_y;
+    let solid = ConformingSolid {
+        name: "Hugging Foundation".to_string(),
+        position: center,
+        half_extents,
+        yaw,
+        min_thickness,
+        max_depth,
+        surface_id,
+        resolution,
+        floor_datum: None,
+    };
     let heightfield = find_heightfield(world, surface_id)
         .ok_or_else(|| "surface height field not ready".to_string())?;
-    let corners = [
-        center + Vec2::new(-half_extents.x, -half_extents.y),
-        center + Vec2::new(half_extents.x, -half_extents.y),
-        center + Vec2::new(half_extents.x, half_extents.y),
-        center + Vec2::new(-half_extents.x, half_extents.y),
-    ];
-    let (max_grade, _) = heightfield
-        .max_over(&corners)
-        .ok_or_else(|| "footprint does not overlap the surface".to_string())?;
-    let y_top = max_grade + min_thickness;
-    let y_delta = y_top - base_y;
+    let y_top = conforming_metrics(&solid, &heightfield)
+        .ok_or_else(|| "footprint does not overlap the surface".to_string())?
+        .y_top;
+    let y_delta = y_top - seating_y;
     let linked_plan = linked_subject
         .as_ref()
         .map(|_| {
@@ -2186,6 +2416,11 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         .as_ref()
         .map(|plan| plan.before().to_vec())
         .unwrap_or_default();
+    let previously_document_hidden = hide_id.is_some_and(|id| {
+        world
+            .get_resource::<ObjectVisibility>()
+            .is_some_and(|state| state.hidden.contains(&id))
+    });
     let previous_hidden_visibility = hide_id.and_then(|id| {
         find_entity_by_element_id(world, id)
             .and_then(|entity| world.get::<Visibility>(entity).copied())
@@ -2196,17 +2431,7 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
     ConformingSolidSnapshot {
         element_id: foundation_id,
         derived_top: 0.0,
-        solid: ConformingSolid {
-            name: "Hugging Foundation".to_string(),
-            position: center,
-            half_extents,
-            yaw: 0.0,
-            min_thickness,
-            max_depth,
-            surface_id,
-            resolution,
-            floor_datum: None,
-        },
+        solid,
     }
     .apply_to(world);
     let foundation_structure_id =
@@ -2235,11 +2460,13 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         surface_id,
         y_delta,
         hide_id,
+        base_offset_from_foundation_top,
         format!("Planted {}", target_before.0.label()),
     );
 
     // Hide the original foundation (reversible).
     if let Some(hide_id) = hide_id {
+        set_foundation_document_hidden(world, hide_id, true);
         if let Some(entity) = find_entity_by_element_id(world, hide_id) {
             world.entity_mut(entity).insert(Visibility::Hidden);
         }
@@ -2255,7 +2482,7 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         foundation_structure_id: Some(foundation_structure_id),
         foundation_id,
         surface_id,
-        base_offset_from_foundation_top: 0.0,
+        base_offset_from_foundation_top,
     };
     world.entity_mut(target_entity).insert(planted_on_surface);
     world.entity_mut(target_entity).insert(planted_structure);
@@ -2297,6 +2524,7 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
                 planted_structure,
                 hidden_foundation: hide_id,
                 previous_hidden_visibility,
+                previously_document_hidden,
             }));
     }
 
@@ -2421,6 +2649,7 @@ fn execute_demote_conforming_foundation(
                     ),
                 },
                 rotation: ShapeRotation(Quat::from_rotation_y(solid.yaw)),
+                layer: None,
                 material_assignment: None,
                 opening_context: None,
                 subobject_display_overrides: None,
@@ -2505,6 +2734,7 @@ fn execute_unplant_on_surface(world: &mut World, params: &Value) -> Result<Comma
 
     // Un-hide the original foundation.
     if let Some(hidden) = link.hidden_foundation {
+        set_foundation_document_hidden(world, hidden, false);
         if let Some(entity) = find_entity_by_element_id(world, hidden) {
             world.entity_mut(entity).insert(Visibility::Inherited);
         }
@@ -2742,6 +2972,17 @@ mod tests {
 
     fn test_world() -> World {
         let mut world = World::new();
+        world.insert_resource(
+            talos3d_core::plugins::surface_placement::SurfacePlacementVocabulary {
+                support_assembly_type: "foundation_system".into(),
+                support_member_role: "foundation".into(),
+                structure_assembly_types: vec![
+                    "structure".into(),
+                    "house".into(),
+                    "building".into(),
+                ],
+            },
+        );
         let mut registry = CapabilityRegistry::default();
         registry.register_factory(GroupFactory);
         registry.register_factory(AssemblyFactory);
@@ -2794,6 +3035,7 @@ mod tests {
                     half_extents,
                 },
                 rotation: ShapeRotation::default(),
+                layer: None,
                 material_assignment: None,
                 opening_context: None,
                 subobject_display_overrides: None,
@@ -2807,6 +3049,7 @@ mod tests {
             frame: GroupFrame::identity(),
             composite: None,
             linked_model: Some(LinkedModelRef {
+                source_root_is_document: false,
                 path: "source-building.talos3d".to_string(),
                 source_root_id: ElementId(100),
                 source_to_scene_ids: [(100, 1), (101, 2), (102, 3)]
@@ -2821,6 +3064,165 @@ mod tests {
             cached_bounds: None,
         }
         .apply_to(world);
+    }
+
+    #[test]
+    fn camera_navigation_reuses_planting_and_model_edits_invalidate_it() {
+        let mut app = linked_test_app();
+        app.add_plugins(PlantingPlugin);
+        app.init_resource::<PlantingMaintenanceRuns>();
+        let terrain = app
+            .world_mut()
+            .spawn((ElementId(10), flat_heightfield(1.0)))
+            .id();
+        spawn_linked_building(app.world_mut());
+        execute_plant_on_surface(
+            app.world_mut(),
+            &json!({
+                "target_id": 1, "surface_id": 10, "hide_element_id": 2,
+            }),
+        )
+        .unwrap();
+        for _ in 0..4 {
+            app.update();
+        }
+        let root = find_entity_by_element_id(app.world_mut(), ElementId(1)).unwrap();
+        let body = find_entity_by_element_id(app.world_mut(), ElementId(3)).unwrap();
+        let camera = app
+            .world_mut()
+            .spawn((
+                talos3d_core::plugins::camera::OrbitCamera::default(),
+                Transform::default(),
+            ))
+            .id();
+        let before = capture_by_id(app.world(), ElementId(3)).unwrap();
+        let revision = app.world().resource::<History>().revision_token();
+        let runs = app.world().resource::<PlantingMaintenanceRuns>().0;
+        // A large unrelated scene must not cause planting work during orbit.
+        for i in 0..4096 {
+            app.world_mut()
+                .spawn((ElementId(10000 + i), Transform::default()));
+        }
+        app.update();
+        let runs = app
+            .world()
+            .resource::<PlantingMaintenanceRuns>()
+            .0
+            .max(runs);
+        for i in 0..120 {
+            app.world_mut()
+                .get_mut::<Transform>(camera)
+                .unwrap()
+                .rotate_y(0.01);
+            app.world_mut()
+                .get_mut::<talos3d_core::plugins::camera::OrbitCamera>(camera)
+                .unwrap()
+                .yaw += 0.01;
+            if i == 60 {
+                app.world_mut().entity_mut(root).insert(Selected);
+            }
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<PlantingMaintenanceRuns>().0,
+            runs,
+            "camera/selection must not reconstruct planting contracts"
+        );
+        assert_eq!(capture_by_id(app.world(), ElementId(3)).unwrap(), before);
+        assert_eq!(app.world().resource::<History>().revision_token(), revision);
+
+        // Runtime components can be lost on reload or snapshot replacement.
+        app.world_mut()
+            .entity_mut(root)
+            .remove::<PlantedStructure>();
+        app.world_mut()
+            .entity_mut(root)
+            .remove::<PlantedOnSurface>();
+        app.update();
+        assert!(app.world().get::<PlantedStructure>(root).is_some());
+        assert!(app.world().get::<PlantedOnSurface>(root).is_some());
+
+        // An asynchronous terrain change has no history revision but must reseat.
+        let old_y = app.world().get::<BoxPrimitive>(body).unwrap().centre.y;
+        app.world_mut()
+            .entity_mut(terrain)
+            .insert(flat_heightfield(3.0));
+        app.update();
+        let body = find_entity_by_element_id(app.world_mut(), ElementId(3)).unwrap();
+        assert!(
+            (app.world().get::<BoxPrimitive>(body).unwrap().centre.y - old_y - 2.0).abs() < 0.001
+        );
+        for _ in 0..4 {
+            app.update();
+        }
+        let settled = app.world().resource::<PlantingMaintenanceRuns>().0;
+        app.update();
+        assert_eq!(app.world().resource::<PlantingMaintenanceRuns>().0, settled);
+        app.world_mut().resource_mut::<History>().clear();
+        app.update();
+        assert_eq!(
+            app.world().resource::<PlantingMaintenanceRuns>().0,
+            settled + 1,
+            "document replacement must invalidate even with the same entities"
+        );
+    }
+
+    #[test]
+    fn indexed_coverage_preserves_ambiguity_and_handles_cycles() {
+        let mut world = test_world();
+        spawn_linked_building(&mut world);
+        let structure = SemanticAssembly {
+            assembly_type: "structure".into(),
+            label: "Structure".into(),
+            members: vec![AssemblyMemberRef {
+                target: ElementId(3),
+                role: "body".into(),
+            }],
+            parameters: json!({}),
+            metadata: json!({}),
+        };
+        assert_eq!(
+            movable_group_from_structure(&mut world, &structure, None),
+            Some(ElementId(1))
+        );
+        let nested = world
+            .spawn((
+                ElementId(50),
+                GroupMembers {
+                    name: "Nested".into(),
+                    member_ids: vec![ElementId(1)],
+                    frame: GroupFrame::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        assert_eq!(
+            movable_group_from_structure(&mut world, &structure, None),
+            None
+        );
+        assert_eq!(
+            movable_group_from_structure(&mut world, &structure, Some(ElementId(1))),
+            Some(ElementId(1))
+        );
+        let root = find_entity_by_element_id(&mut world, ElementId(1)).unwrap();
+        world
+            .get_mut::<GroupMembers>(root)
+            .unwrap()
+            .member_ids
+            .push(ElementId(50));
+        assert_eq!(
+            movable_group_from_structure(&mut world, &structure, None),
+            None
+        );
+        world
+            .get_mut::<GroupMembers>(nested)
+            .unwrap()
+            .member_ids
+            .clear();
+        assert_eq!(
+            movable_group_from_structure(&mut world, &structure, None),
+            Some(ElementId(1))
+        );
     }
 
     #[test]
@@ -2961,6 +3363,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3078,6 +3481,278 @@ mod tests {
     }
 
     #[test]
+    fn rotated_linked_replacement_seats_slab_top_through_preview_and_reload() {
+        let mut app = linked_test_app();
+        let world = app.world_mut();
+        world.spawn((ElementId(10), ramp_heightfield()));
+        spawn_linked_building(world);
+        // Imported hidden reference extends below the real slab by 0.4 m.
+        PrimitiveSnapshot {
+            element_id: ElementId(4),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, -0.3, 0.0),
+                half_extents: Vec3::splat(0.1),
+            },
+            rotation: ShapeRotation::default(),
+            layer: None,
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(world);
+        let root = find_entity_by_element_id(world, ElementId(1)).unwrap();
+        {
+            let mut group = world.get_mut::<GroupMembers>(root).unwrap();
+            group.member_ids.push(ElementId(4));
+            group
+                .linked_model
+                .as_mut()
+                .unwrap()
+                .source_to_scene_ids
+                .push(LinkedModelIdMapping {
+                    source_id: ElementId(103),
+                    scene_id: ElementId(4),
+                });
+        }
+        let reference = find_entity_by_element_id(world, ElementId(4)).unwrap();
+        world.entity_mut(reference).insert(Visibility::Hidden);
+        let rotation = Quat::from_rotation_y(0.7);
+        let plan = plan_linked_model_placement(
+            world,
+            ElementId(1),
+            LinkedModelPlacementOperation::Rotate {
+                rotation,
+                pivot: Some(Vec3::ZERO),
+            },
+        )
+        .unwrap();
+        for snapshot in plan.after() {
+            snapshot.apply_to(world);
+        }
+        let result = execute_plant_on_surface(
+            world,
+            &json!({
+                "target_id": 1, "surface_id": 10, "hide_element_id": 2, "min_thickness": 0.4,
+            }),
+        )
+        .unwrap();
+        let foundation_id = ElementId(
+            result.output.as_ref().unwrap()["foundation_id"]
+                .as_u64()
+                .unwrap(),
+        );
+        let foundation = find_entity_by_element_id(world, foundation_id).unwrap();
+        let solid = world.get::<ConformingSolid>(foundation).unwrap();
+        assert!((solid.half_extents - Vec2::splat(1.5)).length() < 0.001);
+        assert!((solid.yaw + 0.7).abs() < 0.001);
+        let top = foundation_top(world, foundation_id, ElementId(10)).unwrap();
+        assert!(
+            (capture_by_id(world, ElementId(3))
+                .unwrap()
+                .bounds()
+                .unwrap()
+                .min
+                .y
+                - top)
+                .abs()
+                < 0.001
+        );
+        let planted = *world.get::<PlantedStructure>(root).unwrap();
+        assert!((planted.base_offset_from_foundation_top + 0.8).abs() < 0.001);
+        // Rehydration must preserve the datum instead of jumping to hidden bounds.
+        world.entity_mut(root).remove::<PlantedStructure>();
+        rehydrate_planted_structure_components(world);
+        assert!(same_planted_structure(
+            *world.get::<PlantedStructure>(root).unwrap(),
+            planted
+        ));
+        let before = capture_by_id(world, ElementId(3)).unwrap();
+        reseat_planted_structures(world);
+        assert_eq!(capture_by_id(world, ElementId(3)).unwrap(), before);
+        let mut after = translated_target_snapshots(world, ElementId(1), Vec3::new(2.0, 0.0, 0.0));
+        let state = TransformState {
+            mode: TransformMode::Moving,
+            initial_snapshots: vec![(root, capture_by_id(world, ElementId(1)).unwrap())],
+            ..Default::default()
+        };
+        adjust_planted_structure_transform_preview(world, &state, &mut after);
+        let support = after
+            .iter()
+            .find(|s| s.element_id() == foundation_id)
+            .unwrap();
+        let preview_top = preview_foundation_top(world, support, ElementId(10)).unwrap();
+        let body = after
+            .iter()
+            .find(|s| s.element_id() == ElementId(3))
+            .unwrap();
+        assert!((body.bounds().unwrap().min.y - preview_top).abs() < 0.001);
+        for snapshot in &after {
+            snapshot.apply_to(world);
+        }
+        reseat_planted_structures(world);
+        assert_eq!(capture_by_id(world, ElementId(3)).unwrap(), *body);
+    }
+
+    #[test]
+    fn planted_yaw_preview_matches_the_rebuilt_support_and_survives_reseating() {
+        let mut app = linked_test_app();
+        app.add_plugins(PlantingPlugin);
+        let world = app.world_mut();
+        world.spawn((ElementId(10), ramp_heightfield()));
+        spawn_linked_building(world);
+        execute_plant_on_surface(
+            world,
+            &json!({"target_id": 1, "surface_id": 10, "hide_element_id": 2}),
+        )
+        .unwrap();
+        let root = find_entity_by_element_id(world, ElementId(1)).unwrap();
+        let foundation_id = world.get::<PlantedStructure>(root).unwrap().foundation_id;
+        let previous_top = foundation_top(world, foundation_id, ElementId(10)).unwrap();
+        let plan = plan_linked_model_placement(
+            world,
+            ElementId(1),
+            LinkedModelPlacementOperation::Rotate {
+                rotation: Quat::from_rotation_y(0.7),
+                pivot: Some(Vec3::ZERO),
+            },
+        )
+        .unwrap();
+        for snapshot in plan.after() {
+            snapshot.apply_to(world);
+        }
+        let top = foundation_top(world, foundation_id, ElementId(10)).unwrap();
+        assert!((top - previous_top).abs() > 0.001);
+        let body = plan
+            .after()
+            .iter()
+            .find(|s| s.element_id() == ElementId(3))
+            .unwrap();
+        assert!((body.bounds().unwrap().min.y - top).abs() < 0.001);
+        // Mesh generation and background maintenance run between pointer samples.
+        let foundation = find_entity_by_element_id(world, foundation_id).unwrap();
+        world
+            .entity_mut(foundation)
+            .insert(crate::conforming::ConformingDerived { y_top: top });
+        reseat_planted_structures(world);
+        for displayed in plan.after() {
+            assert_eq!(
+                capture_by_id(world, displayed.element_id()).unwrap(),
+                *displayed
+            );
+        }
+    }
+
+    #[test]
+    fn planted_occurrence_visibility_covers_generated_parts_and_history() {
+        use talos3d_core::plugins::layers::LayerPlugin;
+        let mut app = linked_test_app();
+        app.add_plugins(LayerPlugin);
+        app.world_mut()
+            .spawn((ElementId(10), flat_heightfield(1.0)));
+        spawn_linked_building(app.world_mut());
+        let part = app
+            .world_mut()
+            .spawn((
+                GeneratedOccurrencePart {
+                    owner: ElementId(2),
+                    slot_path: "slab".into(),
+                    definition_id: talos3d_core::plugins::modeling::definition::DefinitionId(
+                        "slab".into(),
+                    ),
+                },
+                Visibility::Inherited,
+            ))
+            .id();
+        execute_plant_on_surface(
+            app.world_mut(),
+            &json!({
+                "target_id": 1, "surface_id": 10, "hide_element_id": 2,
+            }),
+        )
+        .unwrap();
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Hidden)
+        );
+        app.world_mut()
+            .resource_mut::<PendingCommandQueue>()
+            .queue_undo();
+        app.update();
+        app.update();
+        assert!(!app
+            .world()
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&ElementId(2)));
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Inherited)
+        );
+        app.world_mut()
+            .resource_mut::<PendingCommandQueue>()
+            .queue_redo();
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Hidden)
+        );
+        execute_unplant_on_surface(app.world_mut(), &json!({"target_id": 1})).unwrap();
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(part),
+            Some(&Visibility::Inherited)
+        );
+    }
+
+    #[test]
+    fn occurrence_footprint_measures_local_vertices_before_bounding() {
+        use talos3d_core::plugins::modeling::occurrence::OccurrenceIdentity;
+        let mut world = test_world();
+        world.init_resource::<Assets<Mesh>>();
+        let rotation = Quat::from_rotation_y(0.7);
+        let translation = Vec3::new(4.0, 2.0, -3.0);
+        let mut mesh = Mesh::from(Cuboid::new(19.0, 0.4, 8.0));
+        // Mesh vertices are retained by normal authored representation assets.
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap()
+                .to_vec(),
+        );
+        let handle = world.resource_mut::<Assets<Mesh>>().add(mesh);
+        let identity: OccurrenceIdentity = serde_json::from_value(json!({
+            "definition_id": "test-slab", "definition_version": 1, "overrides": {}
+        }))
+        .unwrap();
+        world.spawn((
+            ElementId(2),
+            identity,
+            Mesh3d(handle),
+            GlobalTransform::from(Transform {
+                translation,
+                rotation,
+                ..Default::default()
+            }),
+        ));
+        let bounds = occurrence_footprint_bounds(
+            &world,
+            ElementId(2),
+            GroupFrame {
+                translation,
+                rotation,
+            },
+        )
+        .unwrap();
+        assert!((bounds.max - bounds.min - Vec3::new(19.0, 0.4, 8.0)).length() < 0.0001);
+    }
+
+    #[test]
     fn plant_on_surface_uses_hidden_foundation_footprint_not_roof_overhang_bounds() {
         let mut world = test_world();
         world.spawn((ElementId(10), flat_heightfield(2.0)));
@@ -3090,6 +3765,7 @@ mod tests {
                 half_extents: Vec3::new(2.5, 0.1, 3.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3104,6 +3780,7 @@ mod tests {
                 half_extents: Vec3::new(3.8, 0.2, 3.45),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3166,6 +3843,7 @@ mod tests {
                 half_extents: Vec3::new(2.5, 0.5, 3.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3179,6 +3857,7 @@ mod tests {
                 half_extents: Vec3::splat(0.01),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3192,6 +3871,7 @@ mod tests {
                 half_extents: Vec3::new(3.8, 0.1, 3.6),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3260,6 +3940,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.8, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3272,6 +3953,7 @@ mod tests {
                 half_extents: Vec3::new(1.2, 0.2, 1.2),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3422,6 +4104,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3434,6 +4117,7 @@ mod tests {
                 half_extents: Vec3::new(1.2, 0.1, 1.2),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3520,6 +4204,7 @@ mod tests {
                     half_extents,
                 },
                 rotation: ShapeRotation::default(),
+                layer: None,
                 material_assignment: None,
                 opening_context: None,
                 subobject_display_overrides: None,
@@ -3627,6 +4312,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3639,6 +4325,7 @@ mod tests {
                 half_extents: Vec3::new(1.2, 0.1, 1.2),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3722,6 +4409,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3820,6 +4508,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3897,6 +4586,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -3988,6 +4678,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4075,6 +4766,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4173,6 +4865,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4185,6 +4878,7 @@ mod tests {
                 half_extents: Vec3::new(1.1, 0.25, 1.1),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4269,6 +4963,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4343,6 +5038,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4430,6 +5126,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4497,6 +5194,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4509,6 +5207,7 @@ mod tests {
                 half_extents: Vec3::new(1.1, 0.25, 1.1),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4627,6 +5326,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4639,6 +5339,7 @@ mod tests {
                 half_extents: Vec3::new(1.1, 0.25, 1.1),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4676,7 +5377,46 @@ mod tests {
         let mut before = vec![roof_before.clone()];
         let mut after = vec![roof_before.translate_by(Vec3::new(2.0, 0.0, 0.0))];
 
+        let viewport_state = TransformState {
+            mode: TransformMode::Moving,
+            initial_snapshots: before
+                .iter()
+                .map(|snapshot| {
+                    (
+                        talos3d_core::plugins::commands::find_entity_by_element_id_readonly(
+                            world,
+                            snapshot.element_id(),
+                        )
+                        .unwrap(),
+                        snapshot.clone(),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let viewport_plan = talos3d_core::plugins::transform::prepare_transform_edit(
+            world,
+            &viewport_state,
+            before.clone(),
+            after.clone(),
+        );
         apply_transform_plan_modifiers(world, TransformMode::Moving, &mut before, &mut after);
+        assert_eq!(
+            viewport_plan
+                .before
+                .iter()
+                .map(BoxedEntity::to_json)
+                .collect::<Vec<_>>(),
+            before.iter().map(BoxedEntity::to_json).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            viewport_plan
+                .after
+                .iter()
+                .map(BoxedEntity::to_json)
+                .collect::<Vec<_>>(),
+            after.iter().map(BoxedEntity::to_json).collect::<Vec<_>>()
+        );
 
         assert!(
             after
@@ -4741,6 +5481,7 @@ mod tests {
                     half_extents,
                 },
                 rotation: ShapeRotation::default(),
+                layer: None,
                 material_assignment: None,
                 opening_context: None,
                 subobject_display_overrides: None,
@@ -4838,6 +5579,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4850,6 +5592,7 @@ mod tests {
                 half_extents: Vec3::new(1.1, 0.25, 1.1),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -4945,6 +5688,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -5003,6 +5747,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,

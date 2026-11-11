@@ -1,9 +1,9 @@
 use std::f32::consts::TAU;
 
-const SIZE: usize = 24;
+// Rasterize the existing 24-point artwork at 2x for crisp Retina toolbars.
+const SIZE: usize = 48;
+const DESIGN_SIZE: f32 = 24.0;
 const STROKE_COLOR: [u8; 3] = [220, 225, 235];
-// Dark background matching toolbar CHROME_BG
-const BG_COLOR: [u8; 4] = [20, 23, 28, 255];
 
 struct Canvas {
     pixels: Vec<u8>,
@@ -11,15 +11,9 @@ struct Canvas {
 
 impl Canvas {
     fn new() -> Self {
-        let mut pixels = vec![0u8; SIZE * SIZE * 4];
-        for i in 0..SIZE * SIZE {
-            let idx = i * 4;
-            pixels[idx] = BG_COLOR[0];
-            pixels[idx + 1] = BG_COLOR[1];
-            pixels[idx + 2] = BG_COLOR[2];
-            pixels[idx + 3] = BG_COLOR[3];
+        Self {
+            pixels: vec![0; SIZE * SIZE * 4],
         }
-        Self { pixels }
     }
 
     fn into_rgba(self) -> Vec<u8> {
@@ -31,14 +25,8 @@ impl Canvas {
             return;
         }
         let idx = (y as usize * SIZE + x as usize) * 4;
-        let a = alpha as f32 / 255.0;
-        let inv = 1.0 - a;
-        self.pixels[idx] = (STROKE_COLOR[0] as f32 * a + self.pixels[idx] as f32 * inv) as u8;
-        self.pixels[idx + 1] =
-            (STROKE_COLOR[1] as f32 * a + self.pixels[idx + 1] as f32 * inv) as u8;
-        self.pixels[idx + 2] =
-            (STROKE_COLOR[2] as f32 * a + self.pixels[idx + 2] as f32 * inv) as u8;
-        self.pixels[idx + 3] = 255;
+        self.pixels[idx..idx + 3].copy_from_slice(&STROKE_COLOR);
+        self.pixels[idx + 3] = self.pixels[idx + 3].max(alpha);
     }
 
     fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
@@ -46,6 +34,14 @@ impl Canvas {
     }
 
     fn thick_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, thickness: f32) {
+        let scale = SIZE as f32 / DESIGN_SIZE;
+        let (x0, y0, x1, y1, thickness) = (
+            x0 * scale,
+            y0 * scale,
+            x1 * scale,
+            y1 * scale,
+            thickness * scale,
+        );
         let dx = x1 - x0;
         let dy = y1 - y0;
         let len = (dx * dx + dy * dy).sqrt().max(0.01);
@@ -353,6 +349,16 @@ fn draw_deselect(c: &mut Canvas) {
 }
 
 // Lucide: crosshair (set pivot)
+fn draw_ruler(c: &mut Canvas) {
+    c.line(3.0, 7.0, 21.0, 7.0);
+    c.line(21.0, 7.0, 21.0, 17.0);
+    c.line(21.0, 17.0, 3.0, 17.0);
+    c.line(3.0, 17.0, 3.0, 7.0);
+    for x in [7.0, 12.0, 17.0] {
+        c.line(x, 7.0, x, 12.0);
+    }
+}
+
 fn draw_crosshair(c: &mut Canvas) {
     c.circle(12.0, 12.0, 10.0);
     c.line(22.0, 12.0, 18.0, 12.0);
@@ -706,6 +712,20 @@ fn draw_materials(c: &mut Canvas) {
     c.line(15.0, 16.0, 17.0, 16.0);
 }
 
+fn draw_padlock(c: &mut Canvas, locked: bool) {
+    c.rounded_rect(5.0, 11.0, 14.0, 10.0, 2.0);
+    let center = if locked { 12.0 } else { 16.0 };
+    c.arc(center, 7.0, 4.0, TAU / 2.0, TAU);
+    c.line(center - 4.0, 7.0, center - 4.0, 11.0);
+    c.line(
+        center + 4.0,
+        7.0,
+        center + 4.0,
+        if locked { 11.0 } else { 8.0 },
+    );
+    c.line(12.0, 15.0, 12.0, 17.0);
+}
+
 pub fn render_icon(name: &str) -> Vec<u8> {
     let mut c = Canvas::new();
     match name {
@@ -725,6 +745,7 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "export" => draw_export(&mut c),
         "box_select" => draw_box_select(&mut c),
         "deselect" => draw_deselect(&mut c),
+        "ruler" => draw_ruler(&mut c),
         "crosshair" => draw_crosshair(&mut c),
         "zoom_extents" => draw_zoom_extents(&mut c),
         "zoom_selection" => draw_zoom_selection(&mut c),
@@ -760,9 +781,48 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "opening" => draw_opening(&mut c),
         "definitions" => draw_definitions(&mut c),
         "materials" => draw_materials(&mut c),
+        "lock_closed" => draw_padlock(&mut c, true),
+        "lock_open" => draw_padlock(&mut c, false),
         _ => draw_plus(&mut c),
     }
     c.into_rgba()
 }
 
 pub const ICON_SIZE: u32 = SIZE as u32;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toolbar_icons_have_transparent_backgrounds_and_antialiased_strokes_at_2x() {
+        for name in [
+            "mouse_pointer",
+            "move",
+            "save",
+            "undo",
+            "view_grid",
+            "definitions",
+        ] {
+            let rgba = render_icon(name);
+            assert_eq!(rgba.len(), SIZE * SIZE * 4);
+            assert_eq!(&rgba[..4], &[0, 0, 0, 0], "{name} background");
+            assert!(
+                rgba.chunks_exact(4).any(|pixel| pixel[3] == 255),
+                "{name} stroke"
+            );
+            assert!(
+                rgba.chunks_exact(4)
+                    .any(|pixel| pixel[3] > 0 && pixel[3] < 255),
+                "{name} antialiasing"
+            );
+            for pixel in rgba.chunks_exact(4).filter(|pixel| pixel[3] > 0) {
+                assert_eq!(
+                    &pixel[..3],
+                    &STROKE_COLOR,
+                    "{name} must not bake in the toolbar background"
+                );
+            }
+        }
+    }
+}

@@ -1,4 +1,7 @@
-use std::{any::Any, collections::HashMap};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -620,11 +623,25 @@ impl AuthoredEntityFactory for DimensionLineFactory {
         if !visibility.show_all {
             return None;
         }
-        let mut query = world.try_query::<(Entity, &DimensionLineNode)>()?;
+        let scope = DimensionDraftScope::from_world(world);
+        let mut query = world.try_query::<(Entity, &ElementId, &DimensionLineNode)>()?;
         query
             .iter(world)
-            .filter(|(_, node)| node.visible)
-            .filter_map(|(entity, node)| {
+            .filter(|(entity, id, node)| {
+                node.visible
+                    && !crate::plugins::object_locks::entity_locked(world, *entity)
+                    && scope.permits(
+                        **id,
+                        world
+                            .get::<crate::plugins::selection::Selected>(*entity)
+                            .is_some(),
+                    )
+                    && dimension_layer_visible(
+                        world.get_resource::<LayerRegistry>(),
+                        world.get::<LayerAssignment>(*entity),
+                    )
+            })
+            .filter_map(|(entity, _, node)| {
                 let segments =
                     dimension_segments(node.start, node.end, node.line_point, node.extension);
                 let best_distance = segments
@@ -651,11 +668,23 @@ impl AuthoredEntityFactory for DimensionLineFactory {
         if !visibility.show_all {
             return;
         }
-        let Some(mut query) = world.try_query::<&DimensionLineNode>() else {
+        let scope = DimensionDraftScope::from_world(world);
+        let Some(mut query) = world.try_query::<(Entity, &ElementId, &DimensionLineNode)>() else {
             return;
         };
-        for node in query.iter(world) {
-            if !node.visible {
+        for (entity, id, node) in query.iter(world) {
+            if !node.visible
+                || !scope.permits(
+                    *id,
+                    world
+                        .get::<crate::plugins::selection::Selected>(entity)
+                        .is_some(),
+                )
+                || !dimension_layer_visible(
+                    world.get_resource::<LayerRegistry>(),
+                    world.get::<LayerAssignment>(entity),
+                )
+            {
                 continue;
             }
             out.push(SnapPoint {
@@ -685,6 +714,77 @@ impl AuthoredEntityFactory for DimensionLineFactory {
     }
 }
 
+fn dimension_layer_visible(
+    registry: Option<&LayerRegistry>,
+    layer: Option<&LayerAssignment>,
+) -> bool {
+    registry.is_none_or(|registry| {
+        registry.is_visible(
+            layer.map_or(crate::plugins::layers::DEFAULT_LAYER_NAME, |layer| {
+                layer.layer.as_str()
+            }),
+        )
+    })
+}
+
+/// Draft-owned dimensions belong to their drawing view. Keep ordinary unowned
+/// 3D annotations visible, and allow a selected dimension to be edited in 3D.
+#[derive(Default)]
+struct DimensionDraftScope {
+    initialized: bool,
+    state: (bool, Option<ElementId>, usize),
+    owned: HashSet<ElementId>,
+    active_members: Option<HashSet<ElementId>>,
+}
+
+impl DimensionDraftScope {
+    fn rebuild<'a>(
+        &mut self,
+        active: bool,
+        active_id: Option<ElementId>,
+        drafts: impl Iterator<Item = (ElementId, &'a crate::plugins::drafting::draft::DraftNode)>,
+    ) {
+        self.owned.clear();
+        self.active_members = active
+            .then_some(active_id)
+            .flatten()
+            .map(|_| HashSet::new());
+        let mut count = 0;
+        for (id, draft) in drafts {
+            count += 1;
+            self.owned.extend(draft.members.iter().copied());
+            if active && Some(id) == active_id {
+                self.active_members = Some(draft.members.iter().copied().collect());
+            }
+        }
+        self.state = (active, active_id, count);
+        self.initialized = true;
+    }
+
+    fn permits(&self, id: ElementId, selected: bool) -> bool {
+        if let Some(members) = &self.active_members {
+            members.contains(&id)
+        } else {
+            !self.owned.contains(&id) || selected
+        }
+    }
+
+    fn from_world(world: &World) -> Self {
+        let workspace = world.get_resource::<crate::plugins::drafting::DraftingWorkspaceState>();
+        let mut scope = Self::default();
+        if let Some(mut query) =
+            world.try_query::<(&ElementId, &crate::plugins::drafting::draft::DraftNode)>()
+        {
+            scope.rebuild(
+                workspace.is_some_and(|w| w.is_active()),
+                workspace.and_then(|w| w.active_draft_id()),
+                query.iter(world).map(|(id, draft)| (*id, draft)),
+            );
+        }
+        scope
+    }
+}
+
 fn draw_dimension_line_overlay(
     mut gizmos: Gizmos,
     doc_props: Res<DocumentProperties>,
@@ -693,8 +793,13 @@ fn draw_dimension_line_overlay(
     render_settings: Res<RenderSettings>,
     drafting_workspace: Option<Res<crate::plugins::drafting::DraftingWorkspaceState>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
+    drafts: Query<(&ElementId, Ref<crate::plugins::drafting::draft::DraftNode>)>,
+    mut scope: Local<DimensionDraftScope>,
+    layers: Option<Res<LayerRegistry>>,
     dimensions: Query<(
+        &ElementId,
         &DimensionLineNode,
+        Option<&LayerAssignment>,
         Option<&crate::plugins::selection::Selected>,
     )>,
 ) {
@@ -708,8 +813,25 @@ fn draw_dimension_line_overlay(
     let drafting_active = drafting_workspace
         .as_ref()
         .is_some_and(|workspace| workspace.is_active());
-    for (node, selected) in &dimensions {
-        if !node.visible {
+    let active_id = drafting_workspace
+        .as_ref()
+        .and_then(|w| w.active_draft_id());
+    let count = drafts.iter().count();
+    if !scope.initialized
+        || scope.state != (drafting_active, active_id, count)
+        || drafts.iter().any(|(_, draft)| draft.is_changed())
+    {
+        scope.rebuild(
+            drafting_active,
+            active_id,
+            drafts.iter().map(|(id, draft)| (*id, draft.into_inner())),
+        );
+    }
+    for (id, node, layer, selected) in &dimensions {
+        if !node.visible
+            || !scope.permits(*id, selected.is_some())
+            || !dimension_layer_visible(layers.as_deref(), layer)
+        {
             continue;
         }
         let color = if drafting_active && selected.is_none() {
@@ -717,20 +839,20 @@ fn draw_dimension_line_overlay(
         } else {
             dimension_overlay_color(selected.is_some(), paper_style)
         };
-        // The canonical DrawingScene live batch owns dimension line geometry
-        // in Drafting. This compatibility renderer retains glyph presentation
-        // only until DraftText moves into the shared annotation backend.
+        // The canonical DrawingScene owns both lines and screen-space text
+        // in Drafting. World-space glyphs are depth-tested and disappear under
+        // solids; drawing both backends would also duplicate exterior labels.
         if !drafting_active {
             draw_dimension_world_lines(&mut gizmos, node, color);
+            draw_dimension_world_text(
+                &mut gizmos,
+                node,
+                &doc_props,
+                camera,
+                camera_transform,
+                color,
+            );
         }
-        draw_dimension_world_text(
-            &mut gizmos,
-            node,
-            &doc_props,
-            camera,
-            camera_transform,
-            color,
-        );
     }
 }
 
@@ -1099,7 +1221,13 @@ fn current_dimension_plane(world: &World) -> Option<DrawingPlane> {
         .or(Some(fallback))
 }
 
-fn sync_dimension_annotations(world: &mut World) {
+/// A replaced document must replay metadata even when its bytes are unchanged.
+pub(crate) fn reset_metadata_sync(world: &mut World) {
+    world.insert_resource(DimensionAnnotationSyncState::default());
+}
+
+pub(crate) fn sync_dimension_annotations(world: &mut World) {
+    world.init_resource::<DimensionAnnotationSyncState>();
     let saved = {
         let doc_props = world.resource::<DocumentProperties>();
         doc_props
@@ -1867,10 +1995,10 @@ fn legacy_dimension_style(display_unit: DisplayUnit) -> DimensionStyle {
         DisplayUnit::Feet | DisplayUnit::Inches => DimensionStyle::architectural_imperial(),
         _ => DimensionStyle::architectural_metric(),
     };
-    style.text_placement = TextPlacement::Centered {
-        break_line: false,
-        gap_mm: 0.0,
-    };
+    // Native dimension anchors denote the text baseline (as in the existing
+    // PDF adapter and world glyph overlay), not its visual centre. A zero gap
+    // retains the established exported anchor coordinates and line geometry.
+    style.text_placement = TextPlacement::Above { gap_mm: 0.0 };
     style.text_color_hex = "4A4A4E".to_string();
     style
 }
@@ -2703,6 +2831,38 @@ mod tests {
     use crate::capability_registry::AuthoredEntityFactory;
 
     #[test]
+    fn drawing_dimensions_follow_their_view_without_leaking_into_3d() {
+        use crate::plugins::drafting::draft::DraftNode;
+        let mut plan = DraftNode::new("Plan");
+        plan.members = vec![ElementId(1), ElementId(3)];
+        let mut elevation = DraftNode::new("Elevation");
+        elevation.members = vec![ElementId(2), ElementId(3)];
+        let mut scope = DimensionDraftScope::default();
+        let drafts = [(ElementId(10), &plan), (ElementId(20), &elevation)];
+        scope.rebuild(false, Some(ElementId(10)), drafts.into_iter());
+        assert!(!scope.permits(ElementId(1), false));
+        assert!(!scope.permits(ElementId(2), false));
+        assert!(scope.permits(ElementId(1), true));
+        assert!(
+            scope.permits(ElementId(99), false),
+            "ordinary 3D dimensions remain visible"
+        );
+        scope.rebuild(true, Some(ElementId(10)), drafts.into_iter());
+        assert!(scope.permits(ElementId(1), false));
+        assert!(scope.permits(ElementId(3), false), "shared view annotation");
+        assert!(!scope.permits(ElementId(2), true));
+        assert!(!scope.permits(ElementId(99), false));
+        scope.rebuild(true, Some(ElementId(20)), drafts.into_iter());
+        assert!(scope.permits(ElementId(2), false));
+        assert!(!scope.permits(ElementId(1), false));
+        scope.rebuild(false, None, std::iter::empty());
+        assert!(
+            scope.permits(ElementId(1), false),
+            "removing Draft membership restores ordinary annotation"
+        );
+    }
+
+    #[test]
     fn create_request_defaults_visible_extension() {
         let mut world = World::new();
         world.insert_resource(ElementIdAllocator::default());
@@ -3153,6 +3313,50 @@ mod tests {
         .expect("an active camera should be selected");
 
         assert_eq!(selected_transform.translation(), Vec3::new(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn native_projected_dimensions_use_baseline_without_moving_exported_anchors() {
+        let node = DimensionLineNode::default();
+        let doc = DocumentProperties::default();
+        for (a, b, offset) in [
+            (Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(0.0, 3.0)),
+            (Vec2::new(10.0, 0.0), Vec2::ZERO, Vec2::new(0.0, 3.0)),
+            (Vec2::ZERO, Vec2::new(0.0, 10.0), Vec2::new(3.0, 0.0)),
+            (Vec2::new(0.0, 10.0), Vec2::ZERO, Vec2::new(3.0, 0.0)),
+        ] {
+            let primitives =
+                render_dimension_line_projected_primitives(&node, &doc, a, b, offset, 1.0);
+            let (anchor, rotation, mode) = primitives
+                .iter()
+                .find_map(|primitive| {
+                    if let DimPrimitive::Text {
+                        anchor,
+                        rotation_rad,
+                        anchor_mode,
+                        ..
+                    } = primitive
+                    {
+                        Some((*anchor, *rotation_rad, *anchor_mode))
+                    } else {
+                        None
+                    }
+                })
+                .expect("native dimension text");
+            assert_eq!(mode, crate::plugins::drafting::TextAnchor::CenterBaseline);
+            assert!(anchor.abs_diff_eq((a + b) * 0.5 + offset, 1e-6));
+            assert!(
+                rotation >= -std::f32::consts::FRAC_PI_2 && rotation <= std::f32::consts::FRAC_PI_2
+            );
+            assert!(
+                primitives.iter().any(|primitive| matches!(primitive,
+                    DimPrimitive::LineSegment { a: line_a, b: line_b, .. }
+                        if ((*line_a + *line_b) * 0.5).abs_diff_eq(anchor, 1e-6)
+                        && line_a.distance(*line_b) >= a.distance(b)
+                )),
+                "continuous dimension stroke keeps its established location"
+            );
+        }
     }
 
     #[test]

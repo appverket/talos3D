@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use base64::prelude::*;
 use bevy::{
     asset::RenderAssetUsages,
-    image::{CompressedImageFormats, ImageSampler, ImageType},
+    image::{CompressedImageFormats, ImageType},
     math::Affine2,
     prelude::*,
 };
@@ -17,9 +17,8 @@ use serde_json::Value;
 
 use crate::curation::{AssetId, ContentHash, EvidenceRef, MaterialSpecRegistry};
 use crate::plugins::registry_generation::RegistryGeneration;
+use crate::plugins::texture_mipmaps::{material_texture_sampler, with_full_mip_chain};
 
-pub const BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO: &str =
-    "builtin.maibec.red_cedar_light_h2bo";
 pub const BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80: &str = "builtin.glass.blue_tint_glazing_80";
 pub const BUILTIN_MATERIAL_WINDOW_DARK_GASKET: &str = "builtin.window.dark_gasket";
 pub const BUILTIN_MATERIAL_WINDOW_WHITE_FRAME: &str = "builtin.window.white_frame";
@@ -135,11 +134,15 @@ impl TexturePayload {
                     image_type,
                     CompressedImageFormats::NONE,
                     true,
-                    ImageSampler::default(),
+                    // Material UV scale/offset describes tiling; clamping to the
+                    // last texel makes most of a scaled surface appear flat.
+                    material_texture_sampler(),
                     RenderAssetUsages::RENDER_WORLD,
                 )
                 .ok()?;
-                Some(images.add(image))
+                // Tiled finishes are minified as soon as the camera pulls
+                // back; without mips their fine lines alias into moiré.
+                Some(images.add(with_full_mip_chain(image)))
             }
         }
     }
@@ -1355,6 +1358,145 @@ pub fn material_assignment_display_id(assignment: Option<&MaterialAssignment>) -
     assignment.and_then(|assignment| assignment.render_material_id(None))
 }
 
+/// Keep an occurrence's authored binding and its derived ECS material together.
+/// Clearing an occurrence override restores its Definition's inherited material.
+/// Other authored entity types retain their existing component capture behavior.
+pub(crate) fn set_authored_material_assignment(
+    world: &mut World,
+    entity: Entity,
+    assignment: Option<MaterialAssignment>,
+) {
+    use crate::plugins::modeling::{
+        definition::DefinitionRegistry, occurrence::OccurrenceIdentity,
+    };
+    let inherited = world
+        .get::<OccurrenceIdentity>(entity)
+        .and_then(|identity| {
+            world
+                .get_resource::<DefinitionRegistry>()
+                .and_then(|r| r.effective_definition(&identity.definition_id).ok())
+                .and_then(|d| {
+                    crate::plugins::modeling::occurrence::resolve_occurrence_material_assignment(
+                        &d, None,
+                    )
+                })
+        });
+    let is_occurrence = if let Some(mut identity) = world.get_mut::<OccurrenceIdentity>(entity) {
+        identity.material_override = assignment.clone();
+        true
+    } else {
+        false
+    };
+    let effective = if is_occurrence {
+        assignment.or(inherited)
+    } else {
+        assignment
+    };
+    match effective {
+        Some(assignment) => {
+            world.entity_mut(entity).insert(assignment);
+        }
+        None => {
+            world.entity_mut(entity).remove::<MaterialAssignment>();
+        }
+    }
+}
+
+/// Material history retains only bindings and never rebuilds geometry.
+/// UI and MCP use the same validated, atomic batch and history command.
+struct MaterialAssignmentCommand {
+    changes: Vec<(
+        crate::plugins::identity::ElementId,
+        Option<MaterialAssignment>,
+        Option<MaterialAssignment>,
+    )>,
+}
+
+impl crate::plugins::history::EditorCommand for MaterialAssignmentCommand {
+    fn label(&self) -> &'static str {
+        "Assign material"
+    }
+    fn apply(&mut self, world: &mut World) {
+        self.restore(world, false);
+    }
+    fn undo(&mut self, world: &mut World) {
+        self.restore(world, true);
+    }
+}
+
+impl MaterialAssignmentCommand {
+    fn restore(&self, world: &mut World, before: bool) {
+        let entities: std::collections::HashMap<_, _> = world
+            .query::<(Entity, &crate::plugins::identity::ElementId)>()
+            .iter(world)
+            .map(|(entity, id)| (*id, entity))
+            .collect();
+        for (id, old, new) in &self.changes {
+            if let Some(entity) = entities.get(id) {
+                set_authored_material_assignment(
+                    world,
+                    *entity,
+                    if before { old } else { new }.clone(),
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn edit_material_assignments(
+    world: &mut World,
+    updates: Vec<(Entity, Option<MaterialAssignment>)>,
+) -> Result<(), String> {
+    use crate::capability_registry::CapabilityRegistry;
+    use crate::plugins::{
+        history::PendingCommandQueue, identity::ElementId, modeling::occurrence::OccurrenceIdentity,
+    };
+    let mut changes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // Validate every target before accepting any part of a batch.
+    for (entity, assignment) in updates {
+        if let Some(assignment) = &assignment {
+            validate_material_assignment(world, assignment)?;
+        }
+        let entity_ref = world
+            .get_entity(entity)
+            .map_err(|_| "Material target no longer exists")?;
+        let id = *entity_ref
+            .get::<ElementId>()
+            .ok_or("Material target is not authored")?;
+        if !seen.insert(id) {
+            return Err(format!("Duplicate material target {}", id.0));
+        }
+        if crate::plugins::object_locks::entity_locked(world, entity) {
+            return Err(format!("Entity {} is locked", id.0));
+        }
+        if world
+            .resource::<CapabilityRegistry>()
+            .capture_edit_snapshot(&entity_ref, world)
+            .is_none()
+        {
+            return Err(format!(
+                "Entity {} has no persistent authored snapshot",
+                id.0
+            ));
+        }
+        let before = entity_ref
+            .get::<OccurrenceIdentity>()
+            .map(|identity| identity.material_override.clone())
+            .unwrap_or_else(|| entity_ref.get::<MaterialAssignment>().cloned());
+        if before != assignment {
+            changes.push((id, before, assignment));
+        }
+    }
+    if !changes.is_empty() {
+        world
+            .resource_mut::<PendingCommandQueue>()
+            .push_command(Box::new(MaterialAssignmentCommand { changes }));
+        crate::plugins::history::apply_pending_history_commands(world);
+    }
+    Ok(())
+}
+
 // ─── Bevy material handles cache ─────────────────────────────────────────────
 
 /// Maps `material_id + effective texture mapping → Handle<StandardMaterial>`.
@@ -1499,52 +1641,6 @@ impl Plugin for MaterialPlugin {
 }
 
 pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
-    registry.upsert(MaterialDef {
-        id: BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO.to_string(),
-        name: "Maibec Red Cedar Light H2BO".to_string(),
-        base_color: [0.72, 0.57, 0.44, 1.0],
-        perceptual_roughness: 0.92,
-        metallic: 0.0,
-        reflectance: 0.32,
-        specular_tint: [0.98, 0.96, 0.93],
-        emissive: [0.0, 0.0, 0.0],
-        emissive_exposure_weight: 1.0,
-        diffuse_transmission: 0.0,
-        specular_transmission: 0.0,
-        thickness: 0.0,
-        ior: 1.45,
-        attenuation_distance: f32::INFINITY,
-        attenuation_color: [1.0, 1.0, 1.0],
-        clearcoat: 0.08,
-        clearcoat_perceptual_roughness: 0.34,
-        anisotropy_strength: 0.0,
-        spec_ref: None,
-        alpha_mode: MaterialAlphaMode::Opaque,
-        alpha_cutoff: 0.5,
-        base_color_texture: Some(TextureRef::AssetPath {
-            path: "materials/maibec_red_cedar_light_h2bo/diffuse.png".to_string(),
-        }),
-        normal_map_texture: Some(TextureRef::AssetPath {
-            path: "materials/maibec_red_cedar_light_h2bo/normal_opengl.png".to_string(),
-        }),
-        metallic_roughness_texture: Some(TextureRef::AssetPath {
-            path: "materials/maibec_red_cedar_light_h2bo/roughness.png".to_string(),
-        }),
-        emissive_texture: None,
-        occlusion_texture: None,
-        uv_scale: [1.0, 1.0],
-        uv_offset: [0.0, 0.0],
-        uv_rotation: 0.0,
-        uv_flip: [false, false],
-        texture_projection: TextureProjection::Uv,
-        texture_blend_sharpness: default_mapping_blend_sharpness(),
-        anisotropy_rotation: 0.0,
-        double_sided: false,
-        unlit: false,
-        fog_enabled: true,
-        depth_bias: 0.0,
-    });
-
     registry.upsert(MaterialDef {
         id: BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80.to_string(),
         name: "Blue Tint Glazing 80%".to_string(),
@@ -1726,11 +1822,13 @@ fn execute_apply_material_to_selection(
         q.iter(world).collect()
     };
     let count = selected_entities.len();
-    for entity in selected_entities {
-        world
-            .entity_mut(entity)
-            .insert(MaterialAssignment::new(material_id.clone()));
-    }
+    edit_material_assignments(
+        world,
+        selected_entities
+            .into_iter()
+            .map(|entity| (entity, Some(MaterialAssignment::new(material_id.clone()))))
+            .collect(),
+    )?;
     Ok(crate::plugins::command_registry::CommandResult {
         output: Some(serde_json::json!({ "applied_to": count })),
         ..Default::default()
@@ -1752,9 +1850,13 @@ fn execute_set_material_assignment_to_selection(
         q.iter(world).collect()
     };
     let count = selected_entities.len();
-    for entity in selected_entities {
-        world.entity_mut(entity).insert(assignment.clone());
-    }
+    edit_material_assignments(
+        world,
+        selected_entities
+            .into_iter()
+            .map(|entity| (entity, Some(assignment.clone())))
+            .collect(),
+    )?;
     Ok(crate::plugins::command_registry::CommandResult {
         output: Some(serde_json::json!({ "applied_to": count })),
         ..Default::default()
@@ -1770,9 +1872,13 @@ fn execute_clear_material_assignment_on_selection(
         q.iter(world).collect()
     };
     let count = selected_entities.len();
-    for entity in selected_entities {
-        world.entity_mut(entity).remove::<MaterialAssignment>();
-    }
+    edit_material_assignments(
+        world,
+        selected_entities
+            .into_iter()
+            .map(|entity| (entity, None))
+            .collect(),
+    )?;
     Ok(crate::plugins::command_registry::CommandResult {
         output: Some(serde_json::json!({ "cleared": count })),
         ..Default::default()
@@ -1856,8 +1962,14 @@ fn execute_toggle_materials_browser(
 
 // ─── Systems ─────────────────────────────────────────────────────────────────
 
-fn seed_builtin_materials(mut registry: ResMut<MaterialRegistry>) {
+fn seed_builtin_materials(
+    mut registry: ResMut<MaterialRegistry>,
+    defaults: Option<Res<BuiltinMaterialDefaults>>,
+) {
     ensure_builtin_materials(&mut registry);
+    if let Some(defaults) = defaults {
+        defaults.seed(&mut registry);
+    }
 }
 
 /// When the registry changes, invalidate cached handles so they are rebuilt.
@@ -2016,7 +2128,7 @@ fn revert_removed_material_assignments(
 // ─── UUID helper ─────────────────────────────────────────────────────────────
 
 fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
@@ -2031,18 +2143,104 @@ mod tests {
     use super::*;
 
     #[test]
+    fn embedded_material_texture_tiles_beyond_unit_uvs() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        let payload = TexturePayload::Embedded {
+            // Small generated two-tone tile: exercise the actual PNG decode path.
+            data: "iVBORw0KGgoAAAANSUhEUgAAABAAAACACAIAAACN9351AAAANElEQVR4nO3LMQEAIAzAsClGMV6Ghh58yZ850fwPN+phI0EQBEEQBEEQBEEQBEEQBEEQigdbnIqqnsP9nAAAAABJRU5ErkJggg==".into(),
+            mime: "image/png".into(),
+        };
+        let mut images = Assets::<Image>::default();
+        let handle = payload
+            .load(app.world().resource::<AssetServer>(), &mut images)
+            .unwrap();
+        let image = images.get(&handle).unwrap();
+        assert_eq!(image.width(), 16);
+        assert_eq!(image.height(), 128);
+        let bevy::image::ImageSampler::Descriptor(sampler) = &image.sampler else {
+            panic!("material sampler must be explicit");
+        };
+        assert_eq!(
+            sampler.address_mode_u,
+            bevy::image::ImageAddressMode::Repeat
+        );
+        assert_eq!(
+            sampler.address_mode_v,
+            bevy::image::ImageAddressMode::Repeat
+        );
+        // The decoded texture carries its whole mip chain (16×128 → 1×1) so a
+        // minified finish blends instead of aliasing.
+        assert_eq!(image.texture_descriptor.mip_level_count, 8);
+        assert_eq!(sampler.mipmap_filter, bevy::image::ImageFilterMode::Linear);
+        assert!(sampler.anisotropy_clamp > 1);
+    }
+
+    #[test]
+    fn selection_material_commands_update_authored_occurrence_binding() {
+        use crate::plugins::{
+            identity::ElementId,
+            modeling::{definition::DefinitionId, occurrence::OccurrenceIdentity},
+            selection::Selected,
+        };
+        let mut world = World::new();
+        let mut capabilities = crate::capability_registry::CapabilityRegistry::default();
+        capabilities.register_factory(crate::plugins::modeling::occurrence::OccurrenceFactory);
+        world.insert_resource(capabilities);
+        world.init_resource::<crate::plugins::history::History>();
+        world.init_resource::<crate::plugins::history::PendingCommandQueue>();
+        let mut registry = MaterialRegistry::default();
+        registry.upsert(MaterialDef {
+            id: "finish".to_string(),
+            ..Default::default()
+        });
+        world.insert_resource(registry);
+        let entity = world
+            .spawn((
+                ElementId(801),
+                OccurrenceIdentity::new(DefinitionId("family".to_string()), 1),
+                Selected,
+            ))
+            .id();
+        let assignment = MaterialAssignment::new("finish");
+        execute_set_material_assignment_to_selection(
+            &mut world,
+            &serde_json::json!({"assignment": assignment}),
+        )
+        .unwrap();
+        assert_eq!(
+            world
+                .get::<OccurrenceIdentity>(entity)
+                .unwrap()
+                .material_override,
+            Some(assignment.clone())
+        );
+        execute_clear_material_assignment_on_selection(&mut world, &Value::Null).unwrap();
+        assert!(world
+            .get::<OccurrenceIdentity>(entity)
+            .unwrap()
+            .material_override
+            .is_none());
+        execute_apply_material_to_selection(
+            &mut world,
+            &serde_json::json!({"material_id": "finish"}),
+        )
+        .unwrap();
+        assert_eq!(
+            world
+                .get::<OccurrenceIdentity>(entity)
+                .unwrap()
+                .material_override,
+            Some(assignment)
+        );
+    }
+
+    #[test]
     fn builtin_materials_are_seeded_with_stable_ids() {
         let mut registry = MaterialRegistry::default();
         ensure_builtin_materials(&mut registry);
 
-        assert!(registry.contains(BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO));
         assert!(registry.contains(BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80));
-
-        let cedar = registry
-            .get(BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO)
-            .expect("cedar builtin should exist");
-        assert_eq!(cedar.anisotropy_strength, 0.0);
-        assert_eq!(cedar.anisotropy_rotation, 0.0);
     }
 
     #[test]
@@ -2340,4 +2538,236 @@ fn materials_browser_shown(world: &World) -> bool {
     world
         .get_resource::<crate::plugins::material_browser::MaterialsWindowState>()
         .is_some_and(|state| state.visible)
+}
+
+/// Material presets supplied by loaded capabilities. Retained across documents.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct BuiltinMaterialDefaults(BTreeMap<String, MaterialDef>);
+
+impl BuiltinMaterialDefaults {
+    pub fn insert(&mut self, material: MaterialDef) {
+        self.0.insert(material.id.clone(), material);
+    }
+
+    pub fn seed(&self, registry: &mut MaterialRegistry) {
+        for material in self.0.values() {
+            registry.upsert(material.clone());
+        }
+    }
+}
+
+/// Restore public and capability-supplied material presets after document replacement.
+pub fn reseed_builtin_materials(world: &mut World) {
+    let defaults = world
+        .get_resource::<BuiltinMaterialDefaults>()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(mut registry) = world.get_resource_mut::<MaterialRegistry>() {
+        ensure_builtin_materials(&mut registry);
+        defaults.seed(&mut registry);
+    }
+}
+
+#[cfg(test)]
+mod capability_default_tests {
+    use super::*;
+    #[test]
+    fn capability_defaults_survive_document_registry_replacement() {
+        let mut world = World::new();
+        let mut material = MaterialDef::new("Mechanical coating");
+        material.id = "builtin.mechanical.coating".into();
+        let mut defaults = BuiltinMaterialDefaults::default();
+        defaults.insert(material.clone());
+        world.insert_resource(defaults);
+        for _ in 0..2 {
+            world.insert_resource(MaterialRegistry::default());
+            reseed_builtin_materials(&mut world);
+            assert_eq!(
+                world
+                    .resource::<MaterialRegistry>()
+                    .get(&material.id)
+                    .unwrap()
+                    .name,
+                material.name
+            );
+        }
+    }
+}
+
+/// Read a bundled dependency through the same asset namespace as the renderer.
+/// A document cannot cause publication to read arbitrary host filesystem paths.
+pub(crate) fn portable_asset_bytes(world: &World, path: &str) -> Result<Vec<u8>, String> {
+    let p = std::path::Path::new(path);
+    if path.is_empty()
+        || path.contains([':', '\\'])
+        || !p
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err("Texture must be relative to the app asset directory".into());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let server = world
+            .get_resource::<AssetServer>()
+            .ok_or("Texture asset service unavailable")?;
+        let source = server
+            .get_source(bevy::asset::io::AssetSourceId::Default)
+            .map_err(|e| e.to_string())?;
+        bevy::tasks::block_on(async {
+            let mut file = source
+                .reader()
+                .read(p)
+                .await
+                .map_err(|e| format!("Cannot read texture {path}: {e}"))?;
+            let mut data = Vec::new();
+            file.read_to_end(&mut data)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(data)
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        browser_texture_source(world, path)
+    }
+}
+
+// Browser asset readers are asynchronous. Keep source bytes off the frame loop;
+// a capture retries after the first read instead of writing a dangling path.
+#[cfg(target_arch = "wasm32")]
+fn browser_texture_source(world: &World, path: &str) -> Result<Vec<u8>, String> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    type Pending = Option<Result<Vec<u8>, String>>;
+    thread_local! { static SOURCES: RefCell<HashMap<String, Pending>> = RefCell::default(); }
+    let server = world
+        .get_resource::<AssetServer>()
+        .ok_or("Texture asset service unavailable")?
+        .clone();
+    SOURCES.with(|set| {
+        let mut cache = set.borrow_mut();
+        if let Some(item) = cache.get(path) {
+            if let Some(Ok(bytes)) = item {
+                return Ok(bytes.clone());
+            }
+            if let Some(Err(_)) = item {
+                let Some(Some(Err(e))) = cache.remove(path) else {
+                    unreachable!()
+                };
+                return Err(e);
+            }
+            return Err(format!(
+                "Loading texture {path}; try saving again in a moment"
+            ));
+        }
+        cache.insert(path.to_owned(), None);
+        let name = path.to_owned();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = async {
+                let source = server
+                    .get_source(bevy::asset::io::AssetSourceId::Default)
+                    .map_err(|e| e.to_string())?;
+                let mut reader = source
+                    .reader()
+                    .read(std::path::Path::new(&name))
+                    .await
+                    .map_err(|e| format!("Cannot read texture {name}: {e}"))?;
+                let mut bytes = Vec::new();
+                reader
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(bytes)
+            }
+            .await;
+            SOURCES.with(|s| {
+                let mut cache = s.borrow_mut();
+                // Cap retained source copies between documents; in-flight reads are preserved.
+                if cache
+                    .values()
+                    .filter_map(|x| x.as_ref()?.as_ref().ok())
+                    .map(Vec::len)
+                    .sum::<usize>()
+                    > 128 * 1024 * 1024
+                {
+                    cache.retain(|_, v| v.is_none());
+                }
+                cache.insert(name, Some(result));
+            });
+        });
+        Err(format!(
+            "Loading texture {path}; try saving again in a moment"
+        ))
+    })
+}
+
+pub(crate) fn portable_texture_registry(
+    world: &World,
+    source: &TextureRegistry,
+) -> Result<TextureRegistry, String> {
+    let mut out = TextureRegistry::default();
+    for original in source.all() {
+        let mut asset = original.clone();
+        if let TexturePayload::AssetPath(path) = &asset.payload {
+            let bytes = portable_asset_bytes(world, path)?;
+            let mime = image::guess_format(&bytes)
+                .map_err(|_| format!("Cannot identify texture: {path}"))?
+                .to_mime_type();
+            asset.payload = TexturePayload::Embedded {
+                data: BASE64_STANDARD.encode(bytes),
+                mime: mime.to_owned(),
+            };
+            asset.content_hash = asset.payload.content_hash();
+        }
+        out.insert(asset);
+    }
+    Ok(out)
+}
+
+/// The editable snapshot owns image bytes, even if a local material originally
+/// picked a bundled asset path. Both shell captures and file saves call this.
+pub(crate) fn embed_saved_textures(
+    world: &World,
+    material: &mut MaterialDef,
+    source: &TextureRegistry,
+    out: &mut TextureRegistry,
+) -> Result<(), String> {
+    for slot in [
+        &mut material.base_color_texture,
+        &mut material.normal_map_texture,
+        &mut material.metallic_roughness_texture,
+        &mut material.occlusion_texture,
+        &mut material.emissive_texture,
+    ] {
+        let path = match slot.as_ref() {
+            Some(TextureRef::TextureAsset { id }) => {
+                if out.get(id).is_some() {
+                    continue;
+                }
+                let asset = source
+                    .get(id)
+                    .ok_or("Cannot save: a referenced texture is missing")?;
+                match &asset.payload {
+                    TexturePayload::Embedded { .. } => {
+                        out.insert(asset.clone());
+                        continue;
+                    }
+                    TexturePayload::AssetPath(p) => p.clone(),
+                }
+            }
+            Some(TextureRef::AssetPath { path }) => path.clone(),
+            _ => continue,
+        };
+        let bytes = portable_asset_bytes(world, &path)?;
+        let mime = image::guess_format(&bytes)
+            .map_err(|_| format!("Cannot identify texture: {path}"))?
+            .to_mime_type();
+        *slot = Some(TextureRef::Embedded {
+            data: BASE64_STANDARD.encode(bytes),
+            mime: mime.into(),
+        });
+    }
+    normalize_material_textures(material, out);
+    Ok(())
 }

@@ -6,16 +6,15 @@
 //! through Bevy's batched gizmo renderer. Idle frames never inspect meshes or
 //! reclassify edges.
 
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use crate::time::{Duration, Instant};
+use std::collections::HashMap;
 
 use bevy::{
     asset::{AssetEvent, AssetId},
     gizmos::config::{GizmoConfigGroup, GizmoConfigStore},
     math::Rot2,
     prelude::*,
+    text::{ComputedTextBlock, TextLayoutInfo},
     transform::TransformSystems,
     window::PrimaryWindow,
 };
@@ -29,10 +28,11 @@ use crate::{
         dimension_line::{DimensionLineNode, DimensionLineVisibility},
         drafting::{
             DimensionAnnotationNode, DimensionStyleRegistry, DraftNode, DraftPrimitiveNode,
-            DraftingVisibility, DraftingWorkspaceState,
+            DraftingVisibility, DraftingWorkspaceState, TextAnchor,
         },
         identity::ElementId,
         materials::{MaterialAssignment, MaterialRegistry},
+        modeling::occurrence::GeneratedOccurrencePart,
         registry_generation::RegistryGeneration,
     },
 };
@@ -83,6 +83,15 @@ struct DrawingSceneViewportText {
     content: String,
     font_size_px: f32,
     rotation_rad: f32,
+    anchor_mode: TextAnchor,
+}
+
+/// Alignment is derived from Bevy's shaped glyph layout, never estimated from
+/// character count or a font-size fraction. This component is presentation only.
+#[derive(Component, Clone, Copy)]
+struct DrawingSceneTextAnchor {
+    mode: TextAnchor,
+    rotation_rad: f32,
 }
 
 /// Transient Bevy-native presentation of DrawingScene text. Authored text
@@ -109,6 +118,8 @@ pub struct DrawingSceneLiveCache {
     text_entities: Vec<Entity>,
     dirty: bool,
     last_invalidation_mask: u32,
+    observed_workspace: Option<(bool, Option<ElementId>)>,
+    observed_viewport_inset: Option<Vec4>,
     observed_material_generation: Option<RegistryGeneration>,
     observed_mesh_handles: HashMap<Entity, AssetId<Mesh>>,
     last_rebuild_at: Option<Instant>,
@@ -123,6 +134,8 @@ impl Default for DrawingSceneLiveCache {
             text_entities: Vec::new(),
             dirty: true,
             last_invalidation_mask: 0,
+            observed_workspace: None,
+            observed_viewport_inset: None,
             observed_material_generation: None,
             observed_mesh_handles: HashMap::new(),
             last_rebuild_at: None,
@@ -132,6 +145,17 @@ impl Default for DrawingSceneLiveCache {
 }
 
 impl DrawingSceneLiveCache {
+    fn observes_mesh_event(&self, event: &AssetEvent<Mesh>) -> bool {
+        match event {
+            AssetEvent::Added { id } | AssetEvent::Modified { id } | AssetEvent::Removed { id } => {
+                self.observed_mesh_handles
+                    .values()
+                    .any(|observed| observed == id)
+            }
+            _ => false,
+        }
+    }
+
     #[must_use]
     pub fn stats(&self) -> DrawingSceneLiveStats {
         self.stats
@@ -184,7 +208,9 @@ impl DrawingSceneLiveCache {
         self.last_rebuild_at = None;
         self.last_invalidation_mask = 0;
         self.observed_material_generation = None;
-        self.observed_mesh_handles.clear();
+        // Keep the source index across presentation shutdown. Changed<Mesh3d>
+        // does not replay for unchanged entities when Drafting is re-entered.
+        // Invalidation keeps this index current (including removals) while off.
         self.stats.last_line_count = 0;
         self.stats.last_text_count = 0;
         self.stats.source_model_revision = 0;
@@ -241,6 +267,10 @@ impl Plugin for DrawingSceneLivePlugin {
                 )
                     .chain()
                     .after(TransformSystems::Propagate),
+            )
+            .add_systems(
+                PostUpdate,
+                align_live_text.after(bevy::ui::UiSystems::PostLayout),
             );
     }
 }
@@ -261,12 +291,42 @@ fn invalidate_live_drawing_scene(
     mut scene_changes: ParamSet<(
         Query<(), (With<OrbitCamera>, Changed<GlobalTransform>)>,
         Query<(), (With<OrbitCamera>, Changed<Projection>)>,
-        Query<(), (With<ElementId>, Added<Mesh3d>)>,
-        Query<(Entity, &Mesh3d), (With<ElementId>, Changed<Mesh3d>)>,
-        Query<(), (With<ElementId>, Changed<GlobalTransform>)>,
-        Query<(), (With<ElementId>, Changed<Visibility>)>,
+        Query<
+            (),
+            (
+                Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+                Added<Mesh3d>,
+            ),
+        >,
+        Query<
+            (Entity, &Mesh3d),
+            (
+                Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+                Changed<Mesh3d>,
+            ),
+        >,
+        Query<
+            (),
+            (
+                Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+                Changed<GlobalTransform>,
+            ),
+        >,
+        Query<
+            (),
+            (
+                Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+                Changed<Visibility>,
+            ),
+        >,
         Query<(), (With<Mesh3d>, Changed<ElementId>)>,
-        Query<(), (With<ElementId>, Changed<MaterialAssignment>)>,
+        Query<
+            (),
+            (
+                Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+                Changed<MaterialAssignment>,
+            ),
+        >,
     )>,
     mut semantic_changes: ParamSet<(
         Query<
@@ -294,7 +354,14 @@ fn invalidate_live_drawing_scene(
     mut cache: ResMut<DrawingSceneLiveCache>,
 ) {
     let active = workspace.as_ref().is_some_and(|state| state.is_active());
-    let workspace_changed = workspace.as_ref().is_some_and(|state| state.is_changed());
+    // UI systems borrow these resources mutably every frame. Compare semantic
+    // values rather than change ticks, or idle Drafting rebuilds continuously.
+    let workspace_value = (
+        active,
+        workspace.as_ref().and_then(|state| state.active_draft_id()),
+    );
+    let workspace_changed = cache.observed_workspace != Some(workspace_value);
+    cache.observed_workspace = Some(workspace_value);
     let drafting_visibility_changed = drafting_visibility
         .as_ref()
         .is_some_and(|value| value.is_changed());
@@ -321,7 +388,9 @@ fn invalidate_live_drawing_scene(
     let mesh_handle_changed = scene_changes
         .p3()
         .iter()
-        .any(|(entity, mesh)| cache.observe_mesh_handle(entity, mesh.id()));
+        .fold(false, |changed, (entity, mesh)| {
+            cache.observe_mesh_handle(entity, mesh.id()) || changed
+        });
     let mesh_transform_changed = !scene_changes.p4().is_empty();
     let mesh_visibility_changed = !scene_changes.p5().is_empty();
     let mesh_identity_changed = !scene_changes.p6().is_empty();
@@ -329,10 +398,12 @@ fn invalidate_live_drawing_scene(
     let annotation_changed = !semantic_changes.p0().is_empty();
     let clip_changed = !semantic_changes.p1().is_empty();
     let draft_changed = !semantic_changes.p2().is_empty();
-    let viewport_changed = semantic_changes
+    let viewport_value = semantic_changes
         .p3()
         .as_ref()
-        .is_some_and(|value| value.is_changed());
+        .map(|inset| Vec4::new(inset.left, inset.top, inset.right, inset.bottom));
+    let viewport_changed = cache.observed_viewport_inset != viewport_value;
+    cache.observed_viewport_inset = viewport_value;
     let removed_mesh_entities: Vec<Entity> = removed_meshes.read().collect();
     for entity in &removed_mesh_entities {
         cache.observed_mesh_handles.remove(entity);
@@ -348,7 +419,11 @@ fn invalidate_live_drawing_scene(
         || removed_draft_primitives
         || removed_clip_planes
         || removed_drafts;
-    let mesh_asset_changed = mesh_events.read().count() > 0;
+    // Preview/cap/UI meshes are derived presentation, not DrawingScene inputs.
+    // Their asset uploads must not recursively rebuild the canonical scene.
+    let mesh_asset_changed = mesh_events.read().fold(false, |changed, event| {
+        cache.observes_mesh_event(event) || changed
+    });
 
     if !active {
         if cache.scene.is_some() || !cache.dirty {
@@ -478,7 +553,7 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
         clear_live_text_entities(world);
         return 0;
     };
-    let Some((viewport_origin, viewport_size)) = live_viewport_rect(world) else {
+    let Some((camera, viewport_size)) = live_viewport_target(world) else {
         clear_live_text_entities(world);
         return 0;
     };
@@ -497,7 +572,13 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
             .unwrap_or_else(|| world.spawn_empty().id());
         world.entity_mut(entity).insert((
             DrawingSceneLiveText,
+            UiTargetCamera(camera),
+            DrawingSceneTextAnchor {
+                mode: spec.anchor_mode,
+                rotation_rad: spec.rotation_rad,
+            },
             Text::new(spec.content),
+            TextLayout::default().with_no_wrap(),
             TextFont {
                 font_size: FontSize::Px(spec.font_size_px),
                 ..default()
@@ -505,8 +586,8 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
             TextColor(Color::BLACK),
             Node {
                 position_type: PositionType::Absolute,
-                left: px(viewport_origin.x + spec.position_px.x),
-                top: px(viewport_origin.y + spec.position_px.y),
+                left: px(spec.position_px.x),
+                top: px(spec.position_px.y),
                 ..default()
             },
             UiTransform {
@@ -528,19 +609,76 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
     count
 }
 
-fn live_viewport_rect(world: &mut World) -> Option<(Vec2, Vec2)> {
-    let inset = world
-        .get_resource::<ViewportUiInset>()
-        .map(|inset| Vec4::new(inset.left, inset.top, inset.right, inset.bottom))
-        .unwrap_or(Vec4::ZERO);
-    let mut windows = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
-    let window = windows.single(world).ok()?;
-    let origin = Vec2::new(inset.x, inset.y);
-    let size = Vec2::new(
-        window.width() - inset.x - inset.z,
-        window.height() - inset.y - inset.w,
-    );
-    (size.cmpgt(Vec2::ZERO).all()).then_some((origin, size))
+fn text_anchor_transform(size: Vec2, baseline: f32, anchor: DrawingSceneTextAnchor) -> UiTransform {
+    let local_anchor = match anchor.mode {
+        TextAnchor::LeftBaseline => Vec2::new(0.0, baseline),
+        TextAnchor::CenterBaseline => Vec2::new(size.x * 0.5, baseline),
+        TextAnchor::Center => size * 0.5,
+    };
+    let rotation = Rot2::radians(-anchor.rotation_rad);
+    // Bevy rotates UI nodes about their centre. Move that centre so the semantic
+    // insertion point stays fixed even for vertical and oblique dimensions.
+    let translation = rotation * (size * 0.5 - local_anchor) - size * 0.5;
+    UiTransform {
+        translation: Val2::px(translation.x, translation.y),
+        rotation,
+        ..default()
+    }
+}
+
+fn shaped_text_anchor_transform(
+    layout: &TextLayoutInfo,
+    physical_baseline: f32,
+    anchor: DrawingSceneTextAnchor,
+) -> UiTransform {
+    // Bevy UI already converts TextLayoutInfo.size to logical pixels. Parley
+    // retains physical font metrics, so only its baseline needs DPI conversion.
+    text_anchor_transform(layout.size, physical_baseline / layout.scale_factor, anchor)
+}
+
+fn align_live_text(
+    mut texts: Query<
+        (
+            &DrawingSceneTextAnchor,
+            &ComputedTextBlock,
+            &TextLayoutInfo,
+            &mut UiTransform,
+        ),
+        Or<(Changed<TextLayoutInfo>, Changed<DrawingSceneTextAnchor>)>,
+    >,
+) {
+    for (anchor, shaped, layout, mut transform) in &mut texts {
+        let Some(line) = shaped.buffer().lines().next() else {
+            continue;
+        };
+        if !layout.scale_factor.is_finite() || layout.scale_factor <= 0.0 {
+            continue;
+        }
+        let aligned = shaped_text_anchor_transform(layout, line.metrics().baseline, *anchor);
+        if *transform != aligned {
+            *transform = aligned;
+        }
+    }
+}
+
+fn live_viewport_target(world: &mut World) -> Option<(Entity, Vec2)> {
+    let mut cameras = world.try_query_filtered::<(Entity, &Camera), With<OrbitCamera>>()?;
+    let (entity, camera) = cameras.single(world).ok()?;
+    let computed_size = camera.logical_viewport_size();
+    let has_explicit_viewport = camera.viewport.is_some();
+    // DrawingScene projects the full camera frustum. UI panels cover its edges;
+    // they do not crop the camera or change the projected annotation anchors.
+    // UiTargetCamera also makes UI coordinates relative to the same viewport.
+    let size = computed_size.or_else(|| {
+        // Before the camera's first render update, the normal full-window
+        // camera has no computed target size yet.
+        if has_explicit_viewport {
+            return None;
+        }
+        let mut windows = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
+        windows.single(world).ok().map(|window| window.size())
+    })?;
+    size.cmpgt(Vec2::ZERO).all().then_some((entity, size))
 }
 
 fn scene_viewport_texts(
@@ -561,6 +699,7 @@ fn scene_viewport_texts(
                 content,
                 height_mm,
                 rotation_rad,
+                anchor_mode,
                 ..
             } = primitive
             else {
@@ -583,6 +722,7 @@ fn scene_viewport_texts(
                 content: content.clone(),
                 font_size_px: (*height_mm / paper_height * viewport_size.y).max(1.0),
                 rotation_rad: *rotation_rad,
+                anchor_mode: *anchor_mode,
             })
         })
         .collect()
@@ -652,11 +792,34 @@ mod tests {
     }
 
     #[test]
+    fn leaving_and_reentering_draft_preserves_mesh_removal_invalidation() {
+        let mut assets = Assets::<Mesh>::default();
+        let mesh = assets.add(Cuboid::default());
+        let mut cache = DrawingSceneLiveCache::default();
+        let entity = Entity::from_bits(7);
+        cache.observe_mesh_handle(entity, mesh.id());
+        let now = Instant::now();
+        cache.record_rebuild(None, None, 0, Duration::ZERO, now);
+        cache.clear(); // Leaving Draft removes presentation, not source tracking.
+        cache.record_rebuild(None, None, 0, Duration::ZERO, now); // Re-enter unchanged.
+        assert!(!cache.is_dirty());
+        let removal = AssetEvent::Removed { id: mesh.id() };
+        assert!(cache.observes_mesh_event(&removal));
+        if cache.observes_mesh_event(&removal) {
+            cache.invalidate(INVALIDATE_MESH_ASSET);
+        }
+        assert!(cache.is_dirty());
+        assert_eq!(cache.last_invalidation_reasons(), vec!["mesh_asset"]);
+    }
+
+    #[test]
     fn renderer_change_ticks_do_not_masquerade_as_handle_changes() {
         let mut cache = DrawingSceneLiveCache::default();
         let entity = Entity::from_bits(7);
         let first = Handle::<Mesh>::default().id();
-        let second = AssetId::<Mesh>::invalid();
+        let second = AssetId::<Mesh>::Uuid {
+            uuid: bevy::asset::uuid::Uuid::from_u128(7),
+        };
 
         assert!(cache.observe_mesh_handle(entity, first));
         assert!(!cache.observe_mesh_handle(entity, first));
@@ -693,6 +856,117 @@ mod tests {
         assert_eq!(batch.spans[0].id, id);
         assert!((batch.vertices[0] - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5);
         assert!((batch.vertices[1] - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn shaped_text_dpi_conversion_keeps_logical_size_and_scales_only_baseline() {
+        let anchor = DrawingSceneTextAnchor {
+            mode: TextAnchor::CenterBaseline,
+            rotation_rad: 0.7,
+        };
+        let logical_size = Vec2::new(80.0, 20.0);
+        let normal = TextLayoutInfo {
+            size: logical_size,
+            scale_factor: 1.0,
+            ..default()
+        };
+        let retina = TextLayoutInfo {
+            size: logical_size,
+            scale_factor: 2.0,
+            ..default()
+        };
+        assert_eq!(
+            shaped_text_anchor_transform(&normal, 15.0, anchor),
+            shaped_text_anchor_transform(&retina, 30.0, anchor)
+        );
+    }
+
+    #[test]
+    fn shaped_text_alignment_preserves_baseline_anchor_through_rotation() {
+        let size = Vec2::new(80.0, 20.0);
+        let baseline = 15.0;
+        for angle in [0.0, std::f32::consts::FRAC_PI_2, 0.37] {
+            for (mode, local_anchor) in [
+                (TextAnchor::LeftBaseline, Vec2::new(0.0, baseline)),
+                (TextAnchor::CenterBaseline, Vec2::new(40.0, baseline)),
+                (TextAnchor::Center, size * 0.5),
+            ] {
+                let transform = text_anchor_transform(
+                    size,
+                    baseline,
+                    DrawingSceneTextAnchor {
+                        mode,
+                        rotation_rad: angle,
+                    },
+                );
+                let Val::Px(x) = transform.translation.x else {
+                    panic!("pixel alignment");
+                };
+                let Val::Px(y) = transform.translation.y else {
+                    panic!("pixel alignment");
+                };
+                let projected_anchor =
+                    size * 0.5 + Vec2::new(x, y) + transform.rotation * (local_anchor - size * 0.5);
+                assert!(projected_anchor.length() < 1e-5, "{mode:?} at {angle}");
+            }
+        }
+    }
+
+    #[test]
+    fn default_plugins_include_the_ui_render_pass_for_draft_text() {
+        // Text and UiPlugin alone produce layout and entities but no pixels.
+        // Exercise the actual feature-selected application plugin group.
+        assert!(DefaultPlugins
+            .build()
+            .contains::<bevy::ui_render::UiRenderPlugin>());
+    }
+
+    #[test]
+    fn text_projection_uses_main_camera_extent_despite_asymmetric_panels() {
+        let mut world = World::new();
+        world.insert_resource(ViewportUiInset {
+            left: 280.0,
+            top: 40.0,
+            right: 80.0,
+            bottom: 24.0,
+        });
+        world.spawn((
+            Window {
+                resolution: (1000, 800).into(),
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        let main = world
+            .spawn((Camera::default(), OrbitCamera::default()))
+            .id();
+        world.spawn(Camera::default()); // Definition preview must not be selected.
+        assert_eq!(
+            live_viewport_target(&mut world),
+            Some((main, Vec2::new(1000.0, 800.0)))
+        );
+        world.resource_mut::<ViewportUiInset>().left = 0.0;
+        assert_eq!(
+            live_viewport_target(&mut world),
+            Some((main, Vec2::new(1000.0, 800.0)))
+        );
+    }
+
+    #[test]
+    fn mesh_invalidation_ignores_derived_uploads_but_tracks_authored_asset_edits() {
+        let mut assets = Assets::<Mesh>::default();
+        let authored = assets.add(Cuboid::default());
+        let derived = assets.add(Cuboid::default());
+        let mut cache = DrawingSceneLiveCache::default();
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        cache.observe_mesh_handle(entity, authored.id());
+        assert!(!cache.observes_mesh_event(&AssetEvent::Modified { id: derived.id() }));
+        assert!(cache.observes_mesh_event(&AssetEvent::Modified { id: authored.id() }));
+        assert!(cache.observes_mesh_event(&AssetEvent::Removed { id: authored.id() }));
+        cache.observe_mesh_handle(entity, derived.id());
+        assert!(!cache.observes_mesh_event(&AssetEvent::Modified { id: authored.id() }));
+        assert!(cache.observes_mesh_event(&AssetEvent::Added { id: derived.id() }));
     }
 
     #[test]

@@ -368,6 +368,11 @@ impl AuthoredEntity for PolylineSnapshot {
         Some(Transform::IDENTITY)
     }
 
+    fn preview_transform_from(&self, before: &dyn AuthoredEntity) -> Option<Transform> {
+        let before = before.as_any().downcast_ref::<Self>()?;
+        translated_vertex_pose(&before.primitive.points, &self.primitive.points)
+    }
+
     fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
         draw_polyline_outline(gizmos, &self.primitive, color);
     }
@@ -376,12 +381,237 @@ impl AuthoredEntity for PolylineSnapshot {
         polyline_outline_line_count(&self.primitive)
     }
 
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        crate::authored_entity::snapshot_fingerprint(self)
+    }
+
     fn box_clone(&self) -> BoxedEntity {
         self.clone().into()
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        other.type_name() == self.type_name() && other.to_json() == self.to_json()
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| other == self)
+    }
+}
+
+/// Immutable geometry shared by before/after drag candidates. The offset is a
+/// captured authored edit, not another movement rule; materialization happens
+/// only on commit or explicit snapshot export.
+#[derive(Clone)]
+pub(crate) struct RigidMeshSnapshot {
+    element_id: ElementId,
+    source: std::sync::Arc<TriangleMeshSnapshot>,
+    source_hash: blake3::Hash,
+    source_bytes: usize,
+    offset: Vec3,
+    rotation: Quat,
+    center: Vec3,
+    bounds: Option<EntityBounds>,
+}
+
+pub(crate) fn share_mesh_snapshot(snapshot: BoxedEntity) -> BoxedEntity {
+    let Some(mesh) = snapshot.0.as_any().downcast_ref::<TriangleMeshSnapshot>() else {
+        return snapshot;
+    };
+    let (source_hash, source_bytes) = mesh.plan_fingerprint().expect("native mesh serialization");
+    let shared = RigidMeshSnapshot {
+        element_id: mesh.element_id,
+        source: std::sync::Arc::new(mesh.clone()),
+        source_hash,
+        source_bytes,
+        offset: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        center: mesh.center(),
+        bounds: mesh.bounds(),
+    };
+    BoxedEntity(Box::new(shared))
+}
+
+impl RigidMeshSnapshot {
+    fn materialize(&self) -> TriangleMeshSnapshot {
+        let mut snapshot = (*self.source).clone();
+        snapshot.element_id = self.element_id;
+        for vertex in &mut snapshot.primitive.vertices {
+            *vertex = self.point(*vertex);
+        }
+        if self.rotation != Quat::IDENTITY {
+            if let Some(normals) = &mut snapshot.primitive.normals {
+                for normal in normals {
+                    *normal = self.rotation * *normal;
+                }
+            }
+        }
+        snapshot
+    }
+    fn point(&self, point: Vec3) -> Vec3 {
+        if self.rotation == Quat::IDENTITY {
+            point + self.offset
+        } else {
+            self.rotation * point + self.offset
+        }
+    }
+    fn normals_match(&self, normals: &Option<Vec<Vec3>>) -> bool {
+        match (&self.source.primitive.normals, normals) {
+            (Some(a), Some(b)) if self.rotation != Quat::IDENTITY => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| self.rotation * *a == *b)
+            }
+            (a, b) => a == b,
+        }
+    }
+    fn matches_native(&self, other: &TriangleMeshSnapshot) -> bool {
+        self.element_id == other.element_id
+            && self.source.layer == other.layer
+            && self.source.material_assignment == other.material_assignment
+            && self.source.semantic_shadow == other.semantic_shadow
+            && self.source.primitive.faces == other.primitive.faces
+            && self.normals_match(&other.primitive.normals)
+            && self.source.primitive.name == other.primitive.name
+            && self.source.primitive.vertices.len() == other.primitive.vertices.len()
+            && self
+                .source
+                .primitive
+                .vertices
+                .iter()
+                .zip(&other.primitive.vertices)
+                .all(|(a, b)| self.point(*a) == *b)
+    }
+}
+
+impl AuthoredEntity for RigidMeshSnapshot {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn copy_with_ids(
+        &self,
+        ids: &std::collections::HashMap<ElementId, ElementId>,
+    ) -> Option<BoxedEntity> {
+        if self.source.semantic_shadow.is_some() {
+            return None;
+        }
+        let mut copy = self.clone();
+        copy.element_id = *ids.get(&self.element_id)?;
+        Some(BoxedEntity(Box::new(copy)))
+    }
+
+    fn type_name(&self) -> &'static str {
+        "triangle_mesh"
+    }
+    fn element_id(&self) -> ElementId {
+        self.element_id
+    }
+    fn label(&self) -> String {
+        self.source.label()
+    }
+    fn center(&self) -> Vec3 {
+        self.point(self.center)
+    }
+    fn bounds(&self) -> Option<EntityBounds> {
+        self.bounds
+            .map(|bounds| bounds.map_corners(|p| self.point(p)))
+    }
+    fn translate_by(&self, delta: Vec3) -> BoxedEntity {
+        let mut next = self.clone();
+        next.offset += delta;
+        BoxedEntity(Box::new(next))
+    }
+    fn rotate_by(&self, rotation: Quat) -> BoxedEntity {
+        let mut next = self.clone();
+        let center = self.center();
+        next.rotation = rotation * self.rotation;
+        next.offset = center - next.rotation * self.center;
+        BoxedEntity(Box::new(next))
+    }
+    fn scale_by(&self, factor: Vec3, center: Vec3) -> BoxedEntity {
+        self.materialize().scale_by(factor, center)
+    }
+    fn property_fields(&self) -> Vec<PropertyFieldDef> {
+        self.source.property_fields()
+    }
+    fn set_property_json(&self, name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        self.materialize().set_property_json(name, value)
+    }
+    fn handles(&self) -> Vec<HandleInfo> {
+        Vec::new()
+    }
+    fn to_json(&self) -> Value {
+        self.materialize().to_json()
+    }
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        crate::authored_entity::snapshot_fingerprint(&(
+            self.element_id,
+            self.source_hash.as_bytes(),
+            self.rotation,
+            self.offset,
+        ))
+    }
+    fn plan_retained_assets(&self) -> Vec<(blake3::Hash, usize)> {
+        vec![(self.source_hash, self.source_bytes)]
+    }
+    fn apply_to(&self, world: &mut World) {
+        self.materialize().apply_to(world);
+    }
+    fn remove_from(&self, world: &mut World) {
+        despawn_by_element_id(world, self.element_id);
+    }
+    fn preview_transform(&self) -> Option<Transform> {
+        Some(Transform::from_translation(self.offset).with_rotation(self.rotation))
+    }
+    fn preview_transform_from(&self, before: &dyn AuthoredEntity) -> Option<Transform> {
+        if let Some(before) = before.as_any().downcast_ref::<Self>() {
+            if self.source_hash == before.source_hash {
+                let rotation = self.rotation * before.rotation.inverse();
+                return Some(
+                    Transform::from_translation(self.offset - rotation * before.offset)
+                        .with_rotation(rotation),
+                );
+            }
+        }
+        let before = before.as_any().downcast_ref::<TriangleMeshSnapshot>()?;
+        self.source
+            .eq_snapshot(before)
+            .then(|| Transform::from_translation(self.offset).with_rotation(self.rotation))
+    }
+    fn matches_entity(&self, entity: &EntityRef, _world: &World) -> Option<bool> {
+        let Some(mesh) = entity.get::<TriangleMesh>() else {
+            return Some(false);
+        };
+        Some(
+            entity.get::<ElementId>() == Some(&self.element_id)
+                && entity.get::<LayerAssignment>().map(|v| &v.layer) == self.source.layer.as_ref()
+                && entity.get::<MaterialAssignment>() == self.source.material_assignment.as_ref()
+                && entity.get::<SemanticShadow>() == self.source.semantic_shadow.as_ref()
+                && mesh.faces == self.source.primitive.faces
+                && self.normals_match(&mesh.normals)
+                && mesh.name == self.source.primitive.name
+                && mesh.vertices.len() == self.source.primitive.vertices.len()
+                && mesh
+                    .vertices
+                    .iter()
+                    .zip(&self.source.primitive.vertices)
+                    .all(|(b, a)| self.point(*a) == *b),
+        )
+    }
+    fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) { /* GPU mesh supplies the preview. */
+    }
+    fn box_clone(&self) -> BoxedEntity {
+        BoxedEntity(Box::new(self.clone()))
+    }
+    fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
+        if let Some(other) = other.as_any().downcast_ref::<Self>() {
+            if self.source_hash == other.source_hash {
+                return self.element_id == other.element_id
+                    && self.offset == other.offset
+                    && self.rotation == other.rotation;
+            }
+            return self.matches_native(&other.materialize());
+        }
+        other
+            .as_any()
+            .downcast_ref::<TriangleMeshSnapshot>()
+            .is_some_and(|other| self.matches_native(other))
     }
 }
 
@@ -511,6 +741,23 @@ impl AuthoredEntity for TriangleMeshSnapshot {
         }
         let mut snapshot = self.clone();
         match property_name {
+            // Geometry-only edits to imported shells retain stable identity,
+            // topology, materials and group membership through the same undoable
+            // property command used by the UI and model API.
+            "vertices" => {
+                let vertices = point_array(value)?;
+                if vertices.len() != self.primitive.vertices.len() {
+                    return Err(
+                        "Vertex edits must preserve the existing vertex count and topology".into(),
+                    );
+                }
+                if vertices.iter().any(|point| !point.is_finite()) {
+                    return Err("Vertex coordinates must be finite".into());
+                }
+                snapshot.primitive.vertices = vertices;
+                snapshot.primitive.normals = None;
+                validate_triangle_mesh(&snapshot.primitive)?;
+            }
             "name" => {
                 snapshot.primitive.name = match value {
                     Value::Null => None,
@@ -525,7 +772,12 @@ impl AuthoredEntity for TriangleMeshSnapshot {
                     _ => return Err("Triangle mesh layer must be a string or null".to_string()),
                 };
             }
-            _ => return Err(invalid_property_error("triangle_mesh", &["name", "layer"])),
+            _ => {
+                return Err(invalid_property_error(
+                    "triangle_mesh",
+                    &["name", "layer", "vertices"],
+                ))
+            }
         }
         Ok(snapshot.into())
     }
@@ -544,17 +796,9 @@ impl AuthoredEntity for TriangleMeshSnapshot {
     }
 
     fn handles(&self) -> Vec<HandleInfo> {
-        self.primitive
-            .vertices
-            .iter()
-            .enumerate()
-            .map(|(index, vertex)| HandleInfo {
-                id: format!("vertex_{index}"),
-                position: *vertex,
-                kind: HandleKind::Vertex,
-                label: format!("Vertex {}", index + 1),
-            })
-            .collect()
+        // Import vertices are not object-level grips. Subobjects belong to face
+        // editing; ordinary selection uses bounded transform handles.
+        Vec::new()
     }
 
     fn bounds(&self) -> Option<EntityBounds> {
@@ -625,6 +869,11 @@ impl AuthoredEntity for TriangleMeshSnapshot {
         Some(Transform::IDENTITY)
     }
 
+    fn preview_transform_from(&self, before: &dyn AuthoredEntity) -> Option<Transform> {
+        let before = before.as_any().downcast_ref::<Self>()?;
+        translated_vertex_pose(&before.primitive.vertices, &self.primitive.vertices)
+    }
+
     fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
         draw_triangle_mesh_outline(gizmos, &self.primitive, color);
     }
@@ -633,12 +882,22 @@ impl AuthoredEntity for TriangleMeshSnapshot {
         triangle_mesh_outline_line_count(&self.primitive)
     }
 
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        crate::authored_entity::snapshot_fingerprint(self)
+    }
+
     fn box_clone(&self) -> BoxedEntity {
         self.clone().into()
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        other.type_name() == self.type_name() && other.to_json() == self.to_json()
+        if let Some(other) = other.as_any().downcast_ref::<RigidMeshSnapshot>() {
+            return other.matches_native(self);
+        }
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| other == self)
     }
 }
 
@@ -730,6 +989,9 @@ impl AuthoredEntityFactory for PolylineFactory {
 
         let mut __q = world.try_query::<EntityRef>().unwrap();
         for entity_ref in __q.iter(world) {
+            if crate::plugins::object_locks::entity_locked(world, entity_ref.id()) {
+                continue;
+            }
             let Some(polyline) = entity_ref.get::<Polyline>() else {
                 continue;
             };
@@ -780,6 +1042,16 @@ impl AuthoredEntityFactory for PolylineFactory {
 }
 
 impl AuthoredEntityFactory for TriangleMeshFactory {
+    fn display_label(&self, entity_ref: &EntityRef, _world: &World) -> Option<String> {
+        entity_ref.get::<ElementId>()?;
+        let mesh = entity_ref.get::<TriangleMesh>()?;
+        Some(
+            mesh.name
+                .clone()
+                .unwrap_or_else(|| format!("Triangle Mesh ({} faces)", mesh.faces.len())),
+        )
+    }
+
     fn type_name(&self) -> &'static str {
         "triangle_mesh"
     }
@@ -1131,6 +1403,33 @@ fn draw_triangle_mesh_outline(gizmos: &mut Gizmos, primitive: &TriangleMesh, col
         gizmos.line(top[index], top[next_index], color);
         gizmos.line(bottom[index], top[index], color);
     }
+}
+
+/// Derived metadata only; never serialized. The source tick prevents stale
+/// bounds during command/preview edits before mesh generation has caught up.
+#[derive(Component)]
+pub(crate) struct TriangleMeshBoundsCache {
+    source_tick: bevy::ecs::change_detection::Tick,
+    bounds: Option<EntityBounds>,
+}
+
+impl TriangleMeshBoundsCache {
+    pub(crate) fn new(mesh: &Ref<TriangleMesh>) -> Self {
+        Self {
+            source_tick: mesh.last_changed(),
+            bounds: triangle_mesh_bounds(mesh).map(|(min, max)| EntityBounds { min, max }),
+        }
+    }
+}
+
+pub(crate) fn authored_triangle_mesh_bounds(entity: &EntityRef) -> Option<EntityBounds> {
+    let mesh = entity.get_ref::<TriangleMesh>()?;
+    if let Some(cache) = entity.get::<TriangleMeshBoundsCache>() {
+        if cache.source_tick == mesh.last_changed() {
+            return cache.bounds;
+        }
+    }
+    triangle_mesh_bounds(&mesh).map(|(min, max)| EntityBounds { min, max })
 }
 
 fn triangle_mesh_bounds(primitive: &TriangleMesh) -> Option<(Vec3, Vec3)> {
@@ -1492,12 +1791,19 @@ impl AuthoredEntity for EditableMeshSnapshot {
         self.mesh.edge_count()
     }
 
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        crate::authored_entity::snapshot_fingerprint(self)
+    }
+
     fn box_clone(&self) -> BoxedEntity {
         self.clone().into()
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        other.type_name() == self.type_name() && other.to_json() == self.to_json()
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| other == self)
     }
 }
 
@@ -1709,6 +2015,85 @@ mod tests {
     type PlaneSnapshot = PrimitiveSnapshot<PlanePrimitive>;
 
     #[test]
+    fn imported_vertex_edit_preserves_topology_and_identity_and_clears_stale_normals() {
+        let before = TriangleMeshSnapshot {
+            element_id: ElementId(42),
+            primitive: TriangleMesh {
+                name: Some("shell".into()),
+                vertices: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+                faces: vec![[0, 1, 2]],
+                normals: Some(vec![Vec3::Z; 3]),
+            },
+            layer: Some("original".into()),
+            material_assignment: None,
+            semantic_shadow: None,
+        };
+        let after = before
+            .set_property_json(
+                "vertices",
+                &serde_json::json!([[0, 0, 0], [0.8, 0, 0], [0, 1, 0]]),
+            )
+            .unwrap();
+        let after = after
+            .0
+            .as_any()
+            .downcast_ref::<TriangleMeshSnapshot>()
+            .unwrap();
+        assert_eq!(after.element_id, before.element_id);
+        assert_eq!(after.primitive.faces, before.primitive.faces);
+        assert_eq!(after.primitive.name, before.primitive.name);
+        assert_eq!(after.layer, before.layer);
+        assert!(after.primitive.normals.is_none());
+        assert_eq!(before.primitive.vertices[1], Vec3::X);
+        assert!(before
+            .set_property_json("vertices", &serde_json::json!([[0, 0, 0]]))
+            .is_err());
+        assert!(before
+            .set_property_json(
+                "vertices",
+                &serde_json::json!([[0, 0, 0], [1e99, 0, 0], [0, 1, 0]])
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn imported_mesh_bounds_cache_rejects_stale_geometry_before_regeneration() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(TriangleMesh {
+                name: None,
+                vertices: vec![Vec3::ZERO, Vec3::ONE],
+                faces: vec![],
+                normals: None,
+            })
+            .id();
+        let cache =
+            TriangleMeshBoundsCache::new(&world.entity(entity).get_ref::<TriangleMesh>().unwrap());
+        world.entity_mut(entity).insert(cache);
+        assert_eq!(
+            authored_triangle_mesh_bounds(&world.entity(entity))
+                .unwrap()
+                .max,
+            Vec3::ONE
+        );
+        world.increment_change_tick();
+        world.get_mut::<TriangleMesh>(entity).unwrap().vertices[1] = Vec3::splat(3.0);
+        assert_eq!(
+            authored_triangle_mesh_bounds(&world.entity(entity))
+                .unwrap()
+                .max,
+            Vec3::splat(3.0)
+        );
+        world.increment_change_tick();
+        world
+            .get_mut::<TriangleMesh>(entity)
+            .unwrap()
+            .vertices
+            .clear();
+        assert!(authored_triangle_mesh_bounds(&world.entity(entity)).is_none());
+    }
+
+    #[test]
     fn plane_property_fields_use_vec3_corners() {
         let snapshot = PlaneSnapshot {
             element_id: ElementId(12),
@@ -1718,6 +2103,7 @@ mod tests {
                 elevation: 0.75,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -1742,6 +2128,7 @@ mod tests {
                 elevation: 0.0,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -1833,6 +2220,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 2.0, 3.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -1871,6 +2259,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -1882,6 +2271,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -1918,6 +2308,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -1929,6 +2320,7 @@ mod tests {
                 half_extents: Vec3::new(2.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -1964,6 +2356,7 @@ mod tests {
                 height: 2.0,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -1976,6 +2369,7 @@ mod tests {
                 height: 2.0,
             },
             rotation: ShapeRotation(Quat::from_rotation_y(0.25)),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2018,6 +2412,7 @@ mod tests {
                 height: 2.0,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2030,6 +2425,7 @@ mod tests {
                 height: 2.0,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2065,6 +2461,7 @@ mod tests {
                 elevation: 0.0,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2077,6 +2474,7 @@ mod tests {
                 elevation: 0.5,
             },
             rotation: ShapeRotation(Quat::from_rotation_y(0.5)),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2121,6 +2519,7 @@ mod tests {
                 elevation: 0.0,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2133,6 +2532,7 @@ mod tests {
                 elevation: 0.0,
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2143,4 +2543,18 @@ mod tests {
         let entity_ref = world.entity(entity);
         assert!(entity_ref.contains::<NeedsMesh>());
     }
+}
+
+// Derive presentation from the shared plan's authored vertex correspondence,
+// never from pointer motion (semantic modifiers may change that motion).
+fn translated_vertex_pose(before: &[Vec3], after: &[Vec3]) -> Option<Transform> {
+    if before.len() != after.len() {
+        return None;
+    }
+    let delta = *after.first()? - *before.first()?;
+    before
+        .iter()
+        .zip(after)
+        .all(|(a, b)| (*a + delta).abs_diff_eq(*b, 1e-4))
+        .then(|| Transform::from_translation(delta))
 }

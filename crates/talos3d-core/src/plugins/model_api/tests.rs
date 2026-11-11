@@ -268,10 +268,10 @@ fn capability_snapshot_reports_registry_counts_and_no_curated_paths() {
         .guidance_overrides
         .iter()
         .all(|fact| fact.classification == "guidance_override"));
-    assert!(snapshot
+    assert!(!snapshot
         .must_read_guidance_card_ids
         .contains(&"dkg.visual_morphology".to_string()));
-    assert!(snapshot
+    assert!(!snapshot
         .must_read_guidance_card_ids
         .contains(&"dkg.building_skeleton".to_string()));
     assert!(snapshot
@@ -500,6 +500,7 @@ fn proactive_passage_surfaces_as_must_read_skill_card() {
 
     let prov = |passage_ref: &str, jurisdiction: Option<&str>| {
         build_provenance_for_passage(&PersistedPassage {
+            meta: None,
             passage_ref: passage_ref.into(),
             text: String::new(),
             citation: "test".into(),
@@ -748,6 +749,20 @@ fn get_entities_details_returns_bulk_details_and_missing_ids() {
 #[cfg(feature = "model-api")]
 fn init_model_api_test_world() -> World {
     let mut world = World::new();
+    let mut policies = crate::plugins::refinement::SettingOutPolicies::default();
+    policies.register(crate::plugins::refinement::SettingOutPolicy {
+        element_class: "wall_assembly".into(),
+        thickness_aliases: vec!["wall_thickness_mm".into(), "wall/thickness_mm".into()],
+        layer_aliases: vec!["wall_layers".into()],
+        system_aliases: vec![
+            "construction_system".into(),
+            "construction_system_id".into(),
+            "top_level_construction_system".into(),
+            "wall_system".into(),
+            "structural_system".into(),
+        ],
+    });
+    world.insert_resource(policies);
     world.insert_resource(Messages::<CreateBoxCommand>::default());
     world.insert_resource(Messages::<CreateCylinderCommand>::default());
     world.insert_resource(Messages::<CreateSphereCommand>::default());
@@ -762,6 +777,8 @@ fn init_model_api_test_world() -> World {
     world.insert_resource(Messages::<EndCommandGroup>::default());
     world.insert_resource(PendingCommandQueue::default());
     world.insert_resource(History::default());
+    world.init_resource::<crate::plugins::authored_edit_plan::AuthoredEditPlanRegistry>();
+    world.init_resource::<crate::plugins::authored_edit_plan::requests::EditRequestRegistry>();
     world.insert_resource(crate::plugins::refinement::RefinementGoalRegistry::default());
     world.insert_resource(TextureRegistry::default());
     world.insert_resource(MaterialRegistry::default());
@@ -843,6 +860,7 @@ fn init_model_api_test_world() -> World {
     );
     world.insert_resource(crate::plugins::definition_authoring::DefinitionDraftRegistry::default());
     world.insert_resource(crate::plugins::modeling::occurrence::ChangedDefinitions::default());
+    world.insert_resource(crate::plugins::camera::CameraControlsState::default());
     world.insert_resource(RenderSettings::default());
     world.insert_resource(SceneLightingSettings::default());
     world.insert_resource(crate::plugins::drawing_export::ViewportExportState::default());
@@ -1201,6 +1219,10 @@ fn agent_workflow_create_box_dimension_camera_and_screenshot_is_supported() {
     assert_eq!(camera.focus, [0.0, 1.0, 0.0]);
     assert_eq!(camera.projection, "orthographic");
     assert_eq!(camera.orthographic_scale, 3.0);
+    let controls = world.resource::<crate::plugins::camera::CameraControlsState>();
+    assert_eq!(controls.projection_mode, CameraProjectionMode::Isometric);
+    assert_eq!(controls.focal_length_mm, 35.0);
+    assert!(controls.pending_view_preset.is_none());
     assert!(camera.view_position.is_some());
     assert!(camera.view_forward.is_some());
     assert!(camera.view_up.is_some());
@@ -1733,6 +1755,7 @@ fn source_owned_linked_member_rejects_direct_property_edit() {
         frame: GroupFrame::identity(),
         composite: None,
         linked_model: Some(LinkedModelRef {
+            source_root_is_document: false,
             path: "linked.talos3d".to_string(),
             source_root_id: ElementId(10),
             source_to_scene_ids: vec![
@@ -2305,6 +2328,7 @@ async fn procedural_session_builds_post_and_beam_pavilion_through_mcp() {
     }
     let pure_commit: crate::curation::CommitReport = server
         .procedural_session_commit_tool(Parameters(SessionCommitRequest {
+            commit_id: None,
             session_id: pure_query.session_id.clone(),
             options: crate::curation::CommitOptions::default(),
         }))
@@ -2446,6 +2470,7 @@ async fn procedural_session_builds_post_and_beam_pavilion_through_mcp() {
     //    ModelApiStepExecutor turns each step into a real create_box.
     let commit: crate::curation::CommitReport = server
         .procedural_session_commit_tool(Parameters(SessionCommitRequest {
+            commit_id: None,
             session_id: session_id.clone(),
             options: crate::curation::CommitOptions::default(), // require_clean
         }))
@@ -4008,6 +4033,94 @@ fn occurrence_update_overrides_changes_only_the_target() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn occurrence_control_modifiers_are_shared_by_inspector_and_api() {
+    use crate::plugins::authored_edit_plan::{
+        modifiers::{EditPlanModifiers, OrderedEditModifier},
+        requests,
+    };
+    let mut world = init_model_api_test_world();
+    register_model_api_edit_requests(&mut world);
+    world.init_resource::<EditPlanModifiers>();
+    let definition = handle_create_definition(&mut world, make_rect_extrusion_request()).unwrap();
+    let id = handle_place_occurrence(
+        &mut world,
+        json!({"definition_id": definition.definition_id}),
+    )
+    .unwrap();
+    let dependent = handle_place_occurrence(
+        &mut world,
+        json!({"definition_id": definition.definition_id}),
+    )
+    .unwrap();
+    let original = capture_entity_snapshot(&world, ElementId(dependent)).unwrap();
+    world
+        .resource_mut::<EditPlanModifiers>()
+        .register(OrderedEditModifier::new(
+            "test.dependent",
+            0,
+            "core.occurrence_parameters",
+            move |world, request, draft| {
+                assert_eq!(request.payload::<ElementId>(), Some(&ElementId(id)));
+                draft.after.push(
+                    capture_entity_snapshot(world, ElementId(dependent))
+                        .unwrap()
+                        .translate_by(Vec3::Y),
+                );
+            },
+        ))
+        .unwrap();
+    let preview = requests::preview(
+        &mut world,
+        "core.occurrence_parameters",
+        json!({"element_id":id,"overrides":{"height":5.0}}),
+    )
+    .unwrap();
+    assert_eq!(preview.before_snapshots().len(), 2);
+    assert_eq!(
+        capture_entity_snapshot(&world, ElementId(dependent)).unwrap(),
+        original
+    );
+    handle_update_occurrence_overrides(&mut world, id, json!({"height":5.0})).unwrap();
+    for expected in preview.after_snapshots() {
+        assert_eq!(
+            capture_entity_snapshot(&world, expected.element_id()).unwrap(),
+            *expected
+        );
+    }
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    apply_pending_history_commands(&mut world);
+    assert_eq!(
+        capture_entity_snapshot(&world, ElementId(dependent)).unwrap(),
+        original
+    );
+    world
+        .resource_mut::<EditPlanModifiers>()
+        .register(OrderedEditModifier::new(
+            "test.refusal",
+            100,
+            "core.occurrence_parameters",
+            |_, _, draft| {
+                draft.context.refusals.push("Dependent edit refused".into());
+            },
+        ))
+        .unwrap();
+    let revision = world.resource::<History>().revision_token();
+    assert!(
+        handle_update_occurrence_overrides(&mut world, id, json!({"height":4.0}))
+            .unwrap_err()
+            .contains("Dependent edit refused")
+    );
+    assert!(requests::preview(
+        &mut world,
+        "core.occurrence_parameters",
+        json!({"element_id":id,"overrides":{"height":4.0}})
+    )
+    .is_err());
+    assert_eq!(world.resource::<History>().revision_token(), revision);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn occurrence_material_override_tools_set_and_clear_core_slot() {
     let mut world = init_model_api_test_world();
     for id in ["oak_finish", "walnut_finish"] {
@@ -4333,6 +4446,25 @@ fn definition_library_workflow_exports_imports_and_instantiates() {
 
 #[cfg(feature = "model-api")]
 fn register_hosted_on_relation(world: &mut World) {
+    use crate::plugins::hosting_contracts::{HostedGeometryPolicies, HostedGeometryPolicy};
+    let mut policies = HostedGeometryPolicies::default();
+    policies.default_relation_type = Some("hosted_on".into());
+    policies.register(HostedGeometryPolicy {
+        relation_type: "hosted_on".into(),
+        contract_kind: "fixture::host_aperture".into(),
+        minimum_remaining_host: 0.05,
+        geometry_tolerance: 0.01,
+        placement_tolerance: 0.02,
+        flush_minimum_axis: Some("y".into()),
+        thickness_parameter: Some("wall_thickness".into()),
+        position_parameter: Some("position_along_wall".into()),
+    });
+    world.insert_resource(policies);
+    // The real ModelingPlugin installs this factory. Captured edit plans must
+    // be able to recapture dependent relations for before-state guards.
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::assembly::RelationFactory);
     world
         .resource_mut::<CapabilityRegistry>()
         .register_relation_type(crate::capability_registry::RelationTypeDescriptor {
@@ -4810,7 +4942,7 @@ fn hosted_definition_instantiation_requires_remaining_wall_around_opening() {
     )
     .expect_err("edge-to-edge opening should be rejected");
 
-    assert!(err.contains("Remaining Wall X"), "{err}");
+    assert!(err.contains("Remaining Host X"), "{err}");
 }
 
 #[cfg(feature = "model-api")]
@@ -4873,7 +5005,7 @@ fn hosted_definition_instantiation_allows_opening_flush_with_host_bottom() {
 
 #[cfg(feature = "model-api")]
 #[test]
-fn occurrence_validate_host_fit_uses_core_wall_opening_fallback() {
+fn occurrence_validate_host_fit_uses_capability_geometry_policy() {
     let mut world = init_model_api_test_world();
     register_hosted_on_relation(&mut world);
 
@@ -4919,7 +5051,7 @@ fn occurrence_validate_host_fit_uses_core_wall_opening_fallback() {
     let result = handle_occurrence_validate_host_fit(
         &world,
         ValidateHostFitRequest {
-            contract_kind: WALL_OPENING_HOSTING_CONTRACT_KIND.to_string(),
+            contract_kind: "fixture::host_aperture".to_string(),
             host_element_id: host_id,
             hosted_element_id: instantiated.element_id,
             contract_parameters: json!({
@@ -5024,7 +5156,8 @@ fn primitive_round_trip_through_project_persistence() {
 
 #[cfg(feature = "model-api")]
 #[test]
-fn loading_the_same_clean_document_is_idempotent() {
+fn explicit_reload_replaces_transient_state_even_when_the_document_is_marked_clean() {
+    use crate::relational::registry::ParametricStore;
     let mut world = init_model_api_test_world();
     handle_create_entity(
         &mut world,
@@ -5048,16 +5181,38 @@ fn loading_the_same_clean_document_is_idempotent() {
         }),
     )
     .expect("transient marker should be created");
+    world.init_resource::<ParametricStore>();
+    let instance_id = world
+        .resource_mut::<ParametricStore>()
+        .instantiate("transient");
+    let before_revision = world.resource::<History>().revision_token();
     world.resource_mut::<DocumentState>().dirty = false;
 
     let opened = handle_load_project(&mut world, path.to_str().unwrap_or_default())
-        .expect("opening the same clean document should succeed as a no-op");
+        .expect("explicit same-path load should read the saved document");
 
     assert_eq!(opened, path.to_string_lossy());
     assert!(
-        get_entity_snapshot(&world, ElementId(transient_id)).is_some(),
-        "a same-clean-path open must not rebuild the scene"
+        get_entity_snapshot(&world, ElementId(transient_id)).is_none(),
+        "unsaved transient state must not survive an explicit reload"
     );
+    assert!(world
+        .resource::<ParametricStore>()
+        .get(instance_id)
+        .is_none());
+    assert_ne!(
+        world.resource::<History>().revision_token(),
+        before_revision
+    );
+    assert!(!world.resource::<DocumentState>().dirty);
+
+    // Same path and clean state must not conceal a changed/missing file.
+    fs::remove_file(&path).expect("fixture should exist");
+    let saved_state = list_entities(&world);
+    let revision = world.resource::<History>().revision_token();
+    assert!(handle_load_project(&mut world, path.to_str().unwrap()).is_err());
+    assert_eq!(list_entities(&world), saved_state);
+    assert_eq!(world.resource::<History>().revision_token(), revision);
 
     let _ = fs::remove_file(path);
 }
@@ -5085,7 +5240,7 @@ fn legacy_primitive_record_upgrades_and_loads() {
     // Strip the newer per-record fields to simulate a legacy record
     // inside an otherwise current-version file.
     let mut project: Value =
-        serde_json::from_slice(&fs::read(&path).expect("saved project should read"))
+        crate::plugins::project_codec::decode(&fs::read(&path).expect("saved project should read"))
             .expect("saved project should parse");
     for entity in project["entities"].as_array_mut().expect("entities array") {
         if entity["type"] == json!("sphere") {
@@ -5134,9 +5289,10 @@ fn failed_load_does_not_clear_existing_scene() {
     let mut empty_world = init_model_api_test_world();
     handle_save_project(&mut empty_world, path.to_str().unwrap_or_default())
         .expect("baseline project should save");
-    let mut project: Value =
-        serde_json::from_slice(&fs::read(&path).expect("baseline project should read"))
-            .expect("baseline project should parse");
+    let mut project: Value = crate::plugins::project_codec::decode(
+        &fs::read(&path).expect("baseline project should read"),
+    )
+    .expect("baseline project should parse");
     project["entities"] = json!([{ "type": "scene_light", "data": {} }]);
     fs::write(
         &path,
@@ -5886,91 +6042,14 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(design_body.contains("positive invariants"));
     assert!(design_body.contains("The agent may add to the harness"));
     assert!(design_body.contains("not a brute-force"));
-    assert!(discovery
-        .guidance_card_ids
-        .contains(&"dkg.building_skeleton".to_string()));
-    let skeleton_card = handle_get_guidance_card(&world, "dkg.building_skeleton".into())
-        .expect("card should fetch");
-    assert!(skeleton_card
-        .summary
-        .contains("foundation -> wall frame/top plate"));
-    assert!(skeleton_card.summary.contains("CorpusGaps"));
-    assert!(skeleton_card.summary.contains("marker boxes"));
-    assert!(skeleton_card.json_examples.iter().any(|example| example
-        .to_string()
-        .contains("group_element_id")
-        && example.to_string().contains("created_element_ids")
-        && example.to_string().contains("house_assembly_membership")));
-    assert!(skeleton_card
-        .referenced_tool_ids
-        .contains(&"acquire_corpus_passage".to_string()));
-    let visual_card = handle_list_guidance_cards(&world, Some("house".into()))
-        .iter()
-        .find(|card| card.id == "dkg.visual_morphology")
-        .cloned()
-        .expect("visual morphology card should list for house tasks");
-    assert!(visual_card.title.contains("Houses"));
-    assert!(visual_card
-        .summary
-        .contains("positive morphology checklist"));
-    assert!(visual_card
-        .referenced_tool_ids
-        .contains(&"take_screenshot".to_string()));
-    let visual_body = visual_card
-        .body_markdown
-        .as_deref()
-        .expect("visual morphology card should include resource-oriented body");
-    assert!(visual_body.contains("not a blacklist"));
-    assert!(visual_body.contains("positive invariants"));
-    assert!(visual_body.contains("save it as a prior"));
-    assert!(visual_body.contains("color alone"));
-    assert!(visual_body.contains("mostly shows terrain"));
-    let terrain_card = handle_get_guidance_card(&world, "dkg.terrain_foundation".into())
-        .expect("terrain foundation card should fetch");
-    assert!(terrain_card
-        .summary
-        .contains("one local-coordinate building assembly"));
-    assert!(terrain_card.summary.contains("terrain.plant_structure"));
-    assert!(terrain_card.summary.contains("terrain.plant_on_surface"));
-    assert!(terrain_card.summary.contains("invoke_command"));
-    assert!(terrain_card.summary.contains("command_id"));
-    assert!(terrain_card.summary.contains("semantic `structure`"));
-    assert!(terrain_card
-        .summary
-        .contains("semantic `foundation_system`"));
-    assert!(terrain_card
-        .summary
-        .contains("terrain.release_planted_structure"));
-    assert!(terrain_card
-        .summary
-        .contains("terrain.demote_conforming_foundation"));
-    assert!(terrain_card.summary.contains("world Y=0"));
-    assert!(terrain_card
-        .referenced_tool_ids
-        .contains(&"elevation_at".to_string()));
-    assert!(terrain_card
-        .referenced_tool_ids
-        .contains(&"get_world_aabb".to_string()));
-    let terrain_body = terrain_card
-        .body_markdown
-        .as_deref()
-        .expect("terrain foundation card should include behavior body");
-    assert!(terrain_body.contains("select the visible"));
-    assert!(terrain_body.contains("terrain.plant_structure"));
-    assert!(terrain_body.contains("invoke_command"));
-    assert!(terrain_body.contains("command_id"));
-    assert!(terrain_body.contains("nested semantic `foundation_system`"));
-    assert!(terrain_body.contains("snapshot"));
-    assert!(terrain_body.contains("max_height_box"));
-    let terrain_body = terrain_card
-        .body_markdown
-        .as_deref()
-        .expect("terrain card should explain assembly-wide placement");
-    assert!(terrain_body.contains("assembly-wide"));
-    assert!(terrain_body.contains("prompt target"));
-    assert!(terrain_body.contains("re-seat the house"));
-    assert!(terrain_body.contains("check_floating"));
-    assert!(terrain_body.contains("not sufficient for terrain-seated buildings"));
+    for id in [
+        "dkg.building_skeleton",
+        "dkg.visual_morphology",
+        "dkg.terrain_foundation",
+    ] {
+        assert!(handle_get_guidance_card(&world, id.into()).is_err());
+        assert!(!discovery.guidance_card_ids.contains(&id.to_string()));
+    }
 
     let known_tools = std::collections::BTreeSet::from([
         "get_instance_info",
@@ -6188,6 +6267,34 @@ fn recipe_discovery_without_element_class_searches_bounded_registered_targets() 
     assert_eq!(discovery.path_kind, "recipe");
     assert!(!discovery.recipe_rankings.is_empty());
     assert!(discovery.recipe_rankings.len() <= 12);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn drawing_result_returns_browser_bytes_without_a_filesystem_path() {
+    use base64::Engine as _;
+    let bytes = b"%PDF-1.4\nfixture";
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let result =
+        super::server::drawing_export_tool_result(format!("data:application/pdf;base64,{data}"))
+            .unwrap();
+    let encoded = serde_json::to_value(result).unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(encoded["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["transport"], "browser_memory");
+    assert_eq!(payload["mime_type"], "application/pdf");
+    assert!(payload.get("path").is_none());
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(payload["data_base64"].as_str().unwrap())
+            .unwrap(),
+        bytes
+    );
+    let native = super::server::drawing_export_tool_result("drawing.pdf".into()).unwrap();
+    let encoded = serde_json::to_value(native).unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(encoded["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["path"], "drawing.pdf");
 }
 
 #[cfg(feature = "model-api")]
@@ -6609,6 +6716,16 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
         .referenced_tool_ids
         .contains(&"definition.instantiate_hosted".to_string()));
 
+    let forged: AgentSkillDraftRequest =
+        serde_json::from_value(serde_json::to_value(&skill).unwrap()).unwrap();
+    assert!(handle_save_agent_skill_draft(&mut world, forged).is_err());
+    assert_eq!(
+        handle_get_agent_skill(&world, skill.id.0.clone())
+            .unwrap()
+            .body_markdown,
+        skill.body_markdown
+    );
+
     let draft = handle_save_agent_skill_draft(
         &mut world,
         AgentSkillDraftRequest {
@@ -6633,7 +6750,7 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
     )
     .expect("draft should save");
     assert_eq!(draft.id.0, "project.skill.opening_review");
-    assert_eq!(draft.trust_level, AgentSkillTrustLevel::SessionDraft);
+    assert_eq!(draft.trust_level, AgentSkillTrustLevel::ProjectDraft);
     assert!(draft.forbidden_tool_ids.contains(&"create_box".to_string()));
 }
 
@@ -9160,7 +9277,14 @@ fn assembly_pattern_draft_round_trip_with_gap_and_source_refs() {
 #[test]
 fn material_assignment_round_trips_layer_sets() {
     let mut world = init_model_api_test_world();
-    world.spawn((ElementId(42),));
+    world.spawn((
+        ElementId(42),
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+    ));
     world
         .resource_mut::<crate::plugins::materials::MaterialRegistry>()
         .upsert(MaterialDef {
@@ -9210,7 +9334,14 @@ fn material_assignment_round_trips_layer_sets() {
 #[test]
 fn assign_material_uses_existing_registry_material() {
     let mut world = init_model_api_test_world();
-    world.spawn((ElementId(42),));
+    world.spawn((
+        ElementId(42),
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+    ));
     world
         .resource_mut::<crate::plugins::materials::MaterialRegistry>()
         .upsert(MaterialDef {
@@ -9250,7 +9381,14 @@ fn assign_material_uses_existing_registry_material() {
 #[test]
 fn assign_material_can_create_color_material() {
     let mut world = init_model_api_test_world();
-    world.spawn((ElementId(42),));
+    world.spawn((
+        ElementId(42),
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+    ));
 
     let assigned = handle_assign_material(
         &mut world,
@@ -9289,7 +9427,14 @@ fn assign_material_can_create_color_material() {
 #[test]
 fn assign_material_can_create_asset_textured_material() {
     let mut world = init_model_api_test_world();
-    world.spawn((ElementId(42),));
+    world.spawn((
+        ElementId(42),
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+    ));
 
     let assigned = handle_assign_material(
         &mut world,
@@ -9415,7 +9560,15 @@ fn texture_mapping_tools_update_assignment_override() {
             name: "Project Cedar".to_string(),
             ..Default::default()
         });
-    world.spawn((ElementId(42), MaterialAssignment::new("project.cedar")));
+    world.spawn((
+        ElementId(42),
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+        MaterialAssignment::new("project.cedar"),
+    ));
 
     let updated = handle_update_texture_mapping(
         &mut world,
@@ -12245,6 +12398,30 @@ fn install_definition_occurrence_recipe(
 
 #[cfg(feature = "model-api")]
 #[test]
+fn instantiate_recipe_unknown_family_refuses_before_any_authored_effect() {
+    let mut world = init_model_api_test_world();
+    let next_id = world.resource::<ElementIdAllocator>().next_value();
+    let revision = world.resource::<History>().revision_token();
+    let error = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "invented-recipe".into(),
+            target_class: "unclassified".into(),
+            parameters: json!({}),
+            placement: None,
+            target_state: Some("Conceptual".into()),
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("not installed or registered"));
+    assert!(list_entities(&world).is_empty());
+    assert_eq!(world.resource::<ElementIdAllocator>().next_value(), next_id);
+    assert_eq!(world.resource::<History>().revision_token(), revision);
+    assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn instantiate_recipe_can_create_definition_and_bind_reusable_occurrence() {
     use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
     use crate::plugins::modeling::occurrence::OccurrenceIdentity;
@@ -12298,6 +12475,19 @@ fn instantiate_recipe_can_create_definition_and_bind_reusable_occurrence() {
     );
     let snapshot = get_entity_snapshot(&world, occurrence_id).expect("occurrence resolves");
     assert_eq!(snapshot["offset"], serde_json::json!([1.0, 2.0, 3.0]));
+    let definition = handle_list_definitions(&world)[0].definition_id.clone();
+    assert_eq!(world.resource::<History>().undo_stack_len(), 1);
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    assert!(list_entities(&world).is_empty());
+    assert!(handle_list_definitions(&world).is_empty());
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(handle_list_definitions(&world)[0].definition_id, definition);
+    assert_eq!(
+        get_entity_snapshot(&world, occurrence_id).unwrap(),
+        snapshot
+    );
 }
 
 #[cfg(feature = "model-api")]
@@ -12370,7 +12560,7 @@ fn failed_recipe_rolls_back_created_definition_before_returning_error() {
 ///   4. Return `recipe_id_used` equal to the requested family id.
 ///   5. Leave all created entities in the authored model (verifiable via
 ///      list_entities).
-///   6. Leave the operations undoable: History must have at least one entry.
+///   6. Undo and redo the complete result in one history operation.
 #[cfg(feature = "model-api")]
 #[test]
 fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable() {
@@ -12491,10 +12681,27 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
         .expect("recipe output group must carry the semantic class");
     assert_eq!(assignment.element_class.0, "wall_assembly");
 
-    // Undo is available: the PendingCommandQueue was flushed (commands went
-    // through the pipeline), which means they are now in History. Verify by
-    // checking that the pending queue is empty (flush happened) and that the
-    // entity count persisted (entities survived the flush).
+    // Exercise actual history, not merely the presence of some queued entry.
+    let mut ids: Vec<_> = collect_element_ids(&mut world).into_iter().collect();
+    ids.sort_unstable();
+    let expected = serde_json::to_value(get_entities_details(&world, ids.clone())).unwrap();
+    assert_eq!(world.resource::<History>().undo_stack_len(), 1);
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(list_entities(&world).len(), entity_count_before);
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(
+        serde_json::to_value(get_entities_details(&world, ids.clone())).unwrap(),
+        expected,
+        "one redo must restore geometry and every generated member/group annotation"
+    );
+    for id in ids {
+        assert_eq!(
+            handle_get_authoring_provenance(&world, id).unwrap().mode,
+            "ViaRecipe:two_box_wall"
+        );
+    }
     let queue = world.resource::<crate::plugins::history::PendingCommandQueue>();
     assert!(
         queue.commands.is_empty(),
@@ -12709,6 +12916,17 @@ fn instantiate_recipe_hard_failure_rolls_back_root_and_completed_steps() {
         second.tool = crate::curation::authoring_script::McpToolId::new("missing_tool");
     }
 
+    let control = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box", "centre": [20.0, 0.0, 0.0], "half_extents": [0.5, 0.5, 0.5]
+        }),
+    )
+    .unwrap();
+    let control_snapshot = get_entity_snapshot(&world, ElementId(control)).unwrap();
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    let next_id = world.resource::<ElementIdAllocator>().next_value();
     let ids_before = collect_element_ids(&mut world);
     let history_depth_before = world
         .resource::<crate::plugins::history::History>()
@@ -12737,6 +12955,14 @@ fn instantiate_recipe_hard_failure_rolls_back_root_and_completed_steps() {
             .undo_stack_len(),
         history_depth_before,
         "failed transaction must not remain in undo history"
+    );
+    assert_eq!(world.resource::<ElementIdAllocator>().next_value(), next_id);
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(control)).unwrap(),
+        control_snapshot,
+        "failed recipe must preserve the human's prior redo branch"
     );
 }
 
@@ -12959,6 +13185,19 @@ fn instantiate_recipe_gated_promotion_reports_partial_state_not_bare_error() {
         world.get::<ObligationSet>(obligation_entity).is_some(),
         "the named element must carry the ObligationSet so resolve_obligation can run"
     );
+    let obligations = world
+        .get::<ObligationSet>(obligation_entity)
+        .unwrap()
+        .clone();
+    assert_eq!(world.resource::<History>().undo_stack_len(), 1);
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    assert!(list_entities(&world).is_empty());
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    flush_model_api_write_pipeline(&mut world);
+    let group =
+        find_entity_by_element_id_readonly(&world, ElementId(obligation_element_id)).unwrap();
+    assert_eq!(world.get::<ObligationSet>(group), Some(&obligations));
 }
 
 /// The same defect through the bare `promote_refinement{recipe_id}` path: the
@@ -13814,6 +14053,39 @@ mod capability_profiles {
     }
 
     #[test]
+    fn focused_profile_is_bounded_and_keeps_discovery_edit_and_recovery_routes() {
+        let catalog = profile_tool_catalog();
+        let focused = catalog.tools_for(CapabilityProfile::FocusedAuthoring);
+        let authoring = catalog.tools_for(CapabilityProfile::Authoring);
+        let focused_bytes = serde_json::to_vec(focused.as_ref()).unwrap().len();
+        let authoring_bytes = serde_json::to_vec(authoring.as_ref()).unwrap().len();
+        assert!(focused.len() < 100);
+        assert!(focused_bytes * 4 < authoring_bytes * 3);
+        eprintln!(
+            "focused {} tools / {} schema bytes; authoring {} / {}",
+            focused.len(),
+            focused_bytes,
+            authoring.len(),
+            authoring_bytes
+        );
+        let names = profile_tool_names(CapabilityProfile::FocusedAuthoring);
+        for tool in super::super::profiles::FOCUSED_AUTHORING_TOOLS {
+            assert!(
+                router_tool_names().contains(*tool),
+                "stale focused tool {tool}"
+            );
+            assert!(names.contains(*tool));
+        }
+        assert!(!names.contains("create_box"));
+        assert!(!names.contains("import_file"));
+        assert!(profile_allows(CapabilityProfile::Full, "import_file"));
+        assert_eq!(
+            CapabilityProfile::from_name("focused-authoring"),
+            Some(CapabilityProfile::FocusedAuthoring)
+        );
+    }
+
+    #[test]
     fn full_profile_exposes_entire_router() {
         let catalog = profile_tool_catalog();
         assert_eq!(
@@ -13913,6 +14185,7 @@ mod capability_profiles {
             ..Default::default()
         };
         let instance = InstanceInfo {
+            shared_corpus_releases: Vec::new(),
             instance_id: "talos3d-test-42".to_string(),
             app_name: "talos3d-test".to_string(),
             pid: 42,
@@ -14127,11 +14400,8 @@ mod capability_profiles {
     /// The byte bound was 55% and ordinary growth crossed it by 0.5% — a single
     /// tool's schema, which is exactly the "adding a tool breaks the build" case
     /// this guard says it does not want to be. Measured at the time of writing:
-    /// 148/272 tools (54.4%) after adding the five guidance-session and
-    /// lifecycle tools that must remain available in every capability profile.
-    /// The bound is set to leave room for that deliberate session-contract
-    /// growth while still failing loudly on the thing it exists to catch:
-    /// un-gating the surface wholesale would put both ratios near 100%.
+    /// The five session lifecycle tools are intentionally exposed in every profile.
+    /// Keep the remaining authoring surface bounded relative to full.
     #[test]
     fn authoring_profile_is_a_fraction_of_full_surface() {
         let catalog = profile_tool_catalog();
@@ -14170,6 +14440,8 @@ mod capability_profiles {
         let names = profile_tool_names(CapabilityProfile::Inspection);
         for tool in [
             "create_entity",
+            "declare_elevation_intent",
+            "bind_elevation_intent",
             "create_box",
             "delete_entities",
             "transform",
@@ -14181,13 +14453,26 @@ mod capability_profiles {
             "save_project",
             "save_model",
             "invoke_command",
+            "install_recipe_from_session_export",
+            "save_recipe_draft",
+            "procedural_session.commit",
         ] {
             assert!(
                 !names.contains(tool),
                 "inspection profile must not advertise {tool}"
             );
         }
-        for tool in ["list_entities", "get_world_aabb", "take_screenshot"] {
+        for tool in [
+            "list_entities",
+            "get_world_aabb",
+            "take_screenshot",
+            "explain_design",
+            "definition.explain",
+            "occurrence.resolve",
+            "lookup_source_passage",
+            "get_authoring_provenance",
+            "get_claim_grounding",
+        ] {
             assert!(
                 names.contains(tool),
                 "inspection profile must include {tool}"
@@ -14310,4 +14595,687 @@ mod capability_profiles {
             .tool_call_allowed("ux_click")
             .expect("full allows everything");
     }
+}
+
+#[cfg(feature = "model-api")]
+mod http_sessions;
+
+#[cfg(feature = "model-api")]
+#[test]
+fn discover_curated_paths_definition_routes_use_registered_tools_and_profiles() {
+    let mut world = init_model_api_test_world();
+    let mut request = make_rect_extrusion_request();
+    request["name"] = json!("Door Panel");
+    let panel = handle_create_definition(&mut world, request).unwrap();
+    let window = handle_create_definition(
+        &mut world,
+        make_compound_window_request(&panel.definition_id),
+    )
+    .unwrap();
+    let library = handle_create_definition_library(&mut world, json!({"name":"Products"})).unwrap();
+    for id in [&panel.definition_id, &window.definition_id] {
+        handle_add_definition_to_library(
+            &mut world,
+            json!({
+                "library_id": library.library_id, "definition_id": id,
+            }),
+        )
+        .unwrap();
+    }
+    let variant = handle_create_definition(
+        &mut world,
+        json!({
+            "name": "Derived Window", "base_definition_id": window.definition_id,
+            "definition_kind": "Solid", "parameters": [], "evaluators": [],
+        }),
+    )
+    .unwrap();
+    handle_add_definition_to_library(
+        &mut world,
+        json!({
+            "library_id": library.library_id, "definition_id": variant.definition_id,
+        }),
+    )
+    .unwrap();
+    let mut component = make_rect_extrusion_request();
+    component["name"] = json!("Window A Component");
+    let component = handle_create_definition(&mut world, component).unwrap();
+    handle_add_definition_to_library(
+        &mut world,
+        json!({
+            "library_id": library.library_id, "definition_id": component.definition_id,
+        }),
+    )
+    .unwrap();
+    for (term, expected) in [
+        ("door", "definition.instantiate"),
+        ("window", "definition.instantiate_hosted"),
+    ] {
+        let result = handle_discover_curated_paths(
+            &world,
+            CuratedPathDiscoveryRequest {
+                path_kind: Some("definition".into()),
+                element_class: Some(term.into()),
+                query: None,
+                context: json!({}),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.definition_assets.len(),
+            if term == "window" { 3 } else { 1 }
+        );
+        if term == "window" {
+            let inherited = result
+                .definition_assets
+                .iter()
+                .find(|asset| asset.definition_id == variant.definition_id)
+                .unwrap();
+            assert_eq!(
+                inherited.instantiate_tool.as_deref(),
+                Some("definition.instantiate_hosted")
+            );
+        }
+        assert_eq!(result.suggested_next_tool, expected);
+        assert!(result
+            .definition_assets
+            .iter()
+            .any(|asset| asset.instantiate_tool.as_deref() == Some(expected)));
+        assert!(profile_tool_catalog().router.has_route(expected));
+        assert!(result.definition_assets[0]
+            .how_to_instantiate
+            .contains(&library.library_id));
+        assert!(!result.definition_assets[0]
+            .how_to_instantiate
+            .contains("occurrence.create"));
+        for profile in CapabilityProfile::ALL {
+            let mut projected = result.clone();
+            projected.for_profile(profile);
+            assert!(profile_tool_catalog()
+                .tools_for(profile)
+                .iter()
+                .any(|tool| tool.name == projected.suggested_next_tool));
+            if profile == CapabilityProfile::Inspection {
+                assert_eq!(projected.suggested_next_tool, "set_session_profile");
+                assert_eq!(projected.required_profile.as_deref(), Some("authoring"));
+                assert_eq!(
+                    projected.definition_assets[0].required_profile.as_deref(),
+                    Some("authoring")
+                );
+                assert!(projected.definition_assets[0]
+                    .how_to_instantiate
+                    .starts_with("First call set_session_profile"));
+            }
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+mod session_atomic;
+#[cfg(feature = "model-api")]
+mod session_safety;
+
+#[test]
+#[cfg(feature = "model-api")]
+fn absent_authoring_record_is_distinct_from_explicit_freeform() {
+    use crate::plugins::refinement::AuthoringProvenance;
+    let mut world = World::new();
+    let entity = world.spawn(ElementId(78)).id();
+    assert_eq!(
+        handle_get_authoring_provenance(&world, 78).unwrap().mode,
+        "Unrecorded"
+    );
+    world
+        .entity_mut(entity)
+        .insert(AuthoringProvenance::default());
+    assert_eq!(
+        handle_get_authoring_provenance(&world, 78).unwrap().mode,
+        "Freeform"
+    );
+}
+
+#[cfg(feature = "model-api")]
+mod edit_plans;
+
+#[cfg(feature = "model-api")]
+#[test]
+fn polygon_occurrence_controls_share_plan_history_and_native_reload() {
+    use crate::plugins::{
+        authored_edit_plan::{queue_captured_plan, requests},
+        modeling::profile::ProfileExtrusion,
+    };
+    let mut world = init_model_api_test_world();
+    register_model_api_edit_requests(&mut world);
+    let mut request = make_rect_extrusion_request();
+    for key in ["width_param", "depth_param", "height_param"] {
+        request.as_object_mut().unwrap().remove(key);
+    }
+    request["parameters"][0]["default_value"] = json!(2000.0);
+    request["parameters"][1]["default_value"] = json!(100.0);
+    request["parameters"][2]["default_value"] = json!(1000.0);
+    for param in request["parameters"].as_array_mut().unwrap() {
+        param["metadata"] = json!({"unit":"mm"});
+    }
+    let reference = |name| json!({"expr_kind":"reference","path":name});
+    let zero = json!({"expr_kind":"literal","value":0.0});
+    request["body"] = json!({"evaluators":[{"PolygonExtrusion":{
+        "coordinate_unit":"mm", "height": reference("depth"),
+        "profile_xz":[[zero.clone(),zero.clone()],[reference("width"),zero.clone()],[zero,reference("height")]]
+    }}]});
+    let definition = handle_create_definition(&mut world, request).unwrap();
+    let id = handle_place_occurrence(
+        &mut world,
+        json!({"definition_id":definition.definition_id,"offset":[5.0,2.0,3.0]}),
+    )
+    .unwrap();
+    let geometry = |world: &World| -> ProfileExtrusion {
+        world
+            .entity(find_entity_by_element_id_readonly(world, ElementId(id)).unwrap())
+            .get::<ProfileExtrusion>()
+            .unwrap()
+            .clone()
+    };
+    let original = geometry(&world);
+    let plan = requests::preview(
+        &mut world,
+        "core.occurrence_parameters",
+        json!({"element_id":id,"overrides":{"width":3000.0}}),
+    )
+    .unwrap();
+    assert_eq!(
+        geometry(&world),
+        original,
+        "preview must not mutate live geometry"
+    );
+    queue_captured_plan(&mut world, plan.plan_id()).unwrap();
+    flush_model_api_write_pipeline(&mut world);
+    let changed = geometry(&world);
+    assert_ne!(changed.profile, original.profile);
+    assert_eq!(changed.centre, original.centre);
+    assert!(changed.profile.tessellate(1).contains(&Vec2::new(3.0, 0.0)));
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    apply_pending_history_commands(&mut world);
+    assert_eq!(geometry(&world), original);
+    let revision = world.resource::<History>().revision_token();
+    assert!(handle_update_occurrence_overrides(&mut world, id, json!({"width":0.0})).is_err());
+    assert!(handle_set_property(&mut world, id, "unknown", json!(42)).is_err());
+    assert_eq!(world.resource::<History>().revision_token(), revision);
+    assert_eq!(geometry(&world), original);
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    apply_pending_history_commands(&mut world);
+    assert_eq!(
+        geometry(&world),
+        changed,
+        "failed proposal must preserve redo"
+    );
+    let stale = requests::preview(
+        &mut world,
+        "core.occurrence_parameters",
+        json!({"element_id":id,"overrides":{"width":4000.0}}),
+    )
+    .unwrap();
+    handle_set_property(&mut world, id, "width", json!(3500.0)).unwrap();
+    assert!(queue_captured_plan(&mut world, stale.plan_id()).is_err());
+    let before_save = geometry(&world);
+    let path = temp_json_path("native-polygon-controls").with_extension("talos3d");
+    handle_save_project(&mut world, path.to_str().unwrap()).unwrap();
+    let mut loaded = init_model_api_test_world();
+    handle_load_project(&mut loaded, path.to_str().unwrap()).unwrap();
+    assert_eq!(geometry(&loaded), before_save);
+    assert_eq!(
+        handle_resolve_occurrence(&loaded, id).unwrap()["width"]["value"],
+        json!(3500.0)
+    );
+    handle_update_occurrence_overrides(&mut loaded, id, json!({"width":3000.0})).unwrap();
+    assert_eq!(
+        geometry(&loaded),
+        changed,
+        "same controls after reload must produce same geometry"
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn inspector_control_actions_use_captured_occurrence_plan_and_refuse_stale_input() {
+    use crate::plugins::{
+        occurrence_controls::{self, Action, ControlSession},
+        property_edit::PropertyPanelData,
+    };
+    let mut world = init_model_api_test_world();
+    world.init_resource::<PropertyPanelData>();
+    register_model_api_edit_requests(&mut world);
+    let definition = handle_create_definition(&mut world, make_rect_extrusion_request()).unwrap();
+    let id = handle_place_occurrence(
+        &mut world,
+        json!({"definition_id":definition.definition_id}),
+    )
+    .unwrap();
+    let session = |world: &World| ControlSession {
+        element_id: id,
+        parameter: "width".into(),
+        buffer: "6.0".into(),
+        original_value: json!(4.0),
+        base_revision: world.resource::<History>().revision_token(),
+        plan: None,
+        feedback: String::new(),
+    };
+    let edit = session(&world);
+    world
+        .resource_mut::<PropertyPanelData>()
+        .control_editor
+        .session = Some(edit);
+    world
+        .resource_mut::<PropertyPanelData>()
+        .control_editor
+        .action = Some(Action::Preview);
+    occurrence_controls::process(&mut world, Some(id));
+    assert_eq!(
+        handle_resolve_occurrence(&world, id).unwrap()["width"]["value"],
+        json!(4.0)
+    );
+    assert!(world
+        .resource::<PropertyPanelData>()
+        .control_editor
+        .session
+        .as_ref()
+        .unwrap()
+        .plan
+        .is_some());
+    world
+        .resource_mut::<PropertyPanelData>()
+        .control_editor
+        .action = Some(Action::Apply);
+    occurrence_controls::process(&mut world, Some(id));
+    apply_pending_history_commands(&mut world);
+    assert_eq!(
+        handle_resolve_occurrence(&world, id).unwrap()["width"]["value"],
+        json!(6.0)
+    );
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    apply_pending_history_commands(&mut world);
+    assert_eq!(
+        handle_resolve_occurrence(&world, id).unwrap()["width"]["value"],
+        json!(4.0)
+    );
+    let edit = session(&world);
+    world
+        .resource_mut::<PropertyPanelData>()
+        .control_editor
+        .session = Some(edit);
+    handle_update_occurrence_overrides(&mut world, id, json!({"width":5.0})).unwrap();
+    world
+        .resource_mut::<PropertyPanelData>()
+        .control_editor
+        .action = Some(Action::Preview);
+    occurrence_controls::process(&mut world, Some(id));
+    let editor = &world.resource::<PropertyPanelData>().control_editor;
+    assert!(editor.session.as_ref().unwrap().plan.is_none());
+    assert!(editor
+        .session
+        .as_ref()
+        .unwrap()
+        .feedback
+        .contains("design changed"));
+    assert_eq!(
+        handle_resolve_occurrence(&world, id).unwrap()["width"]["value"],
+        json!(5.0)
+    );
+    occurrence_controls::process(&mut world, None);
+    assert!(
+        world
+            .resource::<PropertyPanelData>()
+            .control_editor
+            .session
+            .is_none(),
+        "changing selection clears unfinished edits"
+    );
+}
+
+#[cfg(feature = "model-api")]
+mod foreign_source;
+
+#[cfg(feature = "model-api")]
+mod native_recipe_history;
+
+#[cfg(feature = "model-api")]
+#[test]
+fn mcp_material_assignment_updates_persisted_occurrence_binding() {
+    use crate::capability_registry::AuthoredEntityFactory;
+    use crate::plugins::modeling::{
+        definition::DefinitionId,
+        occurrence::{OccurrenceFactory, OccurrenceIdentity},
+    };
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<MaterialRegistry>()
+        .upsert(MaterialDef {
+            id: "selected".to_string(),
+            ..Default::default()
+        });
+    let entity = world
+        .spawn((
+            ElementId(802),
+            OccurrenceIdentity::new(DefinitionId("family".to_string()), 1),
+        ))
+        .id();
+    let assignment = MaterialAssignment::new("selected");
+    handle_set_material_assignment(
+        &mut world,
+        SetMaterialAssignmentRequest {
+            element_ids: vec![802],
+            assignment: assignment.clone(),
+        },
+    )
+    .unwrap();
+    let factory = OccurrenceFactory;
+    let captured = factory
+        .capture_snapshot(&world.entity(entity), &world)
+        .unwrap();
+    let reloaded = factory.from_persisted_json(&captured.to_json()).unwrap();
+    assert_eq!(reloaded.material_assignment(), Some(assignment));
+    handle_remove_material(&mut world, vec![802]).unwrap();
+    let cleared = factory
+        .capture_snapshot(&world.entity(entity), &world)
+        .unwrap();
+    assert!(cleared.material_assignment().is_none());
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn browser_invocation_adapter_has_every_native_tool() {
+    let catalog = super::server::profile_tool_catalog();
+    let native: std::collections::BTreeSet<_> = catalog
+        .tools_for(CapabilityProfile::Full)
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    let browser: std::collections::BTreeSet<_> = super::server::without_peer_tool_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        native, browser,
+        "New native tools must automatically reach the browser adapter"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn unbound_compound_size_control_is_refused_before_history_or_opening_changes() {
+    let mut world = init_model_api_test_world();
+    let child = handle_create_definition(&mut world, make_locked_member_request()).unwrap();
+    let mut request = make_compound_window_request(&child.definition_id);
+    request["compound"]["child_slots"][0]["parameter_bindings"][0]["expr"] =
+        json!({"kind":"literal","value":1.2});
+    let def = handle_create_definition(&mut world, request).unwrap();
+    let id =
+        handle_place_occurrence(&mut world, json!({"definition_id":def.definition_id})).unwrap();
+    let before = capture_entity_snapshot(&world, ElementId(id)).unwrap();
+    let revision = world
+        .resource::<crate::plugins::history::History>()
+        .revision_token();
+    let error = handle_update_occurrence_overrides(&mut world, id, json!({"overall_width":1.6}))
+        .unwrap_err();
+    assert!(
+        error.contains("does not change the evaluated body"),
+        "{error}"
+    );
+    assert_eq!(
+        before,
+        capture_entity_snapshot(&world, ElementId(id)).unwrap()
+    );
+    assert_eq!(
+        revision,
+        world
+            .resource::<crate::plugins::history::History>()
+            .revision_token()
+    );
+    handle_update_occurrence_overrides(&mut world, id, json!({"overall_height":1.6}))
+        .expect("bound height still works");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn definition_create_and_update_preserve_explicit_material_defaults() {
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<MaterialRegistry>()
+        .upsert(MaterialDef {
+            id: "test.finish".into(),
+            name: "Test finish".into(),
+            ..Default::default()
+        });
+    let mut request = make_rect_extrusion_request();
+    request["material_assignment"] = json!("test.finish");
+    let def = handle_create_definition(&mut world, request).unwrap();
+    let id = crate::plugins::modeling::definition::DefinitionId(def.definition_id.clone());
+    assert_eq!(
+        world
+            .resource::<crate::plugins::modeling::definition::DefinitionRegistry>()
+            .get(&id)
+            .unwrap()
+            .material_assignment,
+        Some(MaterialAssignment::new("test.finish"))
+    );
+    let revision = world.resource::<History>().revision_token();
+    assert!(handle_update_definition(
+        &mut world,
+        json!({"definition_id":def.definition_id,"material_assignment":"missing"})
+    )
+    .is_err());
+    assert_eq!(revision, world.resource::<History>().revision_token());
+    handle_update_definition(
+        &mut world,
+        json!({"definition_id":def.definition_id,"material_assignment":null}),
+    )
+    .unwrap();
+    assert!(world
+        .resource::<crate::plugins::modeling::definition::DefinitionRegistry>()
+        .get(&id)
+        .unwrap()
+        .material_assignment
+        .is_none());
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn named_view_updates_preserve_saved_camera_for_omitted_and_partial_fields() {
+    let mut world = World::new();
+    world.init_resource::<NamedViewRegistry>();
+    // Deliberately distinct from the live/default camera.
+    let saved = OrbitCamera {
+        focus: Vec3::new(4.0, 5.0, 6.0),
+        radius: 12.0,
+        orthographic_scale: 4.3,
+        yaw: 1.4,
+        pitch: -0.2,
+        projection_mode: CameraProjectionMode::Isometric,
+        focal_length_mm: 70.0,
+    };
+    world
+        .resource_mut::<NamedViewRegistry>()
+        .save(crate::plugins::named_views::NamedView::from_orbit(
+            "North", &saved,
+        ))
+        .unwrap();
+    for request in [
+        serde_json::json!({"name":"North", "description":"North elevation"}),
+        serde_json::json!({"name":"North", "radius":18.0}),
+    ] {
+        let request: server::ViewUpdateRequest = serde_json::from_value(request).unwrap();
+        handle_view_update(
+            &mut world,
+            request.name,
+            request.new_name,
+            request.description,
+            request.camera,
+        )
+        .unwrap();
+        let registry = world.resource::<NamedViewRegistry>();
+        let actual = registry.get("North").unwrap();
+        assert_eq!(actual.focus, [4.0, 5.0, 6.0]);
+        assert_eq!(actual.orthographic_scale, Some(4.3));
+        assert_eq!(actual.yaw, 1.4);
+        assert_eq!(actual.pitch, -0.2);
+        assert_eq!(actual.projection_mode, CameraProjectionMode::Isometric);
+        assert_eq!(actual.focal_length_mm, 70.0);
+        assert_eq!(actual.description.as_deref(), Some("North elevation"));
+    }
+    assert_eq!(
+        world
+            .resource::<NamedViewRegistry>()
+            .get("North")
+            .unwrap()
+            .radius,
+        18.0
+    );
+    let before =
+        serde_json::to_value(world.resource::<NamedViewRegistry>().get("North").unwrap()).unwrap();
+    world
+        .resource_mut::<NamedViewRegistry>()
+        .save(crate::plugins::named_views::NamedView::from_orbit(
+            "South", &saved,
+        ))
+        .unwrap();
+    for target in ["North", "South"] {
+        let request: server::ViewUpdateRequest = serde_json::from_value(serde_json::json!({
+            "name":"North", "new_name":target, "radius":99.0, "description":"must not apply"
+        }))
+        .unwrap();
+        assert!(handle_view_update(
+            &mut world,
+            request.name,
+            request.new_name,
+            request.description,
+            request.camera
+        )
+        .is_err());
+        assert_eq!(
+            serde_json::to_value(world.resource::<NamedViewRegistry>().get("North").unwrap())
+                .unwrap(),
+            before
+        );
+    }
+    let request: server::ViewUpdateRequest = serde_json::from_value(serde_json::json!({
+        "name":"North", "description":"must not apply", "projection":"invalid"
+    }))
+    .unwrap();
+    assert!(handle_view_update(
+        &mut world,
+        request.name,
+        request.new_name,
+        request.description,
+        request.camera
+    )
+    .is_err());
+    assert_eq!(
+        serde_json::to_value(world.resource::<NamedViewRegistry>().get("North").unwrap()).unwrap(),
+        before
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn capability_face_refs_are_agent_discoverable_and_selectable() {
+    use crate::plugins::modeling::{bsp_csg::CsgTriangle, planar_body::PlanarBody};
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+    world.insert_resource(registry);
+    let mut body = PlanarBody::from_triangles(vec![CsgTriangle::new(Vec3::ZERO, Vec3::X, Vec3::Y)]);
+    let face = GeneratedFaceRef::CapabilitySurface {
+        key: "fixture/exterior".into(),
+    };
+    body.surfaces[0].reference = Some(face.clone());
+    world.spawn((
+        ElementId(1),
+        body,
+        BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::ONE,
+        },
+        ShapeRotation::default(),
+    ));
+    let listed = handle_list_subobjects(&mut world, 1).unwrap();
+    assert_eq!(listed.len(), 4);
+    assert_eq!(
+        listed[0].reference,
+        SelectableSubobjectRef::Face {
+            element_id: 1,
+            face
+        }
+    );
+    validate_subobject_refs(&world, &[listed[0].reference.clone()]).unwrap();
+    let edges = handle_expand_subobject_selection(
+        &mut world,
+        listed[0].reference.clone(),
+        "bounding_edges",
+    )
+    .unwrap();
+    assert_eq!(edges.len(), 3);
+    for edge in edges {
+        validate_subobject_refs(&world, &[edge.clone()]).unwrap();
+        assert_eq!(
+            handle_expand_subobject_selection(&mut world, edge, "connected_faces").unwrap(),
+            vec![listed[0].reference.clone()]
+        );
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn mcp_material_batch_is_atomic_and_undoable() {
+    let mut world = init_model_api_test_world();
+    let entity = world
+        .spawn((
+            ElementId(42),
+            BoxPrimitive {
+                centre: Vec3::ZERO,
+                half_extents: Vec3::ONE,
+            },
+            ShapeRotation::default(),
+        ))
+        .id();
+    world.spawn(ElementId(43)); // An id alone cannot be saved as an authored entity.
+    world
+        .resource_mut::<MaterialRegistry>()
+        .upsert(MaterialDef {
+            id: "ground".into(),
+            ..Default::default()
+        });
+    world.resource_mut::<History>().mark_save_point();
+    for ids in [vec![42, 999], vec![42, 43], vec![42, 42]] {
+        assert!(handle_apply_material(
+            &mut world,
+            ApplyMaterialRequest {
+                element_ids: ids,
+                material_id: "ground".into()
+            }
+        )
+        .is_err());
+        assert!(world.get::<MaterialAssignment>(entity).is_none());
+        assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+        assert!(!world.resource::<DocumentState>().dirty);
+    }
+    handle_apply_material(
+        &mut world,
+        ApplyMaterialRequest {
+            element_ids: vec![42],
+            material_id: "ground".into(),
+        },
+    )
+    .unwrap();
+    assert!(world.resource::<DocumentState>().dirty);
+    assert_eq!(world.resource::<History>().undo_stack_len(), 1);
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    apply_pending_history_commands(&mut world);
+    assert!(world.get::<MaterialAssignment>(entity).is_none());
+    assert!(!world.resource::<DocumentState>().dirty);
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    apply_pending_history_commands(&mut world);
+    assert_eq!(
+        world.get::<MaterialAssignment>(entity),
+        Some(&MaterialAssignment::new("ground"))
+    );
 }

@@ -22,6 +22,7 @@ remain part of the saved document.
 | Key | Tool |
 | --- | --- |
 | `Esc` | Select |
+| `Shift+T` | Tape Measure |
 | `B` | Box |
 | `C` | Cylinder |
 | `P` | Plane |
@@ -46,9 +47,62 @@ Fillet and chamfer are currently exposed through the Modeling toolbar, command
 palette, and MCP/automation surfaces rather than a dedicated keyboard shortcut.
 Select one source solid, then run `Create Fillet` or `Create Chamfer`.
 
+## Precision and inference
+
+Hover geometry to see endpoint, midpoint, center, edge and face cues. Pause over
+an edge to reference it while drawing. Hold Shift to keep the inferred direction,
+use arrow keys to lock an axis, and hold Ctrl to temporarily bypass snapping.
+The inferred point feeds the same preview and command as ordinary tool input.
+See [Cursor inference](INFERENCE.md) for the supported tools, axis convention,
+mode cycling, shape cues and current geometry limits.
+
+## Measuring
+
+The ruler button in the top **Measure** toolbar activates Tape Measure. It is
+also available under **Create → Reference → Tape Measure**, or with `Shift+T`.
+Click two points to measure; hold X, Y or Z to constrain the direction. Escape
+cancels a measurement or returns to Select. Select and Tape use their own pointer
+feedback, without the yellow drawing-plane cross.
+
+## Selecting and isolating imported objects
+
+Selected surfaces show a blue tint and screen-space dots. A selected group
+highlights its contents; the status bar keeps the selected object's name and
+active group path visible even while a tool or handle hint is shown. Highlights
+are temporary and excluded from clean viewport exports.
+
+Double-click a group to enter it; Escape exits one level and selects the group
+you left. A plain click outside the current selection box selects its enclosing
+group; repeat to climb the hierarchy and clear selection at the top. Outside
+clicks also leave face editing. Shift-click retains additive selection.
+
+Viewport selections reveal their Outliner row: containing branches expand and
+the panel scrolls to the selected object. Click an Outliner row to select that
+exact object. Shift-click another row under the same parent to select the
+inclusive sibling range, skipping locked entries and excluding descendants.
+Ctrl/Cmd-click toggles individual rows; Ctrl/Cmd+Shift-click adds a range.
+Right-click an already selected row to keep the multi-selection and choose
+**Group Selected**, or use the same button above the tree. Grouping is enabled
+for two or more editable objects under one parent and supports Undo/Redo.
+Ctrl/Cmd-click in the viewport selects the
+individual authored object through its containing groups. Generated Definition
+parts still select their owning occurrence.
+
+Each model object or group has a visibility checkbox in the Outliner. Uncheck it
+to hide the object and its contents; check it to show them again. Dimmed rows stay
+in the tree so hidden objects can be found. A checked but dimmed row is hidden by
+its parent or layer. Showing a parent preserves its children's own settings.
+Object visibility is saved in the project and supports Undo/Redo.
+
+Imported material batches may contain multiple source surfaces. Direct selection
+addresses the authored object; it does not infer architectural boundaries inside
+one fused mesh or assign semantic identities automatically.
+
 ## Face Editing
 
-Double-click a supported solid to enter face editing.
+Double-click a supported primitive to enter face editing. Imported triangle meshes
+and composite results stay in object selection. To deliberately edit their faces,
+select the object and choose **Edit → Edit Faces**.
 
 Current face-edit workflows include:
 
@@ -117,10 +171,40 @@ The same renderer state is available over MCP for agent-driven workflows.
 
 ## Linked Models
 
-**Place Linked Model** inserts another `.talos3d` project as a live instance in
-the current model. The placed root can be moved or rotated independently, while
-its mapped contents remain owned by the external source file. Placing the model
-is one undoable operation.
+Choose **Create > Linked Models > Place Linked Model** and select an existing
+`.talos3d` file to insert it as a live instance in the current model. The source
+can contain loose objects, nested groups, assemblies, or several top-level
+groups; no preparation or **Create Linked Model** extraction is required.
+The model content is linked without changing the source file. A document with
+several roots gets one instance container, retaining the source hierarchy inside
+it. Source layers and hidden objects keep their visibility; imported layer names
+are scoped to their source file. Source scene lights, including sun and sky
+lights, are excluded because the current document owns the environment.
+
+**Create Linked Model** in a selected group's context menu instead extracts
+that group to a new source file and links the existing group to it. Both paths
+use the same live-link lifecycle, visibility preservation, and environment
+exclusion. Existing links refresh once when upgraded to these import rules,
+including groups previously exported from the current document.
+
+After selecting the file, the instance follows the cursor in the shared Move
+placement state, anchored at the source origin. Press **X**, **Y**, or **Z** to
+lock an axis, or **Shift** plus an axis key to constrain its perpendicular plane.
+You can also hold an axis key before dragging a Move corner grip. The lock stays
+active when you release the key. Press the same axis key again to unlock.
+Inference remains enabled; a **Y** lock can take its elevation from a terrain
+face while preserving the original horizontal position. Type a distance for
+precise movement, then press **Enter** or click to confirm. **Escape** cancels
+the insertion.
+
+The placed root can be moved or rotated independently, while its mapped
+contents remain owned by the external source file. Insertion and the confirmed
+placement move are separate undoable operations.
+
+For large linked models, the blue selection surfaces and the outline show the
+proposed position as you drag or rotate. The solid model stays at its starting
+position until you confirm. Escape cancels the placement. Models with added
+host-dependent parts use the detailed preview so those parts can adjust.
 
 Use **Open Linked Model** to edit the source document and **Refresh Linked
 Models** to pull source changes into existing instances. Refresh preserves each
@@ -142,3 +226,37 @@ Some interactions only appear when a capability is loaded. For example:
 
 This is intentional. Talos3D is a platform, and the active capability set
 defines the current workflow surface.
+
+
+## Publishing a view and continuing on another device
+
+Product editions may provide **File → Share model…** and **Continue on web**.
+Sharing publishes the visible model as a read-only snapshot with an expiry and
+revocable link. Later edits do not change that snapshot. Recipients can keep a
+copy of the delivered 3D view; revocation blocks new requests. Native project
+files and BIM sidecars are not included in the published view. The current view
+export preserves geometry and material base colors, excluding texture images.
+Turn off active section cuts before publishing; cut surfaces are not baked into
+this view format.
+
+Continue on web saves and synchronizes the same private project before opening
+its signed-in browser editor. Resolve a sync conflict before continuing; pending
+offline work stays local if upload fails. Public Core remains usable without a
+hosted account; sharing/storage/account UI is supplied by the product adapter.
+
+## Lock reference geometry
+
+Open **View → Outliner** and click the open padlock beside an object or group.
+You can also right-click a selection in the viewport or Outliner and choose
+**Lock Selected**. This locks the entire selection in one undoable operation.
+Locked objects remain visible, but viewport clicks, double-clicks, marquee
+selection, hover, snapping and tool-surface picks pass through them. Locking a
+group includes nested members and generated occurrence geometry. An existing
+selection or edit context inside the locked scope is cleared.
+
+Click the closed padlock in the Outliner to unlock. Inherited locks identify the parent
+group to unlock; a child's own lock survives unlocking its parent. Locks support
+Undo/Redo and are saved in the project. Visibility and layer settings remain
+independent. These are interaction locks, not access controls for explicit model
+commands or automation. The shared command is `view.set_object_locked`, with
+`element_ids` and `locked`; `outline_tree` reports explicit and effective locks.

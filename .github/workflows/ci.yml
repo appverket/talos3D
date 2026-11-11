@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -21,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
-      - run: cargo check --workspace
+      - run: cargo check --locked --workspace
 
   clippy:
     name: Clippy
@@ -36,7 +43,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
-      - run: cargo clippy --workspace -- -W clippy::all
+      - run: cargo clippy --locked --workspace --all-targets -- -W clippy::all
 
   test:
     name: Test
@@ -49,7 +56,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace
+
+  model-api:
+    name: MCP contract (model-api)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test generic MCP baseline assertions
+        run: python3 -m unittest discover -s scripts/evaluation -p 'test_*.py'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      # Compile the exact public app with MCP, then test the shared contracts.
+      - run: cargo clippy -p talos3d-core --all-targets --features model-api -- -W clippy::all
+      - run: cargo check --locked -p talos3d-core-app --features model-api
+      - run: cargo check --locked -p talos3d-core-app --no-default-features --features native
+      - run: cargo test --locked --workspace --features talos3d-core-app/model-api,talos3d-terrain/model-api
 
   fmt:
     name: Format
@@ -60,3 +88,15 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  repository:
+    name: Public repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 scripts/check_repository.py
+      - run: python3 -m pip install -r docs/requirements.txt
+      - run: mkdocs build --strict

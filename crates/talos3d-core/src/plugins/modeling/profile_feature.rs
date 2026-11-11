@@ -13,8 +13,7 @@ use crate::{
         PushPullBlockReason,
     },
     capability_registry::{
-        AuthoredEntityFactory, CapabilityRegistry, FaceHitCandidate, FaceId, GeneratedFaceRef,
-        HitCandidate,
+        AuthoredEntityFactory, FaceHitCandidate, FaceId, GeneratedFaceRef, HitCandidate,
     },
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
@@ -31,8 +30,7 @@ use crate::{
     },
 };
 
-const DEFAULT_FEATURE_DEPTH: f32 = 0.02;
-const MIN_FEATURE_DEPTH: f32 = 0.005;
+const DEFAULT_FEATURE_DEPTH: f32 = 0.0;
 const FEATURE_SELECTION_SURFACE_EPSILON: f32 = 0.001;
 
 fn parse_optional_rotation(value: Option<&Value>) -> Result<Quat, String> {
@@ -56,6 +54,59 @@ fn canonicalize_feature_profile(profile: Profile2d) -> Profile2d {
     } else {
         profile.reversed()
     }
+}
+
+/// Shared validation for commands, pointer tools and persisted feature edits.
+pub fn validate_face_profile(profile: &Profile2d, depth: f32) -> Result<(), String> {
+    if !depth.is_finite()
+        || !profile.start.is_finite()
+        || profile.segments.is_empty()
+        || profile.segments.len() > 256
+    {
+        return Err("A face profile needs finite coordinates and 1–256 segments".into());
+    }
+    for segment in &profile.segments {
+        if !segment.endpoint().is_finite()
+            || matches!(segment, ProfileSegment::ArcTo { bulge, .. } if !bulge.is_finite())
+        {
+            return Err("Profile coordinates and arcs must be finite".into());
+        }
+    }
+    let mut points = profile.tessellate(64);
+    if points.len() > 2 && points[0].distance_squared(*points.last().unwrap()) < 1e-10 {
+        points.pop();
+    }
+    let area = (0..points.len())
+        .map(|i| points[i].perp_dot(points[(i + 1) % points.len()]))
+        .sum::<f32>()
+        .abs()
+        * 0.5;
+    if depth.abs() > 1e-6 && (points.len() < 3 || area < 1e-8) {
+        return Err("Close a nondegenerate planar region before push/pull".into());
+    }
+    // Reject crossing contours before BSP/triangulation. Work is bounded and
+    // performed only at authored edits, never in an idle frame.
+    for i in 0..points.len() {
+        for j in i + 2..points.len() {
+            if i == 0 && j + 1 == points.len() {
+                continue;
+            }
+            let (a, b, c, d) = (
+                points[i],
+                points[(i + 1) % points.len()],
+                points[j],
+                points[(j + 1) % points.len()],
+            );
+            let ab = b - a;
+            let cd = d - c;
+            if ab.perp_dot(c - a) * ab.perp_dot(d - a) < -1e-12
+                && cd.perp_dot(a - c) * cd.perp_dot(b - c) < -1e-12
+            {
+                return Err("Profile must not cross itself".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,6 +133,7 @@ pub struct EvaluatedFeature {
 
 #[derive(Debug, Clone)]
 pub struct FaceProfileFeatureSnapshot {
+    pub display_overrides: Option<crate::capability_registry::SubobjectDisplayOverrides>,
     pub element_id: ElementId,
     pub feature: FaceProfileFeature,
     pub rotation: ShapeRotation,
@@ -89,7 +141,8 @@ pub struct FaceProfileFeatureSnapshot {
 
 impl PartialEq for FaceProfileFeatureSnapshot {
     fn eq(&self, other: &Self) -> bool {
-        self.element_id == other.element_id
+        self.display_overrides == other.display_overrides
+            && self.element_id == other.element_id
             && self.feature == other.feature
             && self.rotation == other.rotation
     }
@@ -104,7 +157,7 @@ impl FaceProfileFeature {
         ProfileExtrusion {
             centre: self.anchor_origin + rotation * Vec3::Y * (self.depth * 0.5),
             profile: self.profile.clone(),
-            height: self.depth.abs().max(MIN_FEATURE_DEPTH),
+            height: self.depth.abs(),
         }
     }
 
@@ -171,11 +224,9 @@ impl FaceProfileFeature {
         match feature_face_id.0 {
             0 => {
                 let extrusion_axis = rotation * Vec3::Y;
-                if self.depth >= 0.0 {
-                    extrusion_axis
-                } else {
-                    -extrusion_axis
-                }
+                // A recess floor faces outwards too; signed depth always uses
+                // the original support normal on both sides of zero.
+                extrusion_axis
             }
             side_face if side_face >= 2 => {
                 let mut normal = mesh_normal.normalize_or_zero();
@@ -197,7 +248,83 @@ impl FaceProfileFeature {
     }
 }
 
+fn rectangular_side(profile: &Profile2d, index: usize) -> Option<([Vec2; 4], Vec2)> {
+    if profile.segments.len() != 3 || index >= 4 {
+        return None;
+    }
+    let mut points = [profile.start; 4];
+    for (i, seg) in profile.segments.iter().enumerate() {
+        let ProfileSegment::LineTo { to } = seg else {
+            return None;
+        };
+        points[i + 1] = *to;
+    }
+    let edges = std::array::from_fn::<_, 4, _>(|i| points[(i + 1) % 4] - points[i]);
+    for i in 0..4 {
+        if edges[i].length() < 0.0001
+            || edges[i]
+                .normalize()
+                .dot(edges[(i + 1) % 4].normalize())
+                .abs()
+                > 0.0001
+        {
+            return None;
+        }
+    }
+    let orientation = edges[0].perp_dot(edges[1]).signum();
+    let e = edges[index].normalize();
+    Some((points, Vec2::new(e.y, -e.x) * orientation))
+}
+
 impl AuthoredEntity for FaceProfileFeatureSnapshot {
+    fn subobject_display_overrides(
+        &self,
+    ) -> Option<crate::capability_registry::SubobjectDisplayOverrides> {
+        self.display_overrides.clone()
+    }
+    fn set_subobject_display_overrides(
+        &self,
+        value: Option<crate::capability_registry::SubobjectDisplayOverrides>,
+    ) -> Result<BoxedEntity, String> {
+        let mut s = self.clone();
+        s.display_overrides = value;
+        Ok(s.into())
+    }
+    fn edit_boundary(
+        &self,
+        boundary: &str,
+        distance: Option<f32>,
+    ) -> Result<Vec<BoxedEntity>, String> {
+        let Some(distance) = distance else {
+            return Ok(vec![]);
+        };
+        if !distance.is_finite() {
+            return Err("Distance must be finite".into());
+        }
+        let index: usize = boundary
+            .strip_prefix("side/")
+            .and_then(|v| v.parse().ok())
+            .ok_or("Select a straight rectangular profile boundary")?;
+        let (mut points,outward)=rectangular_side(&self.feature.profile,index).ok_or("Boundary movement currently requires a rectangular authored profile; other profiles can be erased as a whole feature")?;
+        let sign = if self.feature.depth < 0. { -1. } else { 1. };
+        let width = -(points[(index + 2) % 4] - points[index]).dot(outward);
+        if width + sign * distance <= 0.0001 {
+            return Ok(vec![]);
+        }
+        points[index] += outward * (sign * distance);
+        points[(index + 1) % 4] += outward * (sign * distance);
+        let mut next = self.clone();
+        next.feature.profile = Profile2d {
+            start: points[0],
+            segments: points[1..]
+                .iter()
+                .map(|p| ProfileSegment::LineTo { to: *p })
+                .collect(),
+        };
+        validate_face_profile(&next.feature.profile, next.feature.depth)?;
+        Ok(vec![next.into()])
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -223,6 +350,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
 
     fn translate_by(&self, delta: Vec3) -> BoxedEntity {
         Self {
+            display_overrides: self.display_overrides.clone(),
             element_id: self.element_id,
             feature: FaceProfileFeature {
                 anchor_origin: self.feature.anchor_origin + delta,
@@ -235,6 +363,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
 
     fn rotate_by(&self, rotation: Quat) -> BoxedEntity {
         Self {
+            display_overrides: self.display_overrides.clone(),
             element_id: self.element_id,
             feature: FaceProfileFeature {
                 anchor_origin: rotation * self.feature.anchor_origin,
@@ -249,6 +378,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
         let operand = self.feature.current_operand(self.rotation.0);
         let scaled_depth = self.feature.depth.signum() * self.feature.depth.abs() * factor.y.abs();
         Self {
+            display_overrides: self.display_overrides.clone(),
             element_id: self.element_id,
             feature: FaceProfileFeature {
                 parent: self.feature.parent,
@@ -269,9 +399,13 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
     }
 
     fn push_pull(&self, face_id: FaceId, distance: f32) -> Option<BoxedEntity> {
+        if !distance.is_finite() || validate_face_profile(&self.feature.profile, 1.).is_err() {
+            return None;
+        }
         match face_id.0 {
             0 => Some(
                 Self {
+                    display_overrides: self.display_overrides.clone(),
                     element_id: self.element_id,
                     feature: FaceProfileFeature {
                         depth: self.feature.depth + distance,
@@ -288,6 +422,9 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
     }
 
     fn push_pull_affordance(&self, face_id: FaceId) -> PushPullAffordance {
+        if validate_face_profile(&self.feature.profile, 1.).is_err() {
+            return PushPullAffordance::Blocked(PushPullBlockReason::UnsupportedFace);
+        }
         match self.feature.generated_face_ref(face_id) {
             Some(GeneratedFaceRef::FeatureCap) => PushPullAffordance::Allowed,
             Some(
@@ -340,7 +477,16 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
         let mut snapshot = self.clone();
         match property_name {
-            "depth" => snapshot.feature.depth = scalar_from_json(value)?,
+            "depth" => {
+                let depth = scalar_from_json(value)?;
+                if !depth.is_finite() {
+                    return Err("Depth must be finite".into());
+                }
+                if depth.abs() > 1e-6 && validate_face_profile(&self.feature.profile, 1.).is_err() {
+                    return Err("Close a planar region before push/pull".into());
+                }
+                snapshot.feature.depth = depth;
+            }
             "anchor_origin" => snapshot.feature.anchor_origin = vec3_from_json(value)?,
             "profile" => {
                 snapshot.feature.profile = serde_json::from_value(value.clone())
@@ -353,6 +499,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
                 ))
             }
         }
+        validate_face_profile(&snapshot.feature.profile, snapshot.feature.depth)?;
         Ok(snapshot.into())
     }
 
@@ -383,7 +530,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
     }
 
     fn to_json(&self) -> Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "element_id": self.element_id.0,
             "parent": self.feature.parent.0,
             "anchor_origin": [self.feature.anchor_origin.x, self.feature.anchor_origin.y, self.feature.anchor_origin.z],
@@ -396,17 +543,26 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
                 self.rotation.0.z,
                 self.rotation.0.w
             ],
-        })
+        });
+        if let Some(overrides) = &self.display_overrides {
+            value["display_overrides"] = serde_json::to_value(overrides).unwrap();
+        }
+        value
     }
 
     fn apply_to(&self, world: &mut World) {
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            world.entity_mut(entity).insert((
-                self.feature.clone(),
-                self.rotation,
-                NeedsEvaluation,
-                Visibility::Visible,
-            ));
+            if world.get::<FaceProfileFeature>(entity) != Some(&self.feature)
+                || world.get::<ShapeRotation>(entity) != Some(&self.rotation)
+                || world.get::<EvaluatedFeature>(entity).is_none()
+            {
+                world.entity_mut(entity).insert((
+                    self.feature.clone(),
+                    self.rotation,
+                    NeedsEvaluation,
+                    Visibility::Visible,
+                ));
+            }
         } else {
             world.spawn((
                 self.element_id,
@@ -416,7 +572,32 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
                 Visibility::Visible,
             ));
         }
+        if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+            if let Some(value) = &self.display_overrides {
+                world.entity_mut(entity).insert(value.clone());
+            } else {
+                world
+                    .entity_mut(entity)
+                    .remove::<crate::capability_registry::SubobjectDisplayOverrides>();
+            }
+        }
         if let Some(parent_entity) = find_entity_by_element_id(world, self.feature.parent) {
+            if let Some(layer) = world
+                .get::<crate::plugins::layers::LayerAssignment>(parent_entity)
+                .cloned()
+            {
+                if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+                    world.entity_mut(entity).insert(layer);
+                }
+            }
+            if let Some(material) = world
+                .get::<MeshMaterial3d<StandardMaterial>>(parent_entity)
+                .cloned()
+            {
+                if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+                    world.entity_mut(entity).insert(material);
+                }
+            }
             world.entity_mut(parent_entity).insert((
                 FeatureOperand {
                     owner: self.element_id,
@@ -434,10 +615,12 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
                 if let Some(previous_parent_entity) =
                     find_entity_by_element_id(world, previous.feature.parent)
                 {
-                    world
-                        .entity_mut(previous_parent_entity)
-                        .remove::<FeatureOperand>()
-                        .insert(Visibility::Visible);
+                    restore_feature_parent(
+                        world,
+                        previous_parent_entity,
+                        previous.feature.parent,
+                        self.element_id,
+                    );
                 }
             }
         }
@@ -446,10 +629,7 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
 
     fn remove_from(&self, world: &mut World) {
         if let Some(parent_entity) = find_entity_by_element_id(world, self.feature.parent) {
-            world
-                .entity_mut(parent_entity)
-                .remove::<FeatureOperand>()
-                .insert(Visibility::Visible);
+            restore_feature_parent(world, parent_entity, self.feature.parent, self.element_id);
         }
         despawn_by_element_id(world, self.element_id);
     }
@@ -479,6 +659,33 @@ impl AuthoredEntity for FaceProfileFeatureSnapshot {
     }
 }
 
+/// Removing a copied feature must not expose its source underneath a surviving
+/// feature. The ownership marker and visibility are derived from live authored
+/// dependencies, never an unconditional side effect of deleting one dependent.
+fn restore_feature_parent(
+    world: &mut World,
+    parent_entity: Entity,
+    parent: ElementId,
+    removed: ElementId,
+) {
+    let owner = world
+        .query::<(&ElementId, &FaceProfileFeature)>()
+        .iter(world)
+        .filter(|(id, feature)| **id != removed && feature.parent == parent)
+        .map(|(id, _)| *id)
+        .max();
+    if let Some(owner) = owner {
+        world
+            .entity_mut(parent_entity)
+            .insert((FeatureOperand { owner }, Visibility::Hidden));
+    } else {
+        world
+            .entity_mut(parent_entity)
+            .remove::<FeatureOperand>()
+            .insert(Visibility::Visible);
+    }
+}
+
 impl From<FaceProfileFeatureSnapshot> for BoxedEntity {
     fn from(snapshot: FaceProfileFeatureSnapshot) -> Self {
         Self(Box::new(snapshot))
@@ -488,6 +695,68 @@ impl From<FaceProfileFeatureSnapshot> for BoxedEntity {
 pub struct FaceProfileFeatureFactory;
 
 impl AuthoredEntityFactory for FaceProfileFeatureFactory {
+    fn boundary_binding(
+        &self,
+        world: &World,
+        reference: &crate::capability_registry::SelectableSubobjectRef,
+    ) -> Option<super::boundary_edit::BoundaryBinding> {
+        use crate::capability_registry::{
+            GeneratedEdgeRef as E, GeneratedFaceRef as F, SelectableSubobjectRef as R,
+        };
+        let target = ElementId(reference.element_id());
+        let entity = find_entity_by_element_id_readonly(world, target)?;
+        let feature = world.get::<FaceProfileFeature>(entity)?;
+        let faces: Vec<&F> = match reference {
+            R::Face { face, .. } => vec![face],
+            R::Edge {
+                edge: E::BetweenFaces { first, second, .. },
+                ..
+            } => vec![first, second],
+            R::Edge {
+                edge: E::BoundaryOfFace { face, .. },
+                ..
+            } => vec![face],
+            _ => return None,
+        };
+        let mut sides = faces.into_iter().filter_map(|face| match face {
+            F::FeatureSideSegment(i) | F::FeatureSideArcSegment(i) => Some(*i as usize),
+            F::FeatureSideClosingSegment => Some(feature.profile.segments.len()),
+            _ => None,
+        });
+        let side = sides.next()?;
+        if sides.any(|s| s != side) {
+            return None;
+        }
+        let rotation = world
+            .get::<ShapeRotation>(entity)
+            .copied()
+            .unwrap_or_default()
+            .0;
+        let (origin, normal) = if let Some((p, outward)) = rectangular_side(&feature.profile, side)
+        {
+            let center = (p[side] + p[(side + 1) % 4]) * 0.5;
+            let sign = if feature.depth < 0. { -1. } else { 1. };
+            (
+                feature.anchor_origin
+                    + rotation * Vec3::new(center.x, feature.depth * 0.5, center.y),
+                rotation * Vec3::new(outward.x * sign, 0., outward.y * sign),
+            )
+        } else {
+            (feature.anchor_origin, rotation * Vec3::Y)
+        };
+        Some(super::boundary_edit::BoundaryBinding {
+            owner: target,
+            target,
+            key: format!("side/{side}"),
+            origin,
+            normal,
+        })
+    }
+
+    fn allows_automatic_face_edit(&self, entity_ref: &bevy::ecs::world::EntityRef) -> bool {
+        entity_ref.contains::<FaceProfileFeature>()
+    }
+
     fn type_name(&self) -> &'static str {
         "face_profile_feature"
     }
@@ -499,6 +768,9 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
     ) -> Option<BoxedEntity> {
         Some(
             FaceProfileFeatureSnapshot {
+                display_overrides: entity_ref
+                    .get::<crate::capability_registry::SubobjectDisplayOverrides>()
+                    .cloned(),
                 element_id: *entity_ref.get::<ElementId>()?,
                 feature: entity_ref.get::<FaceProfileFeature>()?.clone(),
                 rotation: entity_ref
@@ -522,9 +794,11 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
         let profile: Profile2d =
             serde_json::from_value(data.get("profile").cloned().ok_or("Missing profile")?)
                 .map_err(|e| format!("Invalid profile: {e}"))?;
+        validate_face_profile(&profile, depth)?;
         let rotation = parse_optional_rotation(data.get("rotation"))?;
         let support_face = data
             .get("support_face")
+            .filter(|v| !v.is_null())
             .cloned()
             .map(serde_json::from_value)
             .transpose()
@@ -535,6 +809,12 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             .map(ElementId)
             .unwrap_or(ElementId(0));
         Ok(FaceProfileFeatureSnapshot {
+            display_overrides: data
+                .get("display_overrides")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| e.to_string())?,
             element_id,
             feature: FaceProfileFeature {
                 parent,
@@ -571,14 +851,17 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
         let profile: Profile2d =
             serde_json::from_value(request.get("profile").cloned().ok_or("Missing profile")?)
                 .map_err(|e| format!("Invalid profile: {e}"))?;
+        validate_face_profile(&profile, depth)?;
         let rotation = parse_optional_rotation(request.get("rotation"))?;
         let support_face = request
             .get("support_face")
+            .filter(|v| !v.is_null())
             .cloned()
             .map(serde_json::from_value)
             .transpose()
             .map_err(|e| format!("Invalid support_face: {e}"))?;
         Ok(FaceProfileFeatureSnapshot {
+            display_overrides: None,
             element_id,
             feature: FaceProfileFeature {
                 parent,
@@ -604,18 +887,6 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             .copied()
             .unwrap_or_default();
 
-        if let Some(parent_entity) = find_entity_by_element_id_readonly(world, feature.parent) {
-            let registry = world.resource::<CapabilityRegistry>();
-            if let Ok(parent_ref) = world.get_entity(parent_entity) {
-                if let Some(parent_snapshot) = registry.capture_snapshot(&parent_ref, world) {
-                    if let Some(parent_factory) = registry.factory_for(parent_snapshot.type_name())
-                    {
-                        parent_factory.draw_selection(world, parent_entity, gizmos, color);
-                    }
-                }
-            }
-        }
-
         feature
             .current_operand(rotation.0)
             .draw_wireframe(gizmos, rotation.0, color);
@@ -633,23 +904,16 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             .copied()
             .unwrap_or_default();
 
-        let parent_lines = find_entity_by_element_id_readonly(world, feature.parent)
-            .and_then(|parent_entity| {
-                let registry = world.resource::<CapabilityRegistry>();
-                let parent_ref = world.get_entity(parent_entity).ok()?;
-                let parent_snapshot = registry.capture_snapshot(&parent_ref, world)?;
-                let parent_factory = registry.factory_for(parent_snapshot.type_name())?;
-                Some(parent_factory.selection_line_count(world, parent_entity))
-            })
-            .unwrap_or(0);
-
-        parent_lines + feature.current_operand(rotation.0).wireframe_line_count()
+        feature.current_operand(rotation.0).wireframe_line_count()
     }
 
     fn hit_test(&self, world: &World, ray: Ray3d) -> Option<HitCandidate> {
         let mut best: Option<HitCandidate> = None;
         let mut query = world.try_query::<(Entity, &FaceProfileFeature)>().unwrap();
         for (entity, feature) in query.iter(world) {
+            if crate::plugins::object_locks::entity_locked(world, entity) {
+                continue;
+            }
             let Some(surface_distance) = evaluated_feature_hit_distance(world, entity, ray) else {
                 continue;
             };
@@ -722,6 +986,7 @@ pub fn make_face_profile_feature_snapshot(
     support_face: Option<GeneratedFaceRef>,
 ) -> FaceProfileFeatureSnapshot {
     FaceProfileFeatureSnapshot {
+        display_overrides: None,
         element_id,
         feature: FaceProfileFeature {
             parent,
@@ -741,6 +1006,32 @@ pub fn feature_face_vertices(world: &World, entity: Entity, face_id: FaceId) -> 
         .get::<ShapeRotation>()
         .copied()
         .unwrap_or_default();
+    if feature.depth.abs() < 1e-6 {
+        if face_id != FaceId(0) {
+            return None;
+        }
+        return Some(
+            feature
+                .profile
+                .tessellate(64)
+                .iter()
+                .map(|p| feature.anchor_origin + rotation.0 * Vec3::new(p.x, 0., p.y))
+                .collect(),
+        );
+    }
+    if face_id == FaceId(0) && feature.depth < 0. {
+        if let Some(evaluated) = world.get::<EvaluatedFeature>(entity) {
+            let normal = rotation.0 * Vec3::Y;
+            let origin = feature.anchor_origin + normal * feature.depth;
+            let cap_exists = evaluated.indices.chunks_exact(3).any(|t| {
+                t.iter()
+                    .all(|&i| (evaluated.vertices[i as usize] - origin).dot(normal).abs() < 1e-4)
+            });
+            if !cap_exists {
+                return None;
+            }
+        }
+    }
     let operand = feature.current_operand(rotation.0);
     let mesh = operand.to_editable_mesh(rotation.0)?;
     let operand_face_id = feature.operand_face_for_feature_face(face_id)?;
@@ -764,6 +1055,31 @@ pub fn face_profile_feature_hit_test(
         .get::<ShapeRotation>()
         .copied()
         .unwrap_or_default();
+    if feature.depth.abs() < 1e-6 {
+        let vertices = feature_face_vertices(world, entity, FaceId(0))?;
+        let points = feature.profile.tessellate(64);
+        let tris = super::triangulate::ear_clip_triangulate(&points);
+        let distance = tris
+            .iter()
+            .filter_map(|t| {
+                ray_triangle_intersection(
+                    ray,
+                    vertices[t[0] as usize],
+                    vertices[t[1] as usize],
+                    vertices[t[2] as usize],
+                )
+            })
+            .min_by(f32::total_cmp)?;
+        return Some(FaceHitCandidate {
+            entity,
+            element_id,
+            distance,
+            face_id: FaceId(0),
+            generated_face_ref: Some(GeneratedFaceRef::FeatureCap),
+            normal: rotation.0 * Vec3::Y,
+            centroid: feature.anchor_origin,
+        });
+    }
     let operand = feature.current_operand(rotation.0);
     let mesh = operand.to_editable_mesh(rotation.0)?;
 
@@ -796,6 +1112,13 @@ pub fn face_profile_feature_hit_test(
     }
 
     let (distance, feature_face_id, operand_face_id) = best?;
+    if world.get::<EvaluatedFeature>(entity).is_some() {
+        let surface_distance = evaluated_feature_hit_distance(world, entity, ray)?;
+        if (surface_distance - distance).abs() > FEATURE_SELECTION_SURFACE_EPSILON {
+            return None;
+        }
+    }
+
     let operand_face = &mesh.faces[operand_face_id.0 as usize];
     let centroid = mesh.face_centroid(operand_face_id.0);
     let normal = feature.canonical_face_normal(
@@ -865,32 +1188,192 @@ pub fn evaluate_face_profile_features(
         let Some(parent_tris) = get_entity_triangles(world, parent_entity) else {
             continue;
         };
-        let operand = feature.current_operand(rotation.copied().unwrap_or_default().0);
-        let Some(operand_mesh) = operand.to_editable_mesh(rotation.copied().unwrap_or_default().0)
-        else {
-            continue;
-        };
-        let operand_tris = bsp_csg::triangles_from_editable_mesh(&operand_mesh);
-        let op = if feature.depth < 0.0 {
-            BooleanOp::Difference
-        } else {
-            BooleanOp::Union
-        };
-        let result = bsp_csg::boolean(&parent_tris, &operand_tris, op);
-        commands.entity(entity).try_insert((
-            EvaluatedFeature {
-                vertices: result.vertices,
-                normals: result.normals,
-                indices: result.indices,
-            },
-            NeedsMesh,
-        ));
+        let result = evaluate_profile_on_triangles(
+            &parent_tris,
+            feature,
+            rotation.copied().unwrap_or_default().0,
+        );
+        commands.entity(entity).try_insert((result, NeedsMesh));
         commands.entity(entity).remove::<NeedsEvaluation>();
     }
 }
 
+/// Shared evaluator for live meshes and agent geometry inspection. At zero the
+/// host is exactly unchanged; no epsilon-thick solid is fabricated.
+pub fn evaluate_profile_on_triangles(
+    base: &[bsp_csg::CsgTriangle],
+    feature: &FaceProfileFeature,
+    rotation: Quat,
+) -> EvaluatedFeature {
+    let unchanged = || {
+        let vertices: Vec<Vec3> = base.iter().flat_map(|t| t.vertices).collect();
+        let normals = base.iter().flat_map(|t| [t.normal; 3]).collect();
+        let indices = (0..vertices.len() as u32).collect();
+        EvaluatedFeature {
+            vertices,
+            normals,
+            indices,
+        }
+    };
+    if feature.depth.abs() < 1e-6 {
+        return unchanged();
+    }
+    let operand = feature.current_operand(rotation);
+    let Some(mesh) = operand.to_editable_mesh(rotation) else {
+        return unchanged();
+    };
+    let triangles = bsp_csg::triangles_from_editable_mesh(&mesh);
+    let op = if feature.depth < 0. {
+        BooleanOp::Difference
+    } else {
+        BooleanOp::Union
+    };
+    // Evaluate near the sketch origin to avoid world-offset cancellation in
+    // the f32 splitting planes, then conform edge subdivisions for a closed shell.
+    let shift = feature.anchor_origin;
+    let local = |ts: &[bsp_csg::CsgTriangle]| {
+        ts.iter()
+            .map(|t| {
+                bsp_csg::CsgTriangle::new(
+                    t.vertices[0] - shift,
+                    t.vertices[1] - shift,
+                    t.vertices[2] - shift,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut result = conform_feature_result(bsp_csg::boolean(&local(base), &local(&triangles), op));
+    for vertex in &mut result.vertices {
+        *vertex += shift;
+    }
+
+    EvaluatedFeature {
+        vertices: result.vertices,
+        normals: result.normals,
+        indices: result.indices,
+    }
+}
+
+/// BSP splits neighbouring triangles independently. Split every output boundary
+/// at the shared vertices before triangulating so T-junctions cannot become
+/// open mesh edges. This bounded operation runs on edited features only.
+fn conform_feature_result(result: bsp_csg::CsgResult) -> bsp_csg::CsgResult {
+    const EPS: f32 = 0.00001;
+    let mut points: Vec<Vec3> = Vec::new();
+    let mut mapped = Vec::with_capacity(result.vertices.len());
+    for &p in &result.vertices {
+        let index = points
+            .iter()
+            .position(|q| q.distance_squared(p) < EPS * EPS)
+            .unwrap_or_else(|| {
+                points.push(p);
+                points.len() - 1
+            });
+        mapped.push(index);
+    }
+    let mut vertices = Vec::new();
+    let mut normals = Vec::new();
+    let mut indices = Vec::new();
+    for tri in result.indices.chunks_exact(3) {
+        let t = [
+            points[mapped[tri[0] as usize]],
+            points[mapped[tri[1] as usize]],
+            points[mapped[tri[2] as usize]],
+        ];
+        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+        if normal == Vec3::ZERO {
+            continue;
+        }
+        let mut ring = Vec::new();
+        for i in 0..3 {
+            let (a, b) = (t[i], t[(i + 1) % 3]);
+            let edge = b - a;
+            let length = edge.length_squared();
+            ring.push(a);
+            let mut splits: Vec<_> = points
+                .iter()
+                .filter_map(|&p| {
+                    let f = (p - a).dot(edge) / length;
+                    (f > 0.
+                        && f < 1.
+                        && p.distance_squared(a + f * edge) < EPS * EPS
+                        && p.distance_squared(a) > EPS * EPS
+                        && p.distance_squared(b) > EPS * EPS)
+                        .then_some((f, p))
+                })
+                .collect();
+            splits.sort_by(|a, b| a.0.total_cmp(&b.0));
+            ring.extend(splits.into_iter().map(|(_, p)| p));
+        }
+        if ring.len() == 3 {
+            let start = vertices.len() as u32;
+            vertices.extend(t);
+            normals.extend([normal; 3]);
+            indices.extend([start, start + 1, start + 2]);
+        } else {
+            let centre = (t[0] + t[1] + t[2]) / 3.;
+            for i in 0..ring.len() {
+                let start = vertices.len() as u32;
+                vertices.extend([centre, ring[i], ring[(i + 1) % ring.len()]]);
+                normals.extend([normal; 3]);
+                indices.extend([start, start + 1, start + 2]);
+            }
+        }
+    }
+    // Subdivision at a nearly collinear BSP vertex can produce a coincident
+    // opposite-wound sliver pair. Cancel the pair, rather than retaining an
+    // internal sheet with four or six incidences on the same edge.
+    let mut unique = std::collections::BTreeMap::<[[i64; 3]; 3], ([Vec3; 3], i32)>::new();
+    for t in vertices.chunks_exact(3) {
+        let ordered = t
+            .iter()
+            .map(|p| {
+                [
+                    (p.x / EPS).round() as i64,
+                    (p.y / EPS).round() as i64,
+                    (p.z / EPS).round() as i64,
+                ]
+            })
+            .collect::<Vec<_>>();
+        let mut key = [ordered[0], ordered[1], ordered[2]];
+        key.sort();
+        if key[0] == key[1] || key[1] == key[2] {
+            continue;
+        }
+        let sign =
+            if (ordered[0] < ordered[1]) ^ (ordered[1] < ordered[2]) ^ (ordered[0] < ordered[2]) {
+                1
+            } else {
+                -1
+            };
+        unique
+            .entry(key)
+            .and_modify(|entry| entry.1 += sign)
+            .or_insert(([t[0], t[1], t[2]], sign));
+    }
+    let mut out = bsp_csg::CsgResult {
+        vertices: Vec::new(),
+        normals: Vec::new(),
+        indices: Vec::new(),
+    };
+    for (_, (t, count)) in unique {
+        if count == 0 {
+            continue;
+        }
+        let start = out.vertices.len() as u32;
+        let normal = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+        out.vertices.extend(t);
+        out.normals.extend([normal; 3]);
+        out.indices.extend([start, start + 1, start + 2]);
+    }
+    out
+}
+
 fn get_entity_triangles(world: &World, entity: Entity) -> Option<Vec<bsp_csg::CsgTriangle>> {
     let entity_ref = world.get_entity(entity).ok()?;
+    if let Some(body) = entity_ref.get::<super::planar_body::PlanarBody>() {
+        return Some(body.triangles.clone());
+    }
     try_get_primitive_triangles::<crate::plugins::modeling::primitives::BoxPrimitive>(&entity_ref)
         .or_else(|| {
             try_get_primitive_triangles::<crate::plugins::modeling::primitives::CylinderPrimitive>(
@@ -990,6 +1473,7 @@ mod tests {
                 support_face: None,
             },
             rotation: ShapeRotation::default(),
+            display_overrides: None,
         };
         let result = snapshot.push_pull(FaceId(0), 0.1).unwrap();
         let result = result
@@ -998,6 +1482,41 @@ mod tests {
             .downcast_ref::<FaceProfileFeatureSnapshot>()
             .unwrap();
         assert!((result.feature.depth + 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn removing_copy_keeps_surviving_features_parent_hidden_and_pickable() {
+        let mut world = World::new();
+        let parent = world.spawn((ElementId(1), Visibility::Visible)).id();
+        let original = FaceProfileFeatureSnapshot {
+            element_id: ElementId(10),
+            feature: FaceProfileFeature {
+                parent: ElementId(1),
+                anchor_origin: Vec3::ZERO,
+                profile: Profile2d::rectangle(1.0, 1.0),
+                depth: 0.0,
+                support_face: None,
+            },
+            rotation: ShapeRotation::default(),
+            display_overrides: None,
+        };
+        original.apply_to(&mut world);
+        let mut copy = original.clone();
+        copy.element_id = ElementId(11);
+        copy.apply_to(&mut world);
+        assert_eq!(
+            world.get::<FeatureOperand>(parent).unwrap().owner,
+            copy.element_id
+        );
+        copy.remove_from(&mut world);
+        assert_eq!(
+            world.get::<FeatureOperand>(parent).unwrap().owner,
+            original.element_id
+        );
+        assert_eq!(world.get::<Visibility>(parent), Some(&Visibility::Hidden));
+        original.remove_from(&mut world);
+        assert!(world.get::<FeatureOperand>(parent).is_none());
+        assert_eq!(world.get::<Visibility>(parent), Some(&Visibility::Visible));
     }
 
     #[test]
@@ -1015,7 +1534,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_cap_normal_tracks_negative_extrusion_axis() {
+    fn recess_cap_normal_keeps_support_orientation() {
         let feature = FaceProfileFeature {
             parent: ElementId(1),
             anchor_origin: Vec3::ZERO,
@@ -1025,7 +1544,7 @@ mod tests {
         };
         let rotation = Quat::from_rotation_y(0.29) * Quat::from_rotation_x(0.13);
         let normal = feature.canonical_face_normal(rotation, FaceId(0), Vec3::ZERO, Vec3::Y);
-        assert!(normal.abs_diff_eq(-(rotation * Vec3::Y), 1e-6));
+        assert!(normal.abs_diff_eq(rotation * Vec3::Y, 1e-6));
     }
 
     #[test]
@@ -1060,6 +1579,7 @@ mod tests {
                 support_face: None,
             },
             rotation: ShapeRotation::default(),
+            display_overrides: None,
         };
 
         assert_eq!(

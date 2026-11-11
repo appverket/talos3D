@@ -17,7 +17,7 @@
 //!   scenes that benefit from the preview; we rate-limit to one update
 //!   every `REFRESH_INTERVAL` so editing the 3D scene stays snappy.
 
-use std::time::Duration;
+use crate::time::Duration;
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};

@@ -1,30 +1,9 @@
-//! Elevation intent that can be declared before the building exists.
+//! View-intent records that can be declared before their target assembly exists.
 //!
-//! The depiction-first gate is only worth having if it genuinely comes first.
-//! An intent stored *on* the building assembly cannot: the assembly has to exist
-//! to be written to, so the author must build something before describing it —
-//! exactly backwards, and a cold agent hit that catch-22 immediately.
-//!
-//! The fix is to stop treating the description as a property of the thing it
-//! describes. An intent is a record in its own right, declarable as the very
-//! first call of a session, and *bound* to a building whenever one exists. That
-//! ordering is what makes it a gate rather than an annotation.
-//!
-//! Two states, and the second is the useful one:
-//!
-//! * **Pending** — declared, not yet attached to anything. Lives here.
-//! * **Bound** — written into the assembly's own parameters, so it persists with
-//!   the project and travels with the building it describes.
-//!
-//! Binding can be explicit, or implicit when there is exactly one candidate.
-//! Implicit binding is what keeps the common case (one building, one
-//! description) free of ceremony without making the ambiguous case guess: with
-//! several unbound intents and no label to match on, the validator says so
-//! rather than picking one.
-//!
-//! An intent that is never bound is itself a finding. Declaring a building and
-//! then building something else is precisely the failure this gate exists to
-//! catch, and silence there would make the whole mechanism optional.
+//! Core stores opaque per-view objects, resolves unambiguous labels and binds
+//! records to semantic assemblies. Capabilities own the field vocabulary,
+//! automatic binding policy and fidelity validators. Pending records are
+//! session-scoped; bound records persist in the target assembly's parameters.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -33,14 +12,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingElevationIntent {
     pub intent_id: u64,
-    /// Optional human name for the building this describes. When several
+    /// Optional human name for the assembly this describes. When several
     /// intents are pending, this is what disambiguates them.
     pub label: Option<String>,
     /// The array of per-elevation intent objects, verbatim.
     pub elevations: serde_json::Value,
 }
 
-/// Session-scoped store of intents awaiting a building.
+/// Session-scoped store of intents awaiting a assembly.
 ///
 /// Deliberately not persisted: an unbound intent is a statement about work in
 /// progress, not part of the document. The moment it binds it moves into the
@@ -89,13 +68,13 @@ impl PendingElevationIntents {
         self.intents.iter()
     }
 
-    /// The intent that unambiguously belongs to a building with this label.
+    /// The intent that unambiguously belongs to a assembly with this label.
     ///
     /// A label match wins outright. Failing that, a single pending intent is
-    /// taken to be the one meant — one description and one building is the
+    /// taken to be the one meant — one description and one assembly is the
     /// ordinary case. Several unbound intents with no matching label resolve to
     /// nothing on purpose: guessing there would attach a description to the
-    /// wrong building and report confident nonsense about it.
+    /// wrong assembly and report confident nonsense about it.
     pub fn resolve_for(&self, assembly_label: &str) -> Option<&PendingElevationIntent> {
         if let Some(matched) = self.intents.iter().find(|intent| {
             intent
@@ -121,11 +100,11 @@ mod tests {
     }
 
     #[test]
-    fn a_single_pending_intent_resolves_for_any_building() {
+    fn a_single_pending_intent_resolves_for_any_assembly() {
         let mut store = PendingElevationIntents::default();
         store.declare(None, elevations());
         assert!(store
-            .resolve_for("Whatever the building is called")
+            .resolve_for("Whatever the assembly is called")
             .is_some());
     }
 
@@ -142,7 +121,7 @@ mod tests {
     }
 
     /// Ambiguity must resolve to nothing. Attaching a description to the wrong
-    /// building would produce confident, wrong findings about it.
+    /// assembly would produce confident, wrong findings about it.
     #[test]
     fn several_unlabelled_intents_resolve_to_nothing() {
         let mut store = PendingElevationIntents::default();

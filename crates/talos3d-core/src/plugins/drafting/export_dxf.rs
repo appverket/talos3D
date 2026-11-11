@@ -264,6 +264,7 @@ fn write_primitive(out: &mut String, prim: &DimPrimitive, layer: &str) {
             // Group code 73 = vertical alignment:
             //   0=baseline, 1=bottom, 2=middle, 3=top
             let (h_align, v_align) = match anchor_mode {
+                TextAnchor::LeftBaseline => (0, 0),
                 TextAnchor::CenterBaseline => (1, 0), // center horizontal, baseline vertical
                 TextAnchor::Center => (1, 2),         // center horizontal, middle vertical
             };

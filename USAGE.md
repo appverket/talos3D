@@ -3,13 +3,13 @@
 ## Run
 
 ```bash
-cargo run
+cargo run --locked -p talos3d-core-app
 ```
 
 With the model API enabled:
 
 ```bash
-cargo run --features model-api
+cargo run --locked -p talos3d-core-app --features model-api
 ```
 
 ## Learn The Product

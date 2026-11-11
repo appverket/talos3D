@@ -1,0 +1,566 @@
+//! GPU selection tint/stipple over the actual selected surfaces, including group
+//! members. Reuses each source Mesh handle; never copies vertices or emits an
+//! edge/dot per frame. Overlays are children of the render source, so interactive
+//! transform previews and inherited visibility follow the same presentation.
+use std::collections::{HashMap, HashSet};
+
+use bevy::{
+    camera::visibility::RenderLayers,
+    light::{NotShadowCaster, NotShadowReceiver},
+    picking::Pickable,
+    prelude::*,
+};
+
+use crate::plugins::{
+    drawing_export::{HiddenDuringViewportExport, ViewportExportState},
+    face_edit::FaceEditContext,
+    identity::ElementId,
+    modeling::{
+        group::GroupMembers, occurrence::GeneratedOccurrencePart, primitive_trait::MeshGenerator,
+        primitives::ShapeRotation, profile_feature::FaceProfileFeature,
+    },
+    selection::Selected,
+    subobject_overlay::FaceStippleMaterial,
+    tools::Preview,
+};
+
+#[derive(Component)]
+pub(crate) struct SelectedObjectOverlay(pub Entity);
+
+#[derive(Resource, Default)]
+struct ObjectSelectionOverlayState {
+    placement_root: Option<Entity>,
+    material: Option<Handle<FaceStippleMaterial>>,
+    feature_meshes: HashMap<Entity, (FaceProfileFeature, Quat, Handle<Mesh>)>,
+}
+
+pub(crate) fn install(app: &mut App) {
+    app.init_resource::<ObjectSelectionOverlayState>()
+        .add_systems(
+            Update,
+            sync_object_selection_overlay
+                .after(crate::plugins::transform::TransformVisualSystems::PreviewUpdate),
+        );
+}
+
+// Selection/group traversal is O(authored entities), with no geometry reads.
+// Idle frames do no mesh/material allocation and mutate no existing overlay.
+fn sync_object_selection_overlay(world: &mut World) {
+    let suppressed = world
+        .get_resource::<FaceEditContext>()
+        .is_some_and(|c| c.is_active())
+        || world
+            .get_resource::<ViewportExportState>()
+            .is_some_and(|s| s.ui_suppressed());
+    let placement = (!suppressed)
+        .then(|| super::transform::linked_placement_preview_pose(world))
+        .flatten();
+    if let Some(root) = world
+        .resource::<ObjectSelectionOverlayState>()
+        .placement_root
+    {
+        if let Some(pose) = placement {
+            if let Some(mut transform) = world.get_mut::<Transform>(root) {
+                transform.set_if_neq(pose);
+                return;
+            }
+        }
+        // Only transient overlays were reparented. Despawning the hierarchy
+        // releases their handles and the normal sync recreates current selection.
+        world.despawn(root);
+        world
+            .resource_mut::<ObjectSelectionOverlayState>()
+            .placement_root = None;
+    }
+    let selected: HashSet<Entity> = if suppressed {
+        HashSet::new()
+    } else {
+        world
+            .query_filtered::<Entity, With<Selected>>()
+            .iter(world)
+            .collect()
+    };
+    let mut ids: HashSet<ElementId> = if suppressed {
+        HashSet::new()
+    } else {
+        world
+            .query_filtered::<&ElementId, With<Selected>>()
+            .iter(world)
+            .copied()
+            .collect()
+    };
+    let groups: HashMap<ElementId, Vec<ElementId>> = if ids.is_empty() {
+        HashMap::new()
+    } else {
+        world
+            .query::<(&ElementId, &GroupMembers)>()
+            .iter(world)
+            .map(|(id, g)| (*id, g.member_ids.clone()))
+            .collect()
+    };
+    let mut pending: Vec<_> = ids.iter().copied().collect();
+    while let Some(id) = pending.pop() {
+        if let Some(members) = groups.get(&id) {
+            for member in members {
+                if ids.insert(*member) {
+                    pending.push(*member);
+                }
+            }
+        }
+    }
+    let mut desired: HashMap<Entity, (Handle<Mesh>, RenderLayers)> = if selected.is_empty() {
+        HashMap::new()
+    } else {
+        world
+            .query_filtered::<(
+                Entity,
+                &Mesh3d,
+                Option<&ElementId>,
+                Option<&GeneratedOccurrencePart>,
+                Option<&RenderLayers>,
+            ), Without<SelectedObjectOverlay>>()
+            .iter(world)
+            .filter(|(entity, _, id, generated, _)| {
+                selected.contains(entity)
+                    || id.is_some_and(|id| ids.contains(id))
+                    || generated.is_some_and(|g| ids.contains(&g.owner))
+            })
+            .map(|(entity, mesh, _, _, layers)| {
+                (
+                    entity,
+                    (mesh.0.clone(), layers.cloned().unwrap_or_default()),
+                )
+            })
+            .collect()
+    };
+    // Evaluated feature meshes also contain their host. Highlight only the
+    // authored region, retaining its derived mesh until its parameters change.
+    let stale: Vec<_> = world
+        .resource::<ObjectSelectionOverlayState>()
+        .feature_meshes
+        .keys()
+        .filter(|e| !desired.contains_key(e))
+        .copied()
+        .collect();
+    for entity in stale {
+        let (_, _, mesh) = world
+            .resource_mut::<ObjectSelectionOverlayState>()
+            .feature_meshes
+            .remove(&entity)
+            .unwrap();
+        world.resource_mut::<Assets<Mesh>>().remove(mesh.id());
+    }
+    for (entity, (mesh, _)) in &mut desired {
+        let Some(feature) = world.get::<FaceProfileFeature>(*entity).cloned() else {
+            continue;
+        };
+        let rotation = world
+            .get::<ShapeRotation>(*entity)
+            .copied()
+            .unwrap_or_default()
+            .0;
+        let cached = world
+            .resource::<ObjectSelectionOverlayState>()
+            .feature_meshes
+            .get(entity)
+            .cloned();
+        if let Some((old, old_rotation, handle)) = &cached {
+            if old == &feature && *old_rotation == rotation {
+                *mesh = handle.clone();
+                continue;
+            }
+        }
+        let operand = feature.current_operand(rotation);
+        let geometry = operand.to_bevy_mesh(rotation).transformed_by(
+            Transform::from_translation(operand.centre + rotation * Vec3::Y * 0.002)
+                .with_rotation(rotation),
+        );
+        let handle = if let Some((_, _, handle)) = cached {
+            world
+                .resource_mut::<Assets<Mesh>>()
+                .insert(handle.id(), geometry)
+                .expect("retained selection mesh");
+            handle
+        } else {
+            world.resource_mut::<Assets<Mesh>>().add(geometry)
+        };
+        *mesh = handle.clone();
+        world
+            .resource_mut::<ObjectSelectionOverlayState>()
+            .feature_meshes
+            .insert(*entity, (feature, rotation, handle));
+    }
+    let existing: HashMap<Entity, Entity> = world
+        .query::<(Entity, &SelectedObjectOverlay)>()
+        .iter(world)
+        .map(|(entity, overlay)| (overlay.0, entity))
+        .collect();
+    for (source, overlay) in &existing {
+        if !desired.contains_key(source) {
+            world.despawn(*overlay);
+        }
+    }
+    if desired.is_empty() {
+        return;
+    }
+    let material = match world
+        .resource::<ObjectSelectionOverlayState>()
+        .material
+        .clone()
+    {
+        Some(handle) => handle,
+        None => {
+            let handle =
+                world
+                    .resource_mut::<Assets<FaceStippleMaterial>>()
+                    .add(FaceStippleMaterial {
+                        color: LinearRgba::new(0.08, 0.32, 1.0, 0.72),
+                        // Blue wash between dots keeps even small/far selected parts readable.
+                        params: Vec4::new(5.0, 1.0, 0.14, 0.0),
+                    });
+            world.resource_mut::<ObjectSelectionOverlayState>().material = Some(handle.clone());
+            handle
+        }
+    };
+    for (source, (mesh, layers)) in desired {
+        if let Some(overlay) = existing.get(&source) {
+            if world.get::<Mesh3d>(*overlay).is_none_or(|m| m.0 != mesh) {
+                world.entity_mut(*overlay).insert(Mesh3d(mesh));
+            }
+            if world.get::<RenderLayers>(*overlay) != Some(&layers) {
+                world.entity_mut(*overlay).insert(layers);
+            }
+        } else {
+            world.spawn((
+                SelectedObjectOverlay(source),
+                Mesh3d(mesh),
+                MeshMaterial3d(material.clone()),
+                ChildOf(source),
+                Transform::IDENTITY,
+                Visibility::Inherited,
+                layers,
+                Pickable::IGNORE,
+                NotShadowCaster,
+                NotShadowReceiver,
+                HiddenDuringViewportExport,
+                Preview,
+                Name::new("Selected object highlight"),
+            ));
+        }
+    }
+    if let Some(pose) = placement {
+        let root = world.spawn((pose, Visibility::Inherited, Preview)).id();
+        let overlays: Vec<_> = world
+            .query::<(Entity, &SelectedObjectOverlay)>()
+            .iter(world)
+            .filter_map(|(entity, overlay)| {
+                let source = world.get_entity(overlay.0).ok()?;
+                let transform = source.get::<GlobalTransform>()?.compute_transform();
+                let visible = source.get::<InheritedVisibility>().is_some_and(|v| v.get());
+                Some((entity, transform, visible))
+            })
+            .collect();
+        for (entity, transform, visible) in overlays {
+            let visibility = if visible {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            world
+                .entity_mut(entity)
+                .insert((ChildOf(root), transform, visibility));
+        }
+        world
+            .resource_mut::<ObjectSelectionOverlayState>()
+            .placement_root = Some(root);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::asset::uuid_handle;
+
+    #[test]
+    fn feature_highlight_uses_only_authored_region_and_reuses_its_mesh() {
+        use crate::plugins::modeling::profile::Profile2d;
+        let mut world = World::new();
+        world.init_resource::<ObjectSelectionOverlayState>();
+        world.init_resource::<Assets<FaceStippleMaterial>>();
+        world.init_resource::<Assets<Mesh>>();
+        let wall_mesh = uuid_handle!("1d1b983f-9ccf-4c91-9d87-7cb96977d603");
+        let source = world
+            .spawn((
+                ElementId(1),
+                Selected,
+                Mesh3d(wall_mesh.clone()),
+                FaceProfileFeature {
+                    parent: ElementId(2),
+                    anchor_origin: Vec3::new(3., 4., 5.),
+                    profile: Profile2d::rectangle(1., 1.),
+                    depth: 0.,
+                    support_face: None,
+                },
+                Transform::IDENTITY,
+                Visibility::Visible,
+            ))
+            .id();
+        sync_object_selection_overlay(&mut world);
+        let overlay = world
+            .query_filtered::<Entity, With<SelectedObjectOverlay>>()
+            .single(&world)
+            .unwrap();
+        let mesh = world.get::<Mesh3d>(overlay).unwrap().0.clone();
+        assert_ne!(mesh, wall_mesh);
+        let positions = world
+            .resource::<Assets<Mesh>>()
+            .get(&mesh)
+            .unwrap()
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        assert!(positions
+            .iter()
+            .all(|p| (p[0] - 3.).abs() <= 0.501 && (p[2] - 5.).abs() <= 0.501));
+        sync_object_selection_overlay(&mut world);
+        assert_eq!(world.get::<Mesh3d>(overlay).unwrap().0, mesh);
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), 1);
+        world.get_mut::<FaceProfileFeature>(source).unwrap().depth = 0.4;
+        sync_object_selection_overlay(&mut world);
+        assert_eq!(world.get::<Mesh3d>(overlay).unwrap().0, mesh);
+        world.entity_mut(source).remove::<Selected>();
+        sync_object_selection_overlay(&mut world);
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), 0);
+    }
+
+    #[test]
+    fn generated_member_selection_highlights_only_that_mesh() {
+        let mut world = World::new();
+        world.init_resource::<ObjectSelectionOverlayState>();
+        world.init_resource::<Assets<FaceStippleMaterial>>();
+        let mesh = uuid_handle!("1d1b983f-9ccf-4c91-9d87-7cb96977d603");
+        let mut parts = Vec::new();
+        for slot in ["left", "right"] {
+            parts.push(
+                world
+                    .spawn((
+                        Mesh3d(mesh.clone()),
+                        Transform::default(),
+                        Visibility::Visible,
+                        GeneratedOccurrencePart {
+                            owner: ElementId(10),
+                            slot_path: slot.into(),
+                            definition_id: crate::plugins::modeling::definition::DefinitionId(
+                                "piece".into(),
+                            ),
+                        },
+                    ))
+                    .id(),
+            );
+        }
+        world.entity_mut(parts[0]).insert(Selected);
+        sync_object_selection_overlay(&mut world);
+        let sources: Vec<_> = world
+            .query::<&SelectedObjectOverlay>()
+            .iter(&world)
+            .map(|o| o.0)
+            .collect();
+        assert_eq!(sources, vec![parts[0]]);
+        let overlay = world
+            .query_filtered::<Entity, With<SelectedObjectOverlay>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(world.get::<Mesh3d>(overlay).unwrap().0, mesh);
+        sync_object_selection_overlay(&mut world);
+        assert!(
+            world.get_entity(overlay).is_ok(),
+            "idle frames reuse the overlay"
+        );
+        world.entity_mut(parts[0]).remove::<Selected>();
+        world.entity_mut(parts[1]).insert(Selected);
+        sync_object_selection_overlay(&mut world);
+        assert_eq!(
+            world
+                .query::<&SelectedObjectOverlay>()
+                .single(&world)
+                .unwrap()
+                .0,
+            parts[1]
+        );
+    }
+
+    #[test]
+    fn nested_selection_reuses_mesh_and_tracks_preview_visibility_and_replacement() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            TransformPlugin,
+            bevy::camera::visibility::VisibilityPlugin,
+        ));
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>();
+        app.init_resource::<ObjectSelectionOverlayState>()
+            .init_resource::<Assets<FaceStippleMaterial>>();
+        let mesh = uuid_handle!("1d1b983f-9ccf-4c91-9d87-7cb96977d603");
+        let source = app
+            .world_mut()
+            .spawn((
+                ElementId(1),
+                Mesh3d(mesh.clone()),
+                Transform::from_xyz(2.0, 3.0, 4.0),
+                Visibility::Visible,
+            ))
+            .id();
+        let group = app
+            .world_mut()
+            .spawn((
+                ElementId(2),
+                Selected,
+                GroupMembers {
+                    name: "veranda".into(),
+                    member_ids: vec![ElementId(1)],
+                    frame: default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        sync_object_selection_overlay(app.world_mut());
+        app.update();
+        let overlay = app
+            .world_mut()
+            .query::<(Entity, &SelectedObjectOverlay)>()
+            .single(app.world())
+            .unwrap()
+            .0;
+        assert_eq!(app.world().get::<Mesh3d>(overlay).unwrap().0, mesh);
+        assert!(app.world().get::<ElementId>(overlay).is_none());
+        assert!(app
+            .world()
+            .get::<HiddenDuringViewportExport>(overlay)
+            .is_some());
+        assert_eq!(
+            app.world()
+                .get::<GlobalTransform>(overlay)
+                .unwrap()
+                .translation(),
+            Vec3::new(2.0, 3.0, 4.0)
+        );
+        app.world_mut()
+            .get_mut::<Transform>(source)
+            .unwrap()
+            .translation
+            .x = 7.0;
+        sync_object_selection_overlay(app.world_mut());
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<GlobalTransform>(overlay)
+                .unwrap()
+                .translation()
+                .x,
+            7.0
+        );
+        assert_eq!(
+            app.world().get::<ChildOf>(overlay).unwrap().parent(),
+            source
+        );
+        app.world_mut()
+            .entity_mut(source)
+            .insert(Visibility::Hidden);
+        app.update();
+        assert!(!app
+            .world()
+            .get::<InheritedVisibility>(overlay)
+            .unwrap()
+            .get());
+        app.world_mut()
+            .entity_mut(source)
+            .insert(Visibility::Visible);
+        app.update();
+        assert!(app
+            .world()
+            .get::<InheritedVisibility>(overlay)
+            .unwrap()
+            .get());
+        let replacement = uuid_handle!("225e6e83-2089-42b9-97e8-116b4d27f0d3");
+        app.world_mut()
+            .entity_mut(source)
+            .insert(Mesh3d(replacement.clone()));
+        sync_object_selection_overlay(app.world_mut());
+        assert_eq!(app.world().get::<Mesh3d>(overlay).unwrap().0, replacement);
+        // Idle sync keeps the same derived entity and shared material.
+        assert_eq!(
+            app.world().resource::<Assets<FaceStippleMaterial>>().len(),
+            1
+        );
+        // A linked placement moves the highlighted surface around a shared
+        // pivot. The authored source and its GPU geometry stay in place.
+        use crate::plugins::{
+            history::History,
+            transform::{ActiveTransformPreview, TransformMotion, TransformState},
+        };
+        let base = History::default().revision_token();
+        app.insert_resource(TransformState {
+            pivot_override: Some(Vec3::ZERO),
+            ..default()
+        });
+        app.insert_resource(ActiveTransformPreview {
+            placement_bounds: Some(crate::authored_entity::EntityBounds {
+                min: Vec3::ZERO,
+                max: Vec3::ONE,
+            }),
+            last_motion: Some((
+                TransformMotion::Rotate(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+                base,
+            )),
+            ..default()
+        });
+        sync_object_selection_overlay(app.world_mut());
+        app.update();
+        let root = app
+            .world()
+            .resource::<ObjectSelectionOverlayState>()
+            .placement_root
+            .unwrap();
+        assert_eq!(app.world().get::<ChildOf>(overlay).unwrap().parent(), root);
+        assert_eq!(app.world().get::<Mesh3d>(overlay).unwrap().0, replacement);
+        let origin = app
+            .world()
+            .get::<GlobalTransform>(source)
+            .unwrap()
+            .translation();
+        assert_eq!(origin, Vec3::new(7., 3., 4.));
+        assert!(app
+            .world()
+            .get::<GlobalTransform>(overlay)
+            .unwrap()
+            .translation()
+            .abs_diff_eq(
+                Quat::from_rotation_y(std::f32::consts::FRAC_PI_2) * origin,
+                1e-5
+            ));
+        app.insert_resource(ActiveTransformPreview::default());
+        app.world_mut().entity_mut(group).remove::<Selected>();
+        sync_object_selection_overlay(app.world_mut());
+        assert!(app.world().get_entity(overlay).is_err());
+        app.world_mut().entity_mut(group).insert(Selected);
+        sync_object_selection_overlay(app.world_mut());
+        assert_eq!(
+            app.world_mut()
+                .query::<&SelectedObjectOverlay>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        app.world_mut().despawn(source);
+        sync_object_selection_overlay(app.world_mut());
+        assert_eq!(
+            app.world_mut()
+                .query::<&SelectedObjectOverlay>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+    }
+}

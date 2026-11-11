@@ -359,13 +359,16 @@ fn chain_segments_into_loops(segments: Vec<(Vec3, Vec3)>) -> Vec<Vec<Vec3>> {
             }
 
             // Check if the loop is closed
-            if chain.len() >= 3 && head.distance_squared(tail) < epsilon_sq {
+            if chain.len() >= 4 && head.distance_squared(*chain.last().unwrap()) < epsilon_sq {
                 break;
             }
         }
 
-        // Close the loop if endpoints are close
-        if chain.len() >= 3 {
+        // Open surfaces do not define a solid cut face. Never bridge their
+        // endpoints merely because the chain contains three vertices.
+        if chain.len() >= 4 && chain[0].distance_squared(*chain.last().unwrap()) < epsilon_sq {
+            let first = chain[0];
+            *chain.last_mut().unwrap() = first;
             loops.push(chain);
         }
     }
@@ -393,27 +396,28 @@ pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<S
         return Vec::new();
     }
 
-    let mesh_query = world.try_query_filtered::<(
-        Entity,
-        &ElementId,
-        &Mesh3d,
-        &GlobalTransform,
-        Option<&Visibility>,
-        Option<&MaterialAssignment>,
-    ), Without<PreviewOnly>>();
+    let mesh_query =
+        world.try_query::<(EntityRef, &Mesh3d, &GlobalTransform, Option<&Visibility>)>();
     let Some(mut mesh_query) = mesh_query else {
         return Vec::new();
     };
 
     let mut fills = Vec::new();
 
-    for (_entity, owner, mesh_handle, mesh_transform, visibility, mat_assign) in
-        mesh_query.iter(world)
-    {
-        if visibility.is_some_and(|v| *v == Visibility::Hidden) {
+    for (entity_ref, mesh_handle, mesh_transform, visibility) in mesh_query.iter(world) {
+        if entity_ref.contains::<PreviewOnly>()
+            || visibility.is_some_and(|v| *v == Visibility::Hidden)
+        {
             continue;
         }
-
+        let Some(owner) = entity_ref
+            .get::<crate::plugins::modeling::occurrence::GeneratedOccurrencePart>()
+            .map(|part| part.owner)
+            .or_else(|| entity_ref.get::<ElementId>().copied())
+        else {
+            continue;
+        };
+        let mat_assign = entity_ref.get::<MaterialAssignment>();
         let Some(mesh) = mesh_assets.get(&mesh_handle.0) else {
             continue;
         };
@@ -431,7 +435,7 @@ pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<S
             for polygon in loops {
                 if polygon.len() >= 3 {
                     fills.push(SectionFillRegion {
-                        owner: *owner,
+                        owner,
                         polygon_3d: polygon,
                         pattern,
                         fill_color,
@@ -777,6 +781,17 @@ mod tests {
         );
         // Crosshatch should have roughly twice as many lines as single direction
         assert!(crosshatch.len() > diagonal_only.len());
+    }
+
+    #[test]
+    fn section_chains_require_actual_closure() {
+        let a = Vec3::ZERO;
+        let b = Vec3::X;
+        let c = Vec3::Z;
+        assert!(chain_segments_into_loops(vec![(a, b), (b, c)]).is_empty());
+        let loops = chain_segments_into_loops(vec![(a, b), (b, c), (c, a)]);
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].first(), loops[0].last());
     }
 
     #[test]

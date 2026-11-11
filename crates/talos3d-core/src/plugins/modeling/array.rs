@@ -603,7 +603,7 @@ impl AuthoredEntityFactory for LinearArrayFactory {
         draw_array_selection(world, entity, gizmos, color);
     }
 
-    fn hit_test(&self, world: &World, ray: bevy::math::Ray3d) -> Option<HitCandidate> {
+    fn hit_test(&self, world: &World, ray: bevy::shape::Ray3d) -> Option<HitCandidate> {
         hit_test_array(world, ray)
     }
 
@@ -700,7 +700,7 @@ impl AuthoredEntityFactory for PolarArrayFactory {
         draw_array_selection(world, entity, gizmos, color);
     }
 
-    fn hit_test(&self, world: &World, ray: bevy::math::Ray3d) -> Option<HitCandidate> {
+    fn hit_test(&self, world: &World, ray: bevy::shape::Ray3d) -> Option<HitCandidate> {
         hit_test_array(world, ray)
     }
 
@@ -740,12 +740,15 @@ fn draw_array_selection(world: &World, entity: Entity, gizmos: &mut Gizmos, colo
     }
 }
 
-fn hit_test_array(world: &World, ray: bevy::math::Ray3d) -> Option<HitCandidate> {
+fn hit_test_array(world: &World, ray: bevy::shape::Ray3d) -> Option<HitCandidate> {
     use crate::plugins::modeling::primitive_trait::ray_aabb_intersection;
 
     let mut best: Option<HitCandidate> = None;
     let mut query = world.try_query::<(Entity, &EvaluatedArray)>().unwrap();
     for (entity, evaluated) in query.iter(world) {
+        if crate::plugins::object_locks::entity_locked(world, entity) {
+            continue;
+        }
         if evaluated.vertices.is_empty() {
             continue;
         }

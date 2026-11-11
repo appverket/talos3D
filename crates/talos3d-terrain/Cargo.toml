@@ -2,9 +2,16 @@
 name = "talos3d-terrain"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/appverket/talos3D"
+
+description = "Terrain modeling and surface operations for Talos3D."
+
+[features]
+model-api = ["talos3d-core/model-api"]
 
 [dependencies]
-bevy = { version = "0.19.1", default-features = false, features = [
+bevy = { version = "0.20.1", default-features = false, features = [
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_gizmos",
@@ -20,12 +27,11 @@ bevy = { version = "0.19.1", default-features = false, features = [
     "bevy_text",
     "bevy_ui",
     "tonemapping_luts",
-    "webgpu",
     "default_font",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 delaunator = "1"
-bevy_egui = "0.40.1"
+bevy_egui = "0.43.1"
 talos3d-capability-api = { path = "../talos3d-capability-api" }
 talos3d-core = { path = "../talos3d-core" }

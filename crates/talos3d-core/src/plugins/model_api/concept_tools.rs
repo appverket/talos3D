@@ -19,9 +19,8 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::plugins::identity::ElementId;
-use crate::semantics::{
-    ConceptAssignment, ConceptId, PublishedAnchor, PublishedAnchors, SemanticGraph,
-};
+use crate::semantics::{AnchorInstanceId, SemanticContext, WorldSemanticContext};
+use crate::semantics::{ConceptId, PlanIntent, SemanticGraph, SemanticPlan};
 
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +42,10 @@ pub struct ConceptMatch {
     /// implies admissibility on its own.
     pub system_membership: Vec<String>,
     pub applicable_element_classes: Vec<String>,
+    pub evidence: Vec<crate::curation::EvidenceRef>,
+    /// Declared publication roles and resolver references; these do not prove
+    /// a runtime geometry resolver is installed.
+    pub publications: Vec<crate::semantics::PublishedAnchorContract>,
     /// Anchor kinds this concept must resolve against, with the concepts that
     /// publish each — the "where does it go" answer.
     pub required_anchors: Vec<RequiredAnchor>,
@@ -56,6 +59,10 @@ pub struct RequiredAnchor {
     pub identity_defining: bool,
     pub published_by: Vec<String>,
     pub repair_hint: String,
+    pub proposition_id: String,
+    pub evidence: Vec<crate::curation::EvidenceRef>,
+    pub current_anchors: Vec<AnchorInstanceId>,
+    pub omitted_current_anchors: usize,
 }
 
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
@@ -68,6 +75,8 @@ pub struct ResolveDomainTermResult {
     /// Set when nothing matched, so an empty result is a first-class gap route
     /// rather than a silent empty list.
     pub no_concept_found: Option<String>,
+    pub edit_request_kind: String,
+    pub next_tools: Vec<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
@@ -121,9 +130,12 @@ pub fn handle_resolve_domain_term(
             no_concept_found: Some(
                 "No Design Concept Graph is installed in this app composition.".to_string(),
             ),
+            edit_request_kind: "core.semantic".into(),
+            next_tools: vec!["request_corpus_expansion".into()],
         };
     };
 
+    let context = WorldSemanticContext::new(world);
     let matches: Vec<ConceptMatch> = graph
         .resolve_term(&request.term)
         .into_iter()
@@ -132,17 +144,31 @@ pub fn handle_resolve_domain_term(
                 .propositions_of_subject(&concept.id, None)
                 .into_iter()
                 .filter_map(|proposition| match &proposition.object {
-                    crate::semantics::PropositionObject::AnchorKind(kind) => Some(RequiredAnchor {
-                        anchor_kind: kind.to_string(),
-                        predicate: proposition.predicate.to_string(),
-                        identity_defining: proposition.identity_defining,
-                        published_by: graph
-                            .publishers_of(kind)
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect(),
-                        repair_hint: proposition.repair_hint.clone(),
-                    }),
+                    crate::semantics::PropositionObject::AnchorKind(kind) => {
+                        let mut current = context.anchor_candidates(kind);
+                        current.retain(|anchor| {
+                            context
+                                .concept_of(anchor.publisher)
+                                .is_some_and(|concept| graph.publishes_anchor(&concept, kind))
+                        });
+                        let omitted_current_anchors = current.len().saturating_sub(16);
+                        current.truncate(16);
+                        Some(RequiredAnchor {
+                            anchor_kind: kind.to_string(),
+                            predicate: proposition.predicate.to_string(),
+                            identity_defining: proposition.identity_defining,
+                            published_by: graph
+                                .publishers_of(kind)
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect(),
+                            repair_hint: proposition.repair_hint.clone(),
+                            proposition_id: proposition.id.to_string(),
+                            evidence: proposition.evidence.clone(),
+                            current_anchors: current,
+                            omitted_current_anchors,
+                        })
+                    }
                     _ => None,
                 })
                 .collect();
@@ -167,6 +193,13 @@ pub fn handle_resolve_domain_term(
                     .map(|class| class.0.clone())
                     .collect(),
                 required_anchors,
+                evidence: concept.evidence.clone(),
+                publications: graph
+                    .publications()
+                    .iter()
+                    .filter(|contract| contract.publisher == concept.id)
+                    .cloned()
+                    .collect(),
             }
         })
         .collect();
@@ -183,6 +216,12 @@ pub fn handle_resolve_domain_term(
         term: request.term,
         matches,
         no_concept_found,
+        edit_request_kind: "core.semantic".into(),
+        next_tools: vec![
+            "get_entity_details".into(),
+            "list_edit_requests".into(),
+            "preview_edit_plan".into(),
+        ],
     }
 }
 
@@ -223,12 +262,13 @@ pub fn handle_assign_concept(
             .collect::<Vec<_>>()
     };
 
-    let entity =
-        crate::plugins::commands::find_entity_by_element_id(world, ElementId(request.element_id))
-            .ok_or_else(|| format!("No entity with element id {}", request.element_id))?;
-    world
-        .entity_mut(entity)
-        .insert(ConceptAssignment::new(concept.clone()));
+    apply_semantic_request(
+        world,
+        SemanticPlan::none().with(PlanIntent::AssignConcept {
+            entity: ElementId(request.element_id),
+            concept: concept.clone(),
+        }),
+    )?;
 
     Ok(AssignConceptResult {
         element_id: request.element_id,
@@ -259,26 +299,26 @@ pub fn handle_publish_anchors(
         }
     }
 
-    let entity =
-        crate::plugins::commands::find_entity_by_element_id(world, ElementId(request.element_id))
-            .ok_or_else(|| format!("No entity with element id {}", request.element_id))?;
-
-    let anchors: Vec<PublishedAnchor> = request
+    let published = request
         .anchors
         .iter()
-        .map(|spec| PublishedAnchor {
-            kind: crate::semantics::AnchorKindId::new(spec.anchor_kind.clone()),
-            role: crate::semantics::AnchorRoleId::new(spec.role.clone()),
-            revision: 0,
+        .map(|spec| format!("{}/{}", spec.anchor_kind, spec.role))
+        .collect();
+    let anchors = request
+        .anchors
+        .into_iter()
+        .map(|spec| crate::semantics::plan::AnchorPublication {
+            kind: spec.anchor_kind.as_str().into(),
+            role: spec.role.as_str().into(),
         })
         .collect();
-    let published = anchors
-        .iter()
-        .map(|anchor| format!("{}/{}", anchor.kind, anchor.role))
-        .collect();
-    world
-        .entity_mut(entity)
-        .insert(PublishedAnchors::new(anchors));
+    apply_semantic_request(
+        world,
+        SemanticPlan::none().with(PlanIntent::PublishAnchors {
+            entity: ElementId(request.element_id),
+            anchors,
+        }),
+    )?;
 
     Ok(PublishAnchorsResult {
         element_id: request.element_id,
@@ -288,4 +328,14 @@ pub fn handle_publish_anchors(
                invalidates dependents rather than detaching them."
             .to_string(),
     })
+}
+
+/// Compatibility tools use the same retained candidate and one history item.
+fn apply_semantic_request(world: &mut World, semantic: SemanticPlan) -> Result<(), String> {
+    let plan = crate::plugins::authored_edit_plan::requests::preview(
+        world,
+        "core.semantic",
+        serde_json::to_value(semantic).map_err(|error| error.to_string())?,
+    )?;
+    super::apply_captured_plan_and_flush(world, &plan)
 }

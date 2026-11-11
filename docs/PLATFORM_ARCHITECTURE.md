@@ -90,8 +90,8 @@ Talos3D should be open-source as a platform. The architecture should support:
 - private enterprise capability packs
 - premium first-party or third-party add-ons
 
-The architectural capability currently in-tree is the reference example of a
-domain extension, not a special architectural tier.
+Talos3D Architecture lives outside this repository and uses the same public
+extension contracts as other specialized editions.
 
 The platform is publishable as a source-level Rust extension system before
 dynamic plugin loading exists. The practical bar is a stable SDK crate,
@@ -107,8 +107,74 @@ The platform geometry model follows ADR-023:
 - semantic geometry summaries are exposed to AI
 - the definition model remains compatible with future DAG-based paradigms
 
+## Captured edit plans
+
+`plugins::authored_edit_plan` owns the transient `AuthoredEditPlan` carrier.
+Capability planners provide ordered before/after authored snapshots, semantic
+intents, and diagnostic context. The published candidate is immutable and has a
+distinct ID, document/revision fence, and content digest. `AuthoringScript`
+remains the durable procedural representation; plans are not project data.
+
+`HistoryPlugin` installs a bounded registry (64 candidates and 64 interactions;
+4 MiB per candidate, including retained source bytes, and 4 MiB per interaction's original snapshots).
+An interaction retains its initial revision and originals while replacing its
+active candidate. Cancellation, eviction and consumption remove access by ID;
+republishing recovered content creates a new identity. New interactions release
+those from older revisions. Consumers holding an `Arc` must release it when
+presentation or history no longer needs it; registry limits do not bound history.
+
+`queue_captured_plan` refuses pending history work, stale candidates, occupied
+created identities, and mismatched before snapshots. History repeats the guard
+immediately before mutation and runs the shared semantic admissibility kernel.
+A successful candidate applies its captured snapshots as one undoable command;
+redo uses the same content. Snapshot implementations own their authored fields
+and dependency ordering. Retyping needs an explicit capability migration;
+typed retained-source changes are a bounded project-resource extension. Arbitrary
+resource or library writes remain outside this carrier.
+
+The shared modifier stage merges capability callbacks and the existing transform
+callbacks by descending priority, with stable registration order inside each
+registry. At equal priority generic callbacks run before compatibility callbacks.
+`prepare_transform_edit` is the pure stage consumed by viewport calculation and
+the retained `apply_transform_plan_modifiers` compatibility wrapper. Dependent
+original snapshots come from the same capability factories for both paths.
+Model API transforms and linked-model placement still call that wrapper; the
+existing terrain planting callback runs unchanged through an adapter.
+
+`talos3d_capability_api::edit_plans` exposes the transient planning surface.
+Callbacks mutate `EditPlanDraft` before capture and receive capability-owned,
+typed ephemeral input. They must not mutate the world. Request kinds keep
+unrelated operations out of a callback. Duplicate generic modifier IDs refuse
+registration. Draft context and semantic intents are consumed by captured-plan
+callers; the legacy snapshot wrapper currently only returns before/after state.
+
+Exact-candidate interactive application and MCP exposure are the next integration
+gate. It must restore any transient authored preview before preflight, apply the
+exact displayed candidate, exercise the actual presentation path, and pass the
+full measured performance gate. Modifier-stage measurements alone do not establish
+frame-time or drag latency.
+
 ## Architectural Summary
 
 Talos3D is a platform first. Features arrive through capabilities. Setups bundle
 those capabilities for a domain. The public codebase should make that layering
 obvious.
+
+### Selected-element explanation
+
+`plugins::design_explanation::explain_design` composes a bounded read projection
+from existing authored components, Definition parameter resolution, recorded
+dependencies and validation. The property inspector and MCP consume this one
+projection. It is never persisted as another source graph, does not infer missing
+provenance, and cannot execute edits from explanation prose.
+
+Retained foreign inputs live in `plugins::foreign_source::SourceArtifacts`, a
+bounded project asset collection of immutable BLAKE3-addressed bytes, source
+assertions and adapter assessments. They are not reusable components. Reference
+meshes carry typed source-part/unit/frame links; accepted native occurrences carry
+an explicit interpretation record and uncertainty. Definition/Occurrence remains
+the native component authority. The existing AuthoredEditPlan includes typed
+before/after source-resource changes in its digest, memory budget, freshness checks
+and atomic history application. No sibling import transaction or durable procedural
+IR is introduced. Original bytes and source-only adapter failures survive project
+persistence independently of providers.

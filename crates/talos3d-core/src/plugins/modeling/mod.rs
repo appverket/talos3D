@@ -1,25 +1,33 @@
 pub mod array;
 pub mod assembly;
 pub mod bim_material_assignment;
+pub mod boundary_edit;
 pub mod bsp_csg;
 pub mod composite_solid;
 pub mod csg;
 pub mod definition;
+pub(crate) mod deformable_mesh;
 pub mod dependency_graph;
 pub mod editable_mesh;
 pub mod exchange_identity;
+pub mod face_sketch;
 pub mod fillet;
 pub mod foundation;
+pub(crate) mod frozen_mesh;
 pub mod generic_factory;
 pub mod generic_snapshot;
 pub mod geometry_health;
 pub mod ghost_geometry;
 pub mod group;
+mod group_edit;
 pub mod host_chart;
 pub mod linked_model;
 pub mod mesh_generation;
 pub mod mirror;
 pub mod occurrence;
+pub mod parametric_definition;
+pub mod planar_body;
+mod polygon_evaluator;
 pub mod primitive_trait;
 pub mod primitives;
 pub mod profile;
@@ -89,6 +97,10 @@ pub struct ModelingWorkbench;
 
 impl Plugin for ModelingPlugin {
     fn build(&self, app: &mut App) {
+        use crate::plugins::component_structure_quality::ComponentStructureQualityPlugin;
+        if !app.is_plugin_added::<ComponentStructureQualityPlugin>() {
+            app.add_plugins(ComponentStructureQualityPlugin);
+        }
         // PP70: domain-neutral refinement-linkage relations are the core
         // vocabulary for cross-state identity; register them here so any
         // app that boots ModelingPlugin has the full relation discovery
@@ -411,7 +423,7 @@ impl Plugin for ModelingPlugin {
                 CommandDescriptor {
                     id: "modeling.place_linked_model".to_string(),
                     label: "Place Linked Model".to_string(),
-                    description: "Choose a Talos3D project file and place it into the current model as a live linked model".to_string(),
+                    description: "Choose an existing Talos3D project file and place its complete contents into the current model as one live linked model; no source group or prior extraction is required".to_string(),
                     category: CommandCategory::Create,
                     parameters: Some(serde_json::json!({
                         "type": "object",
@@ -422,7 +434,7 @@ impl Plugin for ModelingPlugin {
                     })),
                     default_shortcut: None,
                     icon: Some("icon.link".to_string()),
-                    hint: Some("Place an external model file into this scene as a live link".to_string()),
+                    hint: Some("Create a live linked instance from an existing .talos3d file".to_string()),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,
@@ -624,7 +636,7 @@ impl Plugin for ModelingPlugin {
                     parameters: Some(serde_json::json!({"type":"object"})),
                     default_shortcut: Some("M".to_string()),
                     icon: Some("icon.move".to_string()),
-                    hint: Some("Drag a corner or control point to move".to_string()),
+                    hint: Some("Move (M): drag a grip; X/Y/Z lock axis; Shift+X/Y/Z lock plane".to_string()),
                     requires_selection: true,
                     show_in_menu: true,
                     version: 1,
@@ -980,16 +992,24 @@ fn execute_create_sphere(world: &mut World, _: &Value) -> Result<CommandResult, 
 }
 
 fn execute_create_plane(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    if face_sketch::begin_on_selected_face(world, face_sketch::FaceSketchShape::Rectangle)? {
+        return Ok(CommandResult::empty());
+    }
     activate_tool_command(world, ActiveTool::PlacePlane)
 }
 
 fn execute_create_polyline(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    if face_sketch::begin_on_selected_face(world, face_sketch::FaceSketchShape::Polyline)? {
+        return Ok(CommandResult::empty());
+    }
     activate_tool_command(world, ActiveTool::PlacePolyline)
 }
 
 fn execute_begin_move(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     arm_move_handles(world)?;
-    Ok(CommandResult::empty())
+    // Changing the grip display alone leaves Guide Line (or another drawing
+    // tool) receiving the next click. Explicit Move intent changes the tool.
+    activate_tool_command(world, ActiveTool::Select)
 }
 
 fn execute_begin_rotate(world: &mut World, _: &Value) -> Result<CommandResult, String> {
@@ -1004,6 +1024,25 @@ fn start_transform_or_pend(
     world: &mut World,
     mode: TransformMode,
 ) -> Result<CommandResult, String> {
+    // Menu activation is explicit intent, but its release still belongs to
+    // chrome this frame. Let the existing pending path start the gesture only
+    // after chrome has released input; never turn that release into a commit.
+    if world
+        .resource::<crate::plugins::input_ownership::InputOwnership>()
+        .is_ui_capture()
+        && world.resource::<TransformState>().is_idle()
+    {
+        if world
+            .query_filtered::<Entity, With<crate::plugins::selection::Selected>>()
+            .iter(world)
+            .next()
+            .is_none()
+        {
+            return Err("No selection to transform".into());
+        }
+        world.resource_mut::<TransformState>().pending_mode = Some(mode);
+        return Ok(CommandResult::empty());
+    }
     match start_transform_mode(world, mode) {
         Ok(()) => Ok(CommandResult::empty()),
         Err(msg) if msg.contains("Cursor is not over") => {
@@ -1024,101 +1063,12 @@ fn execute_create_chamfer(world: &mut World, params: &Value) -> Result<CommandRe
 }
 
 fn execute_group(world: &mut World, _: &Value) -> Result<CommandResult, String> {
-    use crate::authored_entity::AuthoredEntity;
-    use crate::plugins::{
-        commands::CreateEntityCommand,
-        identity::{ElementId, ElementIdAllocator},
-        selection::Selected,
-    };
-
-    let selected_ids: Vec<ElementId> = {
-        let mut query = world.query_filtered::<&ElementId, With<Selected>>();
-        query.iter(world).copied().collect()
-    };
-
-    if selected_ids.is_empty() {
-        return Err("No entities selected to group".to_string());
-    }
-
-    let group_id = world.resource::<ElementIdAllocator>().next_id();
-    let cached_bounds = group::compute_group_bounds_from_world(world, &selected_ids);
-    let snapshot = group::GroupSnapshot {
-        element_id: group_id,
-        name: "Group".to_string(),
-        member_ids: selected_ids,
-        frame: group::GroupFrame::default(),
-        composite: None,
-        linked_model: None,
-        cached_bounds,
-    };
-
-    // Apply immediately so the entity exists this frame for selection
-    snapshot.apply_to(world);
-
-    // Deselect members and select the new group
-    let selected_entities: Vec<Entity> = {
-        let mut query = world.query_filtered::<Entity, With<Selected>>();
-        query.iter(world).collect()
-    };
-    let group_entity = {
-        let mut q = world.try_query::<EntityRef>().unwrap();
-        q.iter(world)
-            .find(|e| e.get::<ElementId>().copied() == Some(group_id))
-            .map(|e| e.id())
-    };
-    for entity in &selected_entities {
-        world.entity_mut(*entity).remove::<Selected>();
-    }
-    if let Some(group_entity) = group_entity {
-        world.entity_mut(group_entity).insert(Selected);
-    }
-
-    // Send event for undo/redo history
-    world
-        .resource_mut::<Messages<CreateEntityCommand>>()
-        .write(CreateEntityCommand {
-            snapshot: snapshot.into(),
-        });
-
+    group_edit::group_selection(world)?;
     Ok(CommandResult::empty())
 }
 
 fn execute_ungroup(world: &mut World, _: &Value) -> Result<CommandResult, String> {
-    use crate::plugins::{
-        commands::ResolvedDeleteEntitiesCommand, identity::ElementId, selection::Selected,
-    };
-
-    let group_ids: Vec<ElementId> = {
-        let mut query =
-            world.query_filtered::<(&ElementId, &group::GroupMembers), With<Selected>>();
-        let selected = query
-            .iter(world)
-            .map(|(id, members)| (*id, members.linked_model.is_some()))
-            .collect::<Vec<_>>();
-        let linked = selected
-            .iter()
-            .filter_map(|(id, is_linked)| is_linked.then_some(id.0))
-            .collect::<Vec<_>>();
-        if !linked.is_empty() {
-            return Err(format!(
-                "Cannot ungroup linked model group(s) {:?}. This would break the live link and leave ordinary objects in the parent model; open the linked model to edit it, or use an explicit break-link workflow.",
-                linked
-            ));
-        }
-        selected.into_iter().map(|(id, _)| id).collect()
-    };
-
-    if group_ids.is_empty() {
-        return Err("No groups selected to ungroup".to_string());
-    }
-
-    // Use ResolvedDeleteEntitiesCommand to skip cascade (don't delete members)
-    world
-        .resource_mut::<Messages<ResolvedDeleteEntitiesCommand>>()
-        .write(ResolvedDeleteEntitiesCommand {
-            element_ids: group_ids,
-        });
-
+    group_edit::ungroup_selection(world)?;
     Ok(CommandResult::empty())
 }
 
@@ -1490,4 +1440,65 @@ fn feature_source_from_params(world: &World, params: &Value) -> Result<ElementId
         );
     }
     Ok(selected_ids[0])
+}
+
+#[cfg(test)]
+mod menu_transform_tests {
+    use super::*;
+    use crate::plugins::{input_ownership::InputOwnership, selection::Selected};
+
+    #[test]
+    fn explicit_menu_transform_defers_until_ui_releases_input() {
+        let mut world = World::new();
+        world.insert_resource(InputOwnership::UiCapture);
+        world.init_resource::<TransformState>();
+        assert!(execute_begin_rotate(&mut world, &Value::Null).is_err());
+        world.spawn(Selected);
+        execute_begin_rotate(&mut world, &Value::Null).unwrap();
+        assert_eq!(
+            world.resource::<TransformState>().pending_mode,
+            Some(TransformMode::Rotating)
+        );
+        assert!(world.resource::<TransformState>().is_idle());
+        assert!(world.resource::<InputOwnership>().is_ui_capture());
+    }
+}
+
+#[cfg(test)]
+mod move_tool_tests {
+    use super::*;
+    use crate::plugins::{
+        handles::{HandleContext, HandleDisplayMode, HandleInteractionState},
+        input_ownership::InputOwnership,
+        selection::Selected,
+        ui::StatusBarData,
+    };
+
+    #[test]
+    fn move_command_exits_guide_creation_and_keeps_the_selected_assembly() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<ActiveTool>()
+            .init_resource::<TransformState>()
+            .init_resource::<InputOwnership>()
+            .init_resource::<HandleContext>()
+            .init_resource::<HandleInteractionState>()
+            .init_resource::<StatusBarData>();
+        app.world_mut()
+            .resource_mut::<NextState<ActiveTool>>()
+            .set(ActiveTool::PlaceGuideLine);
+        app.update();
+        let assembly = app.world_mut().spawn(Selected).id();
+        execute_begin_move(app.world_mut(), &Value::Null).unwrap();
+        app.update();
+        assert_eq!(
+            *app.world().resource::<State<ActiveTool>>().get(),
+            ActiveTool::Select
+        );
+        assert_eq!(
+            app.world().resource::<HandleContext>().display_mode,
+            HandleDisplayMode::Move
+        );
+        assert!(app.world().get::<Selected>(assembly).is_some());
+    }
 }

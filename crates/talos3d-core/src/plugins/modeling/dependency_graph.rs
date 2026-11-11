@@ -1601,7 +1601,7 @@ mod tests {
     use crate::authored_entity::{AuthoredEntity, BoxedEntity, HandleInfo, PropertyFieldDef};
     use crate::capability_registry::{AuthoredEntityFactory, CapabilityRegistry, HitCandidate};
     use bevy::ecs::world::EntityRef;
-    use bevy::math::Ray3d;
+    use bevy::shape::Ray3d;
     use serde_json::Value;
     use std::any::Any;
     use std::sync::Arc;

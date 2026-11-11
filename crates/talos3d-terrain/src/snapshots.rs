@@ -609,6 +609,9 @@ impl AuthoredEntityFactory for ElevationCurveFactory {
 
         let mut __q = world.try_query::<EntityRef>().unwrap();
         for entity_ref in __q.iter(world) {
+            if talos3d_core::plugins::object_locks::entity_locked(world, entity_ref.id()) {
+                continue;
+            }
             let Some(curve) = entity_ref.get::<ElevationCurve>() else {
                 continue;
             };

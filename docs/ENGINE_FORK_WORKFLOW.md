@@ -58,8 +58,8 @@ cargo check -p talos3d-core
 cargo test -p talos3d-core
 ```
 
-Run launcher checks from their own manifests because `app/` and `app-core/`
-are separate Cargo workspaces.
+The public `app-core/` launcher is included in `cargo check --workspace`.
+Check specialized edition launchers from their owning repositories.
 
 ### Temporary upstream source pin
 
@@ -211,3 +211,128 @@ engine facilities but do not replace Talos3D authored models, Definition
 libraries, command history, or persistence. They may be adopted for
 presentation-only composition where they do not introduce a second semantic
 lifecycle.
+
+## Bevy 0.20 Audit
+
+The 2026-10-08 release moves direct Bevy requirements to `0.20.0`, `bevy_egui`
+to `0.43.1` and egui to `0.36`. Bevy 0.20 requires Rust 1.97.1. Every
+composition that builds `talos3d-core` (Core, Architecture, Naval, Apps and the
+standalone infra catalog/project clients) carries the `vendor/bevy_pbr` patch,
+because Core sets the StandardMaterial clip-plane fields that only the patched
+crate defines.
+
+Engine changes that alter Talos3D usage:
+
+- **egui pass ownership.** `bevy_egui` 0.42 removed single-pass mode. Talos3D
+  chrome, tools and overlays still draw from ordered `Update` systems, because
+  input ownership, viewport insets and export capture read the chrome result in
+  the same frame. `EguiChromePlugin` marks the primary context
+  `run_manually` (the documented bevy_egui contract), begins its pass in
+  `EguiPreUpdateSet::BeginPass` and ends it in `EguiPostUpdateSet::EndPass`.
+  Systems registered in `EguiPrimaryContextPass` run inside that same pass just
+  before it ends; previously they never ran in Talos3D apps. Moving the whole
+  chrome into `EguiPrimaryContextPass` is a separate scheduling change, not an
+  engine-upgrade side effect.
+- **Top-level panels.** egui 0.36 removed Context-level panels and
+  `Context::available_rect`. `egui_chrome::show_top_level_panel` and
+  `remaining_available_rect` carry the unclaimed root area for the current pass
+  so panels drawn by separate systems still stack. Use them for every
+  top-level `egui::Panel`.
+- **WESL shaders.** Bevy's shaders and its preprocessor moved to WESL. Custom
+  material shaders use `import` and `constants::MATERIAL_BIND_GROUP`, are
+  `.wesl` files and load with `Shader::from_wesl`. Shader errors appear only at
+  runtime: a successful compile is not evidence that a shader still loads.
+- **Screen-space transmission is opt-in.** `RenderPipelinePlugin` adds
+  `ScreenSpaceTransmission` to every `Camera3d`, so glass and other
+  transmissive materials render the same in the viewport, previews and exports.
+- **Tonemapping `None` became a full bypass.** Talos3D's "None" setting (and the
+  Drafting preset) maps to Bevy `Tonemapping::Linear`, which keeps the identity
+  curve with exposure and dither as before.
+- **Shapes and rays moved.** Primitives, bounding volumes and `Ray3d` live in
+  `bevy::shape`. glam's `Mat4` camera constructors are deprecated; use
+  `bevy::math::proj` for projections and `Transform::looking_at` for views.
+- **egui texture deltas.** Dropping an unapplied `FullOutput` is a debug
+  assertion in egui 0.36. Tests that run an egui pass themselves must call
+  `drop_without_applying_deltas`.
+
+Reviewed and deliberately not adopted:
+
+- The upstream `PanOrbitCamera` does not replace Talos3D's orbit camera, whose
+  presets, projection modes and MCP control are part of the authored view
+  state. Reconsider it only if it can be driven by the same camera state.
+- `RenderDebugOverlayPlugin` (F1/F2) ships only with `render_dev_tools`, which
+  Talos3D does not enable, so it cannot claim Talos3D shortcuts.
+- `chain_weak` now orders some built-in schedules. Talos3D orders its systems
+  against its own sets rather than Bevy internals; add explicit `.after(...)`
+  if a future system depends on internal engine order.
+- BSN `Ready`, Feathers widgets and retained UI rendering do not replace egui
+  chrome or the authored model lifecycle.
+
+Both `vendor/bevy_pbr` repairs (directional-light priority and StandardMaterial
+clip planes) are still absent upstream in 0.20.0 and were rebased; see
+`vendor/bevy_pbr/PATCHES.md`.
+
+### Manual-pass pointer capture after 0.20
+
+The native inference check exposed a gap in egui 0.36's manual-pass API:
+`Context::is_pointer_over_egui` assumes `run_ui` published its root available
+rectangle; `begin_pass`/`end_pass` callers cannot publish that private field.
+Without it, the background layer claims the entire viewport.
+
+`egui_chrome::EguiWantsInput` normalizes the primary context once per chrome
+pass, using the existing remaining panel rectangle for background hit testing
+and egui's own layer, drag, popup and keyboard state. Viewport consumers still
+read aggregate resources; they do not scan widgets or reinterpret geometry.
+Chrome's same-drag release ownership stays in `ChromeInputCapture`.
+
+The desired upstream repair is a public way for manual-pass callers to publish
+root available/minimum rectangles (or a root-Ui lifecycle that publishes them).
+A vendor patch is not carried because this repository deliberately disallows
+egui vendoring. Once upstream exposes the manual-root contract, publish the
+rectangle there and retire this adapter in favor of the upstream input resource.
+Regression coverage must keep viewport input free, chrome and floating windows
+interactive, and gesture release ownership intact.
+
+## Bevy 0.20.1 audit — 2026-11-06
+
+All direct Talos3D Bevy requirements move to `0.20.1`; lockfiles resolve the
+engine family together. Released `bevy_egui` 0.43.1 / egui 0.36 remain compatible,
+so no UI bridge or application interaction migration is introduced. Standalone
+catalog/project clients update their exact Bevy requirement alongside the app
+compositions.
+
+The upstream release fixes shader-sized GPU buffer allocation, cyclic shader
+dependencies, orphaned-entity ancestor traversal and transform propagation after
+entity-index reuse, redundant uniqueness checks in parallel queries, reflected
+Option defaults, and fog-volume near-plane rendering. It also updates ruzstd to
+the 0.9 line. Talos3D keeps its existing Bevy render extraction, retained rigid
+linked-instance presentation, shared authored edit plans and background recovery
+ordering; these fixes belong in the engine rather than new application workarounds.
+
+`vendor/bevy_pbr` is rebased onto the complete 0.20.1 registry source, including
+its volumetric-fog fix. The two existing patches are still needed and apply
+without conflicts. See its provenance, prepared upstream proposals and removal
+conditions in `vendor/bevy_pbr/PATCHES.md`.
+
+Validation uses the optimized Architecture product entry point, not only a Core
+test executable. Before/after tests use the same 3,121-record nested linked fixture
+(3,072 box meshes), hardware, viewport and renderer settings. Three 72-step
+native Move traces include activation, all presented motion, exact candidate
+commit and the first dirty edit's recovery cost. The active input-to-present p95
+budget is 33 ms; repeated baseline/candidate comparisons also reject material
+regressions in motion, activation or release, and report the worst observed stall
+separately. Timings exclude HTTP and physical display scanout; a missing swapchain
+present cannot pass. Fixture files and raw traces remain local.
+
+Source release: https://github.com/bevyengine/bevy/releases/tag/v0.20.1
+
+Changes: https://github.com/bevyengine/bevy/compare/v0.20.0...v0.20.1
+
+Fresh downstream MCP-feature validation also exposed `rmcp` 1.3.0 allowing a
+newer 1.x macro generator that emits runtime calls absent in 1.3.0. Core now pins
+its optional macro generator to the matching 1.3.0, already used successfully by
+Architecture/Apps. This is a dependency-resolution repair, not a change to tools
+or their semantics. The desired upstream repair is for the runtime to bind its
+private macro ABI to a matching generator version; a local Cargo constraint is
+sufficient, so vendoring the SDK would add no value. Revisit both pins together
+when upgrading the MCP SDK.

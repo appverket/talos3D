@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
 
+mod trace;
+pub use trace::{UxDragTrace, UxDragTraceSample};
+
 use bevy::{
     ecs::{message::Messages, world::EntityRef},
     input::{
@@ -8,7 +11,7 @@ use bevy::{
         ButtonState,
     },
     prelude::*,
-    window::{CursorMoved, PrimaryWindow},
+    window::{CursorMoved, PrimaryWindow, WindowEvent},
 };
 use serde::{Deserialize, Serialize};
 
@@ -33,16 +36,20 @@ pub struct UxHarnessPlugin;
 
 impl Plugin for UxHarnessPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<UxHarnessState>().add_systems(
-            Update,
-            process_ux_harness_step
-                .after(InputPhase::SyncOwnership)
-                // Pointer/button/key edges are valid for one frame. Inject them
-                // before the earliest modal/viewport consumer so transform
-                // confirmation, handle hover/press, selection, and tools all
-                // see the same input.
-                .before(InputPhase::ModalInput),
-        );
+        trace::install(app);
+        app.add_message::<WindowEvent>()
+            .init_resource::<UxHarnessState>()
+            .add_systems(
+                Update,
+                process_ux_harness_step
+                    .after(InputPhase::SyncOwnership)
+                    .before(crate::plugins::cursor::CursorSystems::UpdateWorldPosition)
+                    // Pointer/button/key edges are valid for one frame. Inject them
+                    // before the earliest modal/viewport consumer so transform
+                    // confirmation, handle hover/press, selection, and tools all
+                    // see the same input.
+                    .before(InputPhase::ModalInput),
+            );
     }
 }
 
@@ -123,6 +130,13 @@ pub struct UxDragRequest {
     pub button: Option<String>,
     #[serde(default)]
     pub steps: Option<u32>,
+    /// Record a bounded per-input candidate and render-present trace, returned
+    /// by ux_observe. Timing starts at Bevy input injection, excluding HTTP.
+    #[serde(default)]
+    pub trace: bool,
+    /// Hold one modifier across the gesture, including its activating press.
+    #[serde(default)]
+    pub modifier: Option<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -168,6 +182,40 @@ pub struct UxHarnessSnapshot {
     /// Whether face editing is active (the leaf level of drill-down).
     pub face_edit_active: bool,
     pub entities: Vec<UxEntityProjection>,
+    /// Exact candidate presented by the native transform path, if supported.
+    #[serde(default)]
+    pub active_edit_plan: Option<UxActiveEditPlan>,
+    #[serde(default)]
+    pub preview_error: Option<String>,
+    #[serde(default)]
+    pub drag_trace: Option<UxDragTrace>,
+    /// Resolved viewport inference and semantic boundary owner during a gesture.
+    #[serde(default)]
+    pub inference: Option<UxInferenceSnapshot>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UxInferenceSnapshot {
+    pub kind: String,
+    pub raw_position: Option<[f32; 3]>,
+    pub position: Option<[f32; 3]>,
+    pub target: Option<[f32; 3]>,
+    pub hovered_element_id: Option<u64>,
+    pub boundary_owner: Option<u64>,
+    pub boundary_target: Option<u64>,
+    pub label: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UxActiveEditPlan {
+    pub plan_id: String,
+    pub digest: String,
+    pub base_model_revision: crate::plugins::history::ModelRevision,
+    pub can_commit: bool,
+    pub presentation: String,
+    pub after_entity_ids: Vec<u64>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -290,7 +338,25 @@ pub fn enqueue_drag(world: &mut World, request: UxDragRequest) -> Result<UxInput
     let start = Vec2::new(request.start[0], request.start[1]);
     let end = Vec2::new(request.end[0], request.end[1]);
     let step_count = request.steps.unwrap_or(12).clamp(1, 120);
+    let modifier = request
+        .modifier
+        .as_deref()
+        .map(parse_key_code)
+        .transpose()?;
+    if modifier
+        .as_ref()
+        .is_some_and(|(_, key)| !matches!(key, Key::Alt | Key::Shift))
+    {
+        return Err("Supported drag modifiers are Alt and Shift".into());
+    }
     let mut actions = Vec::new();
+    if let Some((code, key)) = &modifier {
+        actions.push(UxStepAction::Key {
+            key_code: *code,
+            logical_key: key.clone(),
+            state: ButtonState::Pressed,
+        });
+    }
     actions.push(UxStepAction::MovePointer(start));
     actions.push(UxStepAction::MouseButton {
         position: start,
@@ -306,7 +372,18 @@ pub fn enqueue_drag(world: &mut World, request: UxDragRequest) -> Result<UxInput
         button,
         state: ButtonState::Released,
     });
-    enqueue_steps(world, actions)
+    if let Some((code, key)) = modifier {
+        actions.push(UxStepAction::Key {
+            key_code: code,
+            logical_key: key,
+            state: ButtonState::Released,
+        });
+    }
+    let result = enqueue_steps(world, actions)?;
+    if request.trace {
+        trace::begin(world, result.sequence);
+    }
+    Ok(result)
 }
 
 pub fn enqueue_press_key(
@@ -394,6 +471,55 @@ pub fn observe_ux(world: &mut World) -> Result<UxHarnessSnapshot, String> {
             .get_resource::<crate::plugins::face_edit::FaceEditContext>()
             .is_some_and(|context| context.is_active()),
         entities,
+        active_edit_plan: world
+            .get_resource::<crate::plugins::transform::ActiveTransformPreview>()
+            .and_then(|active| {
+                active.plan.as_ref().map(|plan| UxActiveEditPlan {
+                    plan_id: plan.plan_id().0.clone(),
+                    digest: plan.digest().into(),
+                    base_model_revision: plan.base_model_revision().clone(),
+                    can_commit: plan.can_commit(),
+                    presentation: if active.live_snapshot_application {
+                        "authored_snapshot_preview"
+                    } else {
+                        "rigid_transform_preview"
+                    }
+                    .into(),
+                    after_entity_ids: plan
+                        .after_snapshots()
+                        .iter()
+                        .map(|s| s.element_id().0)
+                        .collect(),
+                })
+            }),
+        preview_error: world
+            .get_resource::<crate::plugins::transform::ActiveTransformPreview>()
+            .and_then(|active| active.refusal.clone()),
+        drag_trace: trace::observe(world),
+        inference: world
+            .get_resource::<crate::plugins::snap::SnapResult>()
+            .map(|snap| {
+                let binding = world
+                    .get_resource::<crate::plugins::modeling::boundary_edit::BoundarySession>()
+                    .and_then(|session| session.0.as_ref())
+                    .map(|gesture| &gesture.binding);
+                UxInferenceSnapshot {
+                    kind: format!("{:?}", snap.kind),
+                    raw_position: snap.raw_position.map(|p| p.to_array()),
+                    position: snap.position.map(|p| p.to_array()),
+                    target: snap.target.map(|p| p.to_array()),
+                    hovered_element_id: world
+                        .get_resource::<crate::plugins::cursor::CursorWorldPos>()
+                        .and_then(|cursor| cursor.hovered_element_id)
+                        .map(|id| id.0),
+                    boundary_owner: binding.map(|binding| binding.owner.0),
+                    boundary_target: binding.map(|binding| binding.target.0),
+                    label: world
+                        .get_resource::<crate::plugins::inference::InferenceEngine>()
+                        .and_then(|engine| engine.best_label())
+                        .map(str::to_string),
+                }
+            }),
     })
 }
 
@@ -419,6 +545,7 @@ fn process_ux_harness_step(world: &mut World) {
     let Some(step) = pop_next_step(world) else {
         return;
     };
+    trace::input(world, &step);
     let result = apply_step(world, &step.action);
     let mut state = world.resource_mut::<UxHarnessState>();
     state.completed_sequence = step.sequence;
@@ -469,13 +596,17 @@ fn apply_step(world: &mut World, action: &UxStepAction) -> Result<(), String> {
         } => {
             move_pointer(world, *position)?;
             let window = primary_window_entity(world)?;
+            let event = MouseButtonInput {
+                button: *button,
+                state: *state,
+                window,
+            };
             world
                 .resource_mut::<Messages<MouseButtonInput>>()
-                .write(MouseButtonInput {
-                    button: *button,
-                    state: *state,
-                    window,
-                });
+                .write(event);
+            world
+                .resource_mut::<Messages<WindowEvent>>()
+                .write(WindowEvent::MouseButtonInput(event));
             let mut buttons = world.resource_mut::<ButtonInput<MouseButton>>();
             match state {
                 ButtonState::Pressed => buttons.press(*button),
@@ -522,13 +653,17 @@ fn move_pointer(world: &mut World, position: Vec2) -> Result<(), String> {
         window.set_cursor_position(Some(position));
         (window_entity, previous)
     };
+    let event = CursorMoved {
+        window: window_entity,
+        position,
+        delta: previous.map(|prev| position - prev),
+    };
     world
         .resource_mut::<Messages<CursorMoved>>()
-        .write(CursorMoved {
-            window: window_entity,
-            position,
-            delta: previous.map(|prev| position - prev),
-        });
+        .write(event.clone());
+    world
+        .resource_mut::<Messages<WindowEvent>>()
+        .write(WindowEvent::CursorMoved(event));
     if let Some(previous) = previous {
         world
             .resource_mut::<Messages<MouseMotion>>()
@@ -564,7 +699,7 @@ fn parse_key_code(value: &str) -> Result<(KeyCode, Key), String> {
             .chars()
             .next()
             .expect("one-character key string has a char");
-        return key_code_for_letter(ch).map(|key_code| {
+        return key_code_for_character(ch).map(|key_code| {
             (
                 key_code,
                 Key::Character(ch.to_ascii_lowercase().to_string().into()),
@@ -572,6 +707,15 @@ fn parse_key_code(value: &str) -> Result<(KeyCode, Key), String> {
         });
     }
     match normalized.to_ascii_lowercase().as_str() {
+        value if value.starts_with("digit") && value.len() == 6 => {
+            let ch = value.chars().last().unwrap();
+            key_code_for_character(ch).map(|code| (code, Key::Character(ch.to_string().into())))
+        }
+        "alt" | "option" | "altleft" => Ok((KeyCode::AltLeft,Key::Alt)),
+        "shift" => Ok((KeyCode::ShiftLeft,Key::Shift)),
+        "period" => Ok((KeyCode::Period, Key::Character(".".into()))),
+        "minus" => Ok((KeyCode::Minus, Key::Character("-".into()))),
+        "tab" => Ok((KeyCode::Tab, Key::Tab)),
         "escape" | "esc" => Ok((KeyCode::Escape, Key::Escape)),
         "delete" | "del" => Ok((KeyCode::Delete, Key::Delete)),
         "backspace" => Ok((KeyCode::Backspace, Key::Backspace)),
@@ -594,6 +738,26 @@ fn parse_key_code(value: &str) -> Result<(KeyCode, Key), String> {
         other => Err(format!(
             "Unsupported key_code '{other}'. Use a letter, KeyG-style name, Escape, Delete, Backspace, Enter, ShiftLeft, or ShiftRight."
         )),
+    }
+}
+
+fn key_code_for_character(ch: char) -> Result<KeyCode, String> {
+    match ch {
+        '0' => Ok(KeyCode::Digit0),
+        '1' => Ok(KeyCode::Digit1),
+        '2' => Ok(KeyCode::Digit2),
+        '3' => Ok(KeyCode::Digit3),
+        '4' => Ok(KeyCode::Digit4),
+        '5' => Ok(KeyCode::Digit5),
+        '6' => Ok(KeyCode::Digit6),
+        '7' => Ok(KeyCode::Digit7),
+        '8' => Ok(KeyCode::Digit8),
+        '9' => Ok(KeyCode::Digit9),
+        '*' => Ok(KeyCode::NumpadMultiply),
+        '/' => Ok(KeyCode::Slash),
+        '.' => Ok(KeyCode::Period),
+        '-' => Ok(KeyCode::Minus),
+        _ => key_code_for_letter(ch),
     }
 }
 

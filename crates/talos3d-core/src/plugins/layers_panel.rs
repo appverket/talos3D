@@ -15,9 +15,9 @@
 //! now serves both authored and imported layers, and is toggled like the
 //! Outliner rather than auto-appearing.
 
-use std::collections::{HashMap, HashSet};
 #[cfg(feature = "perf-stats")]
-use std::time::Instant;
+use crate::time::Instant;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use bevy_egui::egui;

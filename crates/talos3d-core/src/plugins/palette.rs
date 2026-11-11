@@ -1,16 +1,18 @@
 use bevy::prelude::*;
 use bevy_egui::egui;
+use egui::AtomExt as _;
 
 use crate::plugins::{
     command_registry::{
         queue_command_invocation_resource, CommandDescriptor, CommandRegistry,
         PendingCommandInvocations,
     },
+    egui_chrome::format_shortcut_for_platform,
     ui::StatusBarData,
 };
 
 const PALETTE_MAX_ROWS: usize = 9;
-const PALETTE_WINDOW_SIZE: egui::Vec2 = egui::vec2(760.0, 420.0);
+const PALETTE_WINDOW_SIZE: egui::Vec2 = egui::vec2(620.0, 400.0);
 const PALETTE_WINDOW_OFFSET: [f32; 2] = [0.0, 64.0];
 
 pub struct PalettePlugin;
@@ -69,6 +71,12 @@ impl PaletteCommandEntry {
 }
 
 fn toggle_palette(world: &mut World) {
+    if world
+        .get_resource::<crate::plugins::input_ownership::InputOwnership>()
+        .is_some_and(|owner| !owner.is_idle())
+    {
+        return;
+    }
     // Cmd/Ctrl+K is dispatched through the unified keymap (core.show_command_palette).
     // `/` remains a palette-local quick toggle.
     let open_shortcut = {
@@ -145,7 +153,7 @@ pub fn draw_command_palette(
         .resizable(false)
         .show(ctx, |ui| {
             let search = egui::TextEdit::singleline(&mut palette_state.filter)
-                .hint_text("Search commands, categories, ids, or type command arguments")
+                .hint_text("Search commands or enter arguments…")
                 .desired_width(f32::INFINITY)
                 .font(egui::TextStyle::Heading);
             let search_response = ui.add(search);
@@ -188,16 +196,26 @@ pub fn draw_command_palette(
                                 {
                                     label = format!("Recent · {label}");
                                 }
-                                if let Some(shortcut) = entry.descriptor.default_shortcut.as_deref()
-                                {
-                                    label.push_str(&format!("  [{shortcut}]"));
-                                }
                                 let label_text = if entry.enabled() {
                                     egui::RichText::new(label)
                                 } else {
                                     egui::RichText::new(label).weak()
                                 };
-                                ui.label(label_text.strong());
+                                let shortcut = entry
+                                    .descriptor
+                                    .default_shortcut
+                                    .as_deref()
+                                    .map(format_shortcut_for_platform)
+                                    .unwrap_or_default();
+                                egui::AtomLayout::new((
+                                    label_text.strong().atom_shrink(true),
+                                    egui::Atom::grow(),
+                                    egui::RichText::new(shortcut).weak(),
+                                ))
+                                .gap(8.0)
+                                .min_size(egui::vec2(ui.available_width(), 18.0))
+                                .wrap_mode(egui::TextWrapMode::Truncate)
+                                .show(ui);
                                 let detail = if let Some(reason) = entry.disabled_reason {
                                     egui::RichText::new(format!(
                                         "{reason}  ·  {}",
@@ -210,7 +228,7 @@ pub fn draw_command_palette(
                                         .small()
                                         .weak()
                                 };
-                                ui.label(detail);
+                                ui.add(egui::Label::new(detail).truncate());
                             })
                             .response
                             .interact(egui::Sense::click());
@@ -542,13 +560,9 @@ fn disabled_reason_for_selection(
 
 fn palette_entry_description(entry: &PaletteCommandEntry) -> String {
     let mut parts = vec![entry.descriptor.category.label().to_string()];
-    if let Some(capability_id) = entry.descriptor.capability_id.as_deref() {
-        parts.push(capability_id.to_string());
-    }
     if !entry.descriptor.description.is_empty() {
         parts.push(entry.descriptor.description.clone());
     }
-    parts.push(entry.descriptor.id.clone());
     parts.join("  ·  ")
 }
 

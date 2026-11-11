@@ -36,7 +36,8 @@ impl Plugin for CommandRegistryPlugin {
                     crate::plugins::keymap::dispatch_command_shortcuts,
                     execute_pending_commands,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(crate::plugins::input_ownership::InputPhase::ToolInput),
             )
             .add_systems(
                 Update,
@@ -342,6 +343,13 @@ pub enum SerializedInteraction {
 #[derive(Resource, Default)]
 pub struct PendingCommandInvocations {
     invocations: Vec<PendingCommandInvocation>,
+}
+
+#[cfg(test)]
+impl PendingCommandInvocations {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.invocations.is_empty()
+    }
 }
 
 pub trait CommandRegistryAppExt {
@@ -836,6 +844,7 @@ fn setup_core_icons(mut images: ResMut<Assets<Image>>, mut icon_registry: ResMut
         ("icon.create_polyline", "create_polyline"),
         ("icon.create_fillet", "create_fillet"),
         ("icon.create_chamfer", "create_chamfer"),
+        ("icon.tape", "ruler"),
         ("icon.dimension", "dimension"),
         ("icon.dimensions", "dimensions"),
         ("icon.guide_line", "guide_line"),

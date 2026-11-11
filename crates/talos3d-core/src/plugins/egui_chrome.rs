@@ -2,11 +2,81 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
 use bevy_egui::{
-    egui, input::WindowToEguiContextMap, EguiContexts, EguiGlobalSettings, EguiPlugin,
-    EguiPreUpdateSet, PrimaryEguiContext,
+    egui, input::WindowToEguiContextMap, EguiContext, EguiContextSettings, EguiContexts,
+    EguiFullOutput, EguiGlobalSettings, EguiInput, EguiPlugin, EguiPostUpdateSet, EguiPreUpdateSet,
+    EguiPrimaryContextPass, PrimaryEguiContext,
 };
 
-pub use bevy_egui::input::EguiWantsInput;
+/// Aggregate input claims for Talos3D's manually driven primary egui pass.
+/// egui 0.36's raw capture query assumes `Context::run_ui` published its root
+/// rectangle. Our split pass owns that rectangle, so normalize at this bridge.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct EguiWantsInput {
+    is_pointer_over_area: bool,
+    wants_pointer_input: bool,
+    is_using_pointer: bool,
+    wants_keyboard_input: bool,
+    is_popup_open: bool,
+}
+
+impl EguiWantsInput {
+    pub fn is_pointer_over_area(&self) -> bool {
+        self.is_pointer_over_area
+    }
+    pub fn wants_pointer_input(&self) -> bool {
+        self.wants_pointer_input
+    }
+    pub fn is_using_pointer(&self) -> bool {
+        self.is_using_pointer
+    }
+    pub fn wants_keyboard_input(&self) -> bool {
+        self.wants_keyboard_input
+    }
+    pub fn is_popup_open(&self) -> bool {
+        self.is_popup_open
+    }
+    pub fn wants_any_pointer_input(&self) -> bool {
+        self.is_pointer_over_area
+            || self.wants_pointer_input
+            || self.is_using_pointer
+            || self.is_popup_open
+    }
+    pub fn wants_any_keyboard_input(&self) -> bool {
+        self.wants_keyboard_input || self.is_popup_open
+    }
+    pub fn wants_any_input(&self) -> bool {
+        self.wants_any_pointer_input() || self.wants_any_keyboard_input()
+    }
+}
+
+fn primary_egui_input_claims(ctx: &egui::Context) -> EguiWantsInput {
+    let is_pointer_over_area = ctx
+        .input(|input| input.pointer.interact_pos())
+        .and_then(|pos| ctx.layer_id_at(pos).map(|layer| (pos, layer)))
+        .is_some_and(|(pos, layer)| {
+            layer.order != egui::Order::Background || !remaining_available_rect(ctx).contains(pos)
+        });
+    let is_using_pointer = ctx.egui_is_using_pointer();
+    EguiWantsInput {
+        is_pointer_over_area,
+        wants_pointer_input: is_using_pointer
+            || (is_pointer_over_area && !ctx.input(|input| input.pointer.any_down())),
+        is_using_pointer,
+        wants_keyboard_input: ctx.egui_wants_keyboard_input(),
+        is_popup_open: ctx.any_popup_open(),
+    }
+}
+
+fn sync_primary_egui_input_claims(
+    mut contexts: Query<&mut EguiContext, With<PrimaryEguiContext>>,
+    mut claims: ResMut<EguiWantsInput>,
+) {
+    *claims = contexts
+        .iter_mut()
+        .next()
+        .map(|mut context| primary_egui_input_claims(context.get_mut()))
+        .unwrap_or_default();
+}
 
 use crate::capability_registry::{CapabilityActivation, CapabilityRegistry};
 use crate::curation::{NominationQueue, SourceRegistry};
@@ -98,18 +168,55 @@ const CAMERA_VERTICAL_SLIDER_HEIGHT: f32 = 120.0;
 #[cfg(feature = "perf-stats")]
 const PERF_OVERLAY_WIDTH: f32 = 260.0;
 
-fn remaining_available_rect(ctx: &egui::Context) -> egui::Rect {
-    #[allow(deprecated)]
-    ctx.available_rect()
+/// Root area not yet claimed by a top-level panel in the current egui pass.
+///
+/// egui 0.36 shows top-level panels inside a root `Ui` instead of on the
+/// `Context`. Talos3D draws panels from several systems in one pass, so the
+/// remaining root area is carried in pass-scoped context data.
+#[derive(Clone, Copy)]
+struct TopLevelPanelArea {
+    pass_nr: u64,
+    remaining: egui::Rect,
+    shown: u64,
 }
 
-fn show_top_level_panel<R>(
+fn top_level_panel_area_id() -> egui::Id {
+    egui::Id::new("talos3d_top_level_panel_area")
+}
+
+fn top_level_panel_area(ctx: &egui::Context) -> TopLevelPanelArea {
+    let pass_nr = ctx.cumulative_pass_nr();
+    ctx.data(|data| data.get_temp::<TopLevelPanelArea>(top_level_panel_area_id()))
+        .filter(|area| area.pass_nr == pass_nr)
+        .unwrap_or(TopLevelPanelArea {
+            pass_nr,
+            remaining: ctx.content_rect(),
+            shown: 0,
+        })
+}
+
+pub(crate) fn remaining_available_rect(ctx: &egui::Context) -> egui::Rect {
+    top_level_panel_area(ctx).remaining
+}
+
+pub(crate) fn show_top_level_panel<R>(
     panel: egui::Panel,
     ctx: &egui::Context,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
-    #[allow(deprecated)]
-    panel.show(ctx, add_contents)
+    let mut area = top_level_panel_area(ctx);
+    let mut root = egui::Ui::new(
+        ctx.clone(),
+        top_level_panel_area_id().with(area.shown),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(area.remaining),
+    );
+    let response = panel.show(&mut root, add_contents);
+    area.remaining = root.available_rect_before_wrap();
+    area.shown += 1;
+    ctx.data_mut(|data| data.insert_temp(top_level_panel_area_id(), area));
+    response
 }
 
 struct MenuSubmenuSpec {
@@ -180,6 +287,14 @@ const EDIT_MENU_GROUPS: &[MenuSubmenuSpec] = &[
 
 const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
+        label: "On Face",
+        command_ids: &[
+            "modeling.draw_face_circle",
+            "modeling.draw_face_rectangle",
+            "modeling.draw_face_polyline",
+        ],
+    },
+    MenuSubmenuSpec {
         label: "Primitives",
         command_ids: &[
             "modeling.create_box",
@@ -204,10 +319,14 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
         command_ids: &[
             "modeling.create_polyline",
             "guide_lines.place",
+            "guide_lines.find_center",
             "dimensions.place",
             "tools.tape",
-            "modeling.place_linked_model",
         ],
+    },
+    MenuSubmenuSpec {
+        label: "Linked Models",
+        command_ids: &["modeling.place_linked_model"],
     },
     MenuSubmenuSpec {
         label: "Booleans",
@@ -267,6 +386,7 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
         command_ids: &[
             "view.toggle_grid",
             "view.toggle_xray",
+            "view.show_hidden_geometry",
             "view.toggle_outline",
             "view.toggle_wireframe",
             "view.toggle_group_focus_hide",
@@ -329,21 +449,151 @@ mod menu_presentation_tests {
         assert_eq!(format_shortcut_for_platform("Ctrl/Cmd+S"), "Ctrl+S");
     }
 
-    #[test]
-    fn menu_shortcut_column_keeps_one_right_edge() {
-        let short_label_row =
-            egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(MENU_ROW_WIDTH, 24.0));
-        let long_label_row =
-            egui::Rect::from_min_size(egui::pos2(10.0, 60.0), egui::vec2(MENU_ROW_WIDTH, 24.0));
-        let short = menu_row_text_columns(short_label_row, 6.0, 18.0, true);
-        let long = menu_row_text_columns(long_label_row, 6.0, 52.0, true);
+    fn menu_frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Vec<egui::Response>) {
+        ctx.begin_pass(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        });
+        apply_chrome_visuals(ctx);
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let mut rows = Vec::new();
+        egui::Area::new(egui::Id::new("menu_test_anchor")).fixed_pos(egui::pos2(10.0, 10.0)).show(ctx, |ui| {
+            let anchor = ui.button("Menu");
+            egui::Popup::menu(&anchor).open(true).show(|ui| {
+                chrome_menu_style(ui.style_mut());
+                menu_section_heading(ui, "Section");
+                rows.push(menu_row_button_state(ui, true, None, "Plain command", Some("⌘S")));
+                rows.push(menu_row_button_state(ui, true, Some(true), "Toggle command", Some("⇧⌘S")));
+                menu_submenu(ui, "Cascade", |ui| { menu_row_button(ui, "Child command"); });
+                rows.push(menu_row_button_state(ui, false, None, "Disabled command", None));
+                rows.push(menu_row_button_state(ui, true, None,
+                    "An unusually long command label that must truncate before its keyboard shortcut", Some("⇧⌘O")));
+            });
+        });
+        (ctx.end_pass(), rows)
+    }
 
-        assert_eq!(short.shortcut_pos.x, long.shortcut_pos.x);
-        assert_eq!(short.shortcut_pos.x, short_label_row.right() - 6.0);
+    fn text_bounds(output: &egui::FullOutput, text: &str) -> egui::Rect {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(shape) if shape.galley.job.text == text => {
+                    Some(shape.galley.rect.translate(shape.pos.to_vec2()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing rendered text {text:?}"))
+    }
+
+    #[test]
+    fn menus_render_aligned_labels_shortcuts_and_complete_keyboard_symbols() {
+        for scale in [1.0, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(scale);
+            for _ in 0..3 {
+                menu_frame(&ctx, vec![]).0.drop_without_applying_deltas();
+            }
+            let (output, rows) = menu_frame(&ctx, vec![]);
+            let left = text_bounds(&output, "Plain command").left();
+            for label in ["Toggle command", "Cascade", "Disabled command", "Section"] {
+                assert!(
+                    (text_bounds(&output, label).left() - left).abs() <= 1.0,
+                    "{label} alignment at scale {scale}"
+                );
+            }
+            let right = text_bounds(&output, "⌘S").right();
+            assert!((text_bounds(&output, "⇧⌘S").right() - right).abs() <= 1.0);
+            assert!((text_bounds(&output, "⇧⌘O").right() - right).abs() <= 1.0);
+            assert!(!rows[2].enabled());
+            // Check actual egui font coverage, not merely the formatted strings.
+            ctx.fonts_mut(|fonts| {
+                for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                    // epaint 0.36 has_glyph gives false negatives for any
+                    // character on its replacement face. Query real charmaps.
+                    let mut font = fonts.fonts.font(&family);
+                    for symbol in "⌘⇧⌥⌃✓⏎⌫▣◈▫✎".chars() {
+                        assert!(
+                            font.characters().contains_key(&symbol),
+                            "missing {symbol} in {family:?}"
+                        );
+                    }
+                }
+            });
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn menu_rows_have_hover_feedback_keyboard_activation_and_disabled_input() {
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            menu_frame(&ctx, vec![]).0.drop_without_applying_deltas();
+        }
+        let (output, rows) = menu_frame(&ctx, vec![]);
+        let enabled_center = rows[0].rect.center();
+        let disabled_center = rows[2].rect.center();
+        let enabled_id = rows[0].id;
+        output.drop_without_applying_deltas();
+        for _ in 0..2 {
+            menu_frame(&ctx, vec![egui::Event::PointerMoved(enabled_center)])
+                .0
+                .drop_without_applying_deltas();
+        }
+        let (output, rows) = menu_frame(&ctx, vec![egui::Event::PointerMoved(enabled_center)]);
+        assert!(rows[0].hovered());
+        fn has_hover(shape: &egui::Shape, point: egui::Pos2) -> bool {
+            match shape {
+                egui::Shape::Rect(rect) => rect.fill == CHROME_HOVER && rect.rect.contains(point),
+                egui::Shape::Vec(shapes) => shapes.iter().any(|shape| has_hover(shape, point)),
+                _ => false,
+            }
+        }
         assert!(
-            long.label_clip_right < short.label_clip_right,
-            "a wider shortcut must clip the label column, never shift the shortcut"
+            output
+                .shapes
+                .iter()
+                .any(|shape| has_hover(&shape.shape, enabled_center)),
+            "native hover must paint feedback"
         );
+        output.drop_without_applying_deltas();
+        ctx.memory_mut(|memory| memory.request_focus(enabled_id));
+        let (output, rows) = menu_frame(
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(rows[0].clicked(), "focused command must accept Enter");
+        output.drop_without_applying_deltas();
+        for pressed in [true, false] {
+            let (output, rows) = menu_frame(
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(disabled_center),
+                    egui::Event::PointerButton {
+                        pos: disabled_center,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            assert!(!rows[2].enabled());
+            assert!(!rows[2].clicked(), "disabled command cannot activate");
+            output.drop_without_applying_deltas();
+        }
     }
 
     #[test]
@@ -492,8 +742,6 @@ pub struct EguiChromeSystems;
 impl Plugin for EguiChromePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(EguiPlugin {
-            #[allow(deprecated)]
-            enable_multipass_for_primary_context: false,
             // Disable bindless textures — not yet supported on Metal
             // (see https://github.com/bevyengine/bevy/issues/18149)
             bindless_mode_array_size: None,
@@ -508,8 +756,10 @@ impl Plugin for EguiChromePlugin {
         .add_plugins(crate::plugins::outliner::OutlinerPlugin)
         .add_plugins(crate::plugins::dependency_panel::DependencyPanelPlugin)
         .add_plugins(crate::plugins::layers_panel::LayersPanelPlugin)
+        .init_resource::<ApplicationBuildInfo>()
         .init_resource::<MenuBarState>()
         .init_resource::<ChromeInputCapture>()
+        .init_resource::<EguiWantsInput>()
         .init_resource::<ToolbarDragState>()
         .init_resource::<ViewportContextMenu>()
         .init_resource::<MaterialsWindowState>()
@@ -527,9 +777,11 @@ impl Plugin for EguiChromePlugin {
             (
                 sync_definition_selection_context,
                 draw_egui_chrome.in_set(EguiChromeSystems),
+                sync_primary_egui_input_claims.in_set(EguiChromeSystems),
             )
                 .chain(),
         );
+        install_primary_egui_pass(app);
     }
 }
 
@@ -717,6 +969,77 @@ impl ChromeInputCapture {
     }
 }
 
+/// The primary egui context whose pass Talos3D has begun and not yet ended.
+///
+/// bevy_egui 0.42 removed single-pass mode. Talos3D chrome, tools and overlays
+/// draw from ordered `Update` systems (input ownership and viewport insets
+/// read their results in the same frame), so the primary pass is driven
+/// manually around `Update`, as `EguiContextSettings::run_manually` documents.
+/// `EguiPrimaryContextPass` systems still run inside that pass.
+#[derive(Resource, Default)]
+struct PrimaryEguiPass(Option<Entity>);
+
+fn install_primary_egui_pass(app: &mut App) {
+    app.init_resource::<PrimaryEguiPass>()
+        .add_observer(run_primary_egui_context_manually)
+        .add_systems(
+            PreUpdate,
+            begin_primary_egui_pass.in_set(EguiPreUpdateSet::BeginPass),
+        )
+        .add_systems(
+            PostUpdate,
+            end_primary_egui_pass.in_set(EguiPostUpdateSet::EndPass),
+        );
+}
+
+fn run_primary_egui_context_manually(
+    added: On<Add<PrimaryEguiContext>>,
+    mut settings: Query<&mut EguiContextSettings>,
+) {
+    if let Ok(mut settings) = settings.get_mut(added.entity) {
+        settings.run_manually = true;
+    }
+}
+
+fn begin_primary_egui_pass(
+    mut pass: ResMut<PrimaryEguiPass>,
+    mut contexts: Query<(Entity, &mut EguiContext, &mut EguiInput), With<PrimaryEguiContext>>,
+) {
+    pass.0 = contexts
+        .iter_mut()
+        .next()
+        .map(|(entity, mut context, mut input)| {
+            context.get_mut().begin_pass(input.take());
+            entity
+        });
+}
+
+fn end_primary_egui_pass(world: &mut World) {
+    let Some(entity) = world.resource_mut::<PrimaryEguiPass>().0.take() else {
+        return;
+    };
+    // A context despawned mid-frame has no pass left to end.
+    if !world
+        .get_entity(entity)
+        .is_ok_and(|entity| entity.contains::<EguiContext>())
+    {
+        return;
+    }
+    let _ = world.try_run_schedule(EguiPrimaryContextPass);
+    let Ok(mut entity) = world.get_entity_mut(entity) else {
+        return;
+    };
+    let Some(output) = entity
+        .get_mut::<EguiContext>()
+        .map(|mut context| context.get_mut().end_pass())
+    else {
+        return;
+    };
+    if let Some(mut full_output) = entity.get_mut::<EguiFullOutput>() {
+        **full_output = Some(output);
+    }
+}
+
 fn restrict_egui_context_map_to_primary_window(
     mut map: ResMut<WindowToEguiContextMap>,
     primary_window: Query<Entity, With<PrimaryWindow>>,
@@ -747,6 +1070,175 @@ fn restrict_egui_context_map_to_primary_window(
         .entry(window_entity)
         .or_default()
         .insert(context_entity);
+}
+
+#[cfg(test)]
+mod primary_egui_pass_tests {
+    use super::{
+        install_primary_egui_pass, primary_egui_input_claims, remaining_available_rect,
+        show_top_level_panel,
+    };
+    use bevy::prelude::*;
+    use bevy_egui::{
+        egui, EguiContext, EguiContextSettings, EguiFullOutput, EguiPrimaryContextPass,
+        PrimaryEguiContext,
+    };
+
+    #[derive(Resource, Default)]
+    struct DrawnPasses {
+        update: Option<u64>,
+        primary_context_pass: Option<u64>,
+    }
+
+    fn draw_label(ctx: &egui::Context) -> u64 {
+        egui::Area::new(egui::Id::new("pass_probe")).show(ctx, |ui| ui.label("probe"));
+        ctx.cumulative_pass_nr()
+    }
+
+    #[test]
+    fn update_and_primary_context_pass_systems_draw_into_one_pass() {
+        let mut app = App::new();
+        app.init_resource::<DrawnPasses>();
+        install_primary_egui_pass(&mut app);
+        app.add_systems(
+            Update,
+            |mut contexts: Query<&mut EguiContext, With<PrimaryEguiContext>>,
+             mut drawn: ResMut<DrawnPasses>| {
+                drawn.update = contexts
+                    .single_mut()
+                    .ok()
+                    .map(|mut c| draw_label(c.get_mut()));
+            },
+        )
+        .add_systems(
+            EguiPrimaryContextPass,
+            |mut contexts: Query<&mut EguiContext, With<PrimaryEguiContext>>,
+             mut drawn: ResMut<DrawnPasses>| {
+                drawn.primary_context_pass = contexts
+                    .single_mut()
+                    .ok()
+                    .map(|mut c| draw_label(c.get_mut()));
+            },
+        );
+        let context = app.world_mut().spawn(PrimaryEguiContext).id();
+
+        app.update();
+
+        let mut entity = app.world_mut().entity_mut(context);
+        assert!(entity.get::<EguiContextSettings>().unwrap().run_manually);
+        let output = entity
+            .get_mut::<EguiFullOutput>()
+            .unwrap()
+            .0
+            .take()
+            .unwrap();
+        assert!(!output.shapes.is_empty());
+        output.drop_without_applying_deltas();
+        let drawn = app.world().resource::<DrawnPasses>();
+        assert!(drawn.update.is_some());
+        assert_eq!(drawn.update, drawn.primary_context_pass);
+    }
+
+    #[test]
+    fn manual_panels_leave_viewport_pointer_available_and_capture_chrome() {
+        let ctx = egui::Context::default();
+        for pointer in [
+            egui::pos2(400.0, 300.0),
+            egui::pos2(40.0, 15.0),
+            egui::pos2(50.0, 200.0),
+            egui::pos2(400.0, 300.0),
+        ] {
+            // Two frames exercise both current-pass and prior-pass hit testing.
+            for _ in 0..2 {
+                ctx.begin_pass(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events: vec![egui::Event::PointerMoved(pointer)],
+                    ..Default::default()
+                });
+                show_top_level_panel(egui::Panel::top("probe_top").exact_size(30.0), &ctx, |_| {});
+                show_top_level_panel(
+                    egui::Panel::left("probe_left").exact_size(100.0),
+                    &ctx,
+                    |_| {},
+                );
+                let viewport = remaining_available_rect(&ctx).contains(pointer);
+                assert_eq!(
+                    primary_egui_input_claims(&ctx).is_pointer_over_area(),
+                    !viewport,
+                    "pointer {pointer:?}"
+                );
+                assert_eq!(
+                    primary_egui_input_claims(&ctx).wants_pointer_input(),
+                    !viewport,
+                    "pointer {pointer:?}"
+                );
+                ctx.end_pass().drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn floating_window_keeps_pointer_capture_inside_remaining_viewport() {
+        let ctx = egui::Context::default();
+        for frame in 0..3 {
+            ctx.begin_pass(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events: vec![egui::Event::PointerMoved(egui::pos2(350.0, 250.0))],
+                ..Default::default()
+            });
+            show_top_level_panel(egui::Panel::top("probe_top").exact_size(30.0), &ctx, |_| {});
+            egui::Window::new("Floating properties")
+                .fixed_pos(egui::pos2(300.0, 200.0))
+                .fixed_size(egui::vec2(200.0, 150.0))
+                .show(&ctx, |ui| {
+                    ui.button("Action").clicked();
+                });
+            assert!(remaining_available_rect(&ctx).contains(egui::pos2(350.0, 250.0)));
+            // egui registers a newly created floating area on its first pass.
+            if frame > 0 {
+                assert!(
+                    primary_egui_input_claims(&ctx).wants_any_pointer_input(),
+                    "frame {frame}"
+                );
+            }
+            ctx.end_pass().drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn top_level_panels_from_separate_calls_share_one_pass_area() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+
+        ctx.begin_pass(input());
+        assert_eq!(remaining_available_rect(&ctx), screen);
+        show_top_level_panel(egui::Panel::top("probe_top").exact_size(30.0), &ctx, |_| {});
+        let after_top = remaining_available_rect(&ctx);
+        show_top_level_panel(
+            egui::Panel::left("probe_left").exact_size(100.0),
+            &ctx,
+            |_| {},
+        );
+        let after_left = remaining_available_rect(&ctx);
+        ctx.end_pass().drop_without_applying_deltas();
+
+        assert!(after_top.min.y >= 30.0 && after_top.max == screen.max);
+        assert!(after_left.min.x >= 100.0 && after_left.min.y == after_top.min.y);
+
+        ctx.begin_pass(input());
+        assert_eq!(remaining_available_rect(&ctx), screen);
+        ctx.end_pass().drop_without_applying_deltas();
+    }
 }
 
 #[cfg(test)]
@@ -1049,41 +1541,48 @@ fn draw_command_menu_button(
     }
 }
 
-/// Width of the leading gutter that holds a toggle's checkmark. Reserved on
-/// every row in a menu that contains any toggle, so labels stay aligned whether
-/// or not their own row is checked.
+/// Every menu row (commands, toggles and cascades) uses the same leading
+/// check column and native egui button. This keeps labels aligned and preserves
+/// hover/focus feedback, disabled semantics and keyboard/accessibility actions.
 const MENU_CHECK_GUTTER: f32 = 16.0;
-/// Stable row width gives every shortcut column the same right edge. Long
-/// labels are clipped before the shortcut gutter instead of moving the hint.
-const MENU_ROW_WIDTH: f32 = 320.0;
-const MENU_SHORTCUT_GAP: f32 = 24.0;
+const MENU_ROW_WIDTH: f32 = 260.0;
+const MENU_ROW_HEIGHT: f32 = 24.0;
+const MENU_SHORTCUT_GAP: f32 = 20.0;
 
-#[derive(Debug, Clone, Copy)]
-struct MenuRowTextColumns {
-    label_pos: egui::Pos2,
-    label_clip_right: f32,
-    shortcut_pos: egui::Pos2,
+fn chrome_menu_style(style: &mut egui::Style) {
+    egui::containers::menu::menu_style(style);
+    style.spacing.button_padding = egui::vec2(6.0, 3.0);
+    style.spacing.interact_size.y = MENU_ROW_HEIGHT;
+    style.spacing.item_spacing.y = 2.0;
 }
 
-fn menu_row_text_columns(
-    rect: egui::Rect,
-    horizontal_padding: f32,
-    shortcut_width: f32,
-    has_shortcut: bool,
-) -> MenuRowTextColumns {
-    let label_pos = egui::pos2(
-        rect.left() + horizontal_padding + MENU_CHECK_GUTTER,
-        rect.center().y,
+fn chrome_menu_button<'a>(label: &'a str, checked: bool) -> egui::Button<'a> {
+    use egui::AtomExt as _;
+    let check = (if checked { "✓" } else { "" }).atom_size(egui::vec2(MENU_CHECK_GUTTER, 16.0));
+    egui::Button::new((check, label.atom_shrink(true)))
+        .gap(0.0)
+        .min_size(egui::vec2(MENU_ROW_WIDTH, MENU_ROW_HEIGHT))
+        .truncate()
+}
+
+fn menu_submenu<R>(ui: &mut egui::Ui, label: &str, contents: impl FnOnce(&mut egui::Ui) -> R) {
+    egui::containers::menu::SubMenuButton::from_button(
+        chrome_menu_button(label, false)
+            .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW),
+    )
+    .ui(ui, contents);
+}
+
+fn menu_section_heading(ui: &mut egui::Ui, label: &str) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(MENU_ROW_WIDTH, 14.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(ui.spacing().button_padding.x + MENU_CHECK_GUTTER);
+            ui.label(egui::RichText::new(label).small().color(CHROME_MUTED));
+        },
     );
-    let label_clip_right = rect.right()
-        - horizontal_padding
-        - shortcut_width
-        - if has_shortcut { MENU_SHORTCUT_GAP } else { 0.0 };
-    MenuRowTextColumns {
-        label_pos,
-        label_clip_right: label_clip_right.max(label_pos.x),
-        shortcut_pos: egui::pos2(rect.right() - horizontal_padding, rect.center().y),
-    }
 }
 
 fn menu_row_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Response {
@@ -1108,8 +1607,6 @@ fn menu_row_button_with_shortcut(
     menu_row_button_state(ui, enabled, None, label, shortcut)
 }
 
-/// Draw one menu row. `toggle_state` is `Some` only for commands that flip a
-/// mode; `Some(true)` draws the checkmark that tells the user the mode is on.
 fn menu_row_button_state(
     ui: &mut egui::Ui,
     enabled: bool,
@@ -1117,67 +1614,25 @@ fn menu_row_button_state(
     label: &str,
     shortcut: Option<&str>,
 ) -> egui::Response {
-    let row_height = ui.spacing().interact_size.y;
-    let font_id = egui::TextStyle::Button.resolve(ui.style());
-    let desired_size = egui::vec2(MENU_ROW_WIDTH, row_height);
-    let sense = if enabled {
-        egui::Sense::click()
-    } else {
-        egui::Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(desired_size, sense);
-
-    if ui.is_rect_visible(rect) {
-        let text_color = if enabled {
-            ui.visuals().widgets.inactive.text_color()
-        } else {
-            ui.visuals().weak_text_color()
-        };
-        if toggle_state == Some(true) {
-            ui.painter().text(
-                egui::pos2(rect.left() + ui.spacing().button_padding.x, rect.center().y),
-                egui::Align2::LEFT_CENTER,
-                "✓",
-                font_id.clone(),
-                ui.visuals().strong_text_color(),
-            );
-        }
-        let shortcut_width = shortcut
-            .map(|text| {
-                ui.painter()
-                    .layout_no_wrap(text.to_string(), font_id.clone(), text_color)
-                    .size()
-                    .x
-            })
-            .unwrap_or(0.0);
-        let columns = menu_row_text_columns(
-            rect,
-            ui.spacing().button_padding.x,
-            shortcut_width,
-            shortcut.is_some(),
-        );
-        let label_clip = egui::Rect::from_min_max(
-            rect.left_top(),
-            egui::pos2(columns.label_clip_right, rect.bottom()),
-        );
-        ui.painter().with_clip_rect(label_clip).text(
-            columns.label_pos,
-            egui::Align2::LEFT_CENTER,
-            label,
-            font_id.clone(),
-            text_color,
-        );
-        if let Some(shortcut) = shortcut {
-            ui.painter().text(
-                columns.shortcut_pos,
-                egui::Align2::RIGHT_CENTER,
-                shortcut,
-                font_id,
-                text_color,
-            );
-        }
+    use egui::AtomExt as _;
+    let mut button = chrome_menu_button(label, toggle_state == Some(true));
+    if let Some(shortcut) = shortcut {
+        button = button.shortcut_text((
+            egui::Atom::default().atom_size(egui::vec2(MENU_SHORTCUT_GAP, 0.0)),
+            shortcut,
+        ));
     }
-
+    let response = ui.add_enabled(enabled, button);
+    if let Some(checked) = toggle_state {
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                enabled && ui.is_enabled(),
+                checked,
+                label,
+            )
+        });
+    }
     response
 }
 
@@ -1186,7 +1641,7 @@ fn menu_row_button_state(
 /// Descriptors declare shortcuts portably as `Ctrl/Cmd+Shift+O`. Showing that
 /// raw string makes every macOS menu read like a cross-platform cheat sheet, so
 /// collapse it to the native glyphs there and to plain `Ctrl+` elsewhere.
-fn format_shortcut_for_platform(shortcut: &str) -> String {
+pub(crate) fn format_shortcut_for_platform(shortcut: &str) -> String {
     if cfg!(target_os = "macos") {
         shortcut
             .replace("Ctrl/Cmd+", "\u{2318}")
@@ -1257,9 +1712,9 @@ fn draw_document_history_menus(
     status_bar_data: &mut StatusBarData,
     hovered_menu_hint: &mut Option<String>,
 ) {
-    ui.menu_button("Open Recent", |ui| {
+    menu_submenu(ui, "Open Recent", |ui| {
         if recent_files.paths().is_empty() {
-            ui.add_enabled(false, egui::Button::new("No recent projects"));
+            menu_row_button_enabled(ui, false, "No recent projects");
         }
         for path in recent_files.paths() {
             let response =
@@ -1280,9 +1735,9 @@ fn draw_document_history_menus(
         }
     });
 
-    ui.menu_button("Recover Autosave", |ui| {
+    menu_submenu(ui, "Recover Autosave", |ui| {
         if recovery_files.files().is_empty() {
-            ui.add_enabled(false, egui::Button::new("No recovery files"));
+            menu_row_button_enabled(ui, false, "No recovery files");
         }
         for recovery in recovery_files.files() {
             let source = recovery
@@ -1388,12 +1843,7 @@ fn draw_command_submenu(
     rendered_ids.extend(descriptors.iter().map(|descriptor| descriptor.id.clone()));
 
     if should_render_inline_menu_group(label, descriptors.len()) {
-        ui.label(
-            egui::RichText::new(label)
-                .small()
-                .weak()
-                .color(CHROME_MUTED),
-        );
+        menu_section_heading(ui, label);
         for descriptor in &descriptors {
             draw_command_menu_button(
                 ui,
@@ -1407,7 +1857,7 @@ fn draw_command_submenu(
         }
         Some(MenuGroupRenderKind::Inline)
     } else {
-        ui.menu_button(label, |ui| {
+        menu_submenu(ui, label, |ui| {
             for descriptor in &descriptors {
                 draw_command_menu_button(
                     ui,
@@ -1436,7 +1886,7 @@ fn draw_view_workspace_submenu(
     toolbar_layout_state: &mut ToolbarLayoutState,
     doc_props: &mut DocumentProperties,
 ) {
-    ui.menu_button("Workspace", |ui| {
+    menu_submenu(ui, "Workspace", |ui| {
         let assistant =
             menu_row_button(ui, "Assistant...").on_hover_text("Open the assistant side panel");
         if assistant.contains_pointer() {
@@ -1490,7 +1940,7 @@ fn draw_view_workspace_submenu(
         }
 
         ui.separator();
-        ui.menu_button("Toolbars", |ui| {
+        menu_submenu(ui, "Toolbars", |ui| {
             draw_toolbar_visibility_menu(ui, toolbar_registry, toolbar_layout_state, doc_props);
         });
     });
@@ -1513,11 +1963,33 @@ fn draw_project_settings_menu_button(
     }
 }
 
-fn draw_about_menu(ui: &mut egui::Ui) {
+/// Identity of the application artifact, supplied by its binary composition.
+/// Custom compositions without build stamping are explicitly development builds.
+#[derive(Resource, Clone, Debug)]
+pub struct ApplicationBuildInfo {
+    pub version: &'static str,
+    pub build_number: &'static str,
+}
+
+impl Default for ApplicationBuildInfo {
+    fn default() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            build_number: "development",
+        }
+    }
+}
+
+fn draw_about_menu(ui: &mut egui::Ui, build: &ApplicationBuildInfo) {
     ui.set_min_width(260.0);
     ui.label(egui::RichText::new("Talos3D").strong());
     ui.label(
-        egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+        egui::RichText::new(format!("Version {}", build.version))
+            .small()
+            .color(CHROME_MUTED),
+    );
+    ui.label(
+        egui::RichText::new(format!("Build {}", build.build_number))
             .small()
             .color(CHROME_MUTED),
     );
@@ -1533,7 +2005,7 @@ fn draw_about_menu(ui: &mut egui::Ui) {
     ui.hyperlink_to("GitHub repository", "https://github.com/appverket/talos3D");
     ui.hyperlink_to(
         "Model API documentation",
-        "https://github.com/appverket/talos3D/blob/main/talos3d-core/docs/MCP_MODEL_API.md",
+        "https://github.com/appverket/talos3D/blob/main/docs/MCP_MODEL_API.md",
     );
 }
 
@@ -1579,6 +2051,13 @@ fn draw_category_menu_contents(
     let mut rendered_ids = HashSet::new();
     let mut previous_kind: Option<MenuGroupRenderKind> = None;
     for group in groups {
+        if !group
+            .command_ids
+            .iter()
+            .any(|id| category_commands.iter().any(|command| command.id == *id))
+        {
+            continue;
+        }
         // Inline sections are visually denser than a submenu row; place a
         // separator between adjacent sections whenever at least one side is
         // inline. Adjacent submenu-only neighbours (the legacy case) keep
@@ -1613,7 +2092,17 @@ fn draw_category_menu_contents(
     // commands land in a named submenu of its own choosing rather than in "More".
     for group in menu_groups.groups_for(category) {
         let command_ids: Vec<&str> = group.command_ids.iter().map(String::as_str).collect();
-        if draw_command_submenu(
+        let has_commands = command_ids
+            .iter()
+            .any(|id| category_commands.iter().any(|command| command.id == *id));
+        if has_commands
+            && (previous_kind == Some(MenuGroupRenderKind::Inline)
+                || (previous_kind.is_some()
+                    && group_will_render_inline(&group.label, &command_ids, category_commands)))
+        {
+            ui.separator();
+        }
+        if let Some(kind) = draw_command_submenu(
             ui,
             &group.label,
             &command_ids,
@@ -1624,11 +2113,8 @@ fn draw_category_menu_contents(
             hovered_menu_hint,
             toggle_states,
             &mut rendered_ids,
-        )
-        .is_some()
-        {
-            // Contributed groups render last, so nothing downstream reads
-            // `previous_kind` again; each already emits its own submenu frame.
+        ) {
+            previous_kind = Some(kind);
         }
     }
 
@@ -1673,7 +2159,7 @@ fn draw_category_menu_contents(
         .filter(|descriptor| !rendered_ids.contains(&descriptor.id))
         .collect();
     if !leftovers.is_empty() {
-        ui.menu_button("More", |ui| {
+        menu_submenu(ui, "More", |ui| {
             for descriptor in leftovers {
                 draw_command_menu_button(
                     ui,
@@ -1730,6 +2216,7 @@ struct ToolbarRenderContext<'a, 'w, 's> {
     drag_state: &'a mut ToolbarDragState,
     selection_count: usize,
     current_tool: &'a str,
+    active_transform_command: Option<&'static str>,
     capability_activation: &'a CapabilityActivation,
 }
 
@@ -1819,12 +2306,14 @@ struct ChromeData<'w, 's> {
     >,
     property_edit_state: ResMut<'w, PropertyEditState>,
     property_panel_state: ResMut<'w, PropertyPanelState>,
-    property_panel_data: Res<'w, PropertyPanelData>,
+    property_panel_data: ResMut<'w, PropertyPanelData>,
     palette_state: ResMut<'w, PaletteState>,
     transform_state: Res<'w, TransformState>,
+    handle_context: Res<'w, crate::plugins::handles::HandleContext>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
     window_query: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    build_info: Res<'w, ApplicationBuildInfo>,
     menu_bar_state: ResMut<'w, MenuBarState>,
     viewport_export_state: Res<'w, ViewportExportState>,
     viewport_ui_inset: ResMut<'w, ViewportUiInset>,
@@ -1855,8 +2344,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         data.menu_bar_state.visible = !data.menu_bar_state.visible;
     }
     if data.keys.just_pressed(KeyCode::Escape) {
-        #[allow(deprecated)]
-        ctx.memory_mut(|memory| memory.close_all_popups());
+        egui::Popup::close_all(&ctx);
     }
 
     if data.viewport_export_state.ui_suppressed() {
@@ -1890,41 +2378,43 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
 
     if data.menu_bar_state.visible {
         show_top_level_panel(egui::Panel::top("menu_bar").resizable(false), &ctx, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                for category in ordered_menu_categories_for_bar(&data.command_registry) {
-                    let category_commands = visible_menu_commands_for_category(
-                        &data.command_registry,
-                        &category,
-                        &data.capability_activation,
-                        &data.drafting_workspace_state,
-                    );
-                    ui.menu_button(category.label(), |ui| {
-                        draw_category_menu_contents(
-                            ui,
+            egui::MenuBar::new()
+                .config(egui::containers::menu::MenuConfig::new().style(chrome_menu_style))
+                .ui(ui, |ui| {
+                    for category in ordered_menu_categories_for_bar(&data.command_registry) {
+                        let category_commands = visible_menu_commands_for_category(
+                            &data.command_registry,
                             &category,
-                            &category_commands,
-                            selection_count,
-                            &mut data.pending_command_invocations,
-                            &mut data.status_bar_data,
-                            &mut hovered_menu_hint,
-                            &data.command_toggle_states,
-                            &data.menu_groups,
-                            &mut data.assistant_window_state,
-                            &mut data.lighting_window_state,
-                            &mut data.render_settings_window_state,
-                            &mut data.project_settings_window_state,
-                            &mut data.extensions_window_state,
-                            &mut data.agent_connection_window_state,
-                            &data.toolbar_registry,
-                            &mut data.toolbar_layout_state,
-                            &mut data.doc_props,
-                            &data.recent_files,
-                            &data.recovery_files,
+                            &data.capability_activation,
+                            &data.drafting_workspace_state,
                         );
-                    });
-                }
-                ui.menu_button("About", draw_about_menu);
-            });
+                        ui.menu_button(category.label(), |ui| {
+                            draw_category_menu_contents(
+                                ui,
+                                &category,
+                                &category_commands,
+                                selection_count,
+                                &mut data.pending_command_invocations,
+                                &mut data.status_bar_data,
+                                &mut hovered_menu_hint,
+                                &data.command_toggle_states,
+                                &data.menu_groups,
+                                &mut data.assistant_window_state,
+                                &mut data.lighting_window_state,
+                                &mut data.render_settings_window_state,
+                                &mut data.project_settings_window_state,
+                                &mut data.extensions_window_state,
+                                &mut data.agent_connection_window_state,
+                                &data.toolbar_registry,
+                                &mut data.toolbar_layout_state,
+                                &mut data.doc_props,
+                                &data.recent_files,
+                                &data.recovery_files,
+                            );
+                        });
+                    }
+                    ui.menu_button("About", |ui| draw_about_menu(ui, &data.build_info));
+                });
         });
     }
 
@@ -1967,6 +2457,17 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                 drag_state: &mut data.drag_state,
                 selection_count,
                 current_tool: &current_tool,
+                active_transform_command: if selection_count > 0 && current_tool == "Select" {
+                    use crate::plugins::handles::HandleDisplayMode;
+                    match data.handle_context.display_mode {
+                        HandleDisplayMode::Move => Some("modeling.move"),
+                        HandleDisplayMode::Scale => Some("modeling.scale"),
+                        HandleDisplayMode::Rotate => Some("modeling.rotate"),
+                        HandleDisplayMode::Combined => None,
+                    }
+                } else {
+                    None
+                },
                 capability_activation: &data.capability_activation,
             };
             draw_toolbar_row(&ctx, &mut render, &descriptor_refs, dock, row_idx as u32);
@@ -2002,6 +2503,17 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             drag_state: &mut data.drag_state,
             selection_count,
             current_tool: &current_tool,
+            active_transform_command: if selection_count > 0 && current_tool == "Select" {
+                use crate::plugins::handles::HandleDisplayMode;
+                match data.handle_context.display_mode {
+                    HandleDisplayMode::Move => Some("modeling.move"),
+                    HandleDisplayMode::Scale => Some("modeling.scale"),
+                    HandleDisplayMode::Rotate => Some("modeling.rotate"),
+                    HandleDisplayMode::Combined => None,
+                }
+            } else {
+                None
+            },
             capability_activation: &data.capability_activation,
         };
 
@@ -2067,7 +2579,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         let selected_now: std::collections::HashSet<Entity> =
             data.selected_entities.iter().collect();
         #[cfg(feature = "perf-stats")]
-        let perf_start = std::time::Instant::now();
+        let perf_start = crate::time::Instant::now();
         let outliner_action = crate::plugins::outliner::draw_outliner_window(
             &ctx,
             &mut data.outliner_window_state,
@@ -2106,7 +2618,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         let selected_now: std::collections::HashSet<Entity> =
             data.selected_entities.iter().collect();
         #[cfg(feature = "perf-stats")]
-        let perf_start = std::time::Instant::now();
+        let perf_start = crate::time::Instant::now();
         let actions = crate::plugins::layers_panel::draw_layers_window(
             &ctx,
             &mut data.layers_panel_state,
@@ -2173,10 +2685,11 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                 runtime.instance_id.clone(),
                 runtime.http_url.clone(),
                 authentication.pairing_code_for_onboarding().to_string(),
+                authentication.is_paired(),
             )
         });
     #[cfg(not(feature = "model-api"))]
-    let agent_connection_details: Option<(String, String, String)> = None;
+    let agent_connection_details: Option<(String, String, String, bool)> = None;
     draw_agent_connection_window(
         &ctx,
         &mut data.agent_connection_window_state,
@@ -2223,7 +2736,10 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     );
 
     data.status_bar_data.command_hint = hovered_menu_hint;
-    let status_hint = hint_text(&data.status_bar_data);
+    let mut status_hint = hint_text(&data.status_bar_data);
+    if status_hint == data.status_bar_data.selection_summary {
+        status_hint.clear();
+    }
     let coordinates = coordinate_text(&data.cursor_world_pos, &data.doc_props);
     show_top_level_panel(
         egui::Panel::bottom("status_bar").resizable(false),
@@ -2235,13 +2751,27 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                     data.status_bar_data.tool_name
                 )));
                 ui.separator();
-                ui.label(coordinates);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(status_hint);
-                    if data.status_bar_data.command_busy() {
-                        ui.spinner();
-                    }
-                });
+                // Reserve space for coordinates before truncating a deep breadcrumb.
+                let selection_width = (ui.available_width() - 230.0).max(40.0);
+                ui.add_sized(
+                    [selection_width, ui.spacing().interact_size.y],
+                    egui::Label::new(
+                        egui::RichText::new(&data.status_bar_data.selection_summary)
+                            .strong()
+                            .color(egui::Color32::from_rgb(100, 175, 255)),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&data.status_bar_data.selection_summary);
+                ui.separator();
+                ui.add(egui::Label::new(coordinates).truncate());
+            });
+            ui.horizontal(|ui| {
+                if data.status_bar_data.command_busy() {
+                    ui.spinner();
+                }
+                ui.add(egui::Label::new(&status_hint).truncate())
+                    .on_hover_text(&status_hint);
             });
         },
     );
@@ -2291,8 +2821,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             .map(|pos| egui::pos2(pos.x, pos.y))
         });
     if let Some(pos) = secondary_clicked_in_viewport {
-        let chrome_owns_pointer =
-            ctx.is_pointer_over_egui() || ctx.egui_wants_pointer_input() || ctx.any_popup_open();
+        let chrome_owns_pointer = primary_egui_input_claims(&ctx).wants_any_pointer_input();
         if available.contains(pos)
             && !chrome_owns_pointer
             && !crate::plugins::camera::orbit_modifier_pressed(&data.keys)
@@ -2324,10 +2853,8 @@ fn publish_chrome_input_capture(
     capture: &mut ChromeInputCapture,
     viewport_context_menu_open: bool,
 ) {
-    let pointer_claimed = ctx.is_pointer_over_egui()
-        || ctx.egui_wants_pointer_input()
-        || ctx.any_popup_open()
-        || viewport_context_menu_open;
+    let pointer_claimed =
+        primary_egui_input_claims(ctx).wants_any_pointer_input() || viewport_context_menu_open;
     let keyboard_claimed =
         ctx.egui_wants_keyboard_input() || ctx.any_popup_open() || viewport_context_menu_open;
     let claim = ctx.input(|input| ChromeInputFrameClaim {
@@ -2343,7 +2870,12 @@ fn publish_chrome_input_capture(
 fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
     data.property_panel_state.interacting = false;
 
-    if data.property_panel_data.snapshots.is_empty() {
+    if data.property_panel_data.snapshots.is_empty()
+        && !matches!(
+            data.property_panel_data.semantic_kind,
+            SelectionSemanticKind::GeneratedPart { .. }
+        )
+    {
         data.property_panel_state.visible = false;
         return;
     }
@@ -2390,9 +2922,6 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
             return;
         }
 
-        let Some(first) = data.property_panel_data.snapshots.first() else {
-            return;
-        };
         // PP-DBUX1: semantic header — distinguish Opening vs Occurrence vs
         // GeneratedPart with stable wording, an "affects N occurrences" cue
         // for occurrences, and an inline "Open Definition" entry per
@@ -2404,6 +2933,7 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
             &data.definition_registry,
             &data.material_registry,
         );
+        let Some(first) = data.property_panel_data.snapshots.first() else { return; };
         let fields = first.property_fields();
         let sections = property_panel_sections(&fields);
         let mut pending_action = None;
@@ -2547,6 +3077,33 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
             apply_property_panel_action(data, &fields, action);
         }
 
+        if !blocked {
+            let panel = &mut *data.property_panel_data;
+            if let Some(explanation) = &panel.explanation {
+                crate::plugins::occurrence_controls::draw(ui, explanation, &mut panel.control_editor);
+            }
+        }
+        if let Some(explanation) = &data.property_panel_data.explanation {
+            let mut refresh = false;
+            egui::CollapsingHeader::new("Design explanation")
+                .show(ui, |ui| {
+                    refresh = ui.small_button("Refresh explanation").clicked();
+                    egui::ScrollArea::vertical().max_height(300.0).id_salt("design_explanation_scroll").show(ui, |ui| {
+                        for section in &explanation.sections {
+                            ui.strong(&section.title);
+                            if section.rows.is_empty() { ui.weak("None recorded."); }
+                            for row in &section.rows {
+                                ui.label(format!("{}: {}", row.label, row.text));
+                            }
+                            if section.omitted > 0 { ui.weak(format!("{} additional entries omitted.",section.omitted)); }
+                            ui.add_space(6.0);
+                        }
+                        ui.weak("Evidence presence does not establish correctness. Validation reflects the last recorded sweep.");
+                    });
+                });
+            if refresh { data.property_panel_data.explanation_refresh = true; }
+        }
+
         // PP-DBUX6: Promote-to-Definition-Default section.
         //
         // Shown when the selected entity is a single occurrence that has at
@@ -2648,7 +3205,7 @@ fn default_assistant_mcp_url<'a>(_data: &'a ChromeData) -> Option<&'a str> {
 fn draw_agent_connection_window(
     ctx: &egui::Context,
     state: &mut AgentConnectionWindowState,
-    runtime: Option<&(String, String, String)>,
+    runtime: Option<&(String, String, String, bool)>,
 ) {
     if !state.visible {
         return;
@@ -2668,13 +3225,21 @@ fn draw_agent_connection_window(
             );
             ui.add_space(8.0);
 
-            let Some((instance_id, http_url, pairing_code)) = runtime else {
+            let Some((instance_id, http_url, pairing_code, paired)) = runtime else {
                 ui.colored_label(
                     egui::Color32::YELLOW,
                     "The Talos3D Model API is not running in this app build. Start a model-api-enabled app to generate an instance-specific onboarding prompt.",
                 );
                 return;
             };
+
+            if *paired {
+                ui.label("An agent connection has already been paired with this app session.");
+                ui.label("Existing agents can reconnect with their session credential. The previous one-time pairing code has been used and cannot connect another agent.");
+                ui.monospace(http_url);
+                ui.weak("To start a new pairing session, save your model and restart the app.");
+                return;
+            }
 
             egui::Grid::new("agent_connection_runtime")
                 .num_columns(2)
@@ -3254,6 +3819,10 @@ fn format_panel_property_value(
             doc_props.display_unit.from_metres(value.x),
             doc_props.display_unit.from_metres(value.y)
         ),
+        // A direction is dimensionless, unlike an anchor/position vector.
+        crate::authored_entity::PropertyValue::Vec3(value) if field_name == "direction" => {
+            format!("{:.4}, {:.4}, {:.4}", value.x, value.y, value.z)
+        }
         crate::authored_entity::PropertyValue::Vec3(value) => format!(
             "{:.2}, {:.2}, {:.2}",
             doc_props.display_unit.from_metres(value.x),
@@ -3281,6 +3850,10 @@ fn edit_buffer_for_property_value(
             doc_props.display_unit.from_metres(value.x),
             doc_props.display_unit.from_metres(value.y)
         ),
+        // A direction is dimensionless, unlike an anchor/position vector.
+        crate::authored_entity::PropertyValue::Vec3(value) if field_name == "direction" => {
+            format!("{:.4}, {:.4}, {:.4}", value.x, value.y, value.z)
+        }
         crate::authored_entity::PropertyValue::Vec3(value) => format!(
             "{:.2}, {:.2}, {:.2}",
             doc_props.display_unit.from_metres(value.x),
@@ -3309,6 +3882,9 @@ fn parse_panel_property_value(
                 doc_props.display_unit.to_metres(value.x),
                 doc_props.display_unit.to_metres(value.y),
             ))
+        }
+        crate::authored_entity::PropertyValue::Vec3(value) if field_name == "direction" => {
+            crate::authored_entity::PropertyValue::Vec3(value)
         }
         crate::authored_entity::PropertyValue::Vec3(value) => {
             crate::authored_entity::PropertyValue::Vec3(Vec3::new(
@@ -3665,7 +4241,8 @@ fn draw_toolbar_content(
             };
             ui.with_layout(section_layout, |ui| {
                 for command in available_commands {
-                    let active = command.activates_tool.as_deref() == Some(render.current_tool);
+                    let active = command.activates_tool.as_deref() == Some(render.current_tool)
+                        || render.active_transform_command == Some(command.id.as_str());
                     let image = toolbar_image(render.contexts, render.icon_registry, command);
                     let mut button = if let Some(img) = image {
                         egui::Button::image(img)
@@ -3966,8 +4543,9 @@ fn draw_floating_toolbar(
                             ui.separator();
                         }
                         for command in available_commands {
-                            let active =
-                                command.activates_tool.as_deref() == Some(render.current_tool);
+                            let active = command.activates_tool.as_deref()
+                                == Some(render.current_tool)
+                                || render.active_transform_command == Some(command.id.as_str());
                             let image =
                                 toolbar_image(render.contexts, render.icon_registry, command);
                             let mut button = if let Some(img) = image {
@@ -4037,7 +4615,7 @@ fn draw_viewport_context_menu(
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(160.0);
+                chrome_menu_style(ui.style_mut());
 
                 // Labels carry no shortcut text of their own: the chord is read
                 // from the command descriptor so the menu can never disagree
@@ -4121,6 +4699,7 @@ fn draw_viewport_context_menu(
                     item!("Definitions\u{2026}", "modeling.toggle_definitions_browser");
                     ui.separator();
                     item!("Zoom to Selection", "core.zoom_to_selection");
+                    item!("Lock Selected", "view.lock_selected");
                     ui.separator();
                     item!("Group", "modeling.group");
                     if selected_group_count == 1 {
@@ -4175,9 +4754,7 @@ fn draw_toolbar_visibility_menu(
     toolbar_layout_state: &mut ToolbarLayoutState,
     doc_props: &mut DocumentProperties,
 ) {
-    ui.label("Toolbars");
-    ui.separator();
-
+    chrome_menu_style(ui.style_mut());
     let mut descriptors = toolbar_registry.toolbars().collect::<Vec<_>>();
     descriptors.sort_by(|left, right| left.label.cmp(&right.label));
     for descriptor in descriptors {
@@ -4186,23 +4763,16 @@ fn draw_toolbar_visibility_menu(
             .get(&descriptor.id)
             .map(|entry| entry.visible)
             .unwrap_or(descriptor.id == "core");
-        if descriptor.id == "core" {
-            let mut always_visible = true;
-            ui.add_enabled(
-                false,
-                egui::Checkbox::new(&mut always_visible, &descriptor.label),
-            );
-            continue;
-        }
-
-        let mut next_visible = visible;
-        if ui.checkbox(&mut next_visible, &descriptor.label).changed() {
-            set_toolbar_visibility(
-                toolbar_layout_state,
-                doc_props,
-                &descriptor.id,
-                next_visible,
-            );
+        if menu_row_button_state(
+            ui,
+            descriptor.id != "core",
+            Some(visible),
+            &descriptor.label,
+            None,
+        )
+        .clicked()
+        {
+            set_toolbar_visibility(toolbar_layout_state, doc_props, &descriptor.id, !visible);
         }
     }
 }
@@ -4414,13 +4984,14 @@ fn display_unit_description(unit: DisplayUnit) -> &'static str {
 fn draw_render_settings_window(
     ctx: &egui::Context,
     state: &mut RenderSettingsWindowState,
-    settings: &mut RenderSettings,
+    settings_resource: &mut ResMut<RenderSettings>,
     drafting_state: &DraftingWorkspaceState,
 ) {
     if !state.visible {
         return;
     }
 
+    let mut settings = settings_resource.clone();
     egui::Window::new("Renderer")
         .open(&mut state.visible)
         .default_width(340.0)
@@ -4581,6 +5152,7 @@ fn draw_render_settings_window(
                     {
                         settings.paper_fill_enabled = false;
                     }
+                    ui.checkbox(&mut settings.show_hidden_geometry, "Show Hidden Geometry");
                     ui.add_enabled_ui(settings.xray_enabled, |ui| {
                         ui.add(
                             egui::Slider::new(&mut settings.xray_surface_alpha, 0.05..=0.9)
@@ -4617,6 +5189,7 @@ fn draw_render_settings_window(
             });
 
         });
+    settings_resource.set_if_neq(settings);
 }
 
 fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
@@ -5149,7 +5722,10 @@ fn command_shortcut_for_platform(registry: &CommandRegistry, id: &str) -> Option
 fn command_tooltip_text(descriptor: &CommandDescriptor) -> String {
     let mut lines = vec![descriptor.label.clone()];
     if let Some(shortcut) = &descriptor.default_shortcut {
-        lines.push(format!("Shortcut: {shortcut}"));
+        lines.push(format!(
+            "Shortcut: {}",
+            format_shortcut_for_platform(shortcut)
+        ));
     }
     if let Some(hint) = &descriptor.hint {
         lines.push(hint.clone());
@@ -5811,6 +6387,22 @@ fn complete_toolbar_drag(
 }
 
 fn apply_chrome_visuals(ctx: &egui::Context) {
+    // Append a bundled fallback, preserving fonts installed by other capabilities.
+    // add_font is idempotent by name and applies at the start of the next pass.
+    ctx.add_font(egui::epaint::text::FontInsert::new(
+        "talos-chrome-symbols",
+        egui::FontData::from_static(include_bytes!("../../assets/fonts/TalosChromeSymbols.ttf")),
+        vec![
+            egui::epaint::text::InsertFontFamily {
+                family: egui::FontFamily::Proportional,
+                priority: egui::epaint::text::FontPriority::Lowest,
+            },
+            egui::epaint::text::InsertFontFamily {
+                family: egui::FontFamily::Monospace,
+                priority: egui::epaint::text::FontPriority::Lowest,
+            },
+        ],
+    ));
     let mut visuals = egui::Visuals::dark();
     visuals.window_fill = CHROME_BG;
     visuals.panel_fill = CHROME_BG;
@@ -5820,17 +6412,18 @@ fn apply_chrome_visuals(ctx: &egui::Context) {
     visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(68, 80, 100);
     visuals.widgets.inactive.fg_stroke.color = CHROME_TEXT;
     visuals.widgets.hovered.bg_fill = CHROME_HOVER;
-    visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(88, 103, 128);
+    visuals.widgets.hovered.weak_bg_fill = CHROME_HOVER;
     visuals.widgets.hovered.fg_stroke.color = CHROME_TEXT;
     visuals.widgets.active.bg_fill = CHROME_ACCENT;
-    visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(108, 136, 176);
+    visuals.widgets.active.weak_bg_fill = CHROME_ACCENT;
     visuals.widgets.active.fg_stroke.color = CHROME_TEXT;
     visuals.widgets.open.bg_fill = CHROME_ACCENT;
-    visuals.widgets.open.weak_bg_fill = egui::Color32::from_rgb(96, 121, 156);
+    visuals.widgets.open.weak_bg_fill = CHROME_ACCENT;
     visuals.override_text_color = Some(CHROME_TEXT);
     visuals.selection.bg_fill = CHROME_ACCENT;
     visuals.selection.stroke.color = CHROME_TEXT;
-    visuals.widgets.noninteractive.bg_stroke.color = CHROME_MUTED;
+    visuals.widgets.noninteractive.bg_stroke.color = egui::Color32::from_rgb(55, 64, 78);
+    visuals.window_stroke.color = egui::Color32::from_rgb(55, 64, 78);
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.global_style()).clone();
@@ -5845,6 +6438,87 @@ fn apply_chrome_visuals(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::{MenuSubmenuSpec, CREATE_MENU_GROUPS, VIEW_MENU_GROUPS};
+
+    #[test]
+    fn guide_inspector_keeps_direction_unitless_and_lengths_in_document_units() {
+        use super::*;
+        use crate::authored_entity::{PropertyValue, PropertyValueKind};
+        use crate::plugins::units::DisplayUnit;
+        let direction = PropertyValue::Vec3(Vec3::new(0.0, -0.2, 0.98));
+        for display_unit in [DisplayUnit::Millimetres, DisplayUnit::Metres] {
+            let doc = DocumentProperties {
+                display_unit,
+                ..default()
+            };
+            let display = format_panel_property_value(&direction, "direction", &doc);
+            let buffer = edit_buffer_for_property_value(&direction, "direction", &doc);
+            assert_eq!(display, "0.0000, -0.2000, 0.9800");
+            assert_eq!(buffer, display);
+            assert_eq!(
+                parse_panel_property_value("direction", PropertyValueKind::Vec3, &buffer, &doc)
+                    .unwrap(),
+                direction
+            );
+        }
+        let doc = DocumentProperties::default();
+        assert_eq!(
+            parse_panel_property_value("anchor", PropertyValueKind::Vec3, "13000, 0, -8000", &doc)
+                .unwrap(),
+            PropertyValue::Vec3(Vec3::new(13.0, 0.0, -8.0))
+        );
+        assert_eq!(
+            parse_panel_property_value("length", PropertyValueKind::Scalar, "5000", &doc).unwrap(),
+            PropertyValue::Scalar(5.0)
+        );
+        assert_eq!(
+            format_panel_property_value(&PropertyValue::Scalar(5.0), "length", &doc),
+            "5000mm"
+        );
+    }
+
+    #[test]
+    fn renderer_window_does_not_invalidate_settings_without_an_edit() {
+        use super::*;
+        #[derive(Resource, Default)]
+        struct Changes(Vec<bool>);
+        let mut app = App::new();
+        app.init_resource::<RenderSettings>()
+            .init_resource::<RenderSettingsWindowState>()
+            .init_resource::<DraftingWorkspaceState>()
+            .init_resource::<Changes>()
+            .add_systems(
+                Update,
+                (
+                    |mut settings: ResMut<RenderSettings>,
+                     mut state: ResMut<RenderSettingsWindowState>,
+                     drafting: Res<DraftingWorkspaceState>,
+                     ctx: Local<egui::Context>| {
+                        ctx.begin_pass(egui::RawInput::default());
+                        draw_render_settings_window(&ctx, &mut state, &mut settings, &drafting);
+                        ctx.end_pass().drop_without_applying_deltas();
+                    },
+                    |settings: Res<RenderSettings>, mut changes: ResMut<Changes>| {
+                        changes.0.push(settings.is_changed())
+                    },
+                )
+                    .chain(),
+            );
+        app.update();
+        app.update();
+        assert_eq!(app.world().resource::<Changes>().0.last(), Some(&false));
+        app.world_mut()
+            .resource_mut::<RenderSettingsWindowState>()
+            .visible = true;
+        app.update();
+        app.update();
+        assert_eq!(app.world().resource::<Changes>().0.last(), Some(&false));
+        app.world_mut()
+            .resource_mut::<RenderSettings>()
+            .bloom_enabled = true;
+        app.update();
+        assert_eq!(app.world().resource::<Changes>().0.last(), Some(&true));
+        assert!(app.world().resource::<RenderSettings>().bloom_enabled);
+    }
 
     fn command_ids_for<'a>(groups: &'a [MenuSubmenuSpec], label: &str) -> &'a [&'a str] {
         groups

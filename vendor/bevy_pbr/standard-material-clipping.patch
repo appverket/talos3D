@@ -1,0 +1,119 @@
+diff --git a/src/pbr_material.rs b/src/pbr_material.rs
+index 25a9e01..f57c594 100644
+--- a/src/pbr_material.rs
++++ b/src/pbr_material.rs
+@@ -683,6 +683,10 @@ pub struct StandardMaterial {
+     ///
+     /// See [`AlphaMode`] for details. Defaults to [`AlphaMode::Opaque`].
+     pub alpha_mode: AlphaMode,
++    /// World-space clipping half-spaces (xyz normal, w offset); negative distances are discarded.
++    /// Derived render state. At most eight planes, including depth and shadow passes.
++    pub clip_planes: [Vec4; 8],
++    pub clip_plane_count: u32,
+ 
+     /// Adjust rendered depth.
+     ///
+@@ -934,6 +938,8 @@ impl Default for StandardMaterial {
+             unlit: false,
+             fog_enabled: true,
+             alpha_mode: AlphaMode::Opaque,
++            clip_planes: [Vec4::ZERO; 8],
++            clip_plane_count: 0,
+             depth_bias: 0.0,
+             depth_map: None,
+             parallax_depth_scale: 0.1,
+@@ -1076,6 +1082,8 @@ pub struct StandardMaterialUniform {
+     pub max_relief_mapping_search_steps: u32,
+     /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
+     pub deferred_lighting_pass_id: u32,
++    pub clip_planes: [Vec4; 8],
++    pub clip_plane_count: u32,
+ }
+ 
+ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
+@@ -1242,6 +1250,8 @@ impl AsBindGroupShaderType<StandardMaterialUniform> for StandardMaterial {
+             lightmap_exposure: self.lightmap_exposure,
+             max_relief_mapping_search_steps: self.parallax_mapping_method.max_steps(),
+             deferred_lighting_pass_id: self.deferred_lighting_pass_id as u32,
++            clip_planes: self.clip_planes,
++            clip_plane_count: self.clip_plane_count.min(8),
+             uv_transform: self.uv_transform.into(),
+         }
+     }
+@@ -1418,7 +1428,11 @@ impl Material for StandardMaterial {
+ 
+     #[inline]
+     fn alpha_mode(&self) -> AlphaMode {
+-        self.alpha_mode
++        if self.clip_plane_count > 0 && self.alpha_mode == AlphaMode::Opaque {
++            AlphaMode::Mask(0.0)
++        } else {
++            self.alpha_mode
++        }
+     }
+ 
+     #[inline]
+diff --git a/src/render/pbr_fragment.wesl b/src/render/pbr_fragment.wesl
+index c7c5460..3a785a4 100644
+--- a/src/render/pbr_fragment.wesl
++++ b/src/render/pbr_fragment.wesl
+@@ -690,5 +690,20 @@ pbr_input.material.uv_transform = uv_transform;
+ }
+     }
+ 
++    // Talos3D world-space clip planes; see vendor/bevy_pbr/PATCHES.md.
++@if(BINDLESS)
++    let clip_count = pbr_bindings::material_array[material_indices[slot].material].clip_plane_count;
++@else
++    let clip_count = pbr_bindings::material.clip_plane_count;
++    for (var clip_index = 0u; clip_index < min(clip_count, 8u); clip_index += 1u) {
++@if(BINDLESS)
++        let plane = pbr_bindings::material_array[material_indices[slot].material].clip_planes[clip_index];
++@else
++        let plane = pbr_bindings::material.clip_planes[clip_index];
++        if dot(plane.xyz, in.world_position.xyz) + plane.w < -0.0001 {
++            discard;
++        }
++    }
++
+     return pbr_input;
+ }
+diff --git a/src/render/pbr_prepass_functions.wesl b/src/render/pbr_prepass_functions.wesl
+index 093bf94..2d8ca71 100644
+--- a/src/render/pbr_prepass_functions.wesl
++++ b/src/render/pbr_prepass_functions.wesl
+@@ -85,6 +85,21 @@ fn prepass_sample_color_and_alpha_discard(in: VertexOutput) {
+     }
+ }
+ 
++    // Talos3D world-space clip planes; see vendor/bevy_pbr/PATCHES.md.
++@if(BINDLESS)
++    let clip_count = pbr_bindings::material_array[material_indices[slot].material].clip_plane_count;
++@else
++    let clip_count = pbr_bindings::material.clip_plane_count;
++    for (var clip_index = 0u; clip_index < min(clip_count, 8u); clip_index += 1u) {
++@if(BINDLESS)
++        let plane = pbr_bindings::material_array[material_indices[slot].material].clip_planes[clip_index];
++@else
++        let plane = pbr_bindings::material.clip_planes[clip_index];
++        if dot(plane.xyz, in.world_position.xyz) + plane.w < -0.0001 {
++            discard;
++        }
++    }
++
+     prepass_alpha_discard(flags, alpha_cutoff, output_color);
+ }
+ }
+diff --git a/src/render/pbr_types.wesl b/src/render/pbr_types.wesl
+index 67e1bcc..4d677ba 100644
+--- a/src/render/pbr_types.wesl
++++ b/src/render/pbr_types.wesl
+@@ -26,6 +26,8 @@ struct StandardMaterial {
+     max_relief_mapping_search_steps: u32,
+     /// ID for specifying which deferred lighting pass should be used for rendering this material, if any.
+     deferred_lighting_pass_id: u32,
++    clip_planes: array<vec4<f32>, 8>,
++    clip_plane_count: u32,
+ };
+ 
+ // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!

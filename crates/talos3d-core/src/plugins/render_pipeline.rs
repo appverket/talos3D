@@ -11,7 +11,7 @@ use bevy::{
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     pbr::{
         ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel,
-        ScreenSpaceReflections,
+        ScreenSpaceReflections, ScreenSpaceTransmission,
     },
     post_process::bloom::Bloom,
     prelude::*,
@@ -93,7 +93,9 @@ impl RenderTonemapping {
 
     fn to_bevy(self) -> Tonemapping {
         match self {
-            Self::None => Tonemapping::None,
+            // Bevy 0.20 `None` bypasses exposure and dither; `Linear` keeps
+            // the identity tone curve Talos3D has always meant by "None".
+            Self::None => Tonemapping::Linear,
             Self::Reinhard => Tonemapping::Reinhard,
             Self::ReinhardLuminance => Tonemapping::ReinhardLuminance,
             Self::AcesFitted => Tonemapping::AcesFitted,
@@ -164,6 +166,7 @@ pub struct RenderSettings {
     pub paper_fill_enabled: bool,
     /// Make surface materials semi-transparent to inspect hidden/interior parts.
     pub xray_enabled: bool,
+    pub show_hidden_geometry: bool,
     /// Alpha applied to surface materials while X-ray mode is enabled.
     pub xray_surface_alpha: f32,
 }
@@ -175,7 +178,7 @@ impl Default for RenderSettings {
             exposure_ev100: Exposure::EV100_BLENDER,
             ssao_enabled: true,
             ssao_constant_object_thickness: 0.1,
-            bloom_enabled: true,
+            bloom_enabled: false,
             bloom_intensity: 0.15,
             bloom_low_frequency_boost: 0.7,
             bloom_low_frequency_boost_curvature: 0.95,
@@ -198,6 +201,7 @@ impl Default for RenderSettings {
             background_rgb: DEFAULT_BACKGROUND_RGB,
             paper_fill_enabled: false,
             xray_enabled: false,
+            show_hidden_geometry: false,
             xray_surface_alpha: DEFAULT_XRAY_SURFACE_ALPHA,
         }
     }
@@ -310,6 +314,7 @@ pub struct RenderPipelinePlugin;
 impl Plugin for RenderPipelinePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(DrawingSceneLivePlugin)
+            .add_observer(enable_camera_transmission)
             .init_resource::<RenderSettings>()
             .init_resource::<RenderPipelineSetupState>()
             .init_resource::<SurfaceMaterialOverrideCache>()
@@ -382,6 +387,18 @@ impl Plugin for RenderPipelinePlugin {
                 },
                 execute_toggle_xray,
                 render_state_xray,
+            )
+            .register_toggle_command(
+                CommandDescriptor {
+                    id: "view.show_hidden_geometry".into(), label: "Show Hidden Geometry".into(),
+                    description: "Inspect the generated edges of the pointed body. Enable X-Ray to infer through faces.".into(),
+                    category: CommandCategory::View, parameters: Some(serde_json::json!({"type":"object","properties":{"enabled":{"type":"boolean"}}})),
+                    default_shortcut: None, icon: None, hint: None, requires_selection: false, show_in_menu: true, version: 1, activates_tool: None, capability_id: None,
+                },
+                |world, args| update_render_settings(world, "", |settings| {
+                    settings.show_hidden_geometry = args.get("enabled").and_then(Value::as_bool).unwrap_or(!settings.show_hidden_geometry);
+                }),
+                |world| world.resource::<RenderSettings>().show_hidden_geometry,
             )
             .register_toggle_command(
                 CommandDescriptor {
@@ -632,7 +649,7 @@ fn is_valid_white_paper_material(material: &StandardMaterial) -> bool {
 fn setup_render_pipeline_once(
     mut commands: Commands,
     settings: Res<RenderSettings>,
-    camera_query: Query<Entity, With<Camera3d>>,
+    camera_query: Query<Entity, (With<Camera3d>, With<OrbitCamera>)>,
     mut clear_color: ResMut<ClearColor>,
     mut setup_state: ResMut<RenderPipelineSetupState>,
 ) {
@@ -642,7 +659,9 @@ fn setup_render_pipeline_once(
 
     let Ok(camera) = camera_query.single() else {
         if !setup_state.warned_missing_camera {
-            warn!("RenderPipelinePlugin: no Camera3d found; will retry render setup");
+            warn!(
+                "RenderPipelinePlugin: no unique main OrbitCamera found; will retry render setup"
+            );
             setup_state.warned_missing_camera = true;
         }
         return;
@@ -675,7 +694,7 @@ fn setup_render_pipeline_once(
 fn sync_render_settings(
     mut commands: Commands,
     settings: Res<RenderSettings>,
-    camera_query: Query<Entity, With<Camera3d>>,
+    camera_query: Query<Entity, (With<Camera3d>, With<OrbitCamera>)>,
 ) {
     if !settings.is_changed() {
         return;
@@ -1184,15 +1203,16 @@ fn display_override_material(
 }
 
 fn paper_fill_material_from(source: &StandardMaterial) -> StandardMaterial {
-    let mut override_material = source.clone();
-    override_material.base_color = Color::WHITE;
-    override_material.emissive = LinearRgba::BLACK;
-    override_material.perceptual_roughness = 1.0;
-    override_material.metallic = 0.0;
-    override_material.reflectance = 0.0;
-    override_material.unlit = true;
-    override_material.alpha_mode = AlphaMode::Opaque;
-    override_material
+    // Paper must not inherit textures, transmission, or other physical surface
+    // channels: those would tint or pattern the canonical black-on-white view.
+    StandardMaterial {
+        base_color: Color::WHITE,
+        unlit: true,
+        cull_mode: source.cull_mode,
+        double_sided: source.double_sided,
+        fog_enabled: false,
+        ..Default::default()
+    }
 }
 
 fn xray_material_from(source: &StandardMaterial, xray_alpha: f32) -> StandardMaterial {
@@ -1238,6 +1258,21 @@ fn ssao_quality(level: u8) -> ScreenSpaceAmbientOcclusionQualityLevel {
     }
 }
 
+/// Bevy 0.20 made screen-space transmission opt-in. Every Talos3D 3D view
+/// (viewport, previews, exports) renders the same materials, so transmissive
+/// materials such as glass keep transmitting in all of them.
+fn enable_camera_transmission(
+    added: On<Add<Camera3d>>,
+    cameras: Query<(), Without<ScreenSpaceTransmission>>,
+    mut commands: Commands,
+) {
+    if cameras.contains(added.entity) {
+        commands
+            .entity(added.entity)
+            .insert(ScreenSpaceTransmission::default());
+    }
+}
+
 fn sync_camera_msaa(commands: &mut Commands, camera: Entity, settings: &RenderSettings) {
     commands
         .entity(camera)
@@ -1257,6 +1292,7 @@ fn sync_ssao_component(commands: &mut Commands, camera: Entity, settings: &Rende
         commands.entity(camera).insert(ScreenSpaceAmbientOcclusion {
             quality_level: ssao_quality(settings.ambient_occlusion_quality),
             constant_object_thickness: settings.ssao_constant_object_thickness,
+            ..default()
         });
     } else {
         commands
@@ -1353,8 +1389,9 @@ fn draw_model_edge_overlays(
     for (entity, _element_id, mesh_handle, mesh_transform, visibility, wireframe_surface_hidden) in
         query.iter(world)
     {
-        if visibility.is_some_and(|visibility| *visibility == Visibility::Hidden)
-            && wireframe_surface_hidden.is_none()
+        if crate::plugins::layers::entity_document_hidden(world, entity)
+            || (visibility.is_some_and(|visibility| *visibility == Visibility::Hidden)
+                && wireframe_surface_hidden.is_none())
         {
             continue;
         }
@@ -1712,6 +1749,26 @@ impl FeatureEdgeState {
 
 #[cfg(test)]
 mod tests {
+    use super::{enable_camera_transmission, RenderTonemapping};
+    use bevy::{core_pipeline::tonemapping::Tonemapping, pbr::ScreenSpaceTransmission};
+
+    #[test]
+    fn every_3d_camera_keeps_screen_space_transmission() {
+        let mut app = App::new();
+        app.add_observer(enable_camera_transmission);
+        let camera = app.world_mut().spawn(Camera3d::default()).id();
+        app.update();
+        assert!(app
+            .world()
+            .entity(camera)
+            .contains::<ScreenSpaceTransmission>());
+    }
+
+    #[test]
+    fn none_tonemapping_keeps_identity_curve_with_exposure() {
+        assert_eq!(RenderTonemapping::None.to_bevy(), Tonemapping::Linear);
+    }
+
     use super::*;
     use crate::plugins::ui::StatusBarData;
     use bevy::render::render_resource::Face;
@@ -1844,6 +1901,69 @@ mod tests {
         let settings = app.world().resource::<RenderSettings>();
         assert!(!settings.xray_enabled);
         assert_eq!(settings.xray_surface_alpha, 0.62);
+    }
+
+    #[test]
+    fn drafting_camera_preset_targets_main_view_with_definition_preview_present() {
+        let mut app = App::new();
+        app.init_resource::<RenderSettings>()
+            .init_resource::<RenderPipelineSetupState>()
+            .init_resource::<ClearColor>()
+            .add_systems(
+                Update,
+                (setup_render_pipeline_once, sync_render_settings).chain(),
+            );
+        let main = app
+            .world_mut()
+            .spawn((Camera3d::default(), OrbitCamera::default()))
+            .id();
+        let preview = app
+            .world_mut()
+            .spawn((Camera3d::default(), Tonemapping::AgX))
+            .id();
+        app.update();
+        assert!(
+            app.world()
+                .resource::<RenderPipelineSetupState>()
+                .configured
+        );
+        assert!(app.world().get::<Bloom>(main).is_none());
+        app.world_mut()
+            .resource_mut::<RenderSettings>()
+            .bloom_enabled = true;
+        app.update();
+        assert!(app.world().get::<Bloom>(main).is_some());
+        apply_drafting_render_preset(&mut app.world_mut().resource_mut::<RenderSettings>());
+        app.update();
+        assert_eq!(
+            app.world().get::<Tonemapping>(main),
+            Some(&Tonemapping::Linear)
+        );
+        assert_eq!(
+            app.world().get::<Tonemapping>(preview),
+            Some(&Tonemapping::AgX)
+        );
+        assert!(app
+            .world()
+            .get::<ScreenSpaceAmbientOcclusion>(main)
+            .is_none());
+        assert!(app.world().get::<Bloom>(main).is_none());
+    }
+
+    #[test]
+    fn paper_fill_discards_source_texture_and_transmission() {
+        let source = StandardMaterial {
+            base_color_texture: Some(Handle::default()),
+            specular_transmission: 0.9,
+            diffuse_transmission: 0.6,
+            cull_mode: None,
+            ..Default::default()
+        };
+        let paper = paper_fill_material_from(&source);
+        assert!(is_valid_white_paper_material(&paper));
+        assert_eq!(paper.specular_transmission, 0.0);
+        assert_eq!(paper.diffuse_transmission, 0.0);
+        assert_eq!(paper.cull_mode, None);
     }
 
     #[test]

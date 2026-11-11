@@ -10,6 +10,48 @@ This is a public part of the platform rather than a private editor hook. The
 same command substrate backs keyboard shortcuts, toolbar actions, menus, the
 command palette, and MCP operations.
 
+## Captured edit plans
+
+Use `list_edit_requests` to discover capability-owned request schemas, then
+`preview_edit_plan` with `request_kind` and `parameters`. The initial request
+is `core.transform`, using the same move/rotate/scale planner and ordered
+semantic modifiers as the viewport. For example:
+
+```json
+{"request_kind":"core.transform","parameters":{"element_ids":[6],"operation":"move","axis":"x","value":0.2}}
+```
+
+Preview leaves authored state and history unchanged. Its transient `plan_id`
+identifies immutable before/after snapshots, a content digest, the base document
+revision, semantic intents and their capture-time verdict. `inspect_edit_plan`
+also reports the current revision, `stale`, `can_apply_now` and `apply_refusal`.
+`can_commit` is the captured semantic verdict, not a promise that the base is
+still current. A snapshot preview does not establish visual correctness;
+`geometry_reviewed` remains false.
+
+`apply_edit_plan` takes only that `plan_id`: it never replans. It refuses stale
+or changed before-state, pending history and semantic refusals; success is one
+history item with exact undo/redo. IDs are bounded, session-local and consumed
+once. Repeating an applied ID fails. Save durable work as native authored
+content/AuthoringScript, not as these transient carrier objects.
+
+Native move/rotate/scale retain the exact candidate displayed by the viewport.
+Release applies it without recomputing from a newer cursor. Cancel restores
+presentation without adding history. MCP writes and authored-state inspection
+are fenced while an interactive gesture owns transient geometry; UX observation,
+capture and plan inspection remain available. Finish or cancel the gesture
+before inspecting an authored base. Superseded candidate IDs cannot apply.
+
+Capabilities register `EditRequestDescriptor` schemas and pure planners in
+`EditRequestRegistry`; domain behavior belongs in those planners and the shared
+`EditPlanModifiers` stage. The existing transform-modifier adapter is retained
+for linked-placement callers. Feature push/pull's type migration and CSG
+finalization remain on their existing command path; they are not advertised as
+captured request support. No new preview renderer is introduced here.
+
+Compact profiles advertise the canonical `set_property` schema. Its deprecated
+`set_entity_property` alias remains available in `full`.
+
 ## What It Exposes
 
 The MCP surface is designed around the authored model rather than render
@@ -71,9 +113,20 @@ UI creation share one coordinate-frame contract.
 
 Linked documents use the same registered command surface. Discover and invoke
 `modeling.place_linked_model` to insert an external Talos3D document as a live
-instance. The result contains an explicit `linked_model_instance` relationship,
+instance. Pass `path` for any existing `.talos3d` project (optionally `name`);
+without `path`, the UI opens a file chooser. Loose objects and multiple root
+groups are supported without extracting or modifying the source first.
+The result contains an explicit `linked_model_instance` relationship,
 including the source path/root/hash, instance root/frame, and source-to-scene
-identity map. Placement is one history operation, so undo removes the complete
+identity map. `source_kind` is `group` for a single source group or `document`
+for a complete project wrapped by a virtual source root. A document root's
+`source_root_id` is a relationship-owned identity, not a persisted entity in
+the source file; its mapping resolves to the host instance root. The persisted
+`source_root_is_document` flag makes refresh rebuild this container even if the
+source's top-level hierarchy changes. Existing links without that flag retain
+their original group-root semantics.
+
+Placement is one history operation, so undo removes the complete
 instance and redo restores the same relationship and scene ids.
 
 Use the read-only `modeling.inspect_linked_models` command to inspect one or
@@ -212,6 +265,7 @@ repository-scoped endpoint config with the actual bound port:
 {
   "mcpServers": {
     "talos3d": {
+      "type": "http",
       "url": "http://127.0.0.1:24842/mcp"
     }
   }
@@ -223,6 +277,14 @@ end up committed. They contain discovery facts only, never a pairing grant or
 bearer credential. Set `TALOS3D_MCP_CONFIG_PATHS` to an OS path-list of explicit config
 files when launching from a packaged app or another directory. Set
 `TALOS3D_WRITE_MCP_CONFIG=false` to disable writing local client configs.
+
+Talos3D refreshes only the `url` of an existing `talos3d` entry, so
+client-owned fields on it survive relaunches. When
+`TALOS3D_MCP_HEADERS_HELPER` names a command, Talos3D also writes it as the
+entry's Claude Code `headersHelper`. The helper runs at connect time and prints
+the request headers as JSON; Claude Code passes the endpoint in
+`CLAUDE_CODE_MCP_SERVER_URL`. The config still holds only the helper command,
+never a credential.
 
 ### Access control
 
@@ -248,10 +310,13 @@ establish a named user, delegated agent identity, or independent command
 authorization policy; the local desktop/OS session is the user-presence trust
 boundary.
 
-The app defaults to a generated pairing code. A repeatable local test harness
-may provision a code of at least 32 non-whitespace characters through
-`TALOS3D_MODEL_API_TOKEN`; Talos3D still keeps that value out of logs,
-manifests, discovery configs, and `InstanceInfo`.
+The app defaults to a generated pairing code. A repeatable local test harness,
+or a local development launcher the user invokes, may provision a code of at least
+32 non-whitespace characters through `TALOS3D_MODEL_API_TOKEN`; Talos3D still
+keeps that value out of logs, manifests, discovery configs, and `InstanceInfo`.
+Such a launcher stands in for the in-app handoff: it must generate a fresh code
+per launch, redeem it immediately, and keep the returned bearer in storage only
+the local user can read. The local OS session remains the trust boundary.
 
 This local pairing route is deliberately not presented as production OAuth.
 A shared or remotely reachable Talos3D resource must follow the MCP
@@ -340,7 +405,7 @@ agent.
 ## Capability Profiles (tool gating)
 
 The full router registers a large tool surface, whose schemas cost a connecting agent
-roughly 196 KB (~35k tokens) of cold-start context. To keep sessions lean, the
+a substantial cold-start context budget. Measure the current schemas and mandatory guidance together rather than relying on historical tool counts. To keep sessions lean, the
 advertised tool surface is gated by a named **capability profile**. The session
 contract — `get_instance_info`, `negotiate_agent_session`, the
 `get_agent_guidance_*` and `agent_guidance_*` lifecycle tools,
@@ -352,7 +417,8 @@ discover guidance and curated paths regardless of gating.
 
 | Profile         | Scope                                                                                                                    |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `authoring`     | Default. The standard authoring loop: inspection, entity/geometry editing, materials, recipes/discovery and the ADR-042 corpus-gap flow, definitions/occurrences/hosted placement, parametric types, validation and structured geometric checks, refinement and obligations, camera/screenshot capture, project save/load/import, and the `list_commands`/`invoke_command` escape hatch (~102 tools, ~87 KB). |
+| `authoring`     | Default. The standard authoring loop: inspection, entity/geometry editing, materials, recipes/discovery and the ADR-042 corpus-gap flow, definitions/occurrences/hosted placement, parametric types, validation and structured geometric checks, refinement and obligations, camera/screenshot capture, project save/load/import, and the `list_commands`/`invoke_command` escape hatch (149 tools / 149,528 compact schema bytes at the focused-authoring checkpoint). |
+| `focused-authoring` | Bounded curated authoring and semantic edits: bootstrap/discovery, authored inspection and evidence, shared edit requests, recipes/Definitions/parametrics, gaps, validation, capture, history and save/reload. Omits raw primitive creation and bulk/advanced operations; switch profiles when required. Checkpoint: 83 tools / 70,365 schema bytes, below the fixed gates of 100 tools and 75% of authoring bytes. |
 | `inspection`    | Read-only: model/scene/semantic reads, validation checks, camera and screenshot. No model writes.                          |
 | `curation`      | Knowledge curation: corpus passages, recipe/assembly-pattern draft management, definition libraries and workspaces, material specs, rule packs, procedural sessions, provenance/grounding, plus inspection and capture. |
 | `ux-automation` | UI automation: `ux_*` input simulation, named views, clip planes, toolbars, render/lighting look-dev, command invocation, plus inspection and capture. |
@@ -362,23 +428,38 @@ Selecting a profile:
 
 - **At connect (HTTP):** each profile has its own endpoint —
   `http://127.0.0.1:<port>/mcp/authoring`, `/mcp/inspection`, `/mcp/curation`,
-  `/mcp/ux-automation`, `/mcp/full`. Plain `/mcp` serves the default profile
+  `/mcp/focused-authoring`, `/mcp/ux-automation`, `/mcp/full`. Plain `/mcp` serves the default profile
   (`authoring`, or `TALOS3D_MCP_PROFILE` when set).
 - **At runtime (any transport):** call `set_session_profile` with
-  `{"profile": "full"}` (or any profile name; omit `profile` to report the
-  current one). Subsequent `tools/list` calls return the new frozen list. On
-  stdio the server also emits a `tools/list_changed` notification; the HTTP
-  transport is stateless with JSON responses (no channel for server-initiated
-  notifications between requests), so HTTP clients should re-fetch `tools/list`
-  after switching — the tool's response reports the change either way. The
-  switch is scoped to the endpoint/session you are connected to — fine for a
-  single-user local app.
+  `{"profile": "full"}` (or omit `profile` to report the current one). Re-fetch
+  `tools/list` after changing profiles. Stdio also emits `tools/list_changed`;
+  HTTP reports `changed` explicitly and does not require a notification listener.
+- **HTTP session lifetime:** initialize returns `Mcp-Session-Id`. Send
+  `notifications/initialized`, then include that id on subsequent requests.
+  Each initialized session owns its profile, even when clients share a URL and
+  instance bearer. Paths choose the initial profile only. A reconnect using the
+  same live id retains the profile; a new initialize starts from the path's
+  default. DELETE the session on exit. Sessions expire after 30 minutes of
+  inactivity or when the app exits; on HTTP 404 initialize again and bootstrap.
+  Stateful responses use SSE; read the response matching the request id and
+  tolerate intervening notification/priming events. The bearer remains required
+  on every request and is never used as a client identity.
+
+The workspace one-shot MCP helper creates and closes a session per invocation.
+Use a profile URL such as `/mcp/curation` for those calls; switching a temporary
+session does not alter the profile of later invocations or other clients.
 
 Gating is honest rather than silent: calling a tool outside the active profile
 returns a structured error naming the profiles that contain it and pointing at
 `set_session_profile`, and `get_capability_snapshot` filters its `next_tools`
 steering list to the active profile so a gated session is never pointed at a
-tool it cannot call. Per-profile tool lists are frozen, schema-sanitized once
+tool it cannot call. Curated Definition discovery identifies the registered
+`definition.instantiate` or `definition.instantiate_hosted` path and includes
+`library_id` in its instructions. When gated, `suggested_next_tool` is
+`set_session_profile` and `required_profile` identifies the transition; the
+asset retains its registered `instantiate_tool`. A profile gate is not a corpus
+gap. Read-only authoring provenance and claim grounding are available in both
+authoring and inspection without enabling curation writes. Per-profile tool lists are frozen, schema-sanitized once
 per process, and shared across sessions.
 
 Tool-to-profile membership lives in
@@ -633,11 +714,34 @@ the created geometry persists, so the response carries `created_element_ids`,
 the unchanged refinement `state`, and a `promotion_blocked` object
 (`unsatisfied_obligations` + `message`). Do not retry the call — that
 duplicates geometry. Resolve each listed obligation with `resolve_obligation`
-on the root element, then call `promote_refinement` again. A blocked
+on `promotion_blocked.obligation_element_id` (the aggregate group after
+instantiation), then call `promote_refinement` on that element. A blocked
 `promote_refinement` with no recipe side effects (no script ran, nothing
-created) still returns a plain error. Real execution failures that occur after
-elements were already created return an error whose message lists the
-persisted element ids.
+created) still returns a plain error. Hard execution or placement failures
+roll back the instantiation. Successful `instantiate_recipe` calls create one
+history item, including placement, group metadata and `ViaRecipe` provenance
+on the locator, generated members and group. One undo removes the complete
+result; redo restores the same IDs and captured metadata without rerunning the
+recipe. A failed attempt preserves prior history, its redo branch and the
+next element ID.
+
+Later `promote_refinement` calls also group command-backed recipe effects,
+root refinement metadata and resolved setting-out reservations into one history
+item. Undo/redo replays captured changes; a hard execution failure rolls them
+back and preserves prior history and the ID allocator. Native capability
+generators must enqueue every authored member, Definition, relation and assembly
+change through commands; `commands::flush_queued_commands` provides synchronous
+visibility through the normal admission/history pipeline. Direct writes to
+arbitrary resources or unrelated entities are not made transactional by this
+wrapper. The root's existing refinement metadata is captured explicitly.
+Declared native recipe refinement limits are enforced before generation.
+
+Saved projects retain obligations, claim grounding and refinement-branch
+metadata as generic semantic sidecars, including on groups and relations.
+JSON numeric controls use the dependency's `float_roundtrip` parser feature so
+save/reload does not alter their values or fingerprint inputs. Older files
+without these sidecars remain readable; missing historical decisions are not
+invented during load.
 
 Session recipe drafts are still **not executable by `instantiate_recipe`**.
 Installed drafts can be appended to `list_recipe_families` and `select_recipe`
@@ -674,6 +778,22 @@ The renderer and lighting surfaces are intentionally agent-facing:
   `delete_light`
 - the startup/default daylight setup is recoverable through
   `restore_default_light_rig`
+
+`view_update` overlays only explicitly supplied camera fields onto the saved
+view. A description-only update preserves its camera even when the live camera
+has moved. Invalid projection values and conflicting renames leave the view
+unchanged. `view_save` continues to use the live camera for omitted fields.
+
+Active clipping planes cut crossing StandardMaterial geometry in color and
+shadow/depth passes on native, WebGPU and WebGL2. The live renderer supports up
+to eight planes; exceeding that capacity reports an error and hides geometry
+rather than rendering an incomplete subset. Opaque cut faces use a transient,
+batched cache rebuilt on relevant geometry, visibility or material changes.
+Cap construction schedules at most 32,768 source-triangle/plane pairs per update;
+a single mesh exceeding that limit skips live caps with a warning while retaining
+GPU clipping and offline section export. These render caches are not authored
+project entities. Drawing-owned dimensions appear in their active Draft rather
+than accumulating all drawing views in ordinary 3D.
 
 Lighting is treated as authored scene state rather than a private startup
 fixture. That means:
@@ -870,3 +990,414 @@ Capability packs should contribute enough metadata that MCP clients can:
 
 If a capability only works through UI-specific logic and cannot be understood
 through MCP, it is not aligned with the platform direction.
+
+### Editing imported mesh positions
+
+`set_entity_property` / `set_property` accepts `vertices` for `triangle_mesh`
+entities. Supply the complete array of finite `[x,y,z]` positions with the
+existing vertex count. This changes positions through the shared undo/history
+command while preserving entity id, faces, name, layer, materials and group
+membership; derived normals are regenerated. It does not infer wall/window
+semantics, change topology, or establish a refinement claim. Read the current
+snapshot first and verify unchanged source geometry before applying a prepared
+edit. Use native hosted/parametric edits for semantic architectural entities.
+
+## Shared occurrence control planning
+
+Occurrence control edits from the inspector and `occurrence.update_overrides`
+run the same `core.occurrence_parameters` planning stage. Capability-owned
+`EditPlanModifiers` can add dependent authored snapshots before immutable
+capture; their originals become part of the same undo unit. A capability can
+set `PlanContext.refusals` to reject a candidate before mutation. Informational
+findings remain distinct from refusals. This stage is shared by native and
+browser transports and contains no domain-specific hosting rules.
+
+## Procedural session freshness and retries
+
+`procedural_session.create` captures a transient document identity and monotonic
+model revision in `snapshot.base_model_revision`, plus a `commit_id`. Include
+that identity in `procedural_session.commit`. Older clients may omit it; omission
+uses the prepared identity and does not request another execution.
+
+An accepted edit, undo, redo, new document, or project load invalidates an
+uncommitted proposal. Commit refuses before mutation when its captured revision
+is stale. Create a new session from the current model and reevaluate the steps.
+Changing a document back to its previous shape does not make an old proposal
+current again.
+
+Each session has one successful execution. Retrying with the same options
+returns the original receipt, including its `commit_id`, without replay—even
+after undo or document replacement. The receipt describes the original execution,
+not the current existence of its output entities. Different commit options or
+another identity are refused after success; further evaluation is also refused.
+For a deliberate rerun, create a new session. Sessions and receipts are transient
+and are not restored by loading a project or restarting the app.
+
+### Procedural commit transaction and validation
+
+The live session executor applies supported commands provisionally, checks real
+postconditions and current whole-document validators/obligations, then accepts
+one history action. A late dispatch error, unmet postcondition, policy refusal,
+or failed inline export rolls back admitted commands and preserves the prior
+undo/redo history, save point, and pending user work. A successful compound
+commit has one undo/redo unit. Rollback advances the revision fence; rebuild a
+failed proposal from the current document before retrying it.
+
+The audited set is `create_box`, `create_entity`, `definition.create`,
+`definition.instantiate`, `occurrence.place`, `set_property`, `model_summary`,
+and `run_validation_v2`. `ProjectRoot` edits apply to new content; `set_property`
+cannot modify a pre-existing element through that scope. Refinement scopes,
+organization-library writes, nested session instructions, and `parametric.create`
+currently return `unsupported_transaction` before any step executes. Their
+native APIs remain available; they need an audited command transaction before
+being admitted to a procedural commit. Pending user commands also refuse commit
+so they cannot be swept into a procedure's rollback or undo group.
+
+Dry-run responses explicitly say `structural_projection_only`. Their stub IDs,
+findings, and bindings are descriptor projections, not a live preview or proof
+of geometric feasibility. The commit receipt identifies `live_model` validation,
+its registered constraint IDs and whole-document scope. No findings does not
+mean unregistered constraints passed or that rendered geometry was reviewed.
+
+`require_clean` rejects live findings and unresolved/deferred obligations.
+`accept_with_waivers` requires exactly identified current findings and non-empty
+rationales; it cannot silently waive outstanding obligations. `accept_partial`
+reports current findings and carries unresolved obligations explicitly. `options.postconditions` supplies additional commit promises and is included
+in the retry identity and accepted script export. Relation
+postconditions inspect real endpoints; claim grounding must match on an
+unambiguous target; obligation satisfaction must refer to the actual output
+entity of the specified step. Missing or ambiguous evidence fails closed.
+
+## Design explanation
+
+`explain_design { element_id }` returns the same read projection shown in the
+property inspector's **Design explanation** section: recorded creation and
+assembly context, Definition controls and hosting, direct dependencies, grounding
+and source references, unresolved decisions/obligations, and last-sweep validator
+coverage. It includes the document/model revision and explicit omission counts.
+
+The projection is transient. Missing direct provenance is reported as missing,
+not inferred to be Freeform; assembly membership is context, not inherited proof.
+A source reference can be present, missing, or unresolved by this projection.
+Presence does not establish applicability. Validation is a recorded sweep, not a
+fresh run or an assertion that absent findings prove completeness. Dependencies
+include recorded inactive alternatives and do not replace an exact edit plan.
+
+Limits are 24 rows per section, 512 characters per text field, 2 KiB per structured
+row detail, and a 48 KiB retained-row budget (complete responses below 64 KiB).
+Use the named detail tools for omitted content. `definition.explain`,
+`occurrence.resolve`, and `lookup_source_passage` are available in inspection
+alongside `explain_design`; these are read-only operations.
+
+The inspector refreshes on selection, revision, Definition registry, relevant
+source-component or dependency-graph changes. It clears while a transform is
+active and offers an explicit Refresh action for a new validation observation.
+No dependency scan is performed per frame for an unchanged selection.
+
+`get_authoring_provenance` likewise returns `mode: "Unrecorded"` when no direct
+component exists. Explicit Freeform records remain Freeform. Elevation-intent
+declaration and binding are editing operations and are not in inspection.
+
+The projection includes the coarse `SemanticIntent` brief, actual
+`SettingOutContract`, recorded refinement lineage, hosted opening/fill links,
+and enclosing aggregate context. Parent unresolved decisions are linked as
+context, without inventing local obligations or inheriting claim grounding.
+A recorded relationship is not proof that every edit propagates through it.
+
+### Native refinement continuation
+
+Refinement branch basis v2 retains the actual dimensional contract and
+fingerprints native authored inputs reached through membership, factory-declared
+inputs, participating semantic relations and core hosting contracts. Definition
+changes, host/opening edits and reservation changes invalidate old content even
+when no anchor revision exists. This is a one-shot read of existing authorities,
+not a new source graph. Legacy v1 bases load but require regeneration before
+silent reactivation. Parameter-only three-way rebase cannot certify changed
+native geometry or migrate a legacy basis. Unchanged native input preserves the
+existing park/reactivate path; persisted undo history is still not promised.
+
+### Explicit project reload
+
+`load_project` always reads the requested file and replaces document state, even
+when it is the current path and the dirty flag is false. This discards unsaved
+state and invalidates old document revision tokens and transient parametric
+instances. A missing or invalid file reports an error before replacing the scene.
+Use `get_instance_info` to inspect the current document without reloading it.
+
+### Native drag evidence
+
+`ux_drag { start, end, steps, trace: true }` opts into a bounded input trace.
+`ux_observe.drag_trace` retains the most recent traced gesture (at most 128
+rows; a drag admits at most 123 input steps). Each row identifies the captured
+native candidate, affected IDs, model revision, and preview refusal if any.
+The release row independently compares the committed authored snapshots with
+the exact candidate retained before release and requires one revision advance.
+Untraced gestures incur no snapshot-comparison or trace-row work.
+
+Timing begins when the harness injects an input edge into Bevy, excluding MCP
+transport/queue latency. `main_frame_ms` ends after the main schedule;
+`release_to_commit_ms` is emitted only for an exact successful commit.
+`present_ms` ends after Bevy submits the same extracted frame's primary-window
+swapchain for presentation. It does not measure physical display scanout. A
+missing acquired/presented surface leaves this field null; headless CPU work
+must never be counted as a rendered-frame pass. The hook uses Bevy's render
+schedule directly, without a renderer fork or synchronous GPU readback.
+
+Input injection precedes cursor projection, snapping, and modal preview/confirm
+consumers. Use rendered inspection alongside traces: a submitted frame proves
+neither geometric correctness nor that an intended grip was selected. A release
+without a captured candidate has no commit verdict and cannot pass the gesture
+gate. Exported viewport images intentionally suppress manipulator overlays;
+`include_ui: true` requires a capturable native window.
+
+### Captured semantic edits
+
+`list_edit_requests` advertises `core.semantic` alongside `core.transform`.
+Its live schema accepts `AssignConcept`, `RemoveConcept`, `PublishAnchors` and
+`Bind` intents (externally tagged JSON variants). An anchor target contains
+`publisher`, `kind` and `role`. Preview with `preview_edit_plan`, inspect the
+captured `semantic_changes` and `semantic_refusals`, and apply only the returned
+`plan_id`. Refusals include the proposition, observed host, repair, contrasts
+and evidence; compatible current anchors are named when available.
+
+The existing AuthoredEditPlan captures before/after views of ConceptAssignment,
+PublishedAnchors and SemanticBindings. Apply, undo and redo restore those exact
+components. Both revision checks and semantic before-state checks fence stale
+proposals, including changes made by legacy metadata writers. Existing native
+semantic sidecars persist this state; no additional durable graph is introduced.
+The compatibility tools `assign_concept` and `publish_anchors` use this same
+captured command/history path.
+
+`resolve_domain_term` returns publication contracts and current required-anchor
+candidates. `get_entity_details` and the shared design explanation expose the
+recorded meaning and bindings. Publication roles must satisfy the installed
+contract. Reidentifying a concept validates retained bindings and publications;
+explicit removal records a downgrade and clears its own semantic components.
+Bare-entity relations remain the responsibility of their relation planners.
+
+Declared anchor identity does **not** prove resolved geometry, automatic
+placement/reseating, engineering validity or parametric driver persistence.
+Geometry edits still use the appropriate shared edit request or curated
+materializer. This bounded semantic request has no dedicated native drag UI;
+the wider interactive anchor-binding and regeneration acceptance remains open.
+
+### Native occurrence controls and polygon bodies
+
+`list_edit_requests` exposes `core.occurrence_parameters` when model-api planners
+are installed. Supply an occurrence `element_id` and an `overrides` object to
+`preview_edit_plan`; inspect and apply the returned plan ID. The property
+inspector's **Edit occurrence controls** editor uses this same request. It
+validates the proposed value without changing the live geometry, then commits
+through captured history. A model change while typing requires reopening the
+control from the current value. Compatibility `occurrence.update_overrides`
+and occurrence `set_property` calls use the same planner and guards.
+
+Full body evaluation precedes edits, including child expressions and dependent
+opening snapshots. Unknown/locked controls, invalid profiles and stale plans
+are refusals. Native save/reload preserves Definition bodies and occurrence
+overrides; it does not reconstruct missing controls from old frozen geometry.
+`occurrence.explain` reports `evaluation_error` for unresolved saved bodies.
+
+The canonical body additionally supports `PolygonExtrusion`: 3–256 local X/Z
+vertices expressed as `BodyExpr`, an extrusion height along local Y, and an
+explicit length `coordinate_unit`. Dimensional expressions must match that
+unit; literals use it. Coordinates convert to world metres at evaluation.
+Non-finite, degenerate and self-intersecting profiles are refused. Compound
+`TransformBinding.translation_unit` similarly makes the translation boundary
+explicit; omitted units retain the legacy world-metre convention.
+
+`modeling::parametric_definition::translate_representation` provides a bounded
+translation of curated emitting representations into a root Definition and
+internal child Definitions. It preserves source member annotations as opaque
+child metadata, typed driver defaults and lock policy, expression dependencies,
+placements and stable occurrence/slot identities. Domain validation and semantic
+projection remain the domain pack's responsibility. This is a draft native body,
+not a released package, inferred reverse engineering, or a serialized parallel
+parametric instance store.
+
+Domain capabilities can register bounded, read-only `DesignExplanationProviders`
+to project source context, evidence and unresolved limits from their existing
+registries. These notes feed the same inspector/MCP explanation; they do not
+promote instance refinement, manufacture obligations, or persist another graph.
+
+### Retained foreign inputs and native interpretation
+
+`list_edit_requests` exposes two bounded, provider-independent requests:
+
+- `core.foreign_reference`: exact input bytes (1..65536), source name, format and
+  release, producer/version, license/provenance, and explicit length unit,
+  right-handed Y-up or Z-up frame, world translation in metres and unit quaternion.
+  The OBJ adapter proposes reference meshes with typed degradation records. It
+  reports loss of editable history, native semantics, materials/UV and precision;
+  unsupported records and fan triangulation are explicit. Unsupported formats or
+  adapter failures propose source-only retention without partial geometry.
+- `core.foreign_native_mapping`: one unconnected reference element, an already
+  registered native Definition, explicit overrides and world placement, rationale
+  and unresolved assumptions. Acceptance replaces only that part with a native
+  occurrence. It retains the original source and other parts. This is a new native
+  interpretation; it does not recover foreign intent or establish refinement.
+  Connected/claimed/linked references require a future capability-owned
+  migration and are refused by this bounded path. Native snapshots preserve the
+  reference layer and material assignment through replacement, controls and reload.
+
+Both requests use `preview_edit_plan`, `inspect_edit_plan` and `apply_edit_plan`.
+Discarding a preview leaves the document unchanged. Apply is atomic with source
+retention, is history-backed, and rejects stale or consumed plans. Undo restores
+references and removes sources created by the undone import; redo restores the
+captured content. Sources already present are immutable, and conflicting provenance
+for the same bytes is refused rather than overwritten.
+
+`get_foreign_sources` lists manifests and adapter assessments. For exact retained
+input, provide one `digest` with `include_bytes:true`. Source bytes are BLAKE3
+addressed project assets (128 artifacts / 4 MiB total), persisted in `.talos3d`;
+no original file or provider is needed after reload. Digests and source links are
+validated before replacing the open document. This slice does not implement a
+foreign component lifecycle, general vendor/IFC adapters or released Definition
+package identity. `explain_design` and the inspector expose the same source links,
+interpretation rationale and uncertainty.
+
+Linked-model import of a project containing retained foreign sources is explicitly
+gated until the linked asset migration exists. Open that project normally to
+preserve its context. Subset export includes referenced artifacts; it omits
+unrelated project inputs. Plans that reuse an existing source capture an unchanged
+before/after resource condition, so legacy writers cannot silently change their
+source context between preview and apply.
+
+### Selecting compound occurrence members
+
+Double-click a compound occurrence to enter it, then click a constituent member.
+The Outliner also selects each member directly and names it from its controlling
+Definition. Escape leaves the occurrence and restores its containing group
+context. Generated members retain stable owner/slot identity through regeneration;
+they do not become independently persisted primitives. Their property inspector
+routes changes to the controlling Definition, and the GPU selection overlay
+highlights only the selected member.
+
+
+## Occurrence material overrides
+
+Typed material assignment on a reusable occurrence is authored state: the
+`OccurrenceIdentity.material_override` binding retains both MaterialSpec and
+render references across save/reload, transforms and snapshot history. UI
+selection commands, MCP material assignment and texture mapping edits use the
+same setter. The rendered root resolves the occurrence override before its
+effective Definition material. Clearing an occurrence assignment removes its
+override and restores the inherited Definition material; it does not erase the
+family default. Older occurrences without an override continue to inherit.
+
+For material-bearing model work, verify `get_material_assignment` after saving
+and reopening, including individual overrides that differ from family defaults.
+A successful assignment response or a matching wood colour alone is insufficient
+evidence that a structural grade has been preserved.
+
+### Physical controls and authored layer persistence
+
+Occurrence parameter edits through MCP and the inspector evaluate the complete
+body before committing. A changed parameter marked `geometry_affecting` is
+refused if the physical body is unchanged in that state. This catches compound
+Definitions that advertise dimensions but bind child geometry to literals.
+Connect the parameter to body expressions, or explicitly mark metadata-only
+parameters with `geometry_affecting: false`. The refusal occurs before dependent
+opening or history changes; it does not silently scale a frozen product.
+
+Generic primitive snapshots now retain their optional layer name through native
+project capture, reload and edits. Legacy records without a layer remain valid;
+an assignment absent from an older saved file cannot be reconstructed from it.
+
+Rectangular cuts on metric planar host charts apply `Uniform` clearance to each
+edge of the profile. Cut validation, reported world profile and generated reveal
+vertices use the same expanded geometry. Invalid distances, unsupported profile
+shapes and non-metric chart types are refused instead of treating the allowance
+as decorative metadata.
+
+On browser WebGL2, viewport-only captures crop the presented window framebuffer
+using the viewport bounds. This avoids the secondary render target returning a
+black image while the actual canvas is visible. The evidence-quality check stays
+enabled.
+
+`definition.create` and `definition.update` accept `material_assignment` using
+the same typed assignment, material-id string or null accepted by other material
+edits. Invalid references are refused before history changes; an explicit
+assignment is retained in the Definition.
+
+`procedural_session.create` returns `registered_step_tools`. This is the admitted
+step surface, which is smaller than the full MCP tool list. An advertised tool
+such as `instantiate_recipe` can be called directly even when it has no
+procedural-session descriptor; unsupported batching is now reported with that
+next action instead of an unexplained registry error.
+
+Browser drawing exports use the same paper-mm sheet writers as native exports.
+`export_drawing` and `export_drafting_sheet` return `transport: "browser_memory"`,
+`mime_type` and `data_base64` in the browser; native callers retain `path`.
+Decode the returned bytes to obtain the PDF/SVG/DXF/PNG. The view must be
+orthographic. Browser menu export downloads the generated file without a native
+filesystem or save dialog. PDF menu export retains the Drafting-mode requirement.
+
+Section visibility culls only meshes whose transformed Bevy bounds lie entirely
+on the hidden side. Crossing meshes remain available to the canonical
+DrawingScene section projector. Updating or disabling a section does not unhide
+unrelated hidden meshes. Bounds/transform/plane changes invalidate this work;
+idle frames do not traverse mesh vertices or rewrite visibility.
+
+Embedded material textures use a repeating sampler so UV scale/offset actually
+tiles the image instead of stretching the last texel across the surface.
+
+## Shared cloud agent skills
+
+The stable onboarding path is `get_instance_info`, `negotiate_agent_session`
+(with the task), `get_authoring_guidance`, `get_capability_snapshot`, then every
+required card and skill. Native transport and browser gateways must advertise
+this path in MCP initialization instructions; a client must not need repository
+or provider-local skill files to discover it.
+
+Applications supply `AgentCorpusConnection`: a trusted HTTPS service URL and,
+for contributions/review, the host's existing account credential. Core supplies
+one async client and the same handlers for native and browser. Credentials are
+never MCP parameters or results. The reference service reuses authenticated
+project accounts, Postgres metadata/audit and immutable R2 bundles.
+
+- `list_agent_skills` / `find_agent_skills`: merge released cloud skills with
+  bundled/private procedures. Cloud status is explicit; an outage is not proof
+  of freshness. Withdrawn skills suppress stale bundled fallback while online.
+- `get_agent_skill`: retrieve the latest released procedure, its immutable
+  `corpus_revision`, resource index and epoch. `get_agent_skill_resource` fetches
+  a reference/schema/helper source by that exact revision; fetched code is
+  never automatically executed.
+- `get_agent_corpus_status`: check the live epoch on onboarding, at task
+  boundaries, after learning, and before authoring. Re-fetch changed procedures.
+  No tool can retroactively update text already in an agent's context. App/tool
+  schema changes still require compatible application releases.
+- `contribute_agent_skill` (curation): persist a generalized bundle, applicable
+  scope, limitations, source/regression evidence and redistribution rights.
+  A receipt identifies a durable candidate, not a release. Reusable procedures
+  belong here rather than only in a provider's home-directory skill store.
+- `list_agent_skill_contributions`, `get_agent_skill_contribution`,
+  `review_agent_skill_contribution`: the authenticated publisher review path.
+  Release requires confidentiality, rights and regression review. Released bytes
+  are immutable; withdraw/reject are audited transitions, not in-place rewrites.
+- `save_agent_skill_draft`: private project data, undoable and persisted in native
+  capture/open and private project cloud sync; cannot replace shipped skills or
+  grant itself bootstrap authority. New/open documents drop previous private skills.
+
+Keep private site/customer/project facts in private project knowledge. Domain
+facts, geometry-producing knowledge and product families belong in existing
+recipes, Definitions, catalogs, source passages and validators; skills explain
+how to use those assets and do not create a competing geometry or rule engine.
+
+### Bounded deformation of measured geometry
+
+`definition.create` / `definition.update` accept `DeformableMesh` in the canonical
+body. It contains `mesh` (the unit-typed FrozenMesh shape) and 1–3 `axes`:
+`{axis: 0|1|2, parameter, reference_value, stations: [[coordinate, weight], ...]}`.
+At a new dimension, each target station is `coordinate + weight *
+(parameter-reference_value)`. Between stations, coordinates interpolate linearly.
+Equal adjacent weights preserve measured border widths. At the reference value,
+the original geometry is reproduced. Stations must cover every vertex and remain
+strictly increasing; collapsed, inverted, nonfinite or undeclared dimensions are
+rejected before geometry changes. Parameters must be geometry-affecting.
+
+This is a generic editing mechanism; domain capabilities own which controls and
+constraints are justified by source evidence. It makes no claim to recover a
+manufacturer's parametric design history. Evaluation uses the ordinary shared
+occurrence preflight, GPU mesh cache, material/compound, transform and persistence
+paths. No import recognition runs in the viewport loop.

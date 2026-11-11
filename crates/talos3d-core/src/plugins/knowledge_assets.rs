@@ -136,6 +136,16 @@ pub fn parse_scope(value: Option<&str>) -> Result<Scope, String> {
     }
 }
 
+/// Authoring may persist private/team drafts, but cannot publish shipped corpus
+/// content by selecting a scope in an MCP argument. Releases use operator curation.
+pub fn parse_draft_scope(value: Option<&str>) -> Result<Scope, String> {
+    let scope = parse_scope(value)?;
+    if scope == Scope::Shipped {
+        return Err("Shipped scope requires an explicitly reviewed corpus release; save a project/org draft instead".into());
+    }
+    Ok(scope)
+}
+
 pub fn scope_as_str(scope: Scope) -> &'static str {
     match scope {
         Scope::Session => "session",
@@ -160,10 +170,53 @@ pub fn validation_as_str(validation: &ValidationStatus) -> &'static str {
     }
 }
 
+/// Knowledge changes use the same before/after history path as model commands,
+/// so private learning participates in autosave revision fences and undo/redo.
+pub(crate) fn apply_knowledge_update<T: bevy::prelude::Resource + Clone>(
+    world: &mut bevy::prelude::World,
+    before: T,
+    after: T,
+    label: &'static str,
+) {
+    struct Replace<T> {
+        before: T,
+        after: T,
+        label: &'static str,
+    }
+    impl<T: bevy::prelude::Resource + Clone> crate::plugins::history::EditorCommand for Replace<T> {
+        fn label(&self) -> &'static str {
+            self.label
+        }
+        fn apply(&mut self, world: &mut bevy::prelude::World) {
+            world.insert_resource(self.after.clone());
+        }
+        fn undo(&mut self, world: &mut bevy::prelude::World) {
+            world.insert_resource(self.before.clone());
+        }
+    }
+    world.init_resource::<crate::plugins::history::History>();
+    world.init_resource::<crate::plugins::history::PendingCommandQueue>();
+    world.init_resource::<crate::plugins::document_state::DocumentState>();
+    world
+        .resource_mut::<crate::plugins::history::PendingCommandQueue>()
+        .push_command(Box::new(Replace {
+            before,
+            after,
+            label,
+        }));
+    crate::plugins::history::apply_pending_history_commands(world);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn agent_scope_cannot_publish_a_draft() {
+        assert!(parse_draft_scope(Some("shipped")).is_err());
+        assert_eq!(parse_draft_scope(None).unwrap(), Scope::Project);
+        assert_eq!(parse_draft_scope(Some("org")).unwrap(), Scope::Org);
+    }
     #[test]
     fn parse_scope_accepts_common_client_casing() {
         assert_eq!(parse_scope(Some("Project")), Ok(Scope::Project));

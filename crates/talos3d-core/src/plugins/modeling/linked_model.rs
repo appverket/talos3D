@@ -17,10 +17,12 @@ use crate::{
         command_registry::CommandResult,
         commands::{snapshot_dependency_order, ApplyEntityChangesCommand, CreateEntityCommand},
         document_state::DocumentState,
-        history::{EditorCommand, PendingCommandQueue},
+        history::{EditorCommand, History, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
+        layers::{LayerRegistry, ObjectVisibility},
         materials::{ensure_builtin_materials, MaterialRegistry, TextureRegistry},
         modeling::{
+            definition::DefinitionRegistry,
             dependency_graph::stamp_authored_entity_dependencies,
             group::{
                 collect_group_members_recursive, compose_snapshot_into_frame,
@@ -32,12 +34,16 @@ use crate::{
             snapshots::{EditableMeshSnapshot, TriangleMeshSnapshot},
         },
         persistence::{
+            apply_semantic_sidecars, capture_semantic_sidecars,
             deserialize_project_entity_records_with_assets, load_project_from_path,
-            serialize_entity_records_as_project, PersistedEntityRecord, ProjectEntityRecords,
+            serialize_entity_records_as_project, PersistedEntityRecord, PersistedSemanticSidecars,
+            ProjectEntityRecords,
         },
         selection::Selected,
         storage::Storage,
-        transform::{apply_transform_plan_modifiers, TransformMode},
+        transform::{
+            apply_transform_plan_modifiers, TransformMode, TransformStartOptions, TransformState,
+        },
     },
 };
 
@@ -57,6 +63,7 @@ pub struct LinkedModelRelationship {
     pub instance_name: String,
     pub source_path: String,
     pub source_root_id: u64,
+    pub source_kind: &'static str,
     pub loaded_content_hash: u64,
     pub frame: LinkedModelFrame,
     pub root_member_ids: Vec<u64>,
@@ -211,6 +218,11 @@ pub fn linked_model_relationship(
         instance_name: members.name.clone(),
         source_path: linked.path.clone(),
         source_root_id: linked.source_root_id.0,
+        source_kind: if linked.source_root_is_document {
+            "document"
+        } else {
+            "group"
+        },
         loaded_content_hash: linked.content_hash,
         frame: LinkedModelFrame {
             translation: members.frame.translation.to_array(),
@@ -423,7 +435,6 @@ pub fn plan_linked_model_placement(
 ) -> Result<LinkedModelPlacementPlan, LinkedModelPlacementError> {
     let subject = linked_model_placement_subject(world, instance_root_id)?;
     let all_member_ids = collect_group_members_recursive(world, instance_root_id);
-    let member_set = all_member_ids.iter().copied().collect::<HashSet<_>>();
     let leaf_ids = all_member_ids
         .iter()
         .copied()
@@ -441,7 +452,6 @@ pub fn plan_linked_model_placement(
     };
 
     let mut before = Vec::new();
-    let mut after = Vec::new();
     for leaf_id in leaf_ids {
         let snapshot = capture_snapshot(world, leaf_id).map_err(|message| {
             placement_error(
@@ -452,23 +462,14 @@ pub fn plan_linked_model_placement(
                 ),
             )
         })?;
-        if snapshot
-            .transform_parent()
-            .is_some_and(|parent_id| member_set.contains(&parent_id))
-        {
-            continue;
-        }
-        let placed = match operation {
-            LinkedModelPlacementOperation::Translate { delta } => snapshot.translate_by(delta),
-            LinkedModelPlacementOperation::Rotate { rotation, .. } => {
-                let target = pivot + rotation * (snapshot.center() - pivot);
-                let rotated = snapshot.rotate_by(rotation);
-                rotated.translate_by(target - rotated.center())
-            }
-        };
         before.push(snapshot);
-        after.push(placed);
     }
+    use crate::plugins::transform::{rigid_after, TransformMotion};
+    let motion = match operation {
+        LinkedModelPlacementOperation::Translate { delta } => TransformMotion::Move(delta),
+        LinkedModelPlacementOperation::Rotate { rotation, .. } => TransformMotion::Rotate(rotation),
+    };
+    let mut after = rigid_after(before.iter(), motion, pivot);
 
     let mut group_ids = vec![instance_root_id];
     group_ids.extend(
@@ -514,7 +515,25 @@ pub fn plan_linked_model_placement(
     })
 }
 
+/// A native file insertion stays cancellable while its shared Move gesture is active.
+#[derive(Resource)]
+struct LinkedPlacementGesture {
+    creation_revision: u64,
+}
+
+pub(crate) fn finish_linked_placement_gesture(world: &mut World, commit: bool) {
+    let Some(gesture) = world.remove_resource::<LinkedPlacementGesture>() else {
+        return;
+    };
+    if !commit && world.resource::<History>().model_revision() == gesture.creation_revision {
+        // Only undo our own just-created instance. Never undo a later external edit.
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+    }
+}
+
 struct CreateLinkedModelInstanceHistoryCommand {
+    sidecars: Vec<(ElementId, PersistedSemanticSidecars)>,
+    hidden: Vec<ElementId>,
     snapshots: Vec<BoxedEntity>,
     instance_root_id: ElementId,
 }
@@ -530,6 +549,12 @@ impl EditorCommand for CreateLinkedModelInstanceHistoryCommand {
             snapshot.apply_to(world);
             stamp_authored_entity_dependencies(world, snapshot);
         }
+        for (id, sidecars) in &self.sidecars {
+            apply_semantic_sidecars(world, *id, sidecars);
+        }
+        if let Some(mut visibility) = world.get_resource_mut::<ObjectVisibility>() {
+            visibility.hidden.extend(self.hidden.iter().copied());
+        }
         select_only(world, self.instance_root_id);
     }
 
@@ -537,6 +562,11 @@ impl EditorCommand for CreateLinkedModelInstanceHistoryCommand {
         self.snapshots.sort_by_key(snapshot_dependency_order);
         for snapshot in self.snapshots.iter().rev() {
             snapshot.remove_from(world);
+        }
+        if let Some(mut visibility) = world.get_resource_mut::<ObjectVisibility>() {
+            for id in &self.hidden {
+                visibility.hidden.remove(id);
+            }
         }
     }
 }
@@ -565,6 +595,7 @@ pub fn execute_create_linked_model(
         member_ids,
         frame,
         Some(LinkedModelRef {
+            source_root_is_document: false,
             path: key.clone(),
             source_root_id,
             source_to_scene_ids: source_ids
@@ -578,13 +609,30 @@ pub fn execute_create_linked_model(
             content_hash: hash,
         }),
     )?;
-    after.apply_to(world);
+    let mut before_snapshots = vec![before];
+    let mut after_snapshots = vec![after];
+    for id in source_ids.iter().copied().filter(|id| *id != group_id) {
+        if !is_group(world, id) {
+            continue;
+        }
+        let snapshot = capture_snapshot(world, id)?;
+        let group = snapshot.0.as_any().downcast_ref::<GroupSnapshot>().unwrap();
+        let mut cleaned = group.clone();
+        cleaned.member_ids.retain(|id| source_ids.contains(id));
+        if cleaned.member_ids != group.member_ids {
+            before_snapshots.push(snapshot);
+            after_snapshots.push(cleaned.into());
+        }
+    }
+    for snapshot in &after_snapshots {
+        snapshot.apply_to(world);
+    }
     world
         .resource_mut::<Messages<ApplyEntityChangesCommand>>()
         .write(ApplyEntityChangesCommand {
             label: "Create linked model",
-            before: vec![before],
-            after: vec![after.clone()],
+            before: before_snapshots,
+            after: after_snapshots,
         });
     let relationship = linked_model_relationship(world, group_id)?;
 
@@ -705,14 +753,22 @@ pub fn execute_place_linked_model(
     if world.get_resource::<PendingCommandQueue>().is_none() {
         return Err("Linked-model placement requires the command history plugin".to_string());
     }
+    if params.get("path").is_none() {
+        return request_linked_model_file(world, params);
+    }
     let Some(path) = place_linked_model_path(world, params)? else {
         return Ok(CommandResult::empty());
     };
     let key = path.to_string_lossy().into_owned();
     let bytes = world.resource::<Storage>().0.load(&key)?;
     let hash = content_hash(&bytes);
-    let linked_project = load_linked_project(world, &bytes)?;
-    let root = linked_project_root_group(&linked_project)?;
+    let mut linked_project = load_linked_project(world, &bytes, &key)?;
+    let default_name = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Linked Model");
+    let (root, source_root_is_document) =
+        linked_project_root_group(&mut linked_project, default_name)?;
     let group_id = world.resource::<ElementIdAllocator>().next_id();
     let name = params
         .get("name")
@@ -720,6 +776,7 @@ pub fn execute_place_linked_model(
         .unwrap_or(root.name.as_str())
         .to_string();
     let linked = LinkedModelRef {
+        source_root_is_document,
         path: key.clone(),
         source_root_id: root.element_id,
         source_to_scene_ids: Vec::new(),
@@ -753,9 +810,27 @@ pub fn execute_place_linked_model(
         .map(|id| capture_snapshot(world, id))
         .collect::<Result<Vec<_>, _>>()?;
     snapshots.sort_by_key(snapshot_dependency_order);
+    let sidecars = created
+        .iter()
+        .filter_map(|id| {
+            let entity = find_entity(world, *id)?;
+            Some((*id, capture_semantic_sidecars(&world.entity(entity))?))
+        })
+        .collect();
+    let hidden = created
+        .iter()
+        .copied()
+        .filter(|id| {
+            world
+                .get_resource::<ObjectVisibility>()
+                .is_some_and(|v| v.hidden.contains(id))
+        })
+        .collect();
     world
         .resource_mut::<PendingCommandQueue>()
         .push_command(Box::new(CreateLinkedModelInstanceHistoryCommand {
+            sidecars,
+            hidden,
             snapshots,
             instance_root_id: group_id,
         }));
@@ -1010,24 +1085,24 @@ fn linked_model_path(
     Ok(base.join("linked-models").join(file_name))
 }
 
-fn place_linked_model_path(world: &World, params: &Value) -> Result<Option<PathBuf>, String> {
+fn place_linked_model_path(_world: &World, params: &Value) -> Result<Option<PathBuf>, String> {
     if let Some(path) = params.get("path").and_then(Value::as_str) {
         if path.trim().is_empty() {
             return Err("path must not be empty".into());
         }
         return Ok(Some(PathBuf::from(path)));
     }
-    pick_linked_model_file(world)
+    Err("path must be provided".into())
 }
 
 #[cfg(target_arch = "wasm32")]
-fn pick_linked_model_file(_world: &World) -> Result<Option<PathBuf>, String> {
-    Err("Native open dialogs are not available in the browser shell".to_string())
+fn request_linked_model_file(_: &mut World, _: &Value) -> Result<CommandResult, String> {
+    Err("Native open dialogs are not available in the browser shell".into())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn pick_linked_model_file(world: &World) -> Result<Option<PathBuf>, String> {
-    let mut dialog = rfd::FileDialog::new().add_filter("Talos3D Project", &["talos3d"]);
+fn request_linked_model_file(world: &mut World, params: &Value) -> Result<CommandResult, String> {
+    let mut dialog = rfd::AsyncFileDialog::new().add_filter("Talos3D Project", &["talos3d"]);
     if let Some(parent) = world
         .get_resource::<DocumentState>()
         .and_then(|state| state.current_path.as_ref())
@@ -1035,7 +1110,45 @@ fn pick_linked_model_file(world: &World) -> Result<Option<PathBuf>, String> {
     {
         dialog = dialog.set_directory(parent);
     }
-    Ok(dialog.pick_file())
+    let mut params = params.clone();
+    crate::plugins::native_dialog::request(
+        world,
+        async move {
+            dialog
+                .pick_file()
+                .await
+                .map(|file| file.path().to_path_buf())
+        },
+        move |world, path| {
+            if let Some(path) = path {
+                params["path"] = Value::String(path.to_string_lossy().into_owned());
+                let creation_revision = world.resource::<History>().model_revision() + 1;
+                if let Err(error) = execute_place_linked_model(world, &params).map(|result| {
+                    if let Some(root_id) = result
+                        .output
+                        .as_ref()
+                        .and_then(|value| value["root_group_id"].as_u64())
+                    {
+                        world.insert_resource(LinkedPlacementGesture { creation_revision });
+                        let anchor = current_group_frame(world, ElementId(root_id)).translation;
+                        let mut state = world.resource_mut::<TransformState>();
+                        state.pending_mode = Some(TransformMode::Moving);
+                        state.pending_options = Some(TransformStartOptions {
+                            initial_cursor: Some(anchor),
+                            ..Default::default()
+                        });
+                    }
+                }) {
+                    if let Some(mut status) =
+                        world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
+                    {
+                        status.set_feedback(format!("Linked model failed: {error}"), 5.0);
+                    }
+                }
+            }
+        },
+    )?;
+    Ok(CommandResult::empty())
 }
 
 fn build_linked_model_file(
@@ -1063,6 +1176,22 @@ fn build_linked_model_file(
     ids.sort_by_key(|id| id.0);
     ids.dedup();
 
+    let excluded: HashSet<_> = ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            find_entity(world, *id).is_some_and(|entity| {
+                world
+                    .get::<crate::plugins::lighting::SceneLightNode>(entity)
+                    .is_some()
+            })
+        })
+        .collect();
+    ids.retain(|id| !excluded.contains(id));
+    let root_members = root_members
+        .into_iter()
+        .filter(|id| !excluded.contains(id))
+        .collect();
     let source_ids = ids.clone();
     let mut snapshots = ids
         .into_iter()
@@ -1072,11 +1201,17 @@ fn build_linked_model_file(
 
     let mut records = Vec::with_capacity(snapshots.len());
     for snapshot in snapshots {
-        let normalized = normalize_snapshot_for_linked_file(snapshot, group_id, &frame)?;
+        let mut normalized = normalize_snapshot_for_linked_file(snapshot, group_id, &frame)?;
+        if let Some(group) = normalized.0.as_any().downcast_ref::<GroupSnapshot>() {
+            let mut group = group.clone();
+            group.member_ids.retain(|id| !excluded.contains(id));
+            normalized = group.into();
+        }
         records.push(PersistedEntityRecord {
             type_name: normalized.type_name().to_string(),
             data: normalized.to_persisted_json(),
-            semantic: None,
+            semantic: find_entity(world, normalized.element_id())
+                .and_then(|entity| capture_semantic_sidecars(&world.entity(entity))),
         });
     }
     records.sort_by_key(|record| {
@@ -1282,6 +1417,9 @@ fn normalize_snapshot_for_linked_file(
         normalized.mesh.recompute_all_normals();
         return Ok(normalized.into());
     }
+    if frame.rotation == Quat::IDENTITY {
+        return Ok(snapshot.translate_with_parent(-frame.translation));
+    }
     Ok(snapshot
         .translate_by(-frame.translation)
         .rotate_by(inverse_rotation))
@@ -1300,72 +1438,252 @@ fn refresh_linked_group(
     if !force && hash == linked.content_hash {
         return Ok(None);
     }
-    let linked_project = load_linked_project(world, &bytes)?;
+    let mut linked_project = load_linked_project(world, &bytes, &linked.path)?;
+    if linked.source_root_is_document {
+        append_document_root(&mut linked_project, linked.source_root_id, "Linked Model")?;
+    }
     apply_linked_snapshots(world, group_id, linked, hash, linked_project)?;
     Ok(Some(hash))
 }
 
-fn load_linked_project(world: &World, bytes: &[u8]) -> Result<LinkedProject, String> {
+fn load_linked_project(
+    world: &World,
+    bytes: &[u8],
+    source_path: &str,
+) -> Result<LinkedProject, String> {
     let ProjectEntityRecords {
         entities: records,
         materials,
         textures,
+        definitions,
+        layers,
+        hidden_objects,
     } = deserialize_project_entity_records_with_assets(bytes)?;
+    // Source-scoped identities keep host definitions and separate linked files
+    // independent, while remaining stable across refresh and save/reload.
+    let namespace = blake3::hash(source_path.as_bytes()).to_hex();
+    let definition_ids = definitions
+        .as_ref()
+        .map(|registry| {
+            registry
+                .list()
+                .into_iter()
+                .map(|definition| {
+                    (
+                        definition.id.0.clone(),
+                        format!("linked-{}-{}", &namespace[..16], definition.id.0),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut imported_definitions = DefinitionRegistry::default();
+    if let Some(definitions) = definitions {
+        for definition in definitions.list() {
+            let mut value = serde_json::to_value(definition).map_err(|error| error.to_string())?;
+            remap_definition_ids(&mut value, &definition_ids);
+            imported_definitions
+                .insert(serde_json::from_value(value).map_err(|error| error.to_string())?);
+        }
+    }
+    let mut imported_layers = LayerRegistry::default();
+    imported_layers.layers.clear();
+    let mut layer_ids = HashMap::new();
+    if let Some(layers) = layers {
+        for (name, mut layer) in layers.layers {
+            let mapped = format!("Linked {} / {}", &namespace[..8], name);
+            layer_ids.insert(name, mapped.clone());
+            layer.name = mapped.clone();
+            imported_layers.layers.insert(mapped, layer);
+        }
+    }
     let registry = world.resource::<CapabilityRegistry>();
     let mut snapshots = Vec::with_capacity(records.len());
-    for record in records {
+    let mut sidecars = HashMap::new();
+    let mut excluded = HashSet::new();
+    for mut record in records {
+        // A linked model contributes model content, not the source document's
+        // sun/sky/scene-light rig. The host document owns its environment.
+        if record.type_name == "scene_light" {
+            if let Some(id) = record.data.get("element_id").and_then(Value::as_u64) {
+                excluded.insert(ElementId(id));
+            }
+            continue;
+        }
+        remap_layer_ids(&mut record.data, &layer_ids);
+        remap_definition_ids(&mut record.data, &definition_ids);
         let factory = registry
             .factory_for(&record.type_name)
             .ok_or_else(|| format!("No factory registered for '{}'", record.type_name))?;
-        snapshots.push(factory.from_persisted_json(&record.data)?);
+        let snapshot = factory.from_persisted_json(&record.data)?;
+        if let Some(semantic) = record.semantic {
+            let mut value = serde_json::to_value(semantic).map_err(|e| e.to_string())?;
+            remap_definition_ids(&mut value, &definition_ids);
+            remap_layer_ids(&mut value, &layer_ids);
+            sidecars.insert(snapshot.element_id(), value);
+        }
+        snapshots.push(snapshot);
+    }
+    for snapshot in &mut snapshots {
+        if let Some(group) = snapshot.0.as_any().downcast_ref::<GroupSnapshot>() {
+            let mut group = group.clone();
+            group.member_ids.retain(|id| !excluded.contains(id));
+            *snapshot = group.into();
+        }
     }
     snapshots.sort_by_key(snapshot_dependency_order);
     Ok(LinkedProject {
+        layers: imported_layers,
+        hidden_objects,
+        sidecars,
         snapshots,
         materials,
         textures,
+        definitions: imported_definitions,
     })
 }
 
+fn remap_layer_ids(value: &mut Value, ids: &HashMap<String, String>) {
+    match value {
+        Value::Object(values) => {
+            for (key, value) in values {
+                if key == "layer" {
+                    if let Some(mapped) = value.as_str().and_then(|name| ids.get(name)) {
+                        *value = Value::String(mapped.clone());
+                        continue;
+                    }
+                }
+                remap_layer_ids(value, ids);
+            }
+        }
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| remap_layer_ids(value, ids)),
+        _ => {}
+    }
+}
+
+fn remap_definition_ids(value: &mut Value, ids: &HashMap<String, String>) {
+    match value {
+        Value::String(id) => {
+            if let Some(mapped) = ids.get(id) {
+                *id = mapped.clone();
+            }
+        }
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| remap_definition_ids(value, ids)),
+        Value::Object(values) => {
+            let original = std::mem::take(values);
+            for (key, mut value) in original {
+                remap_definition_ids(&mut value, ids);
+                values.insert(ids.get(&key).cloned().unwrap_or(key), value);
+            }
+        }
+        _ => {}
+    }
+}
+
 struct LinkedProject {
+    layers: LayerRegistry,
+    hidden_objects: std::collections::BTreeSet<ElementId>,
+    sidecars: HashMap<ElementId, Value>,
+    definitions: DefinitionRegistry,
     snapshots: Vec<BoxedEntity>,
     materials: Option<MaterialRegistry>,
     textures: Option<TextureRegistry>,
 }
 
-fn linked_project_root_group(linked_project: &LinkedProject) -> Result<GroupSnapshot, String> {
-    let groups = linked_project
+/// Preserve the extracted-group format when one group contains all source
+/// roots. Ordinary documents may have loose objects or several independent
+/// groups; give those one virtual root, without modifying the source file.
+fn linked_project_root_group(
+    project: &mut LinkedProject,
+    name: &str,
+) -> Result<(GroupSnapshot, bool), String> {
+    if project.snapshots.is_empty() {
+        return Err("Linked model file is empty".to_string());
+    }
+    let child_ids = project
         .snapshots
         .iter()
         .filter_map(|snapshot| snapshot.0.as_any().downcast_ref::<GroupSnapshot>())
-        .cloned()
-        .collect::<Vec<_>>();
-    if groups.is_empty() {
-        return Err("Linked model file does not contain a group to place".to_string());
-    }
-
-    let group_ids = groups
-        .iter()
-        .map(|group| group.element_id)
-        .collect::<HashSet<_>>();
-    let child_group_ids = groups
-        .iter()
         .flat_map(|group| group.member_ids.iter().copied())
-        .filter(|id| group_ids.contains(id))
         .collect::<HashSet<_>>();
-    let mut root_candidates = groups
+    let roots = project
+        .snapshots
         .iter()
-        .filter(|group| !child_group_ids.contains(&group.element_id))
-        .cloned()
+        .filter(|snapshot| !child_ids.contains(&snapshot.element_id()))
         .collect::<Vec<_>>();
-    if root_candidates.is_empty() {
-        root_candidates = groups;
+    if let [snapshot] = roots.as_slice() {
+        if let Some(group) = snapshot.0.as_any().downcast_ref::<GroupSnapshot>() {
+            return Ok((group.clone(), false));
+        }
     }
-    root_candidates.sort_by_key(|group| group.element_id.0);
-    root_candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Linked model file does not contain a group to place".to_string())
+    let source_ids = project
+        .snapshots
+        .iter()
+        .map(|snapshot| snapshot.element_id())
+        .collect::<HashSet<_>>();
+    // Reserve from the top of JSON's exact-integer range, away from normal
+    // sequential element allocation. This id is stable in the relationship,
+    // including across source edits, and never written into the source file.
+    let root_id = (0..=((1_u64 << 53) - 1))
+        .rev()
+        .map(ElementId)
+        .find(|id| !source_ids.contains(id))
+        .ok_or_else(|| "Linked model has no available document-root identity".to_string())?;
+    Ok((append_document_root(project, root_id, name)?, true))
+}
+
+fn append_document_root(
+    project: &mut LinkedProject,
+    root_id: ElementId,
+    name: &str,
+) -> Result<GroupSnapshot, String> {
+    if project
+        .snapshots
+        .iter()
+        .any(|snapshot| snapshot.element_id() == root_id)
+    {
+        return Err(
+            "Linked source now uses its reserved document-root identity; place the file again"
+                .to_string(),
+        );
+    }
+    if project.snapshots.is_empty() {
+        return Err("Linked model file is empty".to_string());
+    }
+    let child_ids = project
+        .snapshots
+        .iter()
+        .filter_map(|snapshot| snapshot.0.as_any().downcast_ref::<GroupSnapshot>())
+        .flat_map(|group| group.member_ids.iter().copied())
+        .collect::<HashSet<_>>();
+    let mut member_ids = project
+        .snapshots
+        .iter()
+        .map(|snapshot| snapshot.element_id())
+        .filter(|id| !child_ids.contains(id))
+        .collect::<Vec<_>>();
+    member_ids.sort_unstable();
+    member_ids.dedup();
+    if member_ids.is_empty() {
+        return Err(
+            "Linked model file has no top-level objects (cyclic group membership)".to_string(),
+        );
+    }
+    let root = GroupSnapshot {
+        element_id: root_id,
+        name: name.to_string(),
+        member_ids,
+        frame: GroupFrame::identity(),
+        composite: None,
+        linked_model: None,
+        cached_bounds: None,
+    };
+    project.snapshots.push(root.clone().into());
+    Ok(root)
 }
 
 fn apply_linked_snapshots(
@@ -1375,12 +1693,31 @@ fn apply_linked_snapshots(
     hash: u64,
     linked_project: LinkedProject,
 ) -> Result<(), String> {
+    if world.get_resource::<DefinitionRegistry>().is_none() {
+        world.insert_resource(DefinitionRegistry::default());
+    }
+    for definition in linked_project.definitions.list() {
+        world
+            .resource_mut::<DefinitionRegistry>()
+            .insert(definition.clone());
+    }
     merge_linked_project_assets(world, linked_project.materials, linked_project.textures);
+    if world.get_resource::<LayerRegistry>().is_none() {
+        world.insert_resource(LayerRegistry::default());
+    }
+    for (name, source_layer) in linked_project.layers.layers {
+        let mut registry = world.resource_mut::<LayerRegistry>();
+        registry.ensure_layer(&name);
+        let layer = registry.layers.get_mut(&name).unwrap();
+        layer.visible = source_layer.visible;
+        layer.locked = source_layer.locked;
+        layer.color = source_layer.color;
+    }
     let snapshots = linked_project.snapshots;
     let root = snapshots
         .iter()
-        .find_map(|snapshot| snapshot.0.as_any().downcast_ref::<GroupSnapshot>())
-        .filter(|group| group.element_id == linked.source_root_id)
+        .filter_map(|snapshot| snapshot.0.as_any().downcast_ref::<GroupSnapshot>())
+        .find(|group| group.element_id == linked.source_root_id)
         .cloned()
         .ok_or_else(|| "Linked model file is missing its root group".to_string())?;
     let frame = current_group_frame(world, group_id);
@@ -1434,11 +1771,40 @@ fn apply_linked_snapshots(
             continue;
         }
         let remapped = remap_linked_snapshot(world, snapshot, &id_map)?;
-        let composed = compose_linked_snapshot(remapped, &frame);
+        // Source records are in dependency order. Reuse the transformed host
+        // for children whose authored controls are expressed in its frame.
+        let child = remapped.transform_parent().and_then(|id| {
+            let parent = capture_snapshot(world, id).ok()?;
+            remapped.0.with_transformed_parent(parent.0.as_ref())
+        });
+        let composed = child.unwrap_or_else(|| compose_linked_snapshot(remapped, &frame));
         composed.apply_to(world);
         stamp_authored_entity_dependencies(world, &composed);
     }
 
+    for (source_id, mut value) in linked_project.sidecars {
+        if let Some(scene_id) = id_map.get(&source_id) {
+            remap_element_ids_in_value(&mut value, None, &id_map);
+            let sidecars: PersistedSemanticSidecars =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            apply_semantic_sidecars(world, *scene_id, &sidecars);
+        }
+    }
+    if world.get_resource::<ObjectVisibility>().is_none() {
+        world.insert_resource(ObjectVisibility::default());
+    }
+    {
+        let mut visibility = world.resource_mut::<ObjectVisibility>();
+        for mapping in &linked.source_to_scene_ids {
+            visibility.hidden.remove(&mapping.scene_id);
+        }
+        visibility.hidden.extend(
+            linked_project
+                .hidden_objects
+                .iter()
+                .filter_map(|id| id_map.get(id).copied()),
+        );
+    }
     linked.content_hash = hash;
     linked.source_to_scene_ids = id_map
         .iter()
@@ -1614,10 +1980,18 @@ fn remap_element_ids_in_value(
 }
 
 fn is_element_id_key(key: &str) -> bool {
-    matches!(
-        key,
-        "element_id" | "source" | "target" | "source_root_id" | "source_id" | "scene_id"
-    )
+    key.ends_with("_element_id")
+        || matches!(
+            key,
+            "element_id"
+                | "source"
+                | "target"
+                | "source_root_id"
+                | "source_id"
+                | "scene_id"
+                | "host_ref"
+                | "hosted_fill_ref"
+        )
 }
 
 fn is_element_id_array_key(key: &str) -> bool {
@@ -1735,6 +2109,9 @@ fn bump_allocator_past(world: &mut World, ids: &HashSet<ElementId>) {
 
 fn content_hash(bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
+    // Import policy is part of the cache identity. Older links refresh once even
+    // when their source bytes have not changed (both extracted and placed links).
+    "linked-model-content-v2".hash(&mut hasher);
     bytes.hash(&mut hasher);
     hasher.finish()
 }
@@ -1812,6 +2189,7 @@ mod tests {
                 half_extents: Vec3::new(3.0, 0.25, 2.5),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -1824,6 +2202,7 @@ mod tests {
                 half_extents: Vec3::new(3.0, 1.25, 2.5),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -1853,6 +2232,484 @@ mod tests {
         )
         .expect("linked model should be placed");
         ElementId(result.created[0])
+    }
+
+    fn save_source(world: &mut World, path: &Path) -> Vec<u8> {
+        let mut ids = all_scene_element_ids(world).into_iter().collect::<Vec<_>>();
+        ids.sort_unstable();
+        let next = ids.iter().map(|id| id.0).max().unwrap_or(0) + 1;
+        let records = ids
+            .into_iter()
+            .map(|id| {
+                let snapshot = capture_snapshot(world, id).unwrap();
+                PersistedEntityRecord {
+                    type_name: snapshot.type_name().to_string(),
+                    data: snapshot.to_persisted_json(),
+                    semantic: find_entity(world, id)
+                        .and_then(|entity| capture_semantic_sidecars(&world.entity(entity))),
+                }
+            })
+            .collect();
+        let bytes = serialize_entity_records_as_project(world, next, records).unwrap();
+        std::fs::write(path, &bytes).unwrap();
+        bytes
+    }
+
+    fn mapped_id(world: &World, root: ElementId, source: u64) -> ElementId {
+        let relationship = linked_model_relationship(world, root).unwrap();
+        ElementId(
+            relationship
+                .source_to_scene_ids
+                .iter()
+                .find(|mapping| mapping.source_id == source)
+                .unwrap()
+                .scene_id,
+        )
+    }
+
+    #[test]
+    fn extracted_group_links_preserve_visibility_and_upgrade_without_source_edits() {
+        use crate::plugins::{
+            layers::{LayerAssignment, LayerRegistry, ObjectVisibility},
+            lighting::{SceneLightFactory, SceneLightNode, SceneLightSnapshot},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extracted.talos3d");
+        let mut host = test_world();
+        host.resource_mut::<CapabilityRegistry>()
+            .register_factory(SceneLightFactory);
+        let root = spawn_house_group(&mut host);
+        let mut layers = LayerRegistry::default();
+        layers.ensure_layer("Alternative");
+        layers.layers.get_mut("Alternative").unwrap().visible = false;
+        host.insert_resource(layers);
+        let child = find_entity(&host, ElementId(2)).unwrap();
+        host.entity_mut(child)
+            .insert(LayerAssignment::new("Alternative"));
+        host.insert_resource(ObjectVisibility {
+            hidden: [ElementId(1)].into_iter().collect(),
+        });
+        SceneLightSnapshot {
+            element_id: ElementId(4),
+            node: SceneLightNode::default(),
+            translation: Vec3::Y * 30.,
+            rotation: Quat::IDENTITY,
+        }
+        .apply_to(&mut host);
+        let root_entity = find_entity(&host, root).unwrap();
+        host.get_mut::<GroupMembers>(root_entity)
+            .unwrap()
+            .member_ids
+            .push(ElementId(4));
+        execute_create_linked_model(&mut host, &json!({"group_id":root.0, "path":path})).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let records = deserialize_project_entity_records_with_assets(&original_bytes).unwrap();
+        assert!(records
+            .entities
+            .iter()
+            .all(|r| r.type_name != "scene_light"));
+        assert!(!records.layers.unwrap().layers["Alternative"].visible);
+        assert!(records.hidden_objects.contains(&ElementId(1)));
+        assert!(
+            find_entity(&host, ElementId(4)).is_some(),
+            "host environment is retained"
+        );
+        assert!(!group_members(&host, root)
+            .unwrap()
+            .member_ids
+            .contains(&ElementId(4)));
+
+        // Simulate a link cached by the old importer, with unchanged source bytes.
+        let mut legacy_hash = DefaultHasher::new();
+        original_bytes.hash(&mut legacy_hash);
+        host.get_mut::<GroupMembers>(root_entity)
+            .unwrap()
+            .linked_model
+            .as_mut()
+            .unwrap()
+            .content_hash = legacy_hash.finish();
+        assert!(refresh_linked_group(&mut host, root, false)
+            .unwrap()
+            .is_some());
+        assert!(refresh_linked_group(&mut host, root, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        let layer = &host.get::<LayerAssignment>(child).unwrap().layer;
+        assert!(layer.starts_with("Linked "));
+        assert!(!host.resource::<LayerRegistry>().layers[layer].visible);
+        assert!(host
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&ElementId(1)));
+        assert_eq!(host.query::<&SceneLightNode>().iter(&host).count(), 1);
+
+        // The exact same exported file also works when placed into another host.
+        let mut other = test_world();
+        let placed = placed_house(&mut other, &path);
+        let mapped = mapped_id(&other, placed, 2);
+        let layer = &other
+            .get::<LayerAssignment>(find_entity(&other, mapped).unwrap())
+            .unwrap()
+            .layer;
+        assert!(!other.resource::<LayerRegistry>().layers[layer].visible);
+        assert!(other
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&mapped_id(&other, placed, 1)));
+    }
+
+    #[test]
+    fn linked_import_preserves_source_visibility_without_environment_lights() {
+        use crate::plugins::{
+            layers::{LayerAssignment, LayerRegistry, ObjectVisibility},
+            lighting::{SceneLightFactory, SceneLightNode, SceneLightSnapshot},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.talos3d");
+        let mut source = test_world();
+        source
+            .resource_mut::<CapabilityRegistry>()
+            .register_factory(SceneLightFactory);
+        let source_root = spawn_house_group(&mut source);
+        let mut layers = LayerRegistry::default();
+        layers.ensure_layer("Alternative");
+        layers.layers.get_mut("Alternative").unwrap().visible = false;
+        source.insert_resource(layers);
+        let group = find_entity(&source, source_root).unwrap();
+        source.entity_mut(group).insert(LayerAssignment {
+            layer: "Alternative".into(),
+        });
+        source
+            .get_mut::<GroupMembers>(group)
+            .unwrap()
+            .member_ids
+            .push(ElementId(4));
+        let light = SceneLightSnapshot {
+            element_id: ElementId(4),
+            node: SceneLightNode::default(),
+            translation: Vec3::new(30., 40., 50.),
+            rotation: Quat::IDENTITY,
+        };
+        light.apply_to(&mut source);
+        source.insert_resource(ObjectVisibility {
+            hidden: [ElementId(2)].into_iter().collect(),
+        });
+        save_source(&mut source, &path);
+
+        let mut host = test_world();
+        host.resource_mut::<CapabilityRegistry>()
+            .register_factory(SceneLightFactory);
+        let host_light = SceneLightSnapshot {
+            element_id: ElementId(80),
+            ..light.clone()
+        };
+        host_light.apply_to(&mut host);
+        let mut host_layers = LayerRegistry::default();
+        host_layers.ensure_layer("Alternative");
+        host.insert_resource(host_layers);
+        let root = placed_house(&mut host, &path);
+        apply_pending_history_commands_for_test(&mut host);
+        let hidden_id = mapped_id(&host, root, 2);
+        let root_entity = find_entity(&host, root).unwrap();
+        let layer_name = host
+            .get::<LayerAssignment>(root_entity)
+            .unwrap()
+            .layer
+            .clone();
+        assert_ne!(layer_name, "Alternative");
+        assert!(!host.resource::<LayerRegistry>().layers[&layer_name].visible);
+        assert!(host.resource::<LayerRegistry>().layers["Alternative"].visible);
+        assert!(host
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&hidden_id));
+        assert!(!linked_model_relationship(&host, root)
+            .unwrap()
+            .source_to_scene_ids
+            .iter()
+            .any(|mapping| mapping.source_id == 4));
+        assert_eq!(host.query::<&SceneLightNode>().iter(&host).count(), 1);
+
+        host.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands_for_test(&mut host);
+        assert!(!host
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&hidden_id));
+        host.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands_for_test(&mut host);
+        assert!(host
+            .resource::<ObjectVisibility>()
+            .hidden
+            .contains(&hidden_id));
+        assert_eq!(
+            host.get::<LayerAssignment>(find_entity(&host, root).unwrap())
+                .unwrap()
+                .layer,
+            layer_name
+        );
+
+        // A refresh also removes environment content brought in by an older app.
+        let legacy = SceneLightSnapshot {
+            element_id: ElementId(500),
+            ..light
+        };
+        legacy.apply_to(&mut host);
+        let entity = find_entity(&host, root).unwrap();
+        let mut members = host.get_mut::<GroupMembers>(entity).unwrap();
+        members.member_ids.push(ElementId(500));
+        members
+            .linked_model
+            .as_mut()
+            .unwrap()
+            .source_to_scene_ids
+            .push(LinkedModelIdMapping {
+                source_id: ElementId(4),
+                scene_id: ElementId(500),
+            });
+        execute_refresh_linked_models(&mut host, &json!({"group_ids": [root.0], "force": true}))
+            .unwrap();
+        assert!(find_entity(&host, ElementId(500)).is_none());
+        assert!(find_entity(&host, ElementId(80)).is_some());
+        assert_eq!(host.query::<&SceneLightNode>().iter(&host).count(), 1);
+        assert!(!group_members(&host, root)
+            .unwrap()
+            .member_ids
+            .contains(&ElementId(500)));
+        let saved = save_source(&mut host, &dir.path().join("placed.talos3d"));
+        let records = deserialize_project_entity_records_with_assets(&saved).unwrap();
+        assert!(!records.layers.unwrap().layers[&layer_name].visible);
+        assert!(records.hidden_objects.contains(&hidden_id));
+        assert!(records
+            .entities
+            .iter()
+            .filter_map(|r| r.semantic.as_ref())
+            .any(|s| s
+                .layer_assignment
+                .as_ref()
+                .is_some_and(|a| a.layer == layer_name)));
+    }
+
+    #[test]
+    fn ordinary_ungrouped_file_is_a_complete_undoable_persisted_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("existing-model.talos3d");
+        let mut source = test_world();
+        let group = spawn_house_group(&mut source);
+        capture_snapshot(&source, group)
+            .unwrap()
+            .remove_from(&mut source);
+        let bytes = save_source(&mut source, &path);
+        let source_bounds =
+            compute_group_bounds_from_world(&source, &[ElementId(1), ElementId(2)]).unwrap();
+
+        let mut host = test_world();
+        let result = execute_place_linked_model(&mut host, &json!({"path": path})).unwrap();
+        let root = ElementId(result.output.unwrap()["root_group_id"].as_u64().unwrap());
+        let relationship = linked_model_relationship(&host, root).unwrap();
+        assert_eq!(relationship.source_kind, "document");
+        assert_eq!(relationship.instance_name, "existing-model");
+        assert_eq!(relationship.source_to_scene_ids.len(), 3);
+        assert_eq!(group_members(&host, root).unwrap().member_ids.len(), 2);
+        let bounds = compute_group_bounds_from_world(&host, &[root]).unwrap();
+        assert_eq!(bounds.min, source_bounds.min);
+        assert_eq!(bounds.max, source_bounds.max);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        apply_pending_history_commands_for_test(&mut host);
+        assert_eq!(host.resource::<History>().undo_stack_len(), 1);
+        host.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands_for_test(&mut host);
+        assert!(all_scene_element_ids(&mut host).is_empty());
+        host.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands_for_test(&mut host);
+        assert_eq!(
+            linked_model_relationship(&host, root).unwrap(),
+            relationship
+        );
+
+        let host_path = temp.path().join("host.talos3d");
+        let host_bytes = save_source(&mut host, &host_path);
+        let project = load_linked_project(&host, &host_bytes, "test-house.talos3d").unwrap();
+        let mut restored = test_world();
+        for snapshot in project.snapshots {
+            snapshot.apply_to(&mut restored);
+        }
+        assert_eq!(
+            linked_model_relationship(&restored, root).unwrap(),
+            relationship
+        );
+        execute_refresh_linked_models(&mut restored, &json!({"force": true})).unwrap();
+        assert_eq!(
+            linked_model_relationship(&restored, root).unwrap(),
+            relationship
+        );
+    }
+
+    #[test]
+    fn mixed_file_roots_refresh_as_one_moved_instance_without_losing_hierarchy() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mixed.talos3d");
+        let mut source = test_world();
+        let group = spawn_house_group(&mut source);
+        // One group and one loose physical object used to lose the loose object
+        // from root membership, even though it was imported into the scene.
+        let mut loose = capture_snapshot(&source, ElementId(2))
+            .unwrap()
+            .to_persisted_json();
+        loose["element_id"] = json!(4);
+        source
+            .resource::<CapabilityRegistry>()
+            .factory_for("box")
+            .unwrap()
+            .from_persisted_json(&loose)
+            .unwrap()
+            .apply_to(&mut source);
+        save_source(&mut source, &path);
+        let mut host = test_world();
+        let root = placed_house(&mut host, &path);
+        let other = placed_house(&mut host, &path);
+        let before = linked_model_relationship(&host, root).unwrap();
+        assert_eq!(before.source_kind, "document");
+        assert_eq!(
+            group_members(&host, root).unwrap().member_ids,
+            vec![mapped_id(&host, root, group.0), mapped_id(&host, root, 4)]
+        );
+        assert_eq!(
+            group_members(&host, mapped_id(&host, root, group.0))
+                .unwrap()
+                .member_ids,
+            vec![mapped_id(&host, root, 1), mapped_id(&host, root, 2)]
+        );
+        apply_pending_history_commands_for_test(&mut host);
+        let bounds = compute_group_bounds_from_world(&host, &[root]).unwrap();
+        let delta = Vec3::new(7.0, 2.0, -4.0);
+        let plan = plan_linked_model_placement(
+            &host,
+            root,
+            LinkedModelPlacementOperation::Translate { delta },
+        )
+        .unwrap();
+        crate::plugins::commands::enqueue_apply_entity_changes(
+            &mut host,
+            plan.into_apply_command("Move linked file"),
+        );
+        apply_pending_history_commands_for_test(&mut host);
+        let moved = compute_group_bounds_from_world(&host, &[root]).unwrap();
+        assert!((moved.min - bounds.min - delta).length() < 1e-4);
+        assert!(
+            (compute_group_bounds_from_world(&host, &[other])
+                .unwrap()
+                .min
+                - bounds.min)
+                .length()
+                < 1e-4
+        );
+
+        // The source now has only one group. Refresh must keep the original
+        // document scope and instance frame rather than switching root identity.
+        capture_snapshot(&source, ElementId(4))
+            .unwrap()
+            .remove_from(&mut source);
+        save_source(&mut source, &path);
+        execute_refresh_linked_models(&mut host, &json!({"group_ids": [root.0]})).unwrap();
+        let refreshed = linked_model_relationship(&host, root).unwrap();
+        assert_eq!(refreshed.source_root_id, before.source_root_id);
+        assert_eq!(refreshed.source_kind, "document");
+        assert_eq!(refreshed.frame.translation, delta.to_array());
+        assert_eq!(
+            mapped_id(&host, root, group.0),
+            ElementId(
+                before
+                    .source_to_scene_ids
+                    .iter()
+                    .find(|m| m.source_id == group.0)
+                    .unwrap()
+                    .scene_id
+            )
+        );
+        assert!(!refreshed
+            .source_to_scene_ids
+            .iter()
+            .any(|m| m.source_id == 4));
+        assert!(find_entity(&host, mapped_id(&host, other, 4)).is_some());
+        assert_eq!(
+            group_members(&host, root).unwrap().member_ids,
+            vec![mapped_id(&host, root, group.0)]
+        );
+    }
+
+    #[test]
+    fn nested_and_multiple_group_files_resolve_the_actual_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested.talos3d");
+        let mut source = test_world();
+        let group = spawn_house_group(&mut source);
+        GroupSnapshot {
+            element_id: ElementId(10),
+            name: "Outer".into(),
+            member_ids: vec![group],
+            frame: GroupFrame::identity(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut source);
+        save_source(&mut source, &path);
+        let mut host = test_world();
+        let root = placed_house(&mut host, &path);
+        assert_eq!(
+            linked_model_relationship(&host, root)
+                .unwrap()
+                .source_root_id,
+            10
+        );
+        assert_eq!(
+            group_members(&host, root).unwrap().member_ids,
+            vec![mapped_id(&host, root, group.0)]
+        );
+        execute_refresh_linked_models(&mut host, &json!({"force": true})).unwrap();
+
+        // Two independent top-level groups must both belong to the instance.
+        GroupSnapshot {
+            element_id: ElementId(11),
+            name: "Second".into(),
+            member_ids: vec![],
+            frame: GroupFrame::identity(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut source);
+        save_source(&mut source, &path);
+        let multi = placed_house(&mut host, &path);
+        assert_eq!(
+            linked_model_relationship(&host, multi).unwrap().source_kind,
+            "document"
+        );
+        assert_eq!(group_members(&host, multi).unwrap().member_ids.len(), 2);
+        assert!(group_members(&host, multi)
+            .unwrap()
+            .member_ids
+            .contains(&mapped_id(&host, multi, 10)));
+        assert!(group_members(&host, multi)
+            .unwrap()
+            .member_ids
+            .contains(&mapped_id(&host, multi, 11)));
+    }
+
+    #[test]
+    fn empty_file_refuses_before_mutating_host() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("empty.talos3d");
+        let mut source = test_world();
+        save_source(&mut source, &path);
+        let mut host = test_world();
+        let error = execute_place_linked_model(&mut host, &json!({"path": path})).unwrap_err();
+        assert!(error.contains("empty"));
+        assert!(all_scene_element_ids(&mut host).is_empty());
+        assert_eq!(host.resource::<History>().undo_stack_len(), 0);
     }
 
     #[test]
@@ -2168,6 +3025,7 @@ mod tests {
                 half_extents: Vec3::new(2.0, 0.1, 2.0),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2259,7 +3117,11 @@ mod tests {
             .copied()
             .map(ElementId)
             .collect::<Vec<_>>();
-        assert_eq!(created.len(), 4, "all source-owned records enter history");
+        assert_eq!(
+            created.len(),
+            5,
+            "all source-owned records and the document root enter history"
+        );
 
         apply_pending_history_commands_for_test(&mut target);
         assert_eq!(target.resource::<History>().undo_stack_len(), 1);
@@ -2455,6 +3317,7 @@ mod tests {
                 half_extents: Vec3::new(2.5, 1.35, 3.0),
             },
             rotation: ShapeRotation(rotation),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2559,6 +3422,7 @@ mod tests {
                 half_extents: Vec3::splat(0.5),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2568,6 +3432,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("house.talos3d");
         let linked = LinkedModelRef {
+            source_root_is_document: false,
             path: path.to_string_lossy().into_owned(),
             source_root_id: group_id,
             source_to_scene_ids: vec![
@@ -2652,6 +3517,80 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_native_placement_undoes_only_its_own_creation() {
+        let mut world = test_world();
+        let group = spawn_house_group(&mut world);
+        let snapshots = [ElementId(1), ElementId(2), group]
+            .into_iter()
+            .map(|id| capture_snapshot(&world, id).unwrap())
+            .collect();
+        world
+            .resource_mut::<PendingCommandQueue>()
+            .push_command(Box::new(CreateLinkedModelInstanceHistoryCommand {
+                sidecars: vec![],
+                hidden: vec![],
+                snapshots,
+                instance_root_id: group,
+            }));
+        apply_pending_history_commands_for_test(&mut world);
+        let creation_revision = world.resource::<History>().model_revision();
+        world.insert_resource(LinkedPlacementGesture { creation_revision });
+        finish_linked_placement_gesture(&mut world, false);
+        apply_pending_history_commands_for_test(&mut world);
+        assert!(find_entity(&world, group).is_none());
+        assert!(find_entity(&world, ElementId(1)).is_none());
+        assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+    }
+
+    #[test]
+    fn linked_opening_and_fill_references_follow_the_instance_mapping() {
+        let mut data = json!({
+            "element_id": 3, "parent_wall_element_id": 2,
+            "opening_feature": { "host_ref": 2, "hosted_fill_ref": 4 },
+            "parameters": {"opening_element_id": 3, "host_element_id": 2},
+            "width": 2.0, "definition_id": "def-source"
+        });
+        let ids = [
+            (ElementId(2), ElementId(102)),
+            (ElementId(3), ElementId(103)),
+            (ElementId(4), ElementId(104)),
+        ]
+        .into_iter()
+        .collect();
+        remap_element_ids_in_value(&mut data, None, &ids);
+        assert_eq!(data["element_id"], 103);
+        assert_eq!(data["parent_wall_element_id"], 102);
+        assert_eq!(data["opening_feature"]["host_ref"], 102);
+        assert_eq!(data["opening_feature"]["hosted_fill_ref"], 104);
+        assert_eq!(data["parameters"]["opening_element_id"], 103);
+        assert_eq!(data["parameters"]["host_element_id"], 102);
+        assert_eq!(data["width"], 2.0);
+        assert_eq!(data["definition_id"], "def-source");
+    }
+
+    #[test]
+    fn linked_definition_scope_remaps_inheritance_occurrences_and_map_keys() {
+        let ids = [(
+            "def-source".to_string(),
+            "linked-site-def-source".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let mut data = json!({"id": "def-source", "base": "def-source",
+            "occurrences": [{"definition_id": "def-source"}],
+            "by_definition": {"def-source": "unchanged"}, "version": 2});
+        remap_definition_ids(&mut data, &ids);
+        assert_eq!(data["id"], "linked-site-def-source");
+        assert_eq!(data["base"], "linked-site-def-source");
+        assert_eq!(
+            data["occurrences"][0]["definition_id"],
+            "linked-site-def-source"
+        );
+        assert_eq!(data["by_definition"]["linked-site-def-source"], "unchanged");
+        assert_eq!(data["version"], 2);
+    }
+
+    #[test]
     fn refresh_linked_model_remaps_internal_semantic_references() {
         let mut world = test_world();
         let group_id = spawn_house_group(&mut world);
@@ -2662,6 +3601,7 @@ mod tests {
                 half_extents: Vec3::splat(0.5),
             },
             rotation: ShapeRotation::default(),
+            layer: None,
             material_assignment: None,
             opening_context: None,
             subobject_display_overrides: None,
@@ -2676,6 +3616,7 @@ mod tests {
             vec![ElementId(1), ElementId(2)],
             GroupFrame::identity(),
             Some(LinkedModelRef {
+                source_root_is_document: false,
                 path: path.to_string_lossy().into_owned(),
                 source_root_id: group_id,
                 source_to_scene_ids: vec![
@@ -2796,6 +3737,7 @@ mod tests {
             vec![ElementId(1), ElementId(2)],
             GroupFrame::identity(),
             Some(LinkedModelRef {
+                source_root_is_document: false,
                 path: path.to_string_lossy().into_owned(),
                 source_root_id: group_id,
                 source_to_scene_ids: vec![
@@ -2886,6 +3828,7 @@ mod tests {
                     half_extents: Vec3::splat(0.5),
                 },
                 rotation: ShapeRotation::default(),
+                layer: None,
                 material_assignment,
                 opening_context: None,
                 subobject_display_overrides: None,

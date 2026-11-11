@@ -87,6 +87,9 @@ pub fn compose_snapshot_into_frame(snapshot: BoxedEntity, frame: &GroupFrame) ->
     if frame.is_identity() {
         return snapshot;
     }
+    if frame.rotation == Quat::IDENTITY {
+        return snapshot.translate_with_parent(frame.translation);
+    }
     let local_centre = snapshot.center();
     let world_centre = frame.point_to_world(local_centre);
     let rotated = snapshot.rotate_by(frame.rotation);
@@ -118,6 +121,11 @@ pub struct GroupMembers {
 pub struct LinkedModelRef {
     pub path: String,
     pub source_root_id: ElementId,
+    /// The source root is a virtual container for a complete document rather
+    /// than a persisted source group. Its id is reserved in this relationship;
+    /// refresh rebuilds the container without rewriting the external file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_root_is_document: bool,
     /// Mapping from element ids in the linked model document to element ids in
     /// this scene instance. The initial conversion preserves ids, but the link
     /// contract is explicit so later placement paths can allocate independent
@@ -168,6 +176,23 @@ impl From<GroupSnapshot> for BoxedEntity {
 impl AuthoredEntity for GroupSnapshot {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn copy_with_ids(&self, ids: &HashMap<ElementId, ElementId>) -> Option<BoxedEntity> {
+        if self.composite.is_some() {
+            return None;
+        }
+        let mut copy = self.clone();
+        copy.element_id = *ids.get(&self.element_id)?;
+        for id in &mut copy.member_ids {
+            *id = *ids.get(id)?;
+        }
+        if let Some(link) = &mut copy.linked_model {
+            for pair in &mut link.source_to_scene_ids {
+                pair.scene_id = *ids.get(&pair.scene_id)?;
+            }
+        }
+        Some(copy.into())
     }
 
     fn type_name(&self) -> &'static str {
@@ -281,15 +306,25 @@ impl AuthoredEntity for GroupSnapshot {
         // Groups have no geometry preview
     }
 
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        crate::authored_entity::snapshot_fingerprint(self)
+    }
+
     fn box_clone(&self) -> BoxedEntity {
         self.clone().into()
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        other
-            .as_any()
-            .downcast_ref::<Self>()
-            .is_some_and(|other| self == other)
+        other.as_any().downcast_ref::<Self>().is_some_and(|other| {
+            // Derived bounds may be absent on a planned frame snapshot.
+            // Only authored fields participate in revision preflight.
+            self.element_id == other.element_id
+                && self.name == other.name
+                && self.member_ids == other.member_ids
+                && self.frame == other.frame
+                && self.composite == other.composite
+                && self.linked_model == other.linked_model
+        })
     }
 }
 
@@ -305,6 +340,11 @@ enum GroupSnapshotJson {
 pub struct GroupFactory;
 
 impl AuthoredEntityFactory for GroupFactory {
+    fn display_label(&self, entity_ref: &EntityRef, _world: &World) -> Option<String> {
+        entity_ref.get::<ElementId>()?;
+        Some(entity_ref.get::<GroupMembers>()?.name.clone())
+    }
+
     fn type_name(&self) -> &'static str {
         "group"
     }
@@ -314,6 +354,25 @@ impl AuthoredEntityFactory for GroupFactory {
         let members = entity_ref.get::<GroupMembers>()?;
         let composite = entity_ref.get::<CompositeSolid>().cloned();
         let cached_bounds = compute_group_bounds_from_world(world, &members.member_ids);
+        Some(
+            GroupSnapshot {
+                element_id,
+                name: members.name.clone(),
+                member_ids: members.member_ids.clone(),
+                frame: members.frame,
+                composite,
+                linked_model: members.linked_model.clone(),
+                cached_bounds,
+            }
+            .into(),
+        )
+    }
+
+    fn capture_edit_snapshot(&self, entity_ref: &EntityRef, _world: &World) -> Option<BoxedEntity> {
+        let element_id = *entity_ref.get::<ElementId>()?;
+        let members = entity_ref.get::<GroupMembers>()?;
+        let composite = entity_ref.get::<CompositeSolid>().cloned();
+        let cached_bounds = None;
         Some(
             GroupSnapshot {
                 element_id,
@@ -929,6 +988,7 @@ pub fn compute_group_bounds_from_world(
     let mut max = Vec3::splat(f32::MIN);
     let mut any = false;
     let mut visited = HashSet::new();
+    let mut occurrence_bounds = None;
 
     let mut stack: Vec<ElementId> = member_ids.to_vec();
     while let Some(id) = stack.pop() {
@@ -944,6 +1004,22 @@ pub fn compute_group_bounds_from_world(
         if let Some(members) = entity_ref.get::<GroupMembers>() {
             // Recurse into nested groups
             stack.extend_from_slice(&members.member_ids);
+        } else if entity_ref.contains::<super::primitives::TriangleMesh>()
+            && !entity_ref.contains::<super::mesh_generation::DerivedGeometry>()
+        {
+            if let Some(bounds) = super::snapshots::authored_triangle_mesh_bounds(&entity_ref) {
+                min = min.min(bounds.min);
+                max = max.max(bounds.max);
+                any = true;
+            }
+        } else if entity_ref.contains::<super::occurrence::OccurrenceIdentity>() {
+            let all = occurrence_bounds
+                .get_or_insert_with(|| super::occurrence::all_occurrence_generated_bounds(world));
+            if let Some(bounds) = all.get(&id) {
+                min = min.min(bounds.min);
+                max = max.max(bounds.max);
+                any = true;
+            }
         } else if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
             if let Some(bounds) = snapshot.bounds() {
                 min = min.min(bounds.min);
@@ -967,14 +1043,22 @@ pub fn compute_group_bounds_from_world(
 }
 
 /// Compute aggregate member bounds in a group's local frame from world-authored
-/// member geometry. Prefer snap/wireframe points where entities expose them so
-/// a rotated linked model gets an object-aligned box instead of an inflated
-/// inverse-transform of each member's world AABB.
+/// member geometry. Reuse mesh bounds caches and capability bounds, never
+/// enumerate snap edges for selection presentation. Rotated raw meshes use
+/// conservative transformed AABBs; capabilities can supply tighter bounds.
 pub fn compute_group_bounds_in_frame_from_world(
     world: &World,
     member_ids: &[ElementId],
     frame: &GroupFrame,
 ) -> Option<EntityBounds> {
+    // Translation does not change orientation. Reuse the authored mesh bounds
+    // cache instead of allocating/deduplicating every mesh edge on every frame.
+    if frame.rotation == Quat::IDENTITY {
+        return compute_group_bounds_from_world(world, member_ids).map(|bounds| EntityBounds {
+            min: bounds.min - frame.translation,
+            max: bounds.max - frame.translation,
+        });
+    }
     let registry = world.resource::<CapabilityRegistry>();
     let element_index = element_entity_index(world);
     let inverse_rotation = frame.rotation.inverse();
@@ -983,6 +1067,7 @@ pub fn compute_group_bounds_in_frame_from_world(
     let mut max = Vec3::splat(f32::MIN);
     let mut any = false;
     let mut visited = HashSet::new();
+    let mut occurrence_bounds = None;
 
     let mut stack: Vec<ElementId> = member_ids.to_vec();
     while let Some(id) = stack.pop() {
@@ -1000,25 +1085,42 @@ pub fn compute_group_bounds_in_frame_from_world(
             continue;
         }
 
-        if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
-            let segments = snapshot.0.snap_segments();
-            if segments.is_empty() {
-                if let Some(bounds) = snapshot.bounds() {
-                    for corner in bounds.corners() {
-                        let local = to_local(corner);
-                        min = min.min(local);
-                        max = max.max(local);
-                        any = true;
-                    }
+        if entity_ref.contains::<super::primitives::TriangleMesh>()
+            && !entity_ref.contains::<super::mesh_generation::DerivedGeometry>()
+        {
+            // Eight cached AABB corners give conservative rotated bounds. This
+            // is deliberately independent of triangle count and snap-edge lists.
+            if let Some(bounds) = super::snapshots::authored_triangle_mesh_bounds(&entity_ref) {
+                for corner in bounds.corners() {
+                    let local = to_local(corner);
+                    min = min.min(local);
+                    max = max.max(local);
+                    any = true;
                 }
-            } else {
-                for (start, end) in segments {
-                    for point in [start, end] {
-                        let local = to_local(point);
-                        min = min.min(local);
-                        max = max.max(local);
-                        any = true;
-                    }
+            }
+        } else if entity_ref.contains::<super::occurrence::OccurrenceIdentity>() {
+            let all = occurrence_bounds
+                .get_or_insert_with(|| super::occurrence::all_occurrence_generated_bounds(world));
+            if let Some(bounds) = all.get(&id) {
+                for corner in bounds.corners() {
+                    let local = to_local(corner);
+                    min = min.min(local);
+                    max = max.max(local);
+                    any = true;
+                }
+            }
+        } else if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
+            if let Some(bounds) = snapshot.0.bounds_in_frame(inverse_rotation) {
+                let offset = inverse_rotation * frame.translation;
+                min = min.min(bounds.min - offset);
+                max = max.max(bounds.max - offset);
+                any = true;
+            } else if let Some(bounds) = snapshot.bounds() {
+                for corner in bounds.corners() {
+                    let local = to_local(corner);
+                    min = min.min(local);
+                    max = max.max(local);
+                    any = true;
                 }
             }
         } else if let Some(aabb) = entity_ref.get::<bevy::camera::primitives::Aabb>() {
@@ -1040,9 +1142,11 @@ pub fn compute_group_bounds_in_frame_from_world(
     any.then_some(EntityBounds { min, max })
 }
 
-fn element_entity_index(world: &World) -> HashMap<ElementId, Entity> {
+pub(crate) fn element_entity_index(world: &World) -> HashMap<ElementId, Entity> {
     let mut index = HashMap::new();
-    let mut query = world.try_query::<(Entity, &ElementId)>().unwrap();
+    let Some(mut query) = world.try_query::<(Entity, &ElementId)>() else {
+        return index;
+    };
     for (entity, element_id) in query.iter(world) {
         index.insert(*element_id, entity);
     }
@@ -1271,6 +1375,42 @@ mod frame_tests {
             .expect("cyclic nested group with a leaf should still have bounds");
         assert!(approx(bounds.min, Vec3::new(9.0, 1.5, -3.0)));
         assert!(approx(bounds.max, Vec3::new(11.0, 2.5, 1.0)));
+    }
+
+    #[test]
+    fn translated_mesh_group_bounds_do_not_require_snapshot_or_edge_capture() {
+        use super::super::primitives::TriangleMesh;
+        let mut world = World::new();
+        // No mesh factory: bounds must use authored cached metadata directly.
+        world.insert_resource(CapabilityRegistry::default());
+        world.spawn((
+            ElementId(1),
+            TriangleMesh {
+                vertices: vec![
+                    Vec3::new(1., 2., 3.),
+                    Vec3::new(4., 5., 6.),
+                    Vec3::new(1., 5., 3.),
+                ],
+                faces: vec![[0, 1, 2]],
+                normals: None,
+                name: None,
+            },
+        ));
+        let frame = GroupFrame {
+            translation: Vec3::Y * 8.,
+            ..Default::default()
+        };
+        let bounds =
+            compute_group_bounds_in_frame_from_world(&world, &[ElementId(1)], &frame).unwrap();
+        assert_eq!(bounds.min, Vec3::new(1., -6., 3.));
+        assert_eq!(bounds.max, Vec3::new(4., -3., 6.));
+        let rotated = GroupFrame {
+            rotation: Quat::from_rotation_y(0.5),
+            ..frame
+        };
+        assert!(
+            compute_group_bounds_in_frame_from_world(&world, &[ElementId(1)], &rotated).is_some()
+        );
     }
 
     #[test]

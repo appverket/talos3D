@@ -506,7 +506,13 @@ pub(crate) struct DraftSyncState {
     last_serialized: Option<Value>,
 }
 
+/// A replaced document must replay metadata even when its bytes are unchanged.
+pub(crate) fn reset_metadata_sync(world: &mut World) {
+    world.insert_resource(DraftSyncState::default());
+}
+
 pub(crate) fn sync_drafts(world: &mut World) {
+    world.init_resource::<DraftSyncState>();
     if !world.contains_resource::<DocumentProperties>() {
         return;
     }

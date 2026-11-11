@@ -206,6 +206,9 @@ pub fn gap_from_publication_finding(
 /// A single passage stored in the [`CorpusPassageRegistry`].
 #[derive(Debug, Clone)]
 pub struct PassageEntry {
+    pub scope: crate::curation::Scope,
+    pub trust: crate::curation::Trust,
+    pub persisted: Option<crate::plugins::knowledge_persistence::PersistedPassage>,
     /// Full plain-text of the passage (Swedish, English, or mixed depending on
     /// the corpus).
     pub text: String,
@@ -253,7 +256,7 @@ fn default_proactive_priority() -> i32 {
 /// Domain packs call [`register`] during `Plugin::build`; PP78's MCP tools
 /// read from it via [`get`].  No vector embedding, no disk I/O — plain
 /// `HashMap`.
-#[derive(Resource, Default, Debug)]
+#[derive(Resource, Default, Debug, Clone)]
 pub struct CorpusPassageRegistry {
     passages: HashMap<String, PassageEntry>,
 }
@@ -282,11 +285,107 @@ impl CorpusPassageRegistry {
         self.passages.insert(
             passage_ref.0,
             PassageEntry {
+                scope: crate::curation::Scope::Shipped,
+                trust: crate::curation::Trust::Published,
+                persisted: None,
                 text: text.into(),
                 provenance,
                 proactive,
             },
         );
+    }
+
+    pub(crate) fn register_released(
+        &mut self,
+        passage: crate::plugins::knowledge_persistence::PersistedPassage,
+    ) -> Result<(), String> {
+        let meta = passage
+            .meta
+            .as_ref()
+            .ok_or("Released passage needs curation metadata")?;
+        if !meta.is_shipped_published() {
+            return Err("Released passage must be Shipped/Published".into());
+        }
+        if self.passages.contains_key(&passage.passage_ref) {
+            return Err(format!(
+                "Corpus passage ID already installed: {}",
+                passage.passage_ref
+            ));
+        }
+        self.passages.insert(
+            passage.passage_ref.clone(),
+            PassageEntry {
+                scope: meta.scope,
+                trust: meta.trust,
+                text: passage.text.clone(),
+                provenance: crate::plugins::knowledge_persistence::build_provenance_for_passage(
+                    &passage,
+                ),
+                proactive: passage.proactive_guidance.clone(),
+                persisted: Some(passage),
+            },
+        );
+        Ok(())
+    }
+
+    /// Private learning cannot impersonate or shadow a shipped asset. Its
+    /// proactive flag is kept as project data, not injected into global guidance.
+    pub fn register_private(
+        &mut self,
+        passage: crate::plugins::knowledge_persistence::PersistedPassage,
+    ) -> Result<(), String> {
+        use crate::curation::{Scope, Trust};
+        let scope = passage.meta.as_ref().map_or(Scope::Project, |m| m.scope);
+        let trust = passage.meta.as_ref().map_or(Trust::Draft, |m| m.trust);
+        if !matches!(scope, Scope::Session | Scope::Project) {
+            return Err(
+                "Private knowledge cannot declare Shipped scope; use a reviewed release".into(),
+            );
+        }
+        if self
+            .passages
+            .get(&passage.passage_ref)
+            .is_some_and(|p| p.scope == Scope::Shipped)
+        {
+            return Err(format!(
+                "Private passage cannot overwrite shipped passage {}",
+                passage.passage_ref
+            ));
+        }
+        self.passages.insert(
+            passage.passage_ref.clone(),
+            PassageEntry {
+                scope,
+                trust,
+                text: passage.text.clone(),
+                provenance: crate::plugins::knowledge_persistence::build_provenance_for_passage(
+                    &passage,
+                ),
+                proactive: None,
+                persisted: Some(passage),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn project_passages(&self) -> Vec<crate::plugins::knowledge_persistence::PersistedPassage> {
+        let mut passages: Vec<_> = self
+            .passages
+            .values()
+            .filter(|p| p.scope == crate::curation::Scope::Project)
+            .filter_map(|p| p.persisted.clone())
+            .collect();
+        passages.sort_by(|a, b| a.passage_ref.cmp(&b.passage_ref));
+        passages
+    }
+
+    pub fn clear_project_passages(&mut self) {
+        self.passages.retain(|_, p| {
+            matches!(
+                p.scope,
+                crate::curation::Scope::Shipped | crate::curation::Scope::Org
+            )
+        });
     }
 
     /// All passages flagged as proactive must-read guidance, sorted by

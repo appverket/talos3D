@@ -4,11 +4,11 @@
 //! A `DefinitionRegistry` holds all live definitions and can resolve parameter
 //! values for a given set of occurrence overrides.
 
+use crate::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fmt,
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bevy::prelude::*;
@@ -491,6 +491,55 @@ pub struct RectangularExtrusionEvaluator {
 pub enum EvaluatorDecl {
     /// Extrude a rectangular `Profile2d` to produce a box-like solid.
     RectangularExtrusion(RectangularExtrusionEvaluator),
+    /// A bounded, expression-driven polygon in local X/Z, extruded along Y.
+    /// This is part of the canonical body, not a separately persisted evaluator.
+    PolygonExtrusion(PolygonExtrusionEvaluator),
+    /// Fixed evaluated geometry. No family logic or dimension editing is implied.
+    FrozenMesh(FrozenMeshEvaluator),
+    /// Measured topology with bounded, monotone, piecewise-linear dimensional controls.
+    DeformableMesh(DeformableMeshEvaluator),
+}
+
+/// A local-space, unit-typed geometry snapshot inside the canonical body.
+/// Importers own provenance and loss records; core knows no source vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenMeshEvaluator {
+    pub coordinate_unit: crate::plugins::units::Unit,
+    pub vertices: Vec<[f64; 3]>,
+    pub faces: Vec<[u32; 3]>,
+}
+
+/// A measured mesh with explicit deformation stations. Topology never changes.
+/// This does not infer manufacturing or family rules from imported geometry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeformableMeshEvaluator {
+    pub mesh: FrozenMeshEvaluator,
+    pub axes: Vec<MeshAxisDeformation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshAxisDeformation {
+    /// 0=X, 1=Y, 2=Z in the mesh's local frame.
+    pub axis: usize,
+    pub parameter: String,
+    /// Parameter value at which the measured mesh is reproduced exactly.
+    pub reference_value: f64,
+    /// [source coordinate, dimension-change weight]. Target coordinate is
+    /// source + weight * (parameter - reference_value). Equal adjacent weights
+    /// preserve that region's measured width; all stations must stay ordered.
+    pub stations: Vec<[f64; 2]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolygonExtrusionEvaluator {
+    /// Explicit coordinate unit for literals and dimensionless expressions.
+    /// Dimensional expressions must produce this same length unit.
+    pub coordinate_unit: crate::plugins::units::Unit,
+    pub profile_xz: Vec<[BodyExpr; 2]>,
+    pub height: BodyExpr,
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,6 +1228,10 @@ pub struct ParameterBinding {
 pub struct TransformBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translation: Option<Vec<BodyExpr>>,
+    /// Explicit source unit for translation expressions. Omitted legacy
+    /// bindings retain their established raw world-metre convention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation_unit: Option<crate::plugins::units::Unit>,
     /// Intrinsic XYZ Euler rotation in degrees applied to the child part in
     /// the parent's local frame. Must contain exactly 3 expressions when
     /// present; corresponds to `Quat::from_euler(EulerRot::XYZ, rx, ry, rz)`
@@ -1884,10 +1937,26 @@ impl Definition {
     /// machine-readable so importers can report unsupported legacy content
     /// without guessing at a replacement.
     pub fn body_findings(&self) -> Vec<DefinitionBodyFinding> {
-        let Some(compound) = &self.body.compound else {
-            return Vec::new();
-        };
         let mut findings = Vec::new();
+        for (index, evaluator) in self.body.evaluators.iter().enumerate() {
+            if let EvaluatorDecl::PolygonExtrusion(polygon) = evaluator {
+                polygon.height.collect_unsupported_legacy(
+                    &format!("body.evaluators[{index}].height"),
+                    &mut findings,
+                );
+                for (point, axes) in polygon.profile_xz.iter().enumerate() {
+                    for (axis, expr) in axes.iter().enumerate() {
+                        expr.collect_unsupported_legacy(
+                            &format!("body.evaluators[{index}].profile_xz[{point}][{axis}]"),
+                            &mut findings,
+                        );
+                    }
+                }
+            }
+        }
+        let Some(compound) = &self.body.compound else {
+            return findings;
+        };
         let input_names: HashSet<&str> = self
             .interface
             .parameters
@@ -1984,6 +2053,57 @@ impl Definition {
         F: FnMut(&DefinitionId) -> bool,
     {
         self.body.validate_schema_version()?;
+        if self.body.evaluators.len() > 1 {
+            return Err("A Definition body supports one geometry evaluator; use compound child slots for multiple parts".into());
+        }
+        for evaluator in &self.body.evaluators {
+            if let EvaluatorDecl::FrozenMesh(mesh) = evaluator {
+                super::frozen_mesh::evaluate(mesh)?;
+                if self
+                    .interface
+                    .parameters
+                    .0
+                    .iter()
+                    .any(|p| p.geometry_affecting)
+                {
+                    return Err(
+                        "Frozen mesh parameters must be metadata only (geometry_affecting=false)"
+                            .into(),
+                    );
+                }
+                if !self
+                    .body
+                    .representations
+                    .iter()
+                    .any(|r| r.update_policy == Some(UpdatePolicy::Frozen))
+                {
+                    return Err("Frozen mesh requires an explicitly Frozen representation".into());
+                }
+            }
+            if let EvaluatorDecl::DeformableMesh(mesh) = evaluator {
+                super::deformable_mesh::validate(mesh)?;
+                for axis in &mesh.axes {
+                    if !self
+                        .interface
+                        .parameters
+                        .0
+                        .iter()
+                        .any(|p| p.name == axis.parameter && p.geometry_affecting)
+                    {
+                        return Err(format!(
+                            "Deformable mesh requires geometry parameter '{}'",
+                            axis.parameter
+                        ));
+                    }
+                }
+            }
+            if let EvaluatorDecl::PolygonExtrusion(polygon) = evaluator {
+                super::polygon_evaluator::length_scale(polygon.coordinate_unit)?;
+                if !(3..=256).contains(&polygon.profile_xz.len()) {
+                    return Err("Polygon extrusion requires 3..=256 vertices".into());
+                }
+            }
+        }
         if let Some(finding) = self.body_findings().into_iter().next() {
             return Err(format!(
                 "Definition '{}' body finding: {finding:?}",
@@ -2075,6 +2195,9 @@ impl Definition {
                 }
                 slot.validate_multiplicity()
                     .map_err(|error| error.to_string())?;
+                if let Some(unit) = slot.transform_binding.translation_unit {
+                    super::polygon_evaluator::length_scale(unit)?;
+                }
                 if let Some(translation) = &slot.transform_binding.translation {
                     if translation.len() != 3 {
                         return Err(format!(
@@ -2571,6 +2694,45 @@ impl DefinitionRegistry {
     /// Return references to all registered definitions in arbitrary order.
     pub fn list(&self) -> Vec<&Definition> {
         self.definitions.values().collect()
+    }
+
+    /// `ids` plus every registered Definition whose evaluated content depends
+    /// on one of them, transitively: compounds that place it in a child slot
+    /// and variants derived from it through `base_definition_id`.
+    ///
+    /// A dependent keeps its own `definition_version`; this closure is how a
+    /// change to a shared child reaches the occurrences of its consumers.
+    pub fn with_dependents(
+        &self,
+        ids: impl IntoIterator<Item = DefinitionId>,
+    ) -> HashSet<DefinitionId> {
+        let mut dependents: HashMap<&DefinitionId, Vec<&DefinitionId>> = HashMap::new();
+        for definition in self.definitions.values() {
+            let slots =
+                definition.body.compound.iter().flat_map(|compound| {
+                    compound.child_slots.iter().map(|slot| &slot.definition_id)
+                });
+            for dependency in definition.base_definition_id.iter().chain(slots) {
+                dependents
+                    .entry(dependency)
+                    .or_default()
+                    .push(&definition.id);
+            }
+        }
+        let mut closure = HashSet::new();
+        let mut pending: Vec<DefinitionId> = ids.into_iter().collect();
+        while let Some(id) = pending.pop() {
+            if let Some(direct) = dependents.get(&id) {
+                pending.extend(
+                    direct
+                        .iter()
+                        .filter(|dependent| !closure.contains(**dependent))
+                        .map(|dependent| (*dependent).clone()),
+                );
+            }
+            closure.insert(id);
+        }
+        closure
     }
 
     /// Remove a definition, returning it if it existed.

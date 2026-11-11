@@ -257,6 +257,19 @@ impl EntityBounds {
         ]
     }
 
+    /// Conservative extent of these eight corners in a new frame.
+    pub(crate) fn map_corners(&self, map: impl FnMut(Vec3) -> Vec3) -> Self {
+        let corners = self.corners().map(map);
+        Self {
+            min: corners
+                .into_iter()
+                .fold(Vec3::splat(f32::INFINITY), Vec3::min),
+            max: corners
+                .into_iter()
+                .fold(Vec3::splat(f32::NEG_INFINITY), Vec3::max),
+        }
+    }
+
     pub fn face_centers(&self) -> [(Vec3, Vec3); 6] {
         let center = self.center();
         [
@@ -277,11 +290,35 @@ pub enum EntityScope {
 }
 
 pub trait AuthoredEntity: Send + Sync + 'static {
+    /// Core metadata decorators expose the capability-owned body for direct
+    /// geometry comparison. `as_any` continues to identify the capability type.
+    fn snapshot_body(&self) -> Option<&dyn AuthoredEntity> {
+        None
+    }
+
     fn as_any(&self) -> &dyn Any;
     fn type_name(&self) -> &'static str;
+    fn creation_label(&self) -> Option<&'static str> {
+        None
+    }
     fn element_id(&self) -> ElementId;
     fn label(&self) -> String;
     fn center(&self) -> Vec3;
+    /// Re-identify an independent copy of this pose. Implementations must remap
+    /// internal references and decline when required relationships cannot travel.
+    fn copy_with_ids(
+        &self,
+        _ids: &std::collections::HashMap<ElementId, ElementId>,
+    ) -> Option<BoxedEntity> {
+        None
+    }
+
+    /// Restore hosts before dependents. Capabilities may override this stage.
+    /// Core stages: ordinary entities 2, derived bodies 3, assemblies 4, relations 5.
+    fn dependency_order(&self) -> u8 {
+        crate::plugins::commands::snapshot_dependency_order_by_name(self.type_name())
+    }
+
     fn scope(&self) -> EntityScope {
         EntityScope::AuthoredModel
     }
@@ -298,6 +335,10 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         self.translate_by(delta)
     }
 
+    /// Rebind a parent-relative child to the exact transformed parent.
+    fn with_transformed_parent(&self, _parent: &dyn AuthoredEntity) -> Option<BoxedEntity> {
+        None
+    }
     fn rotate_by(&self, rotation: Quat) -> BoxedEntity;
     fn scale_by(&self, factor: Vec3, center: Vec3) -> BoxedEntity;
 
@@ -320,7 +361,38 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         PushPullAffordance::Blocked(PushPullBlockReason::UnsupportedFace)
     }
 
+    /// Edit an authored boundary. None erases its owning feature; an empty
+    /// result means a collapsed feature. Implementations own all shape rules.
+    fn edit_boundary(
+        &self,
+        _boundary: &str,
+        _distance: Option<f32>,
+    ) -> Result<Vec<BoxedEntity>, String> {
+        Err("This boundary has no authored edit operation".into())
+    }
+
     fn transform_parent(&self) -> Option<ElementId> {
+        None
+    }
+
+    /// Capability-owned host/aperture selection data for the Definition browser.
+    fn hosting_selection_context(
+        &self,
+    ) -> Option<crate::plugins::hosting_contracts::HostedSelectionContext> {
+        None
+    }
+
+    /// Domain-owned direction of the host's authored reference axis.
+    fn hosted_axis(&self) -> Option<Vec3> {
+        None
+    }
+    /// Parametric coordinate along the host for a world-space point.
+    /// Capability-specific geometric edge margin. This is not a structural
+    /// adequacy claim; None uses the registered host policy.
+    fn hosting_edge_margin(&self) -> Option<f32> {
+        None
+    }
+    fn position_along_host(&self, _point: Vec3) -> Option<f64> {
         None
     }
 
@@ -333,10 +405,9 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         &self,
         assignment: Option<MaterialAssignment>,
     ) -> Result<BoxedEntity, String> {
-        let _ = assignment;
-        Err(format!(
-            "{} snapshots do not support material assignment",
-            self.type_name()
+        Ok(crate::authored_material::with_material(
+            self.box_clone(),
+            assignment,
         ))
     }
     fn subobject_display_overrides(&self) -> Option<SubobjectDisplayOverrides> {
@@ -357,10 +428,36 @@ pub trait AuthoredEntity: Send + Sync + 'static {
     fn bounds(&self) -> Option<EntityBounds> {
         None
     }
+    /// Bounds of actual authored geometry after a world-to-frame rotation.
+    /// Capabilities must project their geometry, not a world AABB. None means
+    /// that this snapshot does not provide oriented validation bounds.
+    fn bounds_in_frame(&self, _rotation: Quat) -> Option<EntityBounds> {
+        None
+    }
     fn snap_segments(&self) -> Vec<(Vec3, Vec3)> {
         Vec::new()
     }
     fn to_json(&self) -> Value;
+
+    /// Fingerprint immutable authored content without constructing a second JSON
+    /// geometry tree. Large native snapshots override this with typed serialization.
+    /// This is transient plan identity, not the persisted project representation.
+    fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
+        snapshot_fingerprint(&self.to_json())
+    }
+    /// Immutable payloads shared by multiple snapshots, counted once per plan.
+    fn plan_retained_assets(&self) -> Vec<(blake3::Hash, usize)> {
+        Vec::new()
+    }
+    /// Optional direct authored comparison, avoiding capture/copy of large buffers.
+    fn matches_entity(
+        &self,
+        _entity: &bevy::ecs::world::EntityRef,
+        _world: &World,
+    ) -> Option<bool> {
+        None
+    }
+
     fn to_persisted_json(&self) -> Value {
         self.to_json()
     }
@@ -370,6 +467,18 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         self.apply_to(world);
     }
     fn remove_from(&self, world: &mut World);
+    /// GPU presentation of this captured after-state over the before-state's
+    /// existing mesh. World-space vertex snapshots need their relative pose.
+    fn preview_transform_from(&self, _before: &dyn AuthoredEntity) -> Option<Transform> {
+        self.preview_transform()
+    }
+
+    /// Small independent presentation metadata (e.g. guides/lights) may apply
+    /// its captured snapshot without forcing unrelated meshes off GPU previews.
+    fn isolated_snapshot_preview(&self) -> bool {
+        false
+    }
+
     fn preview_transform(&self) -> Option<Transform> {
         None
     }
@@ -401,7 +510,12 @@ impl Clone for BoxedEntity {
 
 impl PartialEq for BoxedEntity {
     fn eq(&self, other: &Self) -> bool {
-        self.0.eq_snapshot(other.0.as_ref())
+        self.material_assignment() == other.material_assignment()
+            && self
+                .0
+                .snapshot_body()
+                .unwrap_or(self.0.as_ref())
+                .eq_snapshot(other.0.snapshot_body().unwrap_or(other.0.as_ref()))
     }
 }
 
@@ -415,6 +529,22 @@ impl fmt::Debug for BoxedEntity {
 }
 
 impl BoxedEntity {
+    pub fn hosting_selection_context(
+        &self,
+    ) -> Option<crate::plugins::hosting_contracts::HostedSelectionContext> {
+        self.0.hosting_selection_context()
+    }
+    pub fn hosted_axis(&self) -> Option<Vec3> {
+        self.0.hosted_axis()
+    }
+    pub fn position_along_host(&self, point: Vec3) -> Option<f64> {
+        self.0.position_along_host(point)
+    }
+
+    pub fn dependency_order(&self) -> u8 {
+        self.0.dependency_order()
+    }
+
     pub fn type_name(&self) -> &'static str {
         self.0.type_name()
     }
@@ -556,4 +686,40 @@ impl BoxedEntity {
     pub fn cleanup_preview_entity(&self, world: &mut World, preview_entity: Entity) {
         self.0.cleanup_preview_entity(world, preview_entity);
     }
+}
+
+/// Stream a deterministic typed encoding into the plan hash and byte counter.
+/// In particular, never allocate a serde_json::Value for every mesh vertex.
+pub fn snapshot_fingerprint(
+    value: &impl serde::Serialize,
+) -> Result<(blake3::Hash, usize), String> {
+    struct Writer {
+        hash: blake3::Hasher,
+        bytes: usize,
+    }
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.hash.update(bytes);
+            self.bytes += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer {
+        hash: blake3::Hasher::new(),
+        bytes: 0,
+    };
+    // MessagePack emits many small writes per vertex. Feed full blocks to
+    // BLAKE3 while preserving the exact byte stream and retained-byte count.
+    {
+        use std::io::Write;
+        let mut buffered = std::io::BufWriter::new(&mut writer);
+        value
+            .serialize(&mut rmp_serde::Serializer::new(&mut buffered).with_struct_map())
+            .map_err(|error| error.to_string())?;
+        buffered.flush().map_err(|error| error.to_string())?;
+    }
+    Ok((writer.hash.finalize(), writer.bytes))
 }

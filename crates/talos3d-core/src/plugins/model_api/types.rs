@@ -62,15 +62,16 @@ impl ModelApiAuthentication {
         })
     }
 
+    pub(crate) fn is_paired(&self) -> bool {
+        self.paired.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub(crate) fn pairing_code_for_onboarding(&self) -> &str {
         &self.pairing_code
     }
 
     pub(super) fn redeem_pairing_code(&self, provided: &str) -> Option<&str> {
-        if !super::runtime_transport::constant_time_bytes_equal(
-            provided.as_bytes(),
-            self.pairing_code.as_bytes(),
-        ) {
+        if !super::constant_time_bytes_equal(provided.as_bytes(), self.pairing_code.as_bytes()) {
             return None;
         }
         self.paired
@@ -86,7 +87,7 @@ impl ModelApiAuthentication {
 
     pub(super) fn authorization_header_matches(&self, provided: &str) -> bool {
         self.paired.load(std::sync::atomic::Ordering::Acquire)
-            && super::runtime_transport::constant_time_bytes_equal(
+            && super::constant_time_bytes_equal(
                 provided.as_bytes(),
                 format!("Bearer {}", self.access_token).as_bytes(),
             )
@@ -167,6 +168,12 @@ pub struct EntityDetails {
     pub geometry_semantics: Option<GeometrySemantics>,
     pub semantic: Option<EntitySemanticDetails>,
     pub semantic_shadow: Option<crate::plugins::semantic_shadow::SemanticShadow>,
+    #[serde(default)]
+    pub design_concept: Option<crate::semantics::ConceptAssignment>,
+    #[serde(default)]
+    pub published_anchors: Vec<crate::semantics::PublishedAnchor>,
+    #[serde(default)]
+    pub anchor_bindings: Vec<crate::semantics::SemanticBinding>,
     pub properties: Vec<EntityPropertyDetails>,
 }
 
@@ -220,6 +227,9 @@ pub struct ToolbarDetails {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InstanceInfo {
+    /// Reviewed shared release identities; private project assets are separate.
+    #[serde(default)]
+    pub shared_corpus_releases: Vec<crate::curation::corpus_release::CorpusReleaseInfo>,
     pub instance_id: String,
     pub app_name: String,
     pub pid: u32,
@@ -261,6 +271,7 @@ pub struct InstanceInfo {
 impl From<&ModelApiRuntimeInfo> for InstanceInfo {
     fn from(value: &ModelApiRuntimeInfo) -> Self {
         Self {
+            shared_corpus_releases: Vec::new(),
             instance_id: value.instance_id.clone(),
             app_name: value.app_name.clone(),
             pid: value.pid,
@@ -1539,6 +1550,8 @@ pub struct OccurrenceExplainResult {
     pub resolved_parameters: Value,
     pub anchors: Vec<Value>,
     pub generated_parts: Vec<GeneratedOccurrencePartEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluation_error: Option<String>,
 }
 
 // --- Assembly / Relation types ---

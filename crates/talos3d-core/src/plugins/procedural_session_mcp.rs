@@ -21,6 +21,8 @@
 //! `ModelApiServer` and is added in the same PP. This module is the
 //! transport-neutral substrate it depends on.
 
+mod live_commit;
+
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -63,6 +65,10 @@ pub struct SessionSnapshotRequest {
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct SessionCommitRequest {
     pub session_id: SessionId,
+    /// Echo the id from create/snapshot. Omission uses that same prepared id
+    /// for compatibility; it never creates a new execution.
+    #[serde(default)]
+    pub commit_id: Option<String>,
     pub options: CommitOptions,
 }
 
@@ -77,6 +83,9 @@ pub struct SessionExportRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct SessionCreateResponse {
+    /// Registered step tools are a subset of the full MCP surface. Other tools
+    /// must be called directly; being listed by MCP does not admit them here.
+    pub registered_step_tools: Vec<McpToolId>,
     pub session_id: SessionId,
     pub snapshot: SessionSnapshot,
 }
@@ -130,6 +139,14 @@ impl EditorCommand for SessionStubCommand {
 /// supplied, [`CommandQueueDispatcher`] falls back to a no-op
 /// [`SessionStubCommand`] so the substrate is still exercised end-to-end.
 pub trait SessionStepExecutor {
+    /// Opt-in: every admitted effect must be captured by undoable commands.
+    fn supports_atomic_step(&self, _tool: &McpToolId) -> bool {
+        false
+    }
+    fn prepare_transaction(&self, _world: &World) -> Result<(), String> {
+        Err("Executor has no audited transaction contract".into())
+    }
+
     fn execute(
         &mut self,
         world: &mut World,
@@ -202,13 +219,24 @@ impl<'w, 'e> ToolDispatcher for CommandQueueDispatcher<'w, 'e> {
 // ---------------------------------------------------------------------
 
 pub fn world_create(world: &mut World, req: SessionCreateRequest) -> SessionCreateResponse {
+    world.init_resource::<super::history::History>();
+    let base = world.resource::<super::history::History>().revision_token();
     let mut registry = world.resource_mut::<ProceduralSessionRegistry>();
     let session_id = registry.create(req.spec);
+    registry
+        .get_mut(&session_id)
+        .expect("created session")
+        .base_model_revision = Some(base);
     let snapshot = registry
         .get_mut(&session_id)
         .expect("session just created")
         .snapshot();
+    let registered_step_tools = world
+        .get_resource::<SessionToolRegistry>()
+        .map(|tools| tools.known_tools().cloned().collect())
+        .unwrap_or_default();
     SessionCreateResponse {
+        registered_step_tools,
         session_id,
         snapshot,
     }
@@ -272,28 +300,69 @@ pub fn world_commit_with_executor(
             .clone()
     };
 
-    let step_order: std::collections::VecDeque<StepId> = session
-        .script
-        .steps
-        .iter()
-        .map(|s| s.id().clone())
-        .collect();
-    let oracle = AlwaysPassOracle;
-    let result = {
-        let mut dispatcher = CommandQueueDispatcher {
-            world,
-            session_id: session.id.clone(),
-            step_order,
-            executor,
+    if req
+        .commit_id
+        .as_ref()
+        .is_some_and(|id| id != &session.commit_id)
+    {
+        return Err(SessionError::CommitIdentityMismatch {
+            expected: session.commit_id.clone(),
+        });
+    }
+    // Return a successful receipt before checking freshness. A retry after undo
+    // or document replacement must never recreate the committed effects.
+    if let Some((options, receipt)) = &session.committed {
+        return if options == &req.options {
+            Ok(receipt.clone())
+        } else {
+            Err(SessionError::AlreadyCommitted(session.id.clone()))
         };
-        session_commit(
+    }
+    if let Some(expected) = &session.base_model_revision {
+        let actual = world.resource::<super::history::History>().revision_token();
+        if expected != &actual {
+            return Err(SessionError::StaleModel {
+                expected: expected.clone(),
+                actual,
+            });
+        }
+    }
+
+    let result = if let Some(executor) = executor {
+        live_commit::commit_live(
+            world,
             &mut session,
             &tool_registry,
             &config,
             req.options,
-            &mut dispatcher,
-            &oracle,
+            executor,
         )
+    } else {
+        // Structural test adapter only. Production MCP always supplies the
+        // audited live executor above; this path has no authored effects.
+        let step_order: std::collections::VecDeque<StepId> = session
+            .script
+            .steps
+            .iter()
+            .map(|s| s.id().clone())
+            .collect();
+        let oracle = AlwaysPassOracle;
+        {
+            let mut dispatcher = CommandQueueDispatcher {
+                world,
+                session_id: session.id.clone(),
+                step_order,
+                executor: None,
+            };
+            session_commit(
+                &mut session,
+                &tool_registry,
+                &config,
+                req.options,
+                &mut dispatcher,
+                &oracle,
+            )
+        }
     };
 
     // Write the updated session state back.
@@ -388,6 +457,10 @@ mod tests {
             },
         );
         assert_eq!(response.snapshot.spec.allowed_tools.len(), 1);
+        assert_eq!(
+            response.registered_step_tools,
+            vec![McpToolId::new("architecture.opening.place_hosted")]
+        );
 
         let snap = world_snapshot(
             app.world_mut(),
@@ -445,6 +518,7 @@ mod tests {
         let commit_report = world_commit(
             app.world_mut(),
             SessionCommitRequest {
+                commit_id: None,
                 session_id: resp.session_id.clone(),
                 options: CommitOptions::default(),
             },
@@ -528,6 +602,7 @@ mod tests {
         let err = world_commit(
             app.world_mut(),
             SessionCommitRequest {
+                commit_id: None,
                 session_id: resp.session_id.clone(),
                 options: CommitOptions::default(),
             },

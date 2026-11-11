@@ -15,8 +15,8 @@ It should be understood as:
 - a capability ecosystem surface
 - a host for both open and closed domain extensions
 
-The platform is not limited to architecture, but architecture is the reference
-extension currently present in the repository.
+Architecture is the first specialized edition and lives in its own repository.
+Core supplies the public mechanisms used by that edition and future domains.
 
 ## Product Thesis
 

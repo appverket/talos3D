@@ -22,6 +22,8 @@ use crate::{
         drafting::{
             self, DimPrimitive, DimensionAnnotationNode, DimensionStyleRegistry, DraftingVisibility,
         },
+        identity::ElementId,
+        modeling::occurrence::GeneratedOccurrencePart,
         render_pipeline::RenderSettings,
         section_fill::{
             extract_section_fills, generate_hatch_lines, HatchPattern, ProjectedSectionFill,
@@ -38,9 +40,7 @@ const WEIGHT_BOUNDARY_MM: f32 = 0.25;
 const WEIGHT_DIMENSION_MM: f32 = 0.18;
 
 const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
-const VISIBLE_EDGE_RAY_SAMPLE_T_VALUES: [f32; 3] = [0.2, 0.5, 0.8];
 const EDGE_VISIBILITY_EPSILON: f32 = 0.01;
-const ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH: f32 = 10_000.0;
 const EDGE_QUANTIZATION_SCALE: f32 = 10_000.0;
 const DIMENSION_LINE_TICK_HALF: f32 = 0.06;
 
@@ -139,35 +139,10 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
 
     let (vp_width, vp_height, world_width, world_height) = viewport_dimensions(orbit, projection);
 
-    // Collect mesh subjects
-    let mut entity_query = world.try_query_filtered::<(
-        Entity,
-        &crate::plugins::identity::ElementId,
-        &Mesh3d,
-        &GlobalTransform,
-        Option<&Visibility>,
-    ), Without<PreviewOnly>>()?;
-
-    let mut subjects = Vec::new();
-    for (entity, _eid, mesh_handle, mesh_transform, visibility) in entity_query.iter(world) {
-        if visibility.is_some_and(|v| *v == Visibility::Hidden) {
-            continue;
-        }
-        let Ok(entity_ref) = world.get_entity(entity) else {
-            continue;
-        };
-        let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
-            continue;
-        };
-        if drawing_overlay_excluded(snapshot.type_name()) {
-            continue;
-        }
-        subjects.push(MeshSubject {
-            entity,
-            mesh_handle: mesh_handle.0.clone(),
-            mesh_transform: *mesh_transform,
-        });
-    }
+    let subjects: Vec<MeshSubject> = collect_drawing_mesh_subjects(world, registry)
+        .into_iter()
+        .map(|(_, subject)| subject)
+        .collect();
 
     let scene_triangles = collect_scene_triangles(&subjects, mesh_assets);
     let clip_planes = collect_active_clip_planes(world);
@@ -913,6 +888,7 @@ fn write_drafting_primitive(out: &mut Vec<u8>, prim: &DimPrimitive) {
             color_hex,
         } => {
             let (ta, db) = match anchor_mode {
+                crate::plugins::drafting::TextAnchor::LeftBaseline => ("start", "alphabetic"),
                 crate::plugins::drafting::TextAnchor::CenterBaseline => ("middle", "alphabetic"),
                 crate::plugins::drafting::TextAnchor::Center => ("middle", "middle"),
             };
@@ -1363,6 +1339,54 @@ fn pdf_escape_text(s: &str) -> String {
 
 // ─── Internal geometry helpers ───────────────────────────────────────────────
 
+/// Resolve derived component meshes to their authored owner for every drawing
+/// backend. Compound occurrence roots intentionally have no render mesh.
+pub(crate) fn collect_drawing_mesh_subjects(
+    world: &World,
+    registry: &CapabilityRegistry,
+) -> Vec<(ElementId, MeshSubject)> {
+    let Some(mut owners) = world.try_query::<(Entity, &ElementId)>() else {
+        return Vec::new();
+    };
+    let owners: HashMap<_, _> = owners
+        .iter(world)
+        .map(|(entity, id)| (*id, entity))
+        .collect();
+    let Some(mut meshes) =
+        world.try_query::<(EntityRef, &Mesh3d, &GlobalTransform, Option<&Visibility>)>()
+    else {
+        return Vec::new();
+    };
+    meshes
+        .iter(world)
+        .filter_map(|(entity_ref, mesh, transform, visibility)| {
+            if entity_ref.contains::<PreviewOnly>()
+                || visibility.is_some_and(|v| *v == Visibility::Hidden)
+            {
+                return None;
+            }
+            let owner = entity_ref
+                .get::<GeneratedOccurrencePart>()
+                .map(|part| part.owner)
+                .or_else(|| entity_ref.get::<ElementId>().copied())?;
+            let owner_entity = *owners.get(&owner)?;
+            let owner_ref = world.get_entity(owner_entity).ok()?;
+            let snapshot = registry.capture_snapshot(&owner_ref, world)?;
+            if drawing_overlay_excluded(snapshot.type_name()) {
+                return None;
+            }
+            Some((
+                owner,
+                MeshSubject {
+                    entity: entity_ref.id(),
+                    mesh_handle: mesh.0.clone(),
+                    mesh_transform: *transform,
+                },
+            ))
+        })
+        .collect()
+}
+
 pub(crate) struct MeshSubject {
     pub(crate) entity: Entity,
     pub(crate) mesh_handle: Handle<Mesh>,
@@ -1542,13 +1566,14 @@ pub(crate) fn collect_classified_visible_edges(
     edges
         .into_values()
         .filter(|edge| edge.is_visible_candidate())
-        // Edges whose whole extent is on the clipped side of any active
-        // plane are hidden by the section — skip them entirely.
-        .filter(|edge| !edge_fully_clipped(edge.start_world, edge.end_world, clip_planes))
-        .filter(|edge| {
-            edge_is_visible(
-                edge.start_world,
-                edge.end_world,
+        .flat_map(|edge| {
+            let Some((start, end)) = clip_edge(edge.start_world, edge.end_world, clip_planes)
+            else {
+                return Vec::new();
+            };
+            visible_edge_segments(
+                start,
+                end,
                 entity,
                 camera_position,
                 camera_forward,
@@ -1556,8 +1581,10 @@ pub(crate) fn collect_classified_visible_edges(
                 scene_triangles,
                 clip_planes,
             )
+            .into_iter()
+            .map(|(start, end)| (start, end, edge.classify()))
+            .collect::<Vec<_>>()
         })
-        .map(|edge| (edge.start_world, edge.end_world, edge.classify()))
         .collect()
 }
 
@@ -1683,79 +1710,205 @@ fn register_feature_edge(
     state.total_faces = state.total_faces.saturating_add(1);
 }
 
-fn edge_is_visible(
+/// Subtract the exact intervals hidden by scene triangles. A visible sample
+/// cannot make the rest of a long edge visible: a stud glimpsed through a
+/// window must stop at the aperture in the drawing. This is the shared offline
+/// projector, not a per-frame viewport visibility implementation.
+fn visible_edge_segments(
     start: Vec3,
     end: Vec3,
-    owner_entity: Entity,
+    _owner_entity: Entity,
     camera_position: Vec3,
     camera_forward: Vec3,
     orthographic: bool,
     scene_triangles: &[SceneTriangle],
     clip_planes: &[ClipPlane],
-) -> bool {
-    use crate::plugins::modeling::snapshots::ray_triangle_intersection;
-
-    VISIBLE_EDGE_RAY_SAMPLE_T_VALUES
-        .into_iter()
-        .map(|t| start.lerp(end, t))
-        .any(|sample| {
-            let (ray_origin, ray_direction, max_distance) = if orthographic {
-                let Some(direction) = Dir3::new(camera_forward).ok() else {
-                    return true;
-                };
-                (
-                    sample - direction.as_vec3() * ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH,
-                    direction,
-                    ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH,
-                )
-            } else {
-                let ray_vector = sample - camera_position;
-                let max_distance = ray_vector.length();
-                let Some(direction) = Dir3::new(ray_vector).ok() else {
-                    return true;
-                };
-                (camera_position, direction, max_distance)
-            };
-            let ray = Ray3d::new(ray_origin, ray_direction);
-            !scene_triangles.iter().any(|triangle| {
-                // Skip triangles that are entirely on the clipped side
-                // of any active plane — they are hidden by the section
-                // and must not occlude "elevation beyond" geometry.
-                if triangle_fully_clipped(triangle, clip_planes) {
-                    return false;
-                }
-                if triangle.entity == owner_entity {
-                    return ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c)
-                        .is_some_and(|d| {
-                            d > EDGE_VISIBILITY_EPSILON
-                                && d < max_distance - EDGE_VISIBILITY_EPSILON
-                        });
-                }
-                ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c).is_some_and(
-                    |d| d > EDGE_VISIBILITY_EPSILON && d < max_distance - EDGE_VISIBILITY_EPSILON,
-                )
+) -> Vec<(Vec3, Vec3)> {
+    use bevy::math::DVec3;
+    let start64 = start.as_dvec3();
+    let end64 = end.as_dvec3();
+    let forward = camera_forward.as_dvec3().normalize_or_zero();
+    let camera = camera_position.as_dvec3();
+    let right = forward.any_orthonormal_vector();
+    let up = forward.cross(right);
+    let mut hidden = Vec::new();
+    for triangle in scene_triangles {
+        let vertices = [
+            triangle.a.as_dvec3(),
+            triangle.b.as_dvec3(),
+            triangle.c.as_dvec3(),
+        ];
+        // Broad phase in the view plane. Nearly edge-on triangles are common
+        // in transformed compound parts; disjoint projected bounds cannot hide
+        // the edge regardless of extrapolated plane depth.
+        if orthographic
+            && [right, up].into_iter().any(|axis| {
+                let lo = vertices
+                    .iter()
+                    .map(|v| v.dot(axis))
+                    .fold(f64::INFINITY, f64::min);
+                let hi = vertices
+                    .iter()
+                    .map(|v| v.dot(axis))
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let a = start64.dot(axis);
+                let b = end64.dot(axis);
+                a.max(b) < lo || a.min(b) > hi
             })
-        })
+        {
+            continue;
+        }
+        let normal = (vertices[1] - vertices[0])
+            .cross(vertices[2] - vertices[0])
+            .normalize_or_zero();
+        if normal == DVec3::ZERO {
+            continue;
+        }
+        let mut interval = (0.0, 1.0);
+        let depth = if orthographic {
+            let denominator = normal.dot(forward);
+            if denominator.abs() < 1e-12 {
+                continue;
+            }
+            normal / denominator
+        } else {
+            let camera_side = normal.dot(camera - vertices[0]);
+            if camera_side.abs() < 1e-12 {
+                continue;
+            }
+            -normal * camera_side.signum()
+        };
+        if !restrict_interval(
+            &mut interval,
+            depth.dot(start64 - vertices[0]) - EDGE_VISIBILITY_EPSILON as f64,
+            depth.dot(end64 - vertices[0]) - EDGE_VISIBILITY_EPSILON as f64,
+        ) {
+            continue;
+        }
+        let clipped = (!clip_planes.is_empty()).then(|| {
+            clip_occluder_polygon(vec![triangle.a, triangle.b, triangle.c], clip_planes)
+                .into_iter()
+                .map(|v| v.as_dvec3())
+                .collect::<Vec<_>>()
+        });
+        let polygon = clipped.as_deref().unwrap_or(&vertices);
+        if polygon.len() < 3 {
+            continue;
+        }
+        if clipped.is_some() {
+            let twice_area = (1..polygon.len() - 1)
+                .map(|i| (polygon[i] - polygon[0]).cross(polygon[i + 1] - polygon[0]))
+                .sum::<DVec3>();
+            if twice_area.length_squared() <= 1e-24 {
+                continue;
+            }
+        }
+        // Double precision is essential here. With f32 a sub-micron projected
+        // triangle can round its centroid onto an edge, reverse a half-space,
+        // and incorrectly hide every feature on a distant facade.
+        let centre = polygon.iter().copied().sum::<DVec3>() / polygon.len() as f64;
+        let mut inside = true;
+        for i in 0..polygon.len() {
+            let a = polygon[i];
+            let b = polygon[(i + 1) % polygon.len()];
+            let (origin, side) = if orthographic {
+                (a, (b - a).cross(forward))
+            } else {
+                (camera, (a - camera).cross(b - camera))
+            };
+            let side = side.normalize_or_zero();
+            if side == DVec3::ZERO {
+                continue;
+            }
+            let orientation = side.dot(centre - origin);
+            if orientation.abs() < 1e-12 {
+                inside = false;
+                break;
+            }
+            let side = side * orientation.signum();
+            if !restrict_interval(
+                &mut interval,
+                side.dot(start64 - origin),
+                side.dot(end64 - origin),
+            ) {
+                inside = false;
+                break;
+            }
+        }
+        if inside && interval.1 > interval.0 {
+            if interval.0 <= 0.0 && interval.1 >= 1.0 {
+                return Vec::new();
+            }
+            hidden.push(interval);
+        }
+    }
+    hidden.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut visible = Vec::new();
+    let mut cursor: f64 = 0.0;
+    for (lo, hi) in hidden {
+        if lo > cursor + 1e-6 {
+            visible.push((start.lerp(end, cursor as f32), start.lerp(end, lo as f32)));
+        }
+        cursor = cursor.max(hi);
+    }
+    if cursor < 1.0 - 1e-6 {
+        visible.push((start.lerp(end, cursor as f32), end));
+    }
+    visible
 }
 
-/// True iff every vertex of the triangle is on the *clipped* side of at
-/// least one active plane (i.e. the whole triangle is hidden by that
-/// plane's section). `ClipPlaneNode`'s `normal` points toward the
-/// visible side, so the clipped half-space is `signed < 0`.
-fn triangle_fully_clipped(triangle: &SceneTriangle, clip_planes: &[ClipPlane]) -> bool {
-    clip_planes.iter().any(|(origin, normal)| {
-        let signed = |p: Vec3| (p - *origin).dot(*normal);
-        signed(triangle.a) < 0.0 && signed(triangle.b) < 0.0 && signed(triangle.c) < 0.0
-    })
+/// Intersect an edge parameter interval with the linear half-space f(t) >= 0.
+fn restrict_interval(interval: &mut (f64, f64), start: f64, end: f64) -> bool {
+    if start < 0.0 && end < 0.0 {
+        return false;
+    }
+    if start < 0.0 {
+        interval.0 = interval.0.max(start / (start - end));
+    } else if end < 0.0 {
+        interval.1 = interval.1.min(start / (start - end));
+    }
+    interval.0 <= interval.1
 }
 
-/// True iff both endpoints of the edge are strictly on the clipped side
-/// of at least one active plane.
-fn edge_fully_clipped(start: Vec3, end: Vec3, clip_planes: &[ClipPlane]) -> bool {
-    clip_planes.iter().any(|(origin, normal)| {
-        let signed = |p: Vec3| (p - *origin).dot(*normal);
-        signed(start) < 0.0 && signed(end) < 0.0
-    })
+fn clip_occluder_polygon(mut polygon: Vec<Vec3>, planes: &[ClipPlane]) -> Vec<Vec3> {
+    for (origin, normal) in planes {
+        if polygon.is_empty() {
+            break;
+        }
+        let mut clipped = Vec::new();
+        for i in 0..polygon.len() {
+            let a = polygon[i];
+            let b = polygon[(i + 1) % polygon.len()];
+            let da = (a - *origin).dot(*normal);
+            let db = (b - *origin).dot(*normal);
+            if da >= 0.0 {
+                clipped.push(a);
+            }
+            if (da < 0.0) != (db < 0.0) {
+                clipped.push(a.lerp(b, da / (da - db)));
+            }
+        }
+        polygon = clipped;
+    }
+    polygon
+}
+
+/// Trim crossing edges against each visible half-space before visibility tests
+/// and projection. Merely rejecting fully hidden edges leaks geometry beyond cuts.
+fn clip_edge(mut start: Vec3, mut end: Vec3, clip_planes: &[ClipPlane]) -> Option<(Vec3, Vec3)> {
+    for (origin, normal) in clip_planes {
+        let a = (start - *origin).dot(*normal);
+        let b = (end - *origin).dot(*normal);
+        if a < 0.0 && b < 0.0 {
+            return None;
+        }
+        if a < 0.0 {
+            start = start.lerp(end, a / (a - b));
+        } else if b < 0.0 {
+            end = start.lerp(end, a / (a - b));
+        }
+    }
+    Some((start, end))
 }
 
 fn mesh_positions(mesh: &Mesh) -> Option<Vec<[f32; 3]>> {
@@ -1882,6 +2035,260 @@ fn dimension_display_text(node: &DimensionLineNode, doc_props: &DocumentProperti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn section_trims_crossing_edges_and_ignores_clipped_ray_hits() {
+        let planes = [(Vec3::ZERO, Vec3::Y)];
+        assert_eq!(
+            clip_edge(Vec3::NEG_Y, Vec3::Y, &planes),
+            Some((Vec3::ZERO, Vec3::Y))
+        );
+        assert!(clip_edge(Vec3::NEG_Y, Vec3::NEG_Y * 2.0, &planes).is_none());
+        let owner = Entity::from_bits(1);
+        // Triangle straddles the cut, but its intersection with the viewing ray
+        // is below it. It must not hide the retained edge behind the cut.
+        let triangle = SceneTriangle {
+            entity: Entity::from_bits(2),
+            a: Vec3::new(-2.0, -1.0, 0.0),
+            b: Vec3::new(2.0, -1.0, 0.0),
+            c: Vec3::new(0.0, 1.0, 0.0),
+        };
+        let visible = |planes: &[ClipPlane]| {
+            !visible_edge_segments(
+                Vec3::new(-0.1, -0.5, -1.0),
+                Vec3::new(0.1, -0.5, -1.0),
+                owner,
+                Vec3::new(0.0, 0.0, 2.0),
+                Vec3::NEG_Z,
+                true,
+                std::slice::from_ref(&triangle),
+                planes,
+            )
+            .is_empty()
+        };
+        assert!(!visible(&[]));
+        assert!(visible(&planes));
+    }
+
+    fn opaque_rectangle(y_min: f32, y_max: f32, z: f32) -> Vec<SceneTriangle> {
+        let a = Vec3::new(-2.0, y_min, z);
+        let b = Vec3::new(2.0, y_min, z);
+        let c = Vec3::new(2.0, y_max, z);
+        let d = Vec3::new(-2.0, y_max, z);
+        vec![
+            SceneTriangle {
+                entity: Entity::from_bits(2),
+                a,
+                b,
+                c,
+            },
+            SceneTriangle {
+                entity: Entity::from_bits(2),
+                a,
+                b: c,
+                c: d,
+            },
+        ]
+    }
+
+    #[test]
+    fn aperture_exposes_only_its_slice_of_a_long_framing_edge() {
+        // A narrow opening contains none of the former 20/50/80% samples.
+        // Keep its true visible interval, without the hidden continuation
+        // below the sill or above the head, including reversed triangle winding.
+        let mut wall = opaque_rectangle(-1.0, 1.05, 0.0);
+        wall.extend(opaque_rectangle(1.15, 4.0, 0.0));
+        for reverse in [false, true] {
+            if reverse {
+                for triangle in &mut wall {
+                    std::mem::swap(&mut triangle.b, &mut triangle.c);
+                }
+            }
+            let result = visible_edge_segments(
+                Vec3::new(0.0, 0.0, -1.0),
+                Vec3::new(0.0, 3.0, -1.0),
+                Entity::from_bits(1),
+                Vec3::Z * 10.0,
+                Vec3::NEG_Z,
+                true,
+                &wall,
+                &[],
+            );
+            assert_eq!(result.len(), 1, "{result:?}");
+            assert!(result[0].0.abs_diff_eq(Vec3::new(0.0, 1.05, -1.0), 1e-5));
+            assert!(result[0].1.abs_diff_eq(Vec3::new(0.0, 1.15, -1.0), 1e-5));
+        }
+    }
+
+    #[test]
+    fn perspective_occlusion_splits_at_projected_boundary_and_keeps_front_edges() {
+        let wall = opaque_rectangle(-1.0, 1.0, 0.0);
+        let segments = |z| {
+            visible_edge_segments(
+                Vec3::new(0.0, 0.0, z),
+                Vec3::new(0.0, 4.0, z),
+                Entity::from_bits(1),
+                Vec3::Z * 2.0,
+                Vec3::NEG_Z,
+                false,
+                &wall,
+                &[],
+            )
+        };
+        let behind = segments(-2.0);
+        assert_eq!(behind.len(), 1);
+        assert!(behind[0].0.abs_diff_eq(Vec3::new(0.0, 2.0, -2.0), 1e-5));
+        assert!(behind[0].1.abs_diff_eq(Vec3::new(0.0, 4.0, -2.0), 1e-5));
+        for z in [0.0, 1.0] {
+            let front = segments(z);
+            assert_eq!(
+                front,
+                vec![(Vec3::new(0.0, 0.0, z), Vec3::new(0.0, 4.0, z))]
+            );
+        }
+    }
+
+    #[test]
+    fn reversed_edge_keeps_reversed_visible_interval_and_camera_rear_does_not_occlude() {
+        let wall = opaque_rectangle(-1.0, 1.0, 0.0);
+        for orthographic in [true, false] {
+            let result = visible_edge_segments(
+                Vec3::new(0.0, 4.0, -2.0),
+                Vec3::new(0.0, 0.0, -2.0),
+                Entity::from_bits(1),
+                Vec3::Z * 2.0,
+                Vec3::NEG_Z,
+                orthographic,
+                &wall,
+                &[],
+            );
+            assert_eq!(result.len(), 1);
+            assert!(result[0].0.abs_diff_eq(Vec3::new(0.0, 4.0, -2.0), 1e-5));
+            let boundary = if orthographic { 1.0 } else { 2.0 };
+            assert!(result[0]
+                .1
+                .abs_diff_eq(Vec3::new(0.0, boundary, -2.0), 1e-5));
+        }
+        // This surface is behind the camera, so cannot hide an edge in front.
+        let behind_camera = opaque_rectangle(-10.0, 10.0, 3.0);
+        let start = Vec3::new(0.0, 0.0, -2.0);
+        let end = Vec3::new(0.0, 4.0, -2.0);
+        assert_eq!(
+            visible_edge_segments(
+                start,
+                end,
+                Entity::from_bits(1),
+                Vec3::Z * 2.0,
+                Vec3::NEG_Z,
+                false,
+                &behind_camera,
+                &[],
+            ),
+            vec![(start, end)]
+        );
+    }
+
+    #[test]
+    fn section_clips_partial_occluder_before_interval_subtraction() {
+        let wall = opaque_rectangle(-1.0, 4.0, 0.0);
+        let result = visible_edge_segments(
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 3.0, -1.0),
+            Entity::from_bits(1),
+            Vec3::Z * 10.0,
+            Vec3::NEG_Z,
+            true,
+            &wall,
+            &[(Vec3::Y, Vec3::Y)],
+        );
+        assert_eq!(result.len(), 1);
+        assert!(result[0].0.abs_diff_eq(Vec3::new(0.0, 0.0, -1.0), 1e-5));
+        assert!(result[0].1.abs_diff_eq(Vec3::new(0.0, 1.0, -1.0), 1e-5));
+    }
+
+    #[test]
+    fn section_tangent_to_occluder_does_not_hide_geometry() {
+        let wall = opaque_rectangle(-1.0, 1.0, 0.0);
+        let start = Vec3::new(0.0, 0.0, -1.0);
+        let end = Vec3::new(0.0, 3.0, -1.0);
+        assert_eq!(
+            visible_edge_segments(
+                start,
+                end,
+                Entity::from_bits(1),
+                Vec3::Z * 10.0,
+                Vec3::NEG_Z,
+                true,
+                &wall,
+                &[(Vec3::Y, Vec3::Y)],
+            ),
+            vec![(start, end)]
+        );
+    }
+
+    #[test]
+    fn nearly_edge_on_compound_triangle_does_not_erase_remote_elevation() {
+        // Actual transformed cottage door31 stile vertices. The former f32
+        // centroid predicate claimed this west door hid an entire east corner.
+        let mut triangle = SceneTriangle {
+            entity: Entity::from_bits(2),
+            a: Vec3::new(2.330899953842163, 0.06999999284744263, -1.4349998235702515),
+            b: Vec3::new(2.390899896621704, 0.06999999284744263, -1.434999704360962),
+            c: Vec3::new(2.390899896621704, 1.9500000476837158, -1.434999704360962),
+        };
+        for reverse in [false, true] {
+            if reverse {
+                std::mem::swap(&mut triangle.b, &mut triangle.c);
+            }
+            let start = Vec3::new(-2.5, 0.0, -3.0);
+            let end = Vec3::new(-2.5, 2.3, -3.0);
+            assert_eq!(
+                visible_edge_segments(
+                    start,
+                    end,
+                    Entity::from_bits(1),
+                    Vec3::NEG_X * 10.0,
+                    Vec3::X,
+                    true,
+                    std::slice::from_ref(&triangle),
+                    &[]
+                ),
+                vec![(start, end)]
+            );
+        }
+    }
+
+    #[test]
+    fn closed_box_preserves_visible_outlines_in_all_cardinal_views() {
+        let mesh = Mesh::from(Cuboid::new(5.0, 2.3, 6.0));
+        let mut assets = Assets::<Mesh>::default();
+        let handle = assets.add(mesh.clone());
+        let owner = Entity::from_bits(1);
+        let triangles = collect_scene_triangles(
+            &[MeshSubject {
+                entity: owner,
+                mesh_handle: handle,
+                mesh_transform: GlobalTransform::IDENTITY,
+            }],
+            &assets,
+        );
+        for forward in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z, Vec3::NEG_Y] {
+            let edges = collect_classified_visible_edges(
+                &mesh,
+                &GlobalTransform::IDENTITY,
+                owner,
+                -forward * 10.0,
+                forward,
+                true,
+                &triangles,
+                &[],
+            );
+            assert!(
+                edges.len() >= 4,
+                "cardinal view lost closed-box outline: {forward:?}: {edges:?}"
+            );
+        }
+    }
 
     #[test]
     fn edge_type_weights_follow_iso_conventions() {

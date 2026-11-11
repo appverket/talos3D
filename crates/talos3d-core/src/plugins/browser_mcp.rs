@@ -30,8 +30,23 @@ impl Plugin for BrowserMcpPlugin {
     }
 }
 
+#[cfg(feature = "model-api")]
+fn shared_tool_definitions(world: &World) -> Vec<Value> {
+    let Some(api) = world.get_resource::<crate::plugins::model_api::BrowserModelApi>() else {
+        return Vec::new();
+    };
+    crate::plugins::model_api::browser_tool_definitions(&api.0)
+}
+
 fn tool_definitions() -> Vec<Value> {
     vec![
+        json!({"name":"project_view_capture","description":"Capture a render-only GLB view and its native snapshot at one document revision. Does not publish or acknowledge storage.","inputSchema":object_schema([])}),
+        json!({"name":"project_pack","description":"Pack native project bytes for storage without opening or modifying any document.","inputSchema":{"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}}),
+        json!({"name":"project_capture","description":"Capture the complete native project including Definition libraries, materials and BIM sidecars. Does not acknowledge storage.","inputSchema":{"type":"object","properties":{"for_storage":{"type":"boolean"}}}}),
+        json!({"name":"project_open","description":"Open complete native project bytes using the normal persistence loader.","inputSchema":{"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}}),
+        json!({"name":"project_saved","description":"Acknowledge a durably stored snapshot; newer edits remain dirty.","inputSchema":{"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}}),
+        json!({"name":"project_library_install","description":"Install a revision-pinned library without replacing placed components; undoable.","inputSchema":{"type":"object","properties":{"json":{"type":"string"},"revision":{"type":"string"}},"required":["json","revision"]}}),
+        json!({"name":"project_status","description":"Return native document dirty status.","inputSchema":object_schema([])}),
         json!({
             "name": "browser_session_info",
             "description": "Return status for the attached Talos3D browser runtime session.",
@@ -372,8 +387,75 @@ fn vec3_json(value: Vec3) -> Value {
     json!([value.x, value.y, value.z])
 }
 
+fn project_transport_text(bytes: Vec<u8>) -> Result<String, String> {
+    let bytes = if bytes.starts_with(crate::plugins::project_codec::BINARY_MAGIC) {
+        crate::plugins::project_codec::text_envelope(&bytes)?
+    } else {
+        bytes
+    };
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
 fn dispatch_tool(world: &mut World, tool_name: &str, args: Value) -> Result<Value, String> {
     match tool_name {
+        "project_library_install" => {
+            let bytes = args
+                .get("json")
+                .and_then(Value::as_str)
+                .ok_or("native project JSON required")?
+                .as_bytes();
+            let revision = args
+                .get("revision")
+                .and_then(Value::as_str)
+                .ok_or("revision required")?;
+            Ok(
+                json!({"library_id":crate::plugins::persistence::install_project_library(world,bytes,revision)?}),
+            )
+        }
+        "project_status" => Ok(
+            json!({"dirty":world.resource::<crate::plugins::document_state::DocumentState>().dirty,"revision":world.resource::<crate::plugins::history::History>().revision_token()}),
+        ),
+        "project_view_capture" => {
+            use base64::Engine;
+            let bytes = crate::plugins::persistence::capture_for_storage(world, 64 * 1024 * 1024)?;
+            let glb = crate::plugins::model_export::glb::capture_view_glb(world)?;
+            Ok(
+                json!({"json":project_transport_text(bytes)?,"glb_base64":base64::engine::general_purpose::STANDARD.encode(glb),"revision":world.resource::<crate::plugins::history::History>().revision_token()}),
+            )
+        }
+        "project_pack" => {
+            let bytes = args
+                .get("json")
+                .and_then(Value::as_str)
+                .ok_or("native project JSON required")?
+                .as_bytes()
+                .to_vec();
+            let bytes = crate::plugins::persistence::fit_project_transfer(bytes, 64 * 1024 * 1024)?;
+            Ok(json!({"json":project_transport_text(bytes)?}))
+        }
+        "project_capture" => {
+            let bytes = if args.get("for_storage").and_then(Value::as_bool) == Some(true) {
+                crate::plugins::persistence::capture_for_storage(world, 64 * 1024 * 1024)?
+            } else {
+                crate::plugins::persistence::capture_project_bytes(world)?
+            };
+            Ok(json!({"json":project_transport_text(bytes)?}))
+        }
+        "project_open" | "project_saved" => {
+            let bytes = args
+                .get("json")
+                .and_then(Value::as_str)
+                .ok_or("native project JSON required")?
+                .as_bytes();
+            if tool_name == "project_open" {
+                crate::plugins::persistence::open_project_bytes(world, bytes)?;
+                Ok(json!({"opened":true}))
+            } else {
+                Ok(
+                    json!({"saved":crate::plugins::persistence::acknowledge_project_bytes(world,bytes)?}),
+                )
+            }
+        }
         "browser_session_info" => Ok(browser_session_info(world)),
         "list_entity_types" => Ok(list_entity_types(world)),
         "list_entities" => Ok(list_entities(world)),
@@ -552,17 +634,59 @@ fn install_browser_mcp_executor() {
 #[cfg(target_arch = "wasm32")]
 fn poll_browser_mcp_requests(world: &mut World) {
     for request in wasm_bridge::drain_requests() {
-        let result = match &request.kind {
-            wasm_bridge::BrowserMcpRequestKind::ListTools => Ok(json!({
-                "tools": tool_definitions(),
-                "session": browser_session_info(world),
-            })),
-            wasm_bridge::BrowserMcpRequestKind::CallTool {
-                tool_name,
-                arguments,
-            } => dispatch_tool(world, tool_name, arguments.clone()),
-        };
-        wasm_bridge::resolve(request, result);
+        #[cfg(feature = "model-api")]
+        {
+            match &request.kind {
+                wasm_bridge::BrowserMcpRequestKind::ListTools => {
+                    let mut tools = shared_tool_definitions(world);
+                    tools.extend(tool_definitions().into_iter().filter(|t| {
+                        t["name"].as_str().is_some_and(|n| {
+                            n.starts_with("project_") || n == "browser_session_info"
+                        })
+                    }));
+                    wasm_bridge::resolve(request, Ok(json!({"tools":tools})));
+                }
+                wasm_bridge::BrowserMcpRequestKind::CallTool {
+                    tool_name,
+                    arguments,
+                } if tool_name.starts_with("project_") || tool_name == "browser_session_info" => {
+                    let result = dispatch_tool(world, tool_name, arguments.clone());
+                    wasm_bridge::resolve(request, result);
+                }
+                wasm_bridge::BrowserMcpRequestKind::CallTool {
+                    tool_name,
+                    arguments,
+                } => {
+                    let api = world
+                        .resource::<crate::plugins::model_api::BrowserModelApi>()
+                        .0
+                        .clone();
+                    let name = tool_name.clone();
+                    let args = arguments.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let result = api
+                            .call_without_peer(&name, args)
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string()));
+                        wasm_bridge::resolve(request, result);
+                    });
+                }
+            }
+        }
+        #[cfg(not(feature = "model-api"))]
+        {
+            let result = match &request.kind {
+                wasm_bridge::BrowserMcpRequestKind::ListTools => {
+                    Ok(json!({"tools":tool_definitions()}))
+                }
+                wasm_bridge::BrowserMcpRequestKind::CallTool {
+                    tool_name,
+                    arguments,
+                } => dispatch_tool(world, tool_name, arguments.clone()),
+            };
+            wasm_bridge::resolve(request, result);
+        }
     }
 }
 

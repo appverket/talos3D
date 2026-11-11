@@ -38,6 +38,7 @@ impl Plugin for DraftPrimitiveToolPlugin {
                 draw_preview,
                 show_text_dialog,
             )
+                .after(crate::plugins::snap::SnapSystems::Resolve)
                 .run_if(draft_tool_active),
         );
     }
@@ -364,4 +365,12 @@ mod tests {
         assert_eq!(text.id, "drafting.create_text");
         assert_eq!(text.parameters["content"], "Note");
     }
+}
+
+pub(crate) fn inference_origin(world: &World) -> Option<Vec3> {
+    let point = *world
+        .get_resource::<DraftPrimitiveToolState>()?
+        .points
+        .last()?;
+    Some(world.resource::<DrawingPlane>().to_world(point))
 }
