@@ -357,6 +357,20 @@ impl DisplayUnit {
         )
     }
 
+    pub fn format_coordinates(&self, metres: &[f32], precision: u8) -> String {
+        use std::fmt::Write;
+        let mut result = String::from("(");
+        for (i, m) in metres.iter().enumerate() {
+            if i != 0 {
+                result.push_str(", ");
+            }
+            write!(result, "{:.*}", precision as usize, self.from_metres(*m)).unwrap();
+        }
+        result.push_str(") ");
+        result.push_str(self.abbreviation());
+        result
+    }
+
     fn scale_factor(&self) -> f32 {
         match self {
             Self::Millimetres => 1000.0,

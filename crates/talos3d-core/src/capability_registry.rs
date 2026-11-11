@@ -1179,8 +1179,12 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
     /// Lightweight display metadata. Geometry-heavy factories should override
     /// this so browsing labels never copies mesh buffers or computes bounds.
     fn display_label(&self, entity_ref: &EntityRef, world: &World) -> Option<String> {
-        self.capture_snapshot(entity_ref, world)
-            .map(|snapshot| snapshot.label())
+        self.capture_snapshot(entity_ref, world).map(|snapshot| {
+            match world.get_resource::<crate::plugins::document_properties::DocumentProperties>() {
+                Some(doc) => snapshot.0.label_in_units(doc.display_unit, doc.precision),
+                None => snapshot.label(),
+            }
+        })
     }
 
     /// Opt in only for a primitive whose faces form its editing surface. Raw

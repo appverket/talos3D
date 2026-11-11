@@ -674,7 +674,7 @@ impl Primitive for ProfileExtrusion {
                 return Err(invalid_property_error(
                     "profile_extrusion",
                     &["center", "height", "profile"],
-                ))
+                ));
             }
         }
         Ok(prim)
@@ -699,6 +699,13 @@ impl Primitive for ProfileExtrusion {
 
     fn drag_handle(&self, _handle_id: &str, _cursor: Vec3, _rotation: Quat) -> Option<Self> {
         None
+    }
+
+    fn label_in_units(&self, unit: crate::plugins::units::DisplayUnit, precision: u8) -> String {
+        format!(
+            "Profile extrusion at {}",
+            unit.format_coordinates(&self.centre.to_array(), precision)
+        )
     }
 
     fn label(&self) -> String {
@@ -1141,7 +1148,7 @@ impl Primitive for ProfileSweep {
                 return Err(invalid_property_error(
                     "profile_sweep",
                     &["center", "profile", "path"],
-                ))
+                ));
             }
         }
         Ok(prim)
@@ -1569,7 +1576,7 @@ impl Primitive for ProfileRevolve {
                 return Err(invalid_property_error(
                     "profile_revolve",
                     &["center", "angle", "segments", "profile"],
-                ))
+                ));
             }
         }
         Ok(prim)
@@ -2677,7 +2684,9 @@ mod tests {
                 let outward_xz = Vec3::new(tri_center.x, 0.0, tri_center.z).normalize_or_zero();
                 let normal_xz = Vec3::new(normal.x, 0.0, normal.z);
                 if outward_xz.length_squared() > 0.01 && normal_xz.dot(outward_xz) < 0.0 {
-                    eprintln!("SIDE triangle has INWARD normal: normal_xz={normal_xz:?} outward={outward_xz:?} for {a:?}, {b:?}, {c:?}");
+                    eprintln!(
+                        "SIDE triangle has INWARD normal: normal_xz={normal_xz:?} outward={outward_xz:?} for {a:?}, {b:?}, {c:?}"
+                    );
                     side_normals_consistent = false;
                 }
             }

@@ -28,7 +28,7 @@ pub struct PerfStats {
 impl Default for PerfStats {
     fn default() -> Self {
         Self {
-            visible: true,
+            visible: false,
             fps: 0.0,
             transform_preview_ms: 0.0,
             outliner_build_ms: 0.0,

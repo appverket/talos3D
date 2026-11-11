@@ -295,6 +295,13 @@ impl Primitive for BoxPrimitive {
         None
     }
 
+    fn label_in_units(&self, unit: crate::plugins::units::DisplayUnit, precision: u8) -> String {
+        format!(
+            "Box at {}",
+            unit.format_coordinates(&self.centre.to_array(), precision)
+        )
+    }
+
     fn label(&self) -> String {
         format!(
             "Box at ({:.2}, {:.2}, {:.2})",
@@ -511,7 +518,7 @@ impl Primitive for CylinderPrimitive {
                 return Err(invalid_property_error(
                     "cylinder",
                     &["center", "radius", "height"],
-                ))
+                ));
             }
         }
         Ok(prim)
@@ -548,6 +555,13 @@ impl Primitive for CylinderPrimitive {
             }),
             _ => None,
         }
+    }
+
+    fn label_in_units(&self, unit: crate::plugins::units::DisplayUnit, precision: u8) -> String {
+        format!(
+            "Cylinder at {}",
+            unit.format_coordinates(&self.centre.to_array(), precision)
+        )
     }
 
     fn label(&self) -> String {
@@ -729,6 +743,13 @@ impl Primitive for SpherePrimitive {
             }),
             _ => None,
         }
+    }
+
+    fn label_in_units(&self, unit: crate::plugins::units::DisplayUnit, precision: u8) -> String {
+        format!(
+            "Sphere at {}",
+            unit.format_coordinates(&self.centre.to_array(), precision)
+        )
     }
 
     fn label(&self) -> String {
@@ -946,6 +967,13 @@ impl Primitive for PlanePrimitive {
             _ => return None,
         }
         Some(prim)
+    }
+
+    fn label_in_units(&self, unit: crate::plugins::units::DisplayUnit, precision: u8) -> String {
+        format!(
+            "Plane at elevation {}",
+            unit.format_value(self.elevation, precision)
+        )
     }
 
     fn label(&self) -> String {

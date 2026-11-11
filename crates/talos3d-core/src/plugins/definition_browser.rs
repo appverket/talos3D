@@ -475,7 +475,7 @@ pub fn execute_instantiate_definition(
         other => {
             return Err(format!(
                 "Unsupported host_mode '{other}'. Expected: auto, unhosted, opening, or host"
-            ))
+            ));
         }
     };
 
@@ -694,6 +694,10 @@ pub fn execute_open_definition_draft(
         })),
         ..CommandResult::empty()
     })
+}
+
+pub(crate) fn can_open_selected_definition(world: &mut World) -> bool {
+    selected_occurrence_definition_context(world).is_ok()
 }
 
 pub fn execute_open_selected_occurrence_definition(
@@ -5098,7 +5102,7 @@ fn build_parameter_from_state(
             return Err(format!(
                 "Unsupported parameter type '{}'. Use numeric, boolean, or string",
                 other
-            ))
+            ));
         }
     };
     let override_policy = match state.new_parameter_override_policy.trim() {
@@ -5109,7 +5113,7 @@ fn build_parameter_from_state(
             return Err(format!(
                 "Unsupported override policy '{}'. Use overridable, locked, or required",
                 other
-            ))
+            ));
         }
     };
     Ok(crate::plugins::modeling::definition::ParameterDef {

@@ -13,28 +13,7 @@ pub struct ToolPlugin;
 
 impl Plugin for ToolPlugin {
     fn build(&self, app: &mut App) {
-        // Wall/Opening previously had keyboard-only activation with no command.
-        // Register them so their shortcuts flow through the unified keymap and
-        // are covered by conflict detection like every other tool.
         app.register_command(
-            CommandDescriptor {
-                id: "architectural.place_wall".to_string(),
-                label: "Wall".to_string(),
-                description: "Activate wall placement".to_string(),
-                category: CommandCategory::Create,
-                parameters: None,
-                default_shortcut: None,
-                icon: None,
-                hint: Some("Click to place start point".to_string()),
-                requires_selection: false,
-                show_in_menu: false,
-                version: 1,
-                activates_tool: Some("PlaceWall".to_string()),
-                capability_id: None,
-            },
-            execute_place_wall,
-        )
-        .register_command(
             CommandDescriptor {
                 id: "architectural.place_opening".to_string(),
                 label: "Place Opening".to_string(),
@@ -108,10 +87,6 @@ pub enum ActiveTool {
 
 #[derive(Component)]
 pub struct Preview;
-
-fn execute_place_wall(world: &mut World, _: &Value) -> Result<CommandResult, String> {
-    activate_tool_command(world, ActiveTool::PlaceWall)
-}
 
 fn execute_place_opening(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     activate_tool_command(world, ActiveTool::PlaceOpening)

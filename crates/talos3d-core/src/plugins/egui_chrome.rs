@@ -97,8 +97,9 @@ use crate::plugins::{
     },
     command_registry::{
         ordered_menu_categories, queue_command_invocation_resource, viewport_context_commands,
-        CommandCategory, CommandDescriptor, CommandRegistry, CommandToggleStates, IconRegistry,
-        PendingCommandInvocations, ViewportContextCommandRegistry,
+        CommandCategory, CommandDescriptor, CommandRegistry, CommandRegistryAppExt,
+        CommandToggleStates, IconRegistry, PendingCommandInvocations,
+        ViewportContextCommandRegistry,
     },
     commands::{
         ApplyEntityChangesCommand, BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand,
@@ -417,7 +418,7 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
         label: "Objects",
         layout: MenuGroupLayout::Auto,
-        command_ids: &["view.lock_selected"],
+        command_ids: &["view.lock_selected", "view.hide_selected"],
     },
     MenuSubmenuSpec {
         label: "Zoom",
@@ -897,6 +898,8 @@ impl Plugin for EguiChromePlugin {
             Update,
             (
                 sync_definition_selection_context,
+                resolve_context_menu_predicates
+                    .run_if(|menu: Res<ViewportContextMenu>| menu.open && menu.needs_predicates),
                 draw_egui_chrome.in_set(EguiChromeSystems),
                 sync_primary_egui_input_claims.in_set(EguiChromeSystems),
             )
@@ -904,6 +907,10 @@ impl Plugin for EguiChromePlugin {
         );
         install_primary_egui_pass(app);
         register_chrome_window_commands(app);
+        app.register_viewport_context_command_if(
+            "modeling.open_selected_occurrence_definition",
+            crate::plugins::definition_browser::can_open_selected_definition,
+        );
     }
 }
 
@@ -1112,6 +1119,22 @@ pub(crate) struct ViewportContextMenu {
     open: bool,
     position: egui::Pos2,
     just_opened: bool,
+    needs_predicates: bool,
+    excluded_commands: HashSet<String>,
+}
+
+fn resolve_context_menu_predicates(world: &mut World) {
+    let predicates = world
+        .resource::<ViewportContextCommandRegistry>()
+        .predicates
+        .clone();
+    let excluded = predicates
+        .into_iter()
+        .filter_map(|(id, applies)| (!applies(world)).then_some(id))
+        .collect();
+    let mut menu = world.resource_mut::<ViewportContextMenu>();
+    menu.excluded_commands = excluded;
+    menu.needs_predicates = false;
 }
 
 impl ViewportContextMenu {
@@ -3076,6 +3099,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             && !chrome_owns_pointer
             && !crate::plugins::camera::orbit_modifier_pressed(&data.keys)
         {
+            data.viewport_context_menu.needs_predicates = true;
             data.viewport_context_menu.open = true;
             data.viewport_context_menu.position = pos;
             data.viewport_context_menu.just_opened = true;
@@ -3210,7 +3234,17 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
                                     let active = data.property_panel_state.active_field.as_deref()
                                         == Some(field_id.as_str());
 
-                                    ui.label(field.label);
+                                    let dimensioned = match field.kind {
+                                        crate::authored_entity::PropertyValueKind::Vec2 => true,
+                                        crate::authored_entity::PropertyValueKind::Vec3 => field.name != "direction",
+                                        crate::authored_entity::PropertyValueKind::Scalar => scalar_uses_display_units(field.name),
+                                        _ => false,
+                                    };
+                                    if active && dimensioned {
+                                        ui.label(format!("{} ({})", field.label, data.doc_props.display_unit.abbreviation()));
+                                    } else {
+                                        ui.label(field.label);
+                                    }
                                     if active {
                                         if !field.editable {
                                             data.property_panel_state.active_field = None;
@@ -4064,21 +4098,16 @@ fn format_panel_property_value(
                 .format_value(*value, doc_props.precision)
         }
         crate::authored_entity::PropertyValue::Scalar(value) => format!("{value:.2}"),
-        crate::authored_entity::PropertyValue::Vec2(value) => format!(
-            "{:.2}, {:.2}",
-            doc_props.display_unit.from_metres(value.x),
-            doc_props.display_unit.from_metres(value.y)
-        ),
+        crate::authored_entity::PropertyValue::Vec2(value) => doc_props
+            .display_unit
+            .format_coordinates(&value.to_array(), doc_props.precision),
         // A direction is dimensionless, unlike an anchor/position vector.
         crate::authored_entity::PropertyValue::Vec3(value) if field_name == "direction" => {
             format!("{:.4}, {:.4}, {:.4}", value.x, value.y, value.z)
         }
-        crate::authored_entity::PropertyValue::Vec3(value) => format!(
-            "{:.2}, {:.2}, {:.2}",
-            doc_props.display_unit.from_metres(value.x),
-            doc_props.display_unit.from_metres(value.y),
-            doc_props.display_unit.from_metres(value.z)
-        ),
+        crate::authored_entity::PropertyValue::Vec3(value) => doc_props
+            .display_unit
+            .format_coordinates(&value.to_array(), doc_props.precision),
         crate::authored_entity::PropertyValue::Text(value) => value.clone(),
     }
 }
@@ -4169,10 +4198,8 @@ fn draw_perf_overlay(ctx: &egui::Context, available: egui::Rect, perf_stats: &Pe
 
     egui::Area::new(egui::Id::new("perf_overlay"))
         .order(egui::Order::Foreground)
-        .fixed_pos(egui::pos2(
-            available.max.x - PERF_OVERLAY_WIDTH - 10.0,
-            available.min.y + 10.0,
-        ))
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .fixed_pos(available.left_bottom() + egui::vec2(10.0, -10.0))
         .show(ctx, |ui| {
             egui::Frame::new()
                 .fill(CHROME_BG)
@@ -4922,7 +4949,7 @@ fn draw_viewport_context_menu(
     registry: &CommandRegistry,
     context_commands: &ViewportContextCommandRegistry,
 ) {
-    if !menu.open {
+    if !menu.open || menu.needs_predicates {
         return;
     }
 
@@ -4981,7 +5008,7 @@ fn draw_viewport_context_menu(
                     item!("Rotate", "modeling.rotate");
                     item!("Scale", "modeling.scale");
                     let contributed =
-                        viewport_context_commands(registry, context_commands, selection_count);
+                        viewport_context_commands(registry, context_commands, selection_count).into_iter().filter(|cmd| !menu.excluded_commands.contains(&cmd.id)).collect::<Vec<_>>();
                     if !contributed.is_empty() {
                         ui.separator();
                         for descriptor in contributed {
@@ -5005,10 +5032,7 @@ fn draw_viewport_context_menu(
                         }
                     }
                     ui.separator();
-                    item!(
-                        "Open Definition",
-                        "modeling.open_selected_occurrence_definition"
-                    );
+
                     item!(
                         "Materials\u{2026}",
                         "materials.toggle_browser",
@@ -5035,10 +5059,11 @@ fn draw_viewport_context_menu(
                                 "modeling.create_linked_model_from_selection"
                             );
                         }
-                    } else {
-                        item!(enabled: selected_group_count > 0, "Ungroup", "modeling.ungroup");
+                    } else if selected_group_count > 0 {
+                        item!("Ungroup", "modeling.ungroup");
                     }
                     ui.separator();
+                    item!("Hide Selected", "view.hide_selected");
                     item!("Duplicate", "core.duplicate");
                     item!("Deselect", "core.deselect");
                     item!("Delete", "core.delete");
@@ -6780,6 +6805,14 @@ mod tests {
             );
         }
         let doc = DocumentProperties::default();
+        assert_eq!(
+            format_panel_property_value(
+                &PropertyValue::Vec3(Vec3::new(13.0, 0.0, -8.0)),
+                "anchor",
+                &doc
+            ),
+            "(13000, 0, -8000) mm"
+        );
         assert_eq!(
             parse_panel_property_value("anchor", PropertyValueKind::Vec3, "13000, 0, -8000", &doc)
                 .unwrap(),

@@ -89,9 +89,20 @@ impl ToolbarRegistry {
 
 pub trait ToolbarRegistryAppExt {
     fn register_toolbar(&mut self, descriptor: ToolbarDescriptor) -> &mut Self;
+    /// Lead the default dock order while respecting saved document layouts.
+    fn register_leading_toolbar(&mut self, descriptor: ToolbarDescriptor) -> &mut Self;
 }
 
 impl ToolbarRegistryAppExt for App {
+    fn register_leading_toolbar(&mut self, descriptor: ToolbarDescriptor) -> &mut Self {
+        let mut registry = self.world_mut().get_resource_or_init::<ToolbarRegistry>();
+        registry
+            .toolbars
+            .retain(|toolbar| toolbar.id != descriptor.id);
+        registry.toolbars.insert(0, descriptor);
+        self
+    }
+
     fn register_toolbar(&mut self, descriptor: ToolbarDescriptor) -> &mut Self {
         if !self.world().contains_resource::<ToolbarRegistry>() {
             self.init_resource::<ToolbarRegistry>();

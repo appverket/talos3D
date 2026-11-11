@@ -145,6 +145,16 @@ impl Plugin for LayerPlugin {
                 default_shortcut: None, icon: None, hint: None, requires_selection: false,
                 show_in_menu: false, version: 1, activates_tool: None, capability_id: None,
             }, execute_set_object_visibility)
+            .register_command(CommandDescriptor {
+                id: "view.hide_selected".into(), label: "Hide Selected".into(),
+                description: "Hide the selected objects in this document.".into(),
+                category: CommandCategory::View, parameters: None,
+                default_shortcut: None, icon: None, hint: None, requires_selection: true,
+                show_in_menu: true, version: 1, activates_tool: None, capability_id: None,
+            }, |world, _| {
+                let ids: Vec<_> = world.query_filtered::<&ElementId, With<super::selection::Selected>>().iter(world).copied().collect();
+                execute_set_object_visibility(world, &serde_json::json!({"visible": false, "element_ids": ids}))
+            })
             // Default fallback runs in Update, strictly after domain plugins
             // (e.g. terrain) have claimed their entities in PreUpdate. Then
             // visibility is applied.

@@ -199,6 +199,7 @@ pub struct CommandRegistry {
 /// into part of the serialized command schema.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct ViewportContextCommandRegistry {
+    pub(crate) predicates: HashMap<String, fn(&mut World) -> bool>,
     command_ids: Vec<String>,
 }
 
@@ -359,6 +360,9 @@ pub trait CommandRegistryAppExt {
         handler: CommandHandler,
     ) -> &mut Self;
 
+    /// Keep a previous command id callable without a second palette or menu row.
+    fn register_command_alias(&mut self, alias: &str, target: &str) -> &mut Self;
+
     /// Register a command that flips a mode, together with the probe that
     /// reports whether it is currently on, so menus can show a checkmark
     /// instead of leaving the user to toggle it and watch what happens.
@@ -369,11 +373,42 @@ pub trait CommandRegistryAppExt {
         state_probe: CommandStateProbe,
     ) -> &mut Self;
 
+    /// Evaluate this condition once when the user opens the viewport menu.
+    fn register_viewport_context_command_if(
+        &mut self,
+        id: &str,
+        applies: fn(&mut World) -> bool,
+    ) -> &mut Self;
+
     /// Expose an already-registered command in the viewport context menu.
     fn register_viewport_context_command(&mut self, command_id: impl Into<String>) -> &mut Self;
 }
 
 impl CommandRegistryAppExt for App {
+    fn register_viewport_context_command_if(
+        &mut self,
+        id: &str,
+        applies: fn(&mut World) -> bool,
+    ) -> &mut Self {
+        self.register_viewport_context_command(id);
+        self.world_mut()
+            .resource_mut::<ViewportContextCommandRegistry>()
+            .predicates
+            .insert(id.to_owned(), applies);
+        self
+    }
+
+    fn register_command_alias(&mut self, alias: &str, target: &str) -> &mut Self {
+        let mut registry = self.world_mut().resource_mut::<CommandRegistry>();
+        let index = registry.index_by_id[target];
+        if registry.index_by_id.contains_key(alias) {
+            registry.duplicate_ids.push(alias.to_owned());
+        } else {
+            registry.index_by_id.insert(alias.to_owned(), index);
+        }
+        self
+    }
+
     fn register_command(
         &mut self,
         descriptor: CommandDescriptor,

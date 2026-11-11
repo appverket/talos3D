@@ -303,6 +303,11 @@ pub trait AuthoredEntity: Send + Sync + 'static {
     }
     fn element_id(&self) -> ElementId;
     fn label(&self) -> String;
+
+    /// Human-readable label in the active document units.
+    fn label_in_units(&self, _unit: crate::plugins::units::DisplayUnit, _precision: u8) -> String {
+        self.label()
+    }
     fn center(&self) -> Vec3;
     /// Re-identify an independent copy of this pose. Implementations must remap
     /// internal references and decline when required relationships cannot travel.

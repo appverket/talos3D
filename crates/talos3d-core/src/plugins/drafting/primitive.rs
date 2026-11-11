@@ -843,7 +843,7 @@ fn create_command_descriptor(kind: DraftPrimitiveKind) -> CommandDescriptor {
     let suffix = kind.type_name().trim_start_matches("draft_");
     CommandDescriptor {
         id: format!("drafting.create_{suffix}"),
-        label: format!("Create {}", kind.label()),
+        label: format!("Create {}", kind.label().to_lowercase()),
         description: format!(
             "Create a semantic {} in the active Draft plane and add it to Draft membership atomically.",
             kind.type_name()

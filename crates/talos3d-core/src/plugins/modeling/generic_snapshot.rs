@@ -158,6 +158,10 @@ where
         self.element_id
     }
 
+    fn label_in_units(&self, unit: crate::plugins::units::DisplayUnit, precision: u8) -> String {
+        self.primitive.label_in_units(unit, precision)
+    }
+
     fn label(&self) -> String {
         self.primitive.label()
     }

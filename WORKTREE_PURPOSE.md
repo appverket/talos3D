@@ -1,9 +1,9 @@
 # Worktree purpose
 
-- agent: codex
-- created: 2026-08-27T00:00:00Z
-- branch: codex/guidance-session-hooks
-- task-id: TALOS-aabnkhkk
-- target base: origin/main
-- summary: Add server-owned guidance sessions and optional lifecycle-hook adapters to the Talos3D MCP surface.
-- status: awaiting-merge
+- agent: codex@monster
+- created: 2026-11-11
+- branch: codex/finish-ux-step-a
+- task-id: TALOS-rlfpijgk / TALOS-huyjkold
+- target base: main
+- summary: Complete Claude's Step A UX work in the installed Architecture product.
+- status: active

@@ -129,6 +129,11 @@ pub trait Primitive: Component + Clone + Send + Sync + 'static {
     /// Human-readable label (e.g. "Box at (1.00, 2.00, 3.00)").
     fn label(&self) -> String;
 
+    /// Human-readable label in the active document units.
+    fn label_in_units(&self, _unit: crate::plugins::units::DisplayUnit, _precision: u8) -> String {
+        self.label()
+    }
+
     /// Serialise the primitive to JSON.
     fn to_json(&self) -> serde_json::Value;
 
