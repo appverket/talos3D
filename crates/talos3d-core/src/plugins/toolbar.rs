@@ -93,8 +93,66 @@ pub trait ToolbarRegistryAppExt {
     fn register_leading_toolbar(&mut self, descriptor: ToolbarDescriptor) -> &mut Self;
 }
 
+fn register_visibility_command(app: &mut App, toolbar: &ToolbarDescriptor) {
+    use super::command_registry::{CommandDescriptor, CommandRegistryAppExt, CommandResult};
+    if toolbar.id == "core" {
+        return;
+    } // The core toolbar is always visible.
+    let id = format!("view.toggle_toolbar.{}", toolbar.id);
+    if app
+        .world()
+        .get_resource::<super::command_registry::CommandRegistry>()
+        .and_then(|r| r.get(&id))
+        .is_some()
+    {
+        return;
+    }
+    app.register_command_preset(
+        CommandDescriptor {
+            id,
+            label: format!("Toggle {} toolbar", toolbar.label),
+            description: format!(
+                "Show or hide the {} toolbar in this document.",
+                toolbar.label
+            ),
+            category: CommandCategory::View,
+            parameters: None,
+            default_shortcut: None,
+            icon: None,
+            hint: None,
+            requires_selection: false,
+            show_in_menu: false, // Already listed in View → Toolbars.
+            version: 1,
+            activates_tool: None,
+            capability_id: None,
+        },
+        |world, params| {
+            let toolbar_id = params.as_str().ok_or("Missing toolbar id")?;
+            world.resource_scope(|world, mut layout: Mut<ToolbarLayoutState>| {
+                let visible = !layout
+                    .entries
+                    .get(toolbar_id)
+                    .ok_or("Toolbar layout not ready")?
+                    .visible;
+                set_toolbar_visibility(
+                    &mut layout,
+                    &mut world.resource_mut::<DocumentProperties>(),
+                    toolbar_id,
+                    visible,
+                );
+                Ok(CommandResult {
+                    output: Some(serde_json::json!({"visible": visible})),
+                    ..Default::default()
+                })
+            })
+        },
+        serde_json::json!(toolbar.id),
+    );
+}
+
 impl ToolbarRegistryAppExt for App {
     fn register_leading_toolbar(&mut self, descriptor: ToolbarDescriptor) -> &mut Self {
+        register_visibility_command(self, &descriptor);
         let mut registry = self.world_mut().get_resource_or_init::<ToolbarRegistry>();
         registry
             .toolbars
@@ -104,6 +162,7 @@ impl ToolbarRegistryAppExt for App {
     }
 
     fn register_toolbar(&mut self, descriptor: ToolbarDescriptor) -> &mut Self {
+        register_visibility_command(self, &descriptor);
         if !self.world().contains_resource::<ToolbarRegistry>() {
             self.init_resource::<ToolbarRegistry>();
         }

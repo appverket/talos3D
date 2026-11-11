@@ -135,6 +135,7 @@ pub type CommandStateProbe = fn(&World) -> bool;
 
 #[derive(Clone)]
 struct RegisteredCommand {
+    preset: Option<Value>,
     descriptor: CommandDescriptor,
     handler: CommandHandler,
     state_probe: Option<CommandStateProbe>,
@@ -248,6 +249,7 @@ impl CommandRegistry {
         let index = self.commands.len();
         self.index_by_id.insert(descriptor.id.clone(), index);
         self.commands.push(RegisteredCommand {
+            preset: None,
             descriptor,
             handler,
             state_probe,
@@ -360,6 +362,13 @@ pub trait CommandRegistryAppExt {
         handler: CommandHandler,
     ) -> &mut Self;
 
+    /// Register a parameterless shortcut to a shared handler with fixed arguments.
+    fn register_command_preset(
+        &mut self,
+        descriptor: CommandDescriptor,
+        handler: CommandHandler,
+        preset: Value,
+    ) -> &mut Self;
     /// Keep a previous command id callable without a second palette or menu row.
     fn register_command_alias(&mut self, alias: &str, target: &str) -> &mut Self;
 
@@ -385,6 +394,23 @@ pub trait CommandRegistryAppExt {
 }
 
 impl CommandRegistryAppExt for App {
+    fn register_command_preset(
+        &mut self,
+        descriptor: CommandDescriptor,
+        handler: CommandHandler,
+        preset: Value,
+    ) -> &mut Self {
+        let id = descriptor.id.clone();
+        let mut registry = self.world_mut().get_resource_or_init::<CommandRegistry>();
+        if registry.get(&id).is_none() {
+            registry.register(descriptor, handler, None);
+            registry.commands.last_mut().unwrap().preset = Some(preset);
+        } else {
+            registry.duplicate_ids.push(id);
+        }
+        self
+    }
+
     fn register_viewport_context_command_if(
         &mut self,
         id: &str,
@@ -934,11 +960,15 @@ pub fn execute_command(
     id: &str,
     parameters: &Value,
 ) -> Result<CommandResult, String> {
-    let handler = world
-        .resource::<CommandRegistry>()
-        .handler_for(id)
+    let registry = world.resource::<CommandRegistry>();
+    let command = registry
+        .index_by_id
+        .get(id)
+        .map(|index| &registry.commands[*index])
         .ok_or_else(|| format!("Unknown command: {id}"))?;
-    handler(world, parameters)
+    let handler = command.handler;
+    let preset = command.preset.clone();
+    handler(world, preset.as_ref().unwrap_or(parameters))
 }
 
 fn execute_pending_commands(world: &mut World) {
