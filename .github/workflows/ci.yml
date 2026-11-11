@@ -25,9 +25,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+        run: bash scripts/ci/install_linux_dependencies.sh
       - run: cargo check --locked --workspace
 
   clippy:
@@ -40,9 +38,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+        run: bash scripts/ci/install_linux_dependencies.sh
       - run: cargo clippy --locked --workspace --all-targets -- -W clippy::all
 
   test:
@@ -53,9 +49,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+        run: bash scripts/ci/install_linux_dependencies.sh
       - run: cargo test --locked --workspace
 
   model-api:
@@ -70,9 +64,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+        run: bash scripts/ci/install_linux_dependencies.sh
       # Compile the exact public app with MCP, then test the shared contracts.
       - run: cargo clippy -p talos3d-core --all-targets --features model-api -- -W clippy::all
       - run: cargo check --locked -p talos3d-core-app --features model-api
