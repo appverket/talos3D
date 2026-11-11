@@ -2816,6 +2816,17 @@ async fn negotiate_agent_session_tool_composes_live_world_state() {
         Some("deny")
     );
 
+    let denied = server
+        .call_without_peer("create_box", serde_json::json!({}))
+        .await
+        .expect_err("browser dispatch must enforce the same guidance barrier as HTTP");
+    assert!(
+        denied.message.contains("guidance")
+            || denied
+                .data
+                .as_ref()
+                .is_some_and(|data| data.to_string().contains("GuidanceBlock"))
+    );
     drop(server);
     worker_handle.await.expect("worker should stop cleanly");
 }
@@ -14397,19 +14408,16 @@ mod capability_profiles {
     /// actual cold-start cost). Counts are bounded loosely so adding a tool
     /// does not break the build, but a wholesale un-gating does.
     ///
-    /// The byte bound was 55% and ordinary growth crossed it by 0.5% — a single
-    /// tool's schema, which is exactly the "adding a tool breaks the build" case
-    /// this guard says it does not want to be. Measured at the time of writing:
-    /// The five session lifecycle tools are intentionally exposed in every profile.
-    /// Keep the remaining authoring surface bounded relative to full.
+    /// Five required lifecycle tools are common to all profiles. Round the
+    /// 55% count budget up to one whole tool; retain the 60% byte limit.
     #[test]
     fn authoring_profile_is_a_fraction_of_full_surface() {
         let catalog = profile_tool_catalog();
         let authoring = catalog.tools_for(CapabilityProfile::Authoring);
         let full = catalog.tools_for(CapabilityProfile::Full);
         assert!(
-            authoring.len() * 100 <= full.len() * 55,
-            "authoring advertises {} of {} tools; expected at most 55%",
+            authoring.len() <= (full.len() * 55).div_ceil(100),
+            "authoring advertises {} of {} tools; expected at most 55% rounded up",
             authoring.len(),
             full.len()
         );
