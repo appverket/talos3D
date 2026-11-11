@@ -134,6 +134,43 @@ impl ConformingSolid {
         ]
     }
 
+    /// The support plane uses exactly the terrain samples of the rendered slab.
+    /// Callers interested only in elevation need no mesh or sample buffers.
+    pub(crate) fn top_on(&self, hf: &TerrainHeightfield) -> Option<f32> {
+        self.sample_top(hf, |_, _| {})
+    }
+
+    fn sample_top(
+        &self,
+        hf: &TerrainHeightfield,
+        mut visit: impl FnMut(Vec2, Option<f32>),
+    ) -> Option<f32> {
+        let (nx, nz) = self.grid_dims();
+        let (s, c) = self.yaw.sin_cos();
+        let hx = self.half_extents.x.max(0.01);
+        let hz = self.half_extents.y.max(0.01);
+        let mut highest = f32::NEG_INFINITY;
+        for j in 0..nz {
+            for i in 0..nx {
+                let lx = -hx + 2.0 * hx * (i as f32 / (nx - 1) as f32);
+                let lz = -hz + 2.0 * hz * (j as f32 / (nz - 1) as f32);
+                let point = Vec2::new(
+                    self.position.x + c * lx - s * lz,
+                    self.position.y + s * lx + c * lz,
+                );
+                let height = hf.height_at(point.x, point.y);
+                if let Some(h) = height {
+                    highest = highest.max(h);
+                }
+                visit(point, height);
+            }
+        }
+        highest.is_finite().then(|| {
+            let terrain_top = highest + self.min_thickness.max(0.0);
+            self.floor_datum.unwrap_or(terrain_top).max(terrain_top)
+        })
+    }
+
     fn grid_dims(&self) -> (usize, usize) {
         let res = self.resolution.max(0.05);
         let nx = ((2.0 * self.half_extents.x.max(0.01) / res).ceil() as usize + 1)
@@ -161,46 +198,14 @@ fn sample_conforming(
     hf: &TerrainHeightfield,
 ) -> Option<ConformingSamples> {
     let (nx, nz) = solid.grid_dims();
-    let (s, c) = solid.yaw.sin_cos();
-    let hx = solid.half_extents.x.max(0.01);
-    let hz = solid.half_extents.y.max(0.01);
-
     let mut world = Vec::with_capacity(nx * nz);
     let mut surf = Vec::with_capacity(nx * nz);
-    let mut h_max = f32::NEG_INFINITY;
-    for j in 0..nz {
-        for i in 0..nx {
-            let lx = -hx + 2.0 * hx * (i as f32 / (nx - 1) as f32);
-            let lz = -hz + 2.0 * hz * (j as f32 / (nz - 1) as f32);
-            let w = Vec2::new(
-                solid.position.x + c * lx - s * lz,
-                solid.position.y + s * lx + c * lz,
-            );
-            let h = hf.height_at(w.x, w.y);
-            if let Some(hh) = h {
-                h_max = h_max.max(hh);
-            }
-            world.push(w);
-            surf.push(h);
-        }
-    }
-    if !h_max.is_finite() {
-        return None;
-    }
-
+    let y_top = solid.sample_top(hf, |point, height| {
+        world.push(point);
+        surf.push(height);
+    })?;
     let min_thickness = solid.min_thickness.max(0.0);
-    // max_depth must be at least min_thickness or the bench would clip the top.
     let max_depth = solid.max_depth.max(min_thickness);
-    // Top is the explicit floor datum when given (building finished floor), else it
-    // floats `min_thickness` above the highest ground under the footprint. A datum is
-    // treated as a *minimum*: the top always rises to clear the ground by at least
-    // `min_thickness`, so a datum set at/below grade can never bury the slab (the
-    // underside would otherwise clamp flat and let the terrain poke through).
-    let terrain_top = h_max + min_thickness;
-    let y_top = solid
-        .floor_datum
-        .map(|d| d.max(terrain_top))
-        .unwrap_or(terrain_top);
     let floor_y = y_top - max_depth;
     // Keep at least `min_thickness` of slab even where the datum sits at/below grade.
     let under_cap = y_top - min_thickness;
@@ -877,7 +882,12 @@ impl AuthoredEntity for ConformingSolidSnapshot {
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        other.type_name() == self.type_name() && other.to_json() == self.to_json()
+        // Terrain regeneration can update the cached mesh elevation between
+        // preview frames. Only the footprint and its authored inputs own the edit.
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| self.element_id == other.element_id && self.solid == other.solid)
     }
 }
 

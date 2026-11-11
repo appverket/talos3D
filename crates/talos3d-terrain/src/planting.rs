@@ -395,13 +395,23 @@ fn find_heightfield(world: &mut World, surface_id: ElementId) -> Option<TerrainH
         .or_else(|| flat_heightfield_from_surface(world, surface_id))
 }
 
-fn find_heightfield_readonly(world: &World, surface_id: ElementId) -> Option<TerrainHeightfield> {
-    let mut query = world.try_query::<(&ElementId, &TerrainHeightfield)>()?;
-    query
-        .iter(world)
-        .find(|(id, _)| id.0 == surface_id.0)
-        .map(|(_, hf)| hf.clone())
-        .or_else(|| flat_heightfield_from_surface_readonly(world, surface_id))
+fn support_top_on_surface(
+    world: &World,
+    solid: &ConformingSolid,
+    surface_id: ElementId,
+) -> Option<f32> {
+    if let Some(hf) = world
+        .try_query::<(&ElementId, &TerrainHeightfield)>()
+        .and_then(|mut query| {
+            query
+                .iter(world)
+                .find(|(id, _)| **id == surface_id)
+                .map(|(_, hf)| hf)
+        })
+    {
+        return solid.top_on(hf);
+    }
+    solid.top_on(&flat_heightfield_from_surface_readonly(world, surface_id)?)
 }
 
 fn flat_heightfield_from_surface(
@@ -845,10 +855,11 @@ fn foundation_top(
     surface_id: ElementId,
 ) -> Option<f32> {
     let foundation_entity = find_entity_by_element_id(world, foundation_id)?;
-    let solid = world.get::<ConformingSolid>(foundation_entity)?.clone();
-    let heightfield = find_heightfield(world, surface_id)?;
-    let (max_grade, _) = heightfield.max_over(&solid.world_corners())?;
-    Some(max_grade + solid.min_thickness)
+    support_top_on_surface(
+        world,
+        world.get::<ConformingSolid>(foundation_entity)?,
+        surface_id,
+    )
 }
 
 fn preview_foundation_top(
@@ -856,13 +867,11 @@ fn preview_foundation_top(
     foundation: &BoxedEntity,
     surface_id: ElementId,
 ) -> Option<f32> {
-    if foundation.type_name() != "conforming_solid" {
-        return None;
-    }
-    let foundation =
-        serde_json::from_value::<ConformingSolidSnapshot>(foundation.to_json()).ok()?;
-    let heightfield = find_heightfield_readonly(world, surface_id)?;
-    conforming_metrics(&foundation.solid, &heightfield).map(|metrics| metrics.y_top)
+    let foundation = foundation
+        .0
+        .as_any()
+        .downcast_ref::<ConformingSolidSnapshot>()?;
+    support_top_on_surface(world, &foundation.solid, surface_id)
 }
 
 fn preview_member_bounds(
@@ -1024,7 +1033,7 @@ fn adjust_planted_structure_transform_preview(
     state: &TransformState,
     after: &mut Vec<BoxedEntity>,
 ) {
-    if state.mode != TransformMode::Moving || after.is_empty() {
+    if !matches!(state.mode, TransformMode::Moving | TransformMode::Rotating) || after.is_empty() {
         return;
     }
 
@@ -1045,22 +1054,33 @@ fn adjust_planted_structure_transform_preview(
     };
 
     for (group_id, planted) in planted {
+        // A whole planted group already has its rotated members in the shared
+        // plan. A rotation of a single child must not move the entire group.
+        if state.mode == TransformMode::Rotating
+            && !(initial_by_id.contains_key(&group_id)
+                && initial_by_id.contains_key(&planted.foundation_id))
+        {
+            continue;
+        }
         let Some(placement) = PlantedPlacement::from_world(world, group_id, planted) else {
             continue;
         };
         let member_set = placement.recursive_member_set();
-        let contract_ids = placement.contract_id_set();
-        if contains_specialized_hosted_edit(&initial_by_id, after, &contract_ids) {
-            continue;
-        }
-        let Some(direct_delta) = direct_preview_delta(&initial_by_id, after, &contract_ids) else {
-            continue;
-        };
-        if direct_delta.length_squared() <= f32::EPSILON {
-            continue;
-        }
+        if state.mode == TransformMode::Moving {
+            let contract_ids = placement.contract_id_set();
+            if contains_specialized_hosted_edit(&initial_by_id, after, &contract_ids) {
+                continue;
+            }
+            let Some(direct_delta) = direct_preview_delta(&initial_by_id, after, &contract_ids)
+            else {
+                continue;
+            };
+            if direct_delta.length_squared() <= f32::EPSILON {
+                continue;
+            }
 
-        ensure_planted_contract_in_preview(world, after, &placement, direct_delta);
+            ensure_planted_contract_in_preview(world, after, &placement, direct_delta);
+        }
 
         let mut member_set_without_foundation = member_set.clone();
         member_set_without_foundation.remove(&placement.foundation_id);
@@ -1822,6 +1842,7 @@ fn same_planted_structure(left: PlantedStructure, right: PlantedStructure) -> bo
 #[allow(clippy::type_complexity)]
 fn planting_inputs_changed(
     mut initialized: Local<bool>,
+    transform: Option<Res<TransformState>>,
     history: Option<Res<History>>,
     vocabulary: Option<Res<talos3d_core::plugins::surface_placement::SurfacePlacementVocabulary>>,
     changed: Query<
@@ -1851,6 +1872,13 @@ fn planting_inputs_changed(
     mut removed_contracts: RemovedComponents<PlantedStructure>,
     mut removed_surface_links: RemovedComponents<PlantedOnSurface>,
 ) -> bool {
+    // The shared plan seats the live preview. Defer document maintenance
+    // until commit or cancel restores the authored scene, including any
+    // asynchronous terrain changes that arrived during the gesture.
+    if transform.is_some_and(|state| !state.is_idle()) {
+        *initialized = false;
+        return false;
+    }
     let first_run = !*initialized;
     *initialized = true;
     // Always drain every reader, even when another dependency already changed.
@@ -3563,6 +3591,55 @@ mod tests {
         }
         reseat_planted_structures(world);
         assert_eq!(capture_by_id(world, ElementId(3)).unwrap(), *body);
+    }
+
+    #[test]
+    fn planted_yaw_preview_matches_the_rebuilt_support_and_survives_reseating() {
+        let mut app = linked_test_app();
+        app.add_plugins(PlantingPlugin);
+        let world = app.world_mut();
+        world.spawn((ElementId(10), ramp_heightfield()));
+        spawn_linked_building(world);
+        execute_plant_on_surface(
+            world,
+            &json!({"target_id": 1, "surface_id": 10, "hide_element_id": 2}),
+        )
+        .unwrap();
+        let root = find_entity_by_element_id(world, ElementId(1)).unwrap();
+        let foundation_id = world.get::<PlantedStructure>(root).unwrap().foundation_id;
+        let previous_top = foundation_top(world, foundation_id, ElementId(10)).unwrap();
+        let plan = plan_linked_model_placement(
+            world,
+            ElementId(1),
+            LinkedModelPlacementOperation::Rotate {
+                rotation: Quat::from_rotation_y(0.7),
+                pivot: Some(Vec3::ZERO),
+            },
+        )
+        .unwrap();
+        for snapshot in plan.after() {
+            snapshot.apply_to(world);
+        }
+        let top = foundation_top(world, foundation_id, ElementId(10)).unwrap();
+        assert!((top - previous_top).abs() > 0.001);
+        let body = plan
+            .after()
+            .iter()
+            .find(|s| s.element_id() == ElementId(3))
+            .unwrap();
+        assert!((body.bounds().unwrap().min.y - top).abs() < 0.001);
+        // Mesh generation and background maintenance run between pointer samples.
+        let foundation = find_entity_by_element_id(world, foundation_id).unwrap();
+        world
+            .entity_mut(foundation)
+            .insert(crate::conforming::ConformingDerived { y_top: top });
+        reseat_planted_structures(world);
+        for displayed in plan.after() {
+            assert_eq!(
+                capture_by_id(world, displayed.element_id()).unwrap(),
+                *displayed
+            );
+        }
     }
 
     #[test]

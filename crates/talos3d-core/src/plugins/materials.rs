@@ -2593,3 +2593,181 @@ mod capability_default_tests {
         }
     }
 }
+
+/// Read a bundled dependency through the same asset namespace as the renderer.
+/// A document cannot cause publication to read arbitrary host filesystem paths.
+pub(crate) fn portable_asset_bytes(world: &World, path: &str) -> Result<Vec<u8>, String> {
+    let p = std::path::Path::new(path);
+    if path.is_empty()
+        || path.contains([':', '\\'])
+        || !p
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err("Texture must be relative to the app asset directory".into());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let server = world
+            .get_resource::<AssetServer>()
+            .ok_or("Texture asset service unavailable")?;
+        let source = server
+            .get_source(bevy::asset::io::AssetSourceId::Default)
+            .map_err(|e| e.to_string())?;
+        bevy::tasks::block_on(async {
+            let mut file = source
+                .reader()
+                .read(p)
+                .await
+                .map_err(|e| format!("Cannot read texture {path}: {e}"))?;
+            let mut data = Vec::new();
+            file.read_to_end(&mut data)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(data)
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        browser_texture_source(world, path)
+    }
+}
+
+// Browser asset readers are asynchronous. Keep source bytes off the frame loop;
+// a capture retries after the first read instead of writing a dangling path.
+#[cfg(target_arch = "wasm32")]
+fn browser_texture_source(world: &World, path: &str) -> Result<Vec<u8>, String> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    type Pending = Option<Result<Vec<u8>, String>>;
+    thread_local! { static SOURCES: RefCell<HashMap<String, Pending>> = RefCell::default(); }
+    let server = world
+        .get_resource::<AssetServer>()
+        .ok_or("Texture asset service unavailable")?
+        .clone();
+    SOURCES.with(|set| {
+        let mut cache = set.borrow_mut();
+        if let Some(item) = cache.get(path) {
+            if let Some(Ok(bytes)) = item {
+                return Ok(bytes.clone());
+            }
+            if let Some(Err(_)) = item {
+                let Some(Some(Err(e))) = cache.remove(path) else {
+                    unreachable!()
+                };
+                return Err(e);
+            }
+            return Err(format!(
+                "Loading texture {path}; try saving again in a moment"
+            ));
+        }
+        cache.insert(path.to_owned(), None);
+        let name = path.to_owned();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = async {
+                let source = server
+                    .get_source(bevy::asset::io::AssetSourceId::Default)
+                    .map_err(|e| e.to_string())?;
+                let mut reader = source
+                    .reader()
+                    .read(std::path::Path::new(&name))
+                    .await
+                    .map_err(|e| format!("Cannot read texture {name}: {e}"))?;
+                let mut bytes = Vec::new();
+                reader
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(bytes)
+            }
+            .await;
+            SOURCES.with(|s| {
+                let mut cache = s.borrow_mut();
+                // Cap retained source copies between documents; in-flight reads are preserved.
+                if cache
+                    .values()
+                    .filter_map(|x| x.as_ref()?.as_ref().ok())
+                    .map(Vec::len)
+                    .sum::<usize>()
+                    > 128 * 1024 * 1024
+                {
+                    cache.retain(|_, v| v.is_none());
+                }
+                cache.insert(name, Some(result));
+            });
+        });
+        Err(format!(
+            "Loading texture {path}; try saving again in a moment"
+        ))
+    })
+}
+
+pub(crate) fn portable_texture_registry(
+    world: &World,
+    source: &TextureRegistry,
+) -> Result<TextureRegistry, String> {
+    let mut out = TextureRegistry::default();
+    for original in source.all() {
+        let mut asset = original.clone();
+        if let TexturePayload::AssetPath(path) = &asset.payload {
+            let bytes = portable_asset_bytes(world, path)?;
+            let mime = image::guess_format(&bytes)
+                .map_err(|_| format!("Cannot identify texture: {path}"))?
+                .to_mime_type();
+            asset.payload = TexturePayload::Embedded {
+                data: BASE64_STANDARD.encode(bytes),
+                mime: mime.to_owned(),
+            };
+            asset.content_hash = asset.payload.content_hash();
+        }
+        out.insert(asset);
+    }
+    Ok(out)
+}
+
+/// The editable snapshot owns image bytes, even if a local material originally
+/// picked a bundled asset path. Both shell captures and file saves call this.
+pub(crate) fn embed_saved_textures(
+    world: &World,
+    material: &mut MaterialDef,
+    source: &TextureRegistry,
+    out: &mut TextureRegistry,
+) -> Result<(), String> {
+    for slot in [
+        &mut material.base_color_texture,
+        &mut material.normal_map_texture,
+        &mut material.metallic_roughness_texture,
+        &mut material.occlusion_texture,
+        &mut material.emissive_texture,
+    ] {
+        let path = match slot.as_ref() {
+            Some(TextureRef::TextureAsset { id }) => {
+                if out.get(id).is_some() {
+                    continue;
+                }
+                let asset = source
+                    .get(id)
+                    .ok_or("Cannot save: a referenced texture is missing")?;
+                match &asset.payload {
+                    TexturePayload::Embedded { .. } => {
+                        out.insert(asset.clone());
+                        continue;
+                    }
+                    TexturePayload::AssetPath(p) => p.clone(),
+                }
+            }
+            Some(TextureRef::AssetPath { path }) => path.clone(),
+            _ => continue,
+        };
+        let bytes = portable_asset_bytes(world, &path)?;
+        let mime = image::guess_format(&bytes)
+            .map_err(|_| format!("Cannot identify texture: {path}"))?
+            .to_mime_type();
+        *slot = Some(TextureRef::Embedded {
+            data: BASE64_STANDARD.encode(bytes),
+            mime: mime.into(),
+        });
+    }
+    normalize_material_textures(material, out);
+    Ok(())
+}

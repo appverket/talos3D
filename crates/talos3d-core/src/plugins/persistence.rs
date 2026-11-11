@@ -759,12 +759,90 @@ pub fn new_document(world: &mut World) {
 /// Capturing is not a save acknowledgement: the shell must first commit bytes
 /// and its pending operation durably, then call `acknowledge_project_bytes`.
 pub fn capture_project_bytes(world: &mut World) -> Result<Vec<u8>, String> {
-    let project = build_project_file(world)?;
-    // Keep the object-form JSON transport contract for existing shell clients.
-    // Stable bytes remain essential for delayed-save acknowledgements.
-    let mut value = serde_json::to_value(&project).map_err(|e| e.to_string())?;
-    value.sort_all_objects();
-    serde_json::to_vec(&value).map_err(|e| e.to_string())
+    serde_json::to_vec(&capture_project_value(world)?).map_err(|e| e.to_string())
+}
+
+// Move already-serialized entity geometry into the document. Serializing the
+// scene into a second Value tree at once can exhaust a 32-bit browser heap.
+fn capture_project_value(world: &mut World) -> Result<Value, String> {
+    let mut project = build_project_file(world)?;
+    let entities = std::mem::take(&mut project.entities);
+    let ext = std::mem::take(&mut project.extensions);
+    let mut root = serde_json::to_value(project).map_err(|e| e.to_string())?;
+    let object = root.as_object_mut().ok_or("Invalid project object")?;
+    for (key, value) in ext {
+        object.entry(key).or_insert(value);
+    }
+    let mut records = Vec::with_capacity(entities.len());
+    for mut entity in entities {
+        let data = entity.data.take();
+        let mut record = serde_json::to_value(entity).map_err(|e| e.to_string())?;
+        record["data"] = data;
+        records.push(record);
+    }
+    object.insert("entities".into(), Value::Array(records));
+    root.sort_all_objects();
+    Ok(root)
+}
+
+/// Browser capture must not first allocate oversized JSON and then parse it
+/// into a second full document while the live editor owns its scene.
+pub fn capture_for_storage(world: &mut World, limit: usize) -> Result<Vec<u8>, String> {
+    struct Bounded {
+        bytes: Vec<u8>,
+        limit: usize,
+    }
+    impl std::io::Write for Bounded {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if b.len() > self.limit - self.bytes.len() {
+                return Err(std::io::ErrorKind::FileTooLarge.into());
+            }
+            self.bytes.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let root = capture_project_value(world)?;
+    let mut writer = Bounded {
+        bytes: Vec::new(),
+        limit,
+    };
+    match serde_json::to_writer(&mut writer, &root) {
+        Ok(()) => return Ok(writer.bytes),
+        Err(e) if e.io_error_kind() == Some(std::io::ErrorKind::FileTooLarge) => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    drop(writer);
+    pack_with_limit(root, limit)
+}
+
+fn pack_with_limit(model: Value, limit: usize) -> Result<Vec<u8>, String> {
+    let packed = crate::plugins::project_codec::encode_for_transfer(model)?;
+    if packed.len() <= limit {
+        return Ok(packed);
+    }
+    let binary = crate::plugins::project_codec::binary_envelope(&packed)?;
+    if binary.len() <= limit {
+        return Ok(binary);
+    }
+    Err(format!(
+        "The complete project needs {} bytes; the storage limit is {}. No components were omitted.",
+        binary.len(),
+        limit
+    ))
+}
+
+/// Storage adapters can compact oversized object snapshots on their worker before
+/// upload; small objects remain compatible with the original shell transport.
+pub fn fit_project_transfer(bytes: Vec<u8>, limit: usize) -> Result<Vec<u8>, String> {
+    if bytes.len() <= limit {
+        return Ok(bytes);
+    }
+    let model = crate::plugins::project_codec::decode(&bytes)?;
+    drop(bytes);
+    pack_with_limit(model, limit)
 }
 
 /// Compact native-file representation of the same complete authored snapshot.
@@ -786,7 +864,23 @@ pub fn open_project_bytes(world: &mut World, bytes: &[u8]) -> Result<(), String>
 
 /// A delayed local write cannot mark a newer edit clean.
 pub fn acknowledge_project_bytes(world: &mut World, bytes: &[u8]) -> Result<bool, String> {
-    if capture_project_bytes(world)? != bytes {
+    let matches = if bytes.starts_with(crate::plugins::project_codec::BINARY_MAGIC)
+        || bytes.first() == Some(&b'[')
+    {
+        let current = capture_for_storage(world, 64 * 1024 * 1024)?;
+        if current == bytes {
+            true
+        } else if current.starts_with(crate::plugins::project_codec::BINARY_MAGIC)
+            && bytes.first() == Some(&b'[')
+        {
+            crate::plugins::project_codec::binary_envelope(bytes)? == current
+        } else {
+            false
+        }
+    } else {
+        capture_project_bytes(world)? == bytes
+    };
+    if !matches {
         return Ok(false);
     }
     world.resource_mut::<History>().mark_save_point();
@@ -850,7 +944,10 @@ pub fn install_project_library(
     for material in project.materials.unwrap_or_default().all() {
         if let Some(existing) = after.materials.get(&material.id) {
             if serde_json::to_value(existing).unwrap() != serde_json::to_value(material).unwrap() {
-                return Err(format!("Material {} differs from this project's pinned version; assign a new material ID before importing", material.id));
+                return Err(format!(
+                    "Material {} differs from this project's pinned version; assign a new material ID before importing",
+                    material.id
+                ));
             }
         } else {
             after.materials.upsert(material.clone());
@@ -1358,24 +1455,53 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         None
     };
     let mut material_registry = MaterialRegistry::default();
-    let mut referenced_texture_ids = std::collections::BTreeSet::new();
-    for material in world.resource::<MaterialRegistry>().all() {
-        if !is_builtin_material_id(&material.id) {
-            referenced_texture_ids.extend(material_texture_asset_ids(material));
-            material_registry.upsert(material.clone());
+    // Built-in materials are omitted only if the document never uses them.
+    let mut needed_builtins = std::collections::BTreeSet::new();
+    let mut collect = |a: &crate::plugins::materials::MaterialAssignment| {
+        needed_builtins.extend(
+            a.explicit_render_material_ids()
+                .into_iter()
+                .filter(|s| is_builtin_material_id(s)),
+        );
+    };
+    for a in world
+        .query::<&crate::plugins::materials::MaterialAssignment>()
+        .iter(world)
+    {
+        collect(a);
+    }
+    for def in world.resource::<DefinitionRegistry>().list() {
+        if let Some(a) = &def.material_assignment {
+            collect(a)
         }
     }
-    let materials = if material_registry.count() > 0 {
-        Some(material_registry)
-    } else {
-        None
-    };
-    let texture_registry = world.resource::<TextureRegistry>();
-    let textures = if referenced_texture_ids.is_empty() {
-        None
-    } else {
-        Some(texture_registry.referenced_subset(&referenced_texture_ids))
-    };
+    for lib in world.resource::<DefinitionLibraryRegistry>().list() {
+        if lib.scope != crate::plugins::modeling::definition::DefinitionLibraryScope::Bundled {
+            for def in lib.definitions.values() {
+                if let Some(a) = &def.material_assignment {
+                    collect(a)
+                }
+            }
+        }
+    }
+    let source_textures = world.resource::<TextureRegistry>();
+    let mut portable_textures =
+        crate::plugins::materials::portable_texture_registry(world, source_textures)?;
+    for material in world.resource::<MaterialRegistry>().all() {
+        if !is_builtin_material_id(&material.id) || needed_builtins.contains(&material.id) {
+            let mut saved = material.clone();
+            crate::plugins::materials::embed_saved_textures(
+                world,
+                &mut saved,
+                source_textures,
+                &mut portable_textures,
+            )?;
+            material_registry.upsert(saved);
+        }
+    }
+    let materials = (material_registry.count() > 0).then_some(material_registry);
+    let has_textures = portable_textures.all().next().is_some();
+    let textures = has_textures.then_some(portable_textures);
     let definition_registry = world.resource::<DefinitionRegistry>().clone();
     let definitions = if definition_registry.list().is_empty() {
         None
@@ -4268,7 +4394,7 @@ mod tests {
     }
 
     #[test]
-    fn build_project_file_persists_only_referenced_texture_assets() {
+    fn build_project_file_keeps_unused_project_texture_assets() {
         let mut world = World::new();
         world.insert_resource(CapabilityRegistry::default());
         world.insert_resource(DocumentProperties::default());
@@ -4308,7 +4434,7 @@ mod tests {
             .textures
             .expect("referenced textures should persist");
         assert!(textures.get(&referenced_texture_id).is_some());
-        assert!(textures.get(&unreferenced_texture_id).is_none());
+        assert!(textures.get(&unreferenced_texture_id).is_some());
     }
 
     #[test]

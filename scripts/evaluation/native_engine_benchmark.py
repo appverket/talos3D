@@ -45,11 +45,13 @@ def main():
         "projection": "orthographic", "orthographic_scale": 38,
         "focus": [0, 0, 0], "yaw": 0.5, "pitch": -0.5,
     })
+    parser.add_argument("--yaw-drag", type=float, nargs=4, metavar=("X0", "Y0", "X1", "Y1"),
+                        help="Drag the selected group's yaw grip at these window coordinates")
     args = parser.parse_args()
     report = {"schema": "talos.native_engine_benchmark.v1", "pass": False,
               "fixture_sha256": hashlib.sha256(args.project.read_bytes()).hexdigest(),
               "declared_build": args.build_label, "camera": args.camera,
-              "budget_active_p95_ms": args.budget_ms, "runs": []}
+              "budget_active_p95_ms": args.budget_ms, "yaw_drag": args.yaw_drag, "runs": []}
     client = Client(json.loads(args.credentials.read_text()))
     active_times = []
     try:
@@ -64,16 +66,31 @@ def main():
         client.call("set_session_profile", {"profile": "full"})
         for iteration in range(args.repeat):
             client.call("load_project", {"path": str(args.project.resolve())})
+            # A previous iteration may still be visible while project load is pending.
+            for _ in range(100):
+                info = client.call("get_instance_info")
+                if info["current_document_path"] == str(args.project.resolve()) and not info["document_dirty"]:
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("Disposable project did not finish loading")
             client.call("set_camera", args.camera)
             client.call("set_selection", {"element_ids": [args.root]})
-            client.call("invoke_command", {"command_id": "modeling.move"})
+            if args.yaw_drag:
+                before = client.call("get_entity_details", {"element_id": args.root})
+                initial_rotation = before["snapshot"]["Group"]["frame"]["rotation"]
+            else:
+                client.call("invoke_command", {"command_id": "modeling.move"})
             observe_idle(client)
             time.sleep(0.35)  # Let the camera and selection-dependent chrome settle.
             observation = client.call("ux_observe")
             selected = next(e for e in observation["entities"] if e["element_id"] == args.root)
             start = selected["screen_center"]
             report["window"] = observation["window"]
-            client.call("ux_drag", {"start": start, "end": [start[0]+110, start[1]-35],
+            end = [start[0]+110, start[1]-35]
+            if args.yaw_drag:
+                start, end = args.yaw_drag[:2], args.yaw_drag[2:]
+            client.call("ux_drag", {"start": start, "end": end,
                                     "steps": 72, "button": "left", "trace": True})
             observe_idle(client)
             time.sleep(0.15)
@@ -87,6 +104,10 @@ def main():
             release = [s for s in samples if s["committed_exact_candidate"] is not None]
             if not release or not release[-1]["committed_exact_candidate"]:
                 raise RuntimeError("Release did not commit the displayed candidate")
+            if args.yaw_drag:
+                after = client.call("get_entity_details", {"element_id": args.root})
+                if after["snapshot"]["Group"]["frame"]["rotation"] == initial_rotation:
+                    raise RuntimeError("Drag did not rotate the selected group")
             if release[-1]["present_ms"] is None:
                 raise RuntimeError("Release lacks swapchain presentation evidence")
             press = [s["present_ms"] for s in samples if s["action"] == "press"]
@@ -109,8 +130,8 @@ def main():
             raise RuntimeError("Active p95 exceeds the acceptance budget")
         if args.baseline:
             baseline = json.loads(args.baseline.read_text())
-            for field in ("fixture_sha256", "camera", "window"):
-                if baseline[field] != report[field]:
+            for field in ("fixture_sha256", "camera", "window", "yaw_drag"):
+                if baseline.get(field) != report[field]:
                     raise RuntimeError(f"Baseline {field} differs")
             for metric in ("active_p95_ms", "activation_ms", "release_ms", "active_worst_ms"):
                 old = max(r[metric] for r in baseline["runs"])
