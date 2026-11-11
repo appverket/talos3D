@@ -4233,8 +4233,9 @@ fn toolbar_content_size(descriptor: &ToolbarDescriptor, horizontal: bool) -> egu
     }
 }
 
-/// Space between neighbouring toolbars in one band (separator plus spacing).
-const TOOLBAR_BAND_GAP: f32 = 10.0;
+/// Space between neighbouring toolbars in one band: frame margins, separator
+/// and item spacing, as measured in the rendered chrome.
+const TOOLBAR_BAND_GAP: f32 = 24.0;
 
 /// Main-axis extent a toolbar needs in its band: the size it was drawn at last
 /// frame when known, otherwise an estimate from its button count.
