@@ -712,6 +712,24 @@ fn draw_materials(c: &mut Canvas) {
     c.line(15.0, 16.0, 17.0, 16.0);
 }
 
+/// Two linked nodes: an external agent attached to this instance.
+fn draw_agent_connect(c: &mut Canvas) {
+    c.circle(7.0, 16.0, 3.0);
+    c.circle(17.0, 8.0, 3.0);
+    c.line(9.2, 13.8, 14.8, 10.2);
+    c.line(17.0, 15.0, 17.0, 20.0);
+    c.line(14.5, 17.5, 19.5, 17.5);
+}
+
+/// A speech bubble: the in-app assistant conversation.
+fn draw_assistant(c: &mut Canvas) {
+    c.rounded_rect(4.0, 5.0, 16.0, 11.0, 3.0);
+    c.line(8.0, 16.0, 7.0, 20.0);
+    c.line(7.0, 20.0, 12.0, 16.0);
+    c.line(8.0, 9.0, 16.0, 9.0);
+    c.line(8.0, 12.0, 13.0, 12.0);
+}
+
 fn draw_padlock(c: &mut Canvas, locked: bool) {
     c.rounded_rect(5.0, 11.0, 14.0, 10.0, 2.0);
     let center = if locked { 12.0 } else { 16.0 };
@@ -783,6 +801,8 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "materials" => draw_materials(&mut c),
         "lock_closed" => draw_padlock(&mut c, true),
         "lock_open" => draw_padlock(&mut c, false),
+        "agent_connect" => draw_agent_connect(&mut c),
+        "assistant" => draw_assistant(&mut c),
         _ => draw_plus(&mut c),
     }
     c.into_rgba()

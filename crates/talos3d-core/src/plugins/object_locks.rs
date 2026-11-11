@@ -71,7 +71,7 @@ impl Plugin for ObjectLockPlugin {
                 description: "Lock the selected objects against viewport interaction. Unlock them from the Outliner.".into(),
                 category: CommandCategory::View,
                 parameters: None, default_shortcut: None, icon: None, hint: None,
-                requires_selection: true, show_in_menu: false, version: 1,
+                requires_selection: true, show_in_menu: true, version: 1,
                 activates_tool: None, capability_id: None,
             }, execute_lock_selected)
             .add_systems(PreUpdate, refresh_changed_locks);

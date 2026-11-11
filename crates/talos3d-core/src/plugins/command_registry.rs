@@ -866,6 +866,8 @@ fn setup_core_icons(mut images: ResMut<Assets<Image>>, mut icon_registry: ResMut
         ("icon.compass", "compass"),
         ("icon.definitions", "definitions"),
         ("icon.materials", "materials"),
+        ("icon.agent_connect", "agent_connect"),
+        ("icon.assistant", "assistant"),
     ];
 
     let size = bevy::render::render_resource::Extent3d {

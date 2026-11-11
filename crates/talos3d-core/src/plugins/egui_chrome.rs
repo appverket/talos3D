@@ -219,18 +219,32 @@ pub(crate) fn show_top_level_panel<R>(
     response
 }
 
+/// How a menu group is presented inside its parent menu.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum MenuGroupLayout {
+    /// Inline while small, a cascading submenu once it outgrows
+    /// [`INLINE_GROUP_THRESHOLD`].
+    Auto,
+    /// Always inline. For the commands every editor user reaches for first
+    /// (document, clipboard, selection), which must never sit one level down.
+    Inline,
+}
+
 struct MenuSubmenuSpec {
     label: &'static str,
+    layout: MenuGroupLayout,
     command_ids: &'static [&'static str],
 }
 
 const FILE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
         label: "Document",
+        layout: MenuGroupLayout::Inline,
         command_ids: &["core.new", "core.open", "core.save", "core.save_as"],
     },
     MenuSubmenuSpec {
         label: "Exchange",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "core.import",
             "core.export_drawing",
@@ -241,19 +255,27 @@ const FILE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
             "core.export_model_obj",
         ],
     },
+    MenuSubmenuSpec {
+        label: "Project",
+        layout: MenuGroupLayout::Auto,
+        command_ids: &[PROJECT_SETTINGS_COMMAND_ID],
+    },
 ];
 
 const EDIT_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
         label: "History",
+        layout: MenuGroupLayout::Auto,
         command_ids: &["core.undo", "core.redo"],
     },
     MenuSubmenuSpec {
         label: "Clipboard",
+        layout: MenuGroupLayout::Inline,
         command_ids: &["core.cut", "core.copy", "core.paste", "core.duplicate"],
     },
     MenuSubmenuSpec {
         label: "Selection",
+        layout: MenuGroupLayout::Inline,
         command_ids: &[
             "core.select_tool",
             "core.select_all",
@@ -263,6 +285,7 @@ const EDIT_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Transform",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "modeling.move",
             "modeling.rotate",
@@ -272,10 +295,30 @@ const EDIT_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Structure",
+        layout: MenuGroupLayout::Auto,
         command_ids: &["modeling.group", "modeling.ungroup"],
     },
     MenuSubmenuSpec {
+        label: "Group Editing",
+        layout: MenuGroupLayout::Auto,
+        command_ids: &[
+            "modeling.enter_selected_group",
+            "modeling.exit_edit_context",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Faces and Edges",
+        layout: MenuGroupLayout::Auto,
+        command_ids: &[
+            "modeling.edit_selected_faces",
+            "modeling.erase_boundary",
+            "modeling.hide_edge",
+            "modeling.show_edges",
+        ],
+    },
+    MenuSubmenuSpec {
         label: "Linked Models",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "modeling.create_linked_model_from_selection",
             "modeling.open_linked_model",
@@ -288,6 +331,7 @@ const EDIT_MENU_GROUPS: &[MenuSubmenuSpec] = &[
 const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
         label: "On Face",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "modeling.draw_face_circle",
             "modeling.draw_face_rectangle",
@@ -296,6 +340,7 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Primitives",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "modeling.create_box",
             "modeling.create_cylinder",
@@ -304,7 +349,13 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
         ],
     },
     MenuSubmenuSpec {
+        label: "Features",
+        layout: MenuGroupLayout::Auto,
+        command_ids: &["modeling.create_fillet", "modeling.create_chamfer"],
+    },
+    MenuSubmenuSpec {
         label: "Floor Plan",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "drafting.create_draft",
             "drafting.create_line",
@@ -316,6 +367,7 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Reference",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "modeling.create_polyline",
             "guide_lines.place",
@@ -326,10 +378,12 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Linked Models",
+        layout: MenuGroupLayout::Auto,
         command_ids: &["modeling.place_linked_model"],
     },
     MenuSubmenuSpec {
         label: "Booleans",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "modeling.boolean_union",
             "modeling.boolean_difference",
@@ -338,6 +392,7 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Patterning",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "modeling.mirror_create",
             "modeling.mirror_copy",
@@ -356,14 +411,22 @@ const TOOLS_MENU_GROUPS: &[MenuSubmenuSpec] = &[];
 const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
         label: "Find",
+        layout: MenuGroupLayout::Auto,
         command_ids: &["core.show_command_palette"],
     },
     MenuSubmenuSpec {
+        label: "Objects",
+        layout: MenuGroupLayout::Auto,
+        command_ids: &["view.lock_selected"],
+    },
+    MenuSubmenuSpec {
         label: "Zoom",
+        layout: MenuGroupLayout::Auto,
         command_ids: &["core.zoom_to_extents", "core.zoom_to_selection"],
     },
     MenuSubmenuSpec {
         label: "Projection",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "view.projection_perspective",
             "view.projection_orthographic",
@@ -371,6 +434,7 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Standard Views",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "view.isometric",
             "view.front",
@@ -383,6 +447,7 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Display",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "view.toggle_grid",
             "view.toggle_xray",
@@ -397,10 +462,12 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Sections",
+        layout: MenuGroupLayout::Auto,
         command_ids: &["modeling.clip_plane_create"],
     },
     MenuSubmenuSpec {
         label: "Floor Plan",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "drafting.toggle",
             "drafting.set_preset_arch_imperial",
@@ -411,6 +478,7 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Panels",
+        layout: MenuGroupLayout::Auto,
         command_ids: &[
             "view.toggle_layers",
             "view.toggle_outliner",
@@ -419,6 +487,11 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
             "materials.toggle_browser",
             "lighting.toggle_browser",
         ],
+    },
+    MenuSubmenuSpec {
+        label: "Settings",
+        layout: MenuGroupLayout::Auto,
+        command_ids: &[RENDERER_SETTINGS_COMMAND_ID, EXTENSIONS_COMMAND_ID],
     },
 ];
 
@@ -716,6 +789,54 @@ impl MenuGroupAppExt for App {
     }
 }
 
+/// Commands of a grouped category that no core or contributed group names.
+/// They would be shown under a catch-all "More" submenu, where nobody can
+/// predict them.
+fn ungrouped_menu_commands<'a>(
+    category: &CommandCategory,
+    category_commands: &[&'a CommandDescriptor],
+    menu_groups: &MenuGroupRegistry,
+) -> Vec<&'a CommandDescriptor> {
+    if !category_has_grouped_presentation(category, menu_groups) {
+        return Vec::new();
+    }
+    let grouped: HashSet<&str> = category_menu_groups(category)
+        .iter()
+        .flat_map(|group| group.command_ids.iter().copied())
+        .chain(
+            menu_groups
+                .groups_for(category)
+                .flat_map(|group| group.command_ids.iter().map(String::as_str)),
+        )
+        .collect();
+    category_commands
+        .iter()
+        .copied()
+        .filter(|descriptor| !grouped.contains(descriptor.id.as_str()))
+        .collect()
+}
+
+/// Startup validation: ids of menu-visible commands that have no named menu
+/// group and would therefore fall into "More".
+pub(crate) fn ungrouped_menu_command_ids(
+    registry: &CommandRegistry,
+    menu_groups: &MenuGroupRegistry,
+) -> Vec<String> {
+    ordered_menu_categories(registry)
+        .iter()
+        .flat_map(|category| {
+            let commands: Vec<&CommandDescriptor> = registry
+                .commands()
+                .filter(|descriptor| descriptor.show_in_menu && descriptor.category == *category)
+                .collect();
+            ungrouped_menu_commands(category, &commands, menu_groups)
+                .into_iter()
+                .map(|descriptor| descriptor.id.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Every command id referenced by the menu bar. Used by startup validation to
 /// guarantee menu items only ever drive registered commands.
 pub fn all_menu_command_ids() -> Vec<&'static str> {
@@ -782,7 +903,208 @@ impl Plugin for EguiChromePlugin {
                 .chain(),
         );
         install_primary_egui_pass(app);
+        register_chrome_window_commands(app);
     }
+}
+
+pub const CONNECT_AGENT_COMMAND_ID: &str = "assistant.connect_agent";
+pub const ASSISTANT_PANEL_COMMAND_ID: &str = "assistant.toggle_panel";
+pub const RENDERER_SETTINGS_COMMAND_ID: &str = "view.toggle_renderer_settings";
+pub const EXTENSIONS_COMMAND_ID: &str = "view.toggle_extensions";
+pub const PROJECT_SETTINGS_COMMAND_ID: &str = "core.toggle_project_settings";
+/// Menu-bar category for everything that brings an AI into the session.
+pub const AI_MENU_CATEGORY: &str = "AI";
+const AI_TOOLBAR_ID: &str = "assistant";
+
+/// A chrome window or side panel whose visibility a command can drive, so the
+/// menu bar, toolbars, shortcuts, the command palette and connected agents all
+/// open it through the same registered command.
+trait ChromeWindow:
+    Resource + bevy::ecs::component::Component<Mutability = bevy::ecs::component::Mutable>
+{
+    fn visible_mut(&mut self) -> &mut bool;
+    fn is_visible(&self) -> bool;
+    /// Reset transient per-showing state when the window opens.
+    fn on_shown(&mut self) {}
+}
+
+macro_rules! impl_chrome_window {
+    ($($state:ty),+ $(,)?) => {
+        $(impl ChromeWindow for $state {
+            fn visible_mut(&mut self) -> &mut bool {
+                &mut self.visible
+            }
+
+            fn is_visible(&self) -> bool {
+                self.visible
+            }
+        })+
+    };
+}
+
+impl_chrome_window!(
+    RightSidebarState,
+    RenderSettingsWindowState,
+    ProjectSettingsWindowState,
+    ExtensionsWindowState,
+);
+
+impl ChromeWindow for AgentConnectionWindowState {
+    fn visible_mut(&mut self) -> &mut bool {
+        &mut self.visible
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn on_shown(&mut self) {
+        self.copy_status = None;
+    }
+}
+
+/// Show, hide or toggle a chrome window. `{"visible": bool}` sets it
+/// explicitly; without it the command toggles.
+fn execute_toggle_chrome_window<W: ChromeWindow>(
+    world: &mut World,
+    parameters: &serde_json::Value,
+) -> Result<crate::plugins::command_registry::CommandResult, String> {
+    let mut window = world
+        .get_resource_mut::<W>()
+        .ok_or_else(|| "This window is not available in the current app".to_string())?;
+    let requested = parameters
+        .get("visible")
+        .and_then(serde_json::Value::as_bool);
+    let visible = requested.unwrap_or(!*window.visible_mut());
+    *window.visible_mut() = visible;
+    if visible {
+        window.on_shown();
+    }
+    Ok(crate::plugins::command_registry::CommandResult {
+        output: Some(serde_json::json!({ "visible": visible })),
+        ..Default::default()
+    })
+}
+
+fn chrome_window_shown<W: ChromeWindow>(world: &World) -> bool {
+    world
+        .get_resource::<W>()
+        .is_some_and(|window| window.is_visible())
+}
+
+struct ChromeWindowCommand {
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    category: CommandCategory,
+    shortcut: Option<&'static str>,
+    icon: Option<&'static str>,
+}
+
+fn register_chrome_window_command<W: ChromeWindow>(app: &mut App, command: ChromeWindowCommand) {
+    use crate::plugins::command_registry::CommandRegistryAppExt;
+
+    app.register_toggle_command(
+        CommandDescriptor {
+            id: command.id.to_string(),
+            label: command.label.to_string(),
+            description: command.description.to_string(),
+            category: command.category,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "visible": {
+                        "type": "boolean",
+                        "description": "Show (true) or hide (false). Omit to toggle."
+                    }
+                }
+            })),
+            default_shortcut: command.shortcut.map(str::to_string),
+            icon: command.icon.map(str::to_string),
+            hint: Some(command.description.to_string()),
+            requires_selection: false,
+            show_in_menu: true,
+            version: 1,
+            activates_tool: None,
+            capability_id: None,
+        },
+        execute_toggle_chrome_window::<W>,
+        chrome_window_shown::<W>,
+    );
+}
+
+fn register_chrome_window_commands(app: &mut App) {
+    use crate::plugins::toolbar::{ToolbarRegistryAppExt, ToolbarSection};
+
+    let ai = || CommandCategory::Custom(AI_MENU_CATEGORY.to_string());
+    register_chrome_window_command::<AgentConnectionWindowState>(
+        app,
+        ChromeWindowCommand {
+            id: CONNECT_AGENT_COMMAND_ID,
+            label: "Connect an AI Agent\u{2026}",
+            description: "Connect your own AI agent to this model over MCP",
+            category: ai(),
+            shortcut: None,
+            icon: Some("icon.agent_connect"),
+        },
+    );
+    register_chrome_window_command::<RightSidebarState>(
+        app,
+        ChromeWindowCommand {
+            id: ASSISTANT_PANEL_COMMAND_ID,
+            label: "Assistant",
+            description: "Show or hide the built-in assistant side panel",
+            category: ai(),
+            shortcut: Some("Ctrl/Cmd+J"),
+            icon: Some("icon.assistant"),
+        },
+    );
+    register_chrome_window_command::<RenderSettingsWindowState>(
+        app,
+        ChromeWindowCommand {
+            id: RENDERER_SETTINGS_COMMAND_ID,
+            label: "Renderer\u{2026}",
+            description: "Adjust renderer, tonemapping, and paper drawing settings",
+            category: CommandCategory::View,
+            shortcut: None,
+            icon: None,
+        },
+    );
+    register_chrome_window_command::<ExtensionsWindowState>(
+        app,
+        ChromeWindowCommand {
+            id: EXTENSIONS_COMMAND_ID,
+            label: "Extensions\u{2026}",
+            description: "Enable or disable optional extensions",
+            category: CommandCategory::View,
+            shortcut: None,
+            icon: None,
+        },
+    );
+    register_chrome_window_command::<ProjectSettingsWindowState>(
+        app,
+        ChromeWindowCommand {
+            id: PROJECT_SETTINGS_COMMAND_ID,
+            label: "Project Settings\u{2026}",
+            description: "Set model-level units, precision, snapping, and grid defaults",
+            category: CommandCategory::File,
+            shortcut: None,
+            icon: None,
+        },
+    );
+    app.register_toolbar(ToolbarDescriptor {
+        id: AI_TOOLBAR_ID.to_string(),
+        label: "AI".to_string(),
+        default_dock: ToolbarDock::Top,
+        default_visible: true,
+        sections: vec![ToolbarSection {
+            label: "Agent".to_string(),
+            command_ids: vec![
+                CONNECT_AGENT_COMMAND_ID.to_string(),
+                ASSISTANT_PANEL_COMMAND_ID.to_string(),
+            ],
+        }],
+    });
 }
 
 #[derive(Resource, Default, Debug, Clone)]
@@ -1773,7 +2095,7 @@ fn draw_document_history_menus(
 /// Same filter logic as `draw_command_submenu` so the prediction agrees with
 /// the actual draw call.
 fn group_will_render_inline(
-    label: &str,
+    layout: MenuGroupLayout,
     command_ids: &[&str],
     category_commands: &[&CommandDescriptor],
 ) -> bool {
@@ -1785,7 +2107,7 @@ fn group_will_render_inline(
                 .any(|descriptor| descriptor.id == **id)
         })
         .count();
-    count > 0 && should_render_inline_menu_group(label, count)
+    count > 0 && should_render_inline_menu_group(layout, count)
 }
 
 /// Threshold for the menu-collapse rule (DEFINITION_BROWSER_UX_AGREEMENT.md):
@@ -1795,8 +2117,8 @@ fn group_will_render_inline(
 /// do not force tiny cascades.
 const INLINE_GROUP_THRESHOLD: usize = 2;
 
-fn should_render_inline_menu_group(label: &str, visible_command_count: usize) -> bool {
-    visible_command_count <= INLINE_GROUP_THRESHOLD || label == "Document"
+fn should_render_inline_menu_group(layout: MenuGroupLayout, visible_command_count: usize) -> bool {
+    layout == MenuGroupLayout::Inline || visible_command_count <= INLINE_GROUP_THRESHOLD
 }
 
 /// Result of rendering one menu group; used by the parent to decide whether to
@@ -1817,6 +2139,7 @@ enum MenuGroupRenderKind {
 fn draw_command_submenu(
     ui: &mut egui::Ui,
     label: &str,
+    layout: MenuGroupLayout,
     command_ids: &[&str],
     category_commands: &[&CommandDescriptor],
     selection_count: usize,
@@ -1842,7 +2165,7 @@ fn draw_command_submenu(
 
     rendered_ids.extend(descriptors.iter().map(|descriptor| descriptor.id.clone()));
 
-    if should_render_inline_menu_group(label, descriptors.len()) {
+    if should_render_inline_menu_group(layout, descriptors.len()) {
         menu_section_heading(ui, label);
         for descriptor in &descriptors {
             draw_command_menu_button(
@@ -1874,93 +2197,17 @@ fn draw_command_submenu(
     }
 }
 
-fn draw_view_workspace_submenu(
+/// The toolbar list is data-driven (one row per registered toolbar), so it
+/// stays a drawn submenu. Every other View entry is a registered command.
+fn draw_toolbars_submenu(
     ui: &mut egui::Ui,
-    hovered_menu_hint: &mut Option<String>,
-    assistant_window_state: &mut RightSidebarState,
-    lighting_window_state: &mut LightingWindowState,
-    render_settings_window_state: &mut RenderSettingsWindowState,
-    extensions_window_state: &mut ExtensionsWindowState,
-    agent_connection_window_state: &mut AgentConnectionWindowState,
     toolbar_registry: &ToolbarRegistry,
     toolbar_layout_state: &mut ToolbarLayoutState,
     doc_props: &mut DocumentProperties,
 ) {
-    menu_submenu(ui, "Workspace", |ui| {
-        let assistant =
-            menu_row_button(ui, "Assistant...").on_hover_text("Open the assistant side panel");
-        if assistant.contains_pointer() {
-            *hovered_menu_hint = Some("Open the assistant side panel".to_string());
-        }
-        if assistant.clicked() {
-            assistant_window_state.visible = true;
-            ui.close();
-        }
-
-        let lights =
-            menu_row_button(ui, "Lights...").on_hover_text("Open the scene lighting panel");
-        if lights.contains_pointer() {
-            *hovered_menu_hint = Some("Open the scene lighting panel".to_string());
-        }
-        if lights.clicked() {
-            lighting_window_state.visible = true;
-            ui.close();
-        }
-
-        let renderer = menu_row_button(ui, "Renderer...")
-            .on_hover_text("Adjust renderer, tonemapping, and paper drawing settings");
-        if renderer.contains_pointer() {
-            *hovered_menu_hint =
-                Some("Adjust renderer, tonemapping, and paper drawing settings".to_string());
-        }
-        if renderer.clicked() {
-            render_settings_window_state.visible = true;
-            ui.close();
-        }
-
-        let extensions = menu_row_button(ui, "Extensions...")
-            .on_hover_text("Enable or disable optional extensions");
-        if extensions.contains_pointer() {
-            *hovered_menu_hint = Some("Enable or disable optional extensions".to_string());
-        }
-        if extensions.clicked() {
-            extensions_window_state.visible = true;
-            ui.close();
-        }
-
-        let agent = menu_row_button(ui, "Connect an AI Agent...")
-            .on_hover_text("Connect an external AI agent to this instance");
-        if agent.contains_pointer() {
-            *hovered_menu_hint = Some("Connect an external AI agent to this instance".to_string());
-        }
-        if agent.clicked() {
-            agent_connection_window_state.visible = true;
-            agent_connection_window_state.copy_status = None;
-            ui.close();
-        }
-
-        ui.separator();
-        menu_submenu(ui, "Toolbars", |ui| {
-            draw_toolbar_visibility_menu(ui, toolbar_registry, toolbar_layout_state, doc_props);
-        });
+    menu_submenu(ui, "Toolbars", |ui| {
+        draw_toolbar_visibility_menu(ui, toolbar_registry, toolbar_layout_state, doc_props);
     });
-}
-
-fn draw_project_settings_menu_button(
-    ui: &mut egui::Ui,
-    hovered_menu_hint: &mut Option<String>,
-    project_settings_window_state: &mut ProjectSettingsWindowState,
-) {
-    let project_settings = menu_row_button(ui, "Project Settings...")
-        .on_hover_text("Set model-level units, precision, snapping, and grid defaults");
-    if project_settings.contains_pointer() {
-        *hovered_menu_hint =
-            Some("Set model-level units, precision, snapping, and grid defaults".to_string());
-    }
-    if project_settings.clicked() {
-        project_settings_window_state.visible = true;
-        ui.close();
-    }
 }
 
 /// Identity of the application artifact, supplied by its binary composition.
@@ -2020,12 +2267,6 @@ fn draw_category_menu_contents(
     hovered_menu_hint: &mut Option<String>,
     toggle_states: &CommandToggleStates,
     menu_groups: &MenuGroupRegistry,
-    assistant_window_state: &mut RightSidebarState,
-    lighting_window_state: &mut LightingWindowState,
-    render_settings_window_state: &mut RenderSettingsWindowState,
-    project_settings_window_state: &mut ProjectSettingsWindowState,
-    extensions_window_state: &mut ExtensionsWindowState,
-    agent_connection_window_state: &mut AgentConnectionWindowState,
     toolbar_registry: &ToolbarRegistry,
     toolbar_layout_state: &mut ToolbarLayoutState,
     doc_props: &mut DocumentProperties,
@@ -2065,7 +2306,7 @@ fn draw_category_menu_contents(
         let needs_separator_now = match previous_kind {
             Some(MenuGroupRenderKind::Inline) => true,
             Some(MenuGroupRenderKind::Submenu) => {
-                group_will_render_inline(group.label, group.command_ids, category_commands)
+                group_will_render_inline(group.layout, group.command_ids, category_commands)
             }
             None => false,
         };
@@ -2075,6 +2316,7 @@ fn draw_category_menu_contents(
         if let Some(kind) = draw_command_submenu(
             ui,
             group.label,
+            group.layout,
             group.command_ids,
             category_commands,
             selection_count,
@@ -2098,13 +2340,18 @@ fn draw_category_menu_contents(
         if has_commands
             && (previous_kind == Some(MenuGroupRenderKind::Inline)
                 || (previous_kind.is_some()
-                    && group_will_render_inline(&group.label, &command_ids, category_commands)))
+                    && group_will_render_inline(
+                        MenuGroupLayout::Auto,
+                        &command_ids,
+                        category_commands,
+                    )))
         {
             ui.separator();
         }
         if let Some(kind) = draw_command_submenu(
             ui,
             &group.label,
+            MenuGroupLayout::Auto,
             &command_ids,
             category_commands,
             selection_count,
@@ -2131,33 +2378,22 @@ fn draw_category_menu_contents(
             status_bar_data,
             hovered_menu_hint,
         );
-        ui.separator();
-        draw_project_settings_menu_button(ui, hovered_menu_hint, project_settings_window_state);
     }
 
     if matches!(
         category,
         crate::plugins::command_registry::CommandCategory::View
     ) {
-        draw_view_workspace_submenu(
-            ui,
-            hovered_menu_hint,
-            assistant_window_state,
-            lighting_window_state,
-            render_settings_window_state,
-            extensions_window_state,
-            agent_connection_window_state,
-            toolbar_registry,
-            toolbar_layout_state,
-            doc_props,
-        );
+        ui.separator();
+        draw_toolbars_submenu(ui, toolbar_registry, toolbar_layout_state, doc_props);
     }
 
-    let leftovers: Vec<&CommandDescriptor> = category_commands
+    // Fallback only: startup validation reports every command that lands here,
+    // so a shipped composition should never show this submenu.
+    let leftovers = ungrouped_menu_commands(category, category_commands, menu_groups);
+    debug_assert!(leftovers
         .iter()
-        .copied()
-        .filter(|descriptor| !rendered_ids.contains(&descriptor.id))
-        .collect();
+        .all(|descriptor| !rendered_ids.contains(&descriptor.id)));
     if !leftovers.is_empty() {
         menu_submenu(ui, "More", |ui| {
             for descriptor in leftovers {
@@ -2399,12 +2635,6 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                                 &mut hovered_menu_hint,
                                 &data.command_toggle_states,
                                 &data.menu_groups,
-                                &mut data.assistant_window_state,
-                                &mut data.lighting_window_state,
-                                &mut data.render_settings_window_state,
-                                &mut data.project_settings_window_state,
-                                &mut data.extensions_window_state,
-                                &mut data.agent_connection_window_state,
                                 &data.toolbar_registry,
                                 &mut data.toolbar_layout_state,
                                 &mut data.doc_props,
@@ -2418,7 +2648,14 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         });
     }
 
-    // Clear stale frame rects before the toolbar render pass populates them.
+    // Last frame's drawn sizes drive this frame's overflow decision; then clear
+    // the stale rects before the toolbar render pass repopulates them.
+    let measured_toolbar_sizes: HashMap<String, egui::Vec2> = data
+        .drag_state
+        .toolbar_rects
+        .iter()
+        .map(|(id, rect)| (id.clone(), rect.size()))
+        .collect();
     data.drag_state.toolbar_rects.clear();
 
     // Collect all toolbar rows up-front (owned) so the immutable borrows on
@@ -2441,7 +2678,20 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     .collect();
 
     for (dock, rows) in all_rows {
-        for (row_idx, row_descriptors) in rows.iter().enumerate() {
+        // A band that does not fit its dock spills into an adjacent band, so a
+        // small window never hides toolbars past the edge of the screen.
+        let horizontal = matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom);
+        let remaining = remaining_available_rect(&ctx);
+        let available = if horizontal {
+            remaining.width()
+        } else {
+            remaining.height()
+        };
+        let bands = split_overflowing_bands(rows, available, |descriptor| {
+            toolbar_band_extent(descriptor, horizontal, &measured_toolbar_sizes)
+        });
+        for (row_idx, spill, row_descriptors) in &bands {
+            let (row_idx, spill) = (*row_idx, *spill);
             let descriptor_refs: Vec<&ToolbarDescriptor> = row_descriptors.iter().collect();
             let mut render = ToolbarRenderContext {
                 contexts: &mut contexts,
@@ -2470,7 +2720,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                 },
                 capability_activation: &data.capability_activation,
             };
-            draw_toolbar_row(&ctx, &mut render, &descriptor_refs, dock, row_idx as u32);
+            draw_toolbar_row(&ctx, &mut render, &descriptor_refs, dock, row_idx, spill);
         }
     }
 
@@ -3983,6 +4233,68 @@ fn toolbar_content_size(descriptor: &ToolbarDescriptor, horizontal: bool) -> egu
     }
 }
 
+/// Space between neighbouring toolbars in one band (separator plus spacing).
+const TOOLBAR_BAND_GAP: f32 = 10.0;
+
+/// Main-axis extent a toolbar needs in its band: the size it was drawn at last
+/// frame when known, otherwise an estimate from its button count.
+fn toolbar_band_extent(
+    descriptor: &ToolbarDescriptor,
+    horizontal: bool,
+    measured: &HashMap<String, egui::Vec2>,
+) -> f32 {
+    let main_axis = |size: egui::Vec2| if horizontal { size.x } else { size.y };
+    measured
+        .get(&descriptor.id)
+        .map(|size| main_axis(*size))
+        .unwrap_or_else(|| {
+            if descriptor.id == CAMERA_TOOLBAR_ID {
+                return main_axis(camera_toolbar_content_size(horizontal));
+            }
+            let buttons: usize = descriptor
+                .sections
+                .iter()
+                .map(|section| section.command_ids.len())
+                .sum();
+            let section_breaks = descriptor.sections.len().saturating_sub(1);
+            TOOLBAR_GRIP_SIZE
+                + buttons as f32 * (TOOLBAR_BUTTON_SIZE + 3.0)
+                + section_breaks as f32 * 8.0
+                + 12.0
+        })
+}
+
+/// Split each band so its items fit `available` along the band's main axis.
+/// Returns `(band index, spill index, items)`; spill 0 is the band itself and
+/// higher spills are the overflow, in order. An item larger than `available`
+/// still gets a band of its own.
+fn split_overflowing_bands<T>(
+    bands: Vec<Vec<T>>,
+    available: f32,
+    extent: impl Fn(&T) -> f32,
+) -> Vec<(u32, u32, Vec<T>)> {
+    let mut result = Vec::new();
+    for (band_idx, band) in bands.into_iter().enumerate() {
+        let mut spill = 0u32;
+        let mut current = Vec::new();
+        let mut used = 0.0f32;
+        for item in band {
+            let needed = extent(&item) + TOOLBAR_BAND_GAP;
+            if !current.is_empty() && used + needed > available {
+                result.push((band_idx as u32, spill, std::mem::take(&mut current)));
+                spill += 1;
+                used = 0.0;
+            }
+            used += needed;
+            current.push(item);
+        }
+        if !current.is_empty() {
+            result.push((band_idx as u32, spill, current));
+        }
+    }
+    result
+}
+
 /// Draws a ghost-sized landing slot at the current position in `ui`.
 ///
 /// The slot has the same dimensions as the drag ghost so the user can see
@@ -4022,8 +4334,13 @@ fn draw_toolbar_row(
     descriptors: &[&ToolbarDescriptor],
     dock: ToolbarDock,
     row_idx: u32,
+    spill: u32,
 ) {
-    let panel_id = format!("toolbar_row.{}.{}", dock.as_str(), row_idx);
+    let panel_id = if spill == 0 {
+        format!("toolbar_row.{}.{}", dock.as_str(), row_idx)
+    } else {
+        format!("toolbar_row.{}.{}.spill{}", dock.as_str(), row_idx, spill)
+    };
     let horizontal = matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom);
 
     // Pre-extract everything we need from `render` before the closure captures it,
@@ -4076,7 +4393,7 @@ fn draw_toolbar_row(
             let mut placed = 0usize;
 
             // Prepend slot (insert_after == None means "before the first toolbar").
-            if is_target_row && insert_after_id.is_none() {
+            if is_target_row && insert_after_id.is_none() && spill == 0 {
                 if let Some(size) = slot_size {
                     draw_landing_slot(ui, size);
                     placed += 1;
@@ -4718,9 +5035,10 @@ fn draw_viewport_context_menu(
                             );
                         }
                     } else {
-                        item!("Ungroup", "modeling.ungroup");
+                        item!(enabled: selected_group_count > 0, "Ungroup", "modeling.ungroup");
                     }
                     ui.separator();
+                    item!("Duplicate", "core.duplicate");
                     item!("Deselect", "core.deselect");
                     item!("Delete", "core.delete");
                 } else {
@@ -6556,5 +6874,176 @@ mod tests {
                 "{command_id} must be directly reachable through Create > Floor Plan"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod chrome_exposure_tests {
+    use super::*;
+    use crate::plugins::command_registry::{execute_command, CommandRegistryAppExt};
+
+    #[test]
+    fn overflowing_band_spills_in_order_without_dropping_items() {
+        // Four 100-unit toolbars in a 250-unit column: two fit per band.
+        let bands =
+            split_overflowing_bands(vec![vec!["a", "b", "c", "d"], vec!["e"]], 250.0, |_| 100.0);
+        assert_eq!(
+            bands,
+            vec![
+                (0, 0, vec!["a", "b"]),
+                (0, 1, vec!["c", "d"]),
+                (1, 0, vec!["e"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn band_that_fits_is_left_alone_and_oversized_item_keeps_its_own_band() {
+        let fits = split_overflowing_bands(vec![vec![1, 2, 3]], 1000.0, |_| 100.0);
+        assert_eq!(fits, vec![(0, 0, vec![1, 2, 3])]);
+        let oversized = split_overflowing_bands(vec![vec![1, 2]], 50.0, |_| 100.0);
+        assert_eq!(oversized, vec![(0, 0, vec![1]), (0, 1, vec![2])]);
+    }
+
+    #[test]
+    fn measured_size_overrides_the_button_count_estimate() {
+        let descriptor = ToolbarDescriptor {
+            id: "t".into(),
+            label: "T".into(),
+            default_dock: ToolbarDock::Left,
+            default_visible: true,
+            sections: vec![],
+        };
+        let measured = HashMap::from([("t".to_string(), egui::vec2(40.0, 432.0))]);
+        assert_eq!(toolbar_band_extent(&descriptor, false, &measured), 432.0);
+        assert_eq!(toolbar_band_extent(&descriptor, true, &measured), 40.0);
+        assert!(toolbar_band_extent(&descriptor, false, &HashMap::new()) > 0.0);
+    }
+
+    fn chrome_command_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<RightSidebarState>()
+            .init_resource::<RenderSettingsWindowState>()
+            .init_resource::<ProjectSettingsWindowState>()
+            .init_resource::<ExtensionsWindowState>()
+            .init_resource::<AgentConnectionWindowState>();
+        register_chrome_window_commands(&mut app);
+        app
+    }
+
+    #[test]
+    fn every_chrome_window_is_a_registered_command_with_a_menu_home() {
+        let app = chrome_command_app();
+        let registry = app.world().resource::<CommandRegistry>();
+        for id in [
+            CONNECT_AGENT_COMMAND_ID,
+            ASSISTANT_PANEL_COMMAND_ID,
+            RENDERER_SETTINGS_COMMAND_ID,
+            EXTENSIONS_COMMAND_ID,
+            PROJECT_SETTINGS_COMMAND_ID,
+        ] {
+            let descriptor = registry
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} registered"));
+            assert!(descriptor.show_in_menu, "{id} is menu-visible");
+        }
+        let menu_groups = MenuGroupRegistry::default();
+        assert_eq!(
+            ungrouped_menu_command_ids(registry, &menu_groups),
+            Vec::<String>::new(),
+            "no chrome window command falls into More"
+        );
+        // Bring-your-own-agent leads the AI menu.
+        let ai = CommandCategory::Custom(AI_MENU_CATEGORY.to_string());
+        let ai_ids: Vec<&str> = registry
+            .commands()
+            .filter(|descriptor| descriptor.category == ai)
+            .map(|descriptor| descriptor.id.as_str())
+            .collect();
+        assert_eq!(
+            ai_ids,
+            vec![CONNECT_AGENT_COMMAND_ID, ASSISTANT_PANEL_COMMAND_ID]
+        );
+    }
+
+    #[test]
+    fn chrome_window_command_toggles_sets_and_resets_transient_state() {
+        let mut app = chrome_command_app();
+        let world = app.world_mut();
+        world
+            .resource_mut::<AgentConnectionWindowState>()
+            .copy_status = Some("Copied".into());
+        let shown = |world: &World| world.resource::<AgentConnectionWindowState>().visible;
+
+        execute_command(world, CONNECT_AGENT_COMMAND_ID, &serde_json::json!({})).unwrap();
+        assert!(shown(world));
+        assert_eq!(
+            world.resource::<AgentConnectionWindowState>().copy_status,
+            None
+        );
+        execute_command(world, CONNECT_AGENT_COMMAND_ID, &serde_json::json!({})).unwrap();
+        assert!(!shown(world));
+        let result = execute_command(
+            world,
+            CONNECT_AGENT_COMMAND_ID,
+            &serde_json::json!({ "visible": true }),
+        )
+        .unwrap();
+        assert!(shown(world));
+        assert_eq!(result.output, Some(serde_json::json!({ "visible": true })));
+        assert!(chrome_window_shown::<AgentConnectionWindowState>(world));
+    }
+
+    #[test]
+    fn ungrouped_commands_are_reported_until_a_group_names_them() {
+        fn noop(
+            _: &mut World,
+            _: &serde_json::Value,
+        ) -> Result<crate::plugins::command_registry::CommandResult, String> {
+            Ok(Default::default())
+        }
+        let mut app = App::new();
+        app.register_command(
+            CommandDescriptor {
+                id: "test.orphan".into(),
+                label: "Orphan".into(),
+                description: String::new(),
+                category: CommandCategory::Edit,
+                parameters: None,
+                default_shortcut: None,
+                icon: None,
+                hint: None,
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: None,
+                capability_id: None,
+            },
+            noop,
+        );
+        let registry = app.world().resource::<CommandRegistry>();
+        let mut menu_groups = MenuGroupRegistry::default();
+        assert_eq!(
+            ungrouped_menu_command_ids(registry, &menu_groups),
+            vec!["test.orphan".to_string()]
+        );
+        menu_groups.register(CommandCategory::Edit, "Test", ["test.orphan"]);
+        assert!(ungrouped_menu_command_ids(registry, &menu_groups).is_empty());
+    }
+
+    #[test]
+    fn clipboard_and_selection_rows_are_never_nested() {
+        for label in ["Document", "Clipboard", "Selection"] {
+            let group = [FILE_MENU_GROUPS, EDIT_MENU_GROUPS]
+                .iter()
+                .flat_map(|groups| groups.iter())
+                .find(|group| group.label == label)
+                .unwrap_or_else(|| panic!("{label} group exists"));
+            assert!(should_render_inline_menu_group(
+                group.layout,
+                group.command_ids.len()
+            ));
+        }
+        assert!(!should_render_inline_menu_group(MenuGroupLayout::Auto, 3));
     }
 }

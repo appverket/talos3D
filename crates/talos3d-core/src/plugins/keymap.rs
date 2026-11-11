@@ -28,7 +28,10 @@ use crate::plugins::{
         queue_command_invocation_resource, CommandDescriptor, CommandRegistry,
         PendingCommandInvocations,
     },
-    egui_chrome::{all_menu_command_ids, ChromeInputCapture, EguiWantsInput},
+    egui_chrome::{
+        all_menu_command_ids, ungrouped_menu_command_ids, ChromeInputCapture, EguiWantsInput,
+        MenuGroupRegistry,
+    },
     face_edit::FaceEditContext,
     input_ownership::InputOwnership,
     toolbar::ToolbarRegistry,
@@ -401,6 +404,17 @@ fn install_keymap(world: &mut World) {
             error!(
                 "Toolbar/menu reference integrity: {}",
                 references.join("; ")
+            );
+        }
+    }
+
+    if let Some(menu_groups) = world.get_resource::<MenuGroupRegistry>() {
+        let ungrouped =
+            ungrouped_menu_command_ids(world.resource::<CommandRegistry>(), menu_groups);
+        if !ungrouped.is_empty() {
+            error!(
+                "Menu commands without a named group (shown under \"More\"): {}",
+                ungrouped.join(", ")
             );
         }
     }

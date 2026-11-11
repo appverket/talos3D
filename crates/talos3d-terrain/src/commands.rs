@@ -379,6 +379,11 @@ impl Plugin for TerrainCommandPlugin {
         );
         app.register_menu_group(
             CommandCategory::Edit,
+            "Terrain",
+            ["terrain.delete_elevation_curve"],
+        );
+        app.register_menu_group(
+            CommandCategory::Edit,
             "Site Placement",
             [
                 "terrain.plant_on_surface",
