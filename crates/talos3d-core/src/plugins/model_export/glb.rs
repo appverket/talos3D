@@ -1,15 +1,11 @@
 //! Portable, render-only publication. No authored snapshots, names, IDs or URIs.
 //! Collection runs once at publication; material batches become GPU primitives.
-use crate::plugins::{
-    definition_preview_scene::PreviewOnly, identity::ElementId, layers::entity_document_hidden,
-    modeling::occurrence::GeneratedOccurrencePart,
-};
 use bevy::{
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     prelude::*,
 };
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 mod textures;
 use crate::plugins::materials::{MaterialAssignment, MaterialHandleCache, MaterialRegistry};
@@ -47,18 +43,7 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
     if !crate::plugins::vector_drawing::collect_active_clip_planes(world).is_empty() {
         return Err("Turn off section cuts before publishing this model".into());
     }
-    // Compound occurrences generate detached meshes with an authored owner ID.
-    // Owners may be logical nodes with no inherited visibility component.
-    let visible_owners: HashSet<_> = world
-        .query::<(Entity, &ElementId, Option<&InheritedVisibility>)>()
-        .iter(world)
-        .filter(|(e, _, v)| {
-            v.is_none_or(|v| v.get())
-                && !entity_document_hidden(world, *e)
-                && world.get::<PreviewOnly>(*e).is_none()
-        })
-        .map(|(_, id, _)| *id)
-        .collect();
+    let visible_owners = super::visible_authored_owners(world);
     let entries: Vec<_> = world
         .query::<(
             Entity,
@@ -84,23 +69,7 @@ pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
         .collect();
     let registry = world.get_resource::<MaterialRegistry>();
     for (entity, handle, transform, material) in entries {
-        let mut current = Some(entity);
-        let mut authored = false;
-        while let Some(e) = current {
-            if world.get::<PreviewOnly>(e).is_some() {
-                break;
-            }
-            if let Some(id) = world
-                .get::<GeneratedOccurrencePart>(e)
-                .map(|p| p.owner)
-                .or_else(|| world.get::<ElementId>(e).copied())
-            {
-                authored = visible_owners.contains(&id);
-                break;
-            }
-            current = world.get::<ChildOf>(e).map(|p| p.parent());
-        }
-        if !authored {
+        if super::visible_authored_owner(world, entity, &visible_owners).is_none() {
             continue;
         }
         let Some(mesh) = meshes.get(&handle) else {
@@ -471,6 +440,8 @@ fn encode(batches: Batches, images: Images) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::{identity::ElementId, modeling::occurrence::GeneratedOccurrencePart};
+    use std::collections::HashSet;
     #[test]
     fn export_embeds_authored_images_and_mapped_uvs_even_if_renderer_has_a_fallback() {
         use crate::plugins::materials::*;
