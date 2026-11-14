@@ -333,6 +333,11 @@ impl ModelApiServer {
                 | "set_selection"
                 | "get_world_aabb"
                 | "set_camera"
+                | "get_camera"
+                | "frame_entities"
+                | "frame_model"
+                | "get_render_settings"
+                | "get_perf_stats"
                 | "list_entities"
         );
         let result = REQUEST_ACCESS
