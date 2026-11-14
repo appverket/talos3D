@@ -339,6 +339,7 @@ pub fn write_obj(meshes: &[ExportMesh]) -> String {
 }
 
 pub fn export_model_obj_to_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
+    crate::plugins::document_state::require_editable(world)?;
     let meshes = collect_export_meshes(world);
     if meshes.is_empty() {
         return Err("The model has no 3D geometry to export".to_string());

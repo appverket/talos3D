@@ -529,6 +529,7 @@ fn load_project_shortcut(world: &mut World) {
 
 /// Save to the current path, or open a Save As dialog if no path is set.
 pub fn save_project_now(world: &mut World) -> Result<(), String> {
+    crate::plugins::document_state::require_editable(world)?;
     let current_path = world.resource::<DocumentState>().current_path.clone();
     match current_path {
         Some(path) => save_to_path(world, &path),
@@ -537,6 +538,7 @@ pub fn save_project_now(world: &mut World) -> Result<(), String> {
 }
 
 pub fn save_project_to_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
+    crate::plugins::document_state::require_editable(world)?;
     let path = ensure_extension(path);
     save_to_path(world, &path)?;
     Ok(path)
@@ -596,6 +598,7 @@ pub fn save_as_now(_world: &mut World) -> Result<Option<()>, String> {
 /// Open a Save As dialog, save to the chosen path.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_as_now(world: &mut World) -> Result<Option<()>, String> {
+    crate::plugins::document_state::require_editable(world)?;
     let current_path = world.resource::<DocumentState>().current_path.clone();
     let mut dialog = rfd::AsyncFileDialog::new()
         .add_filter("Talos3D Project", &[FILE_EXTENSION])
@@ -788,6 +791,7 @@ fn capture_project_value(world: &mut World) -> Result<Value, String> {
 /// Browser capture must not first allocate oversized JSON and then parse it
 /// into a second full document while the live editor owns its scene.
 pub fn capture_for_storage(world: &mut World, limit: usize) -> Result<Vec<u8>, String> {
+    crate::plugins::document_state::require_editable(world)?;
     struct Bounded {
         bytes: Vec<u8>,
         limit: usize,
@@ -1070,6 +1074,7 @@ impl crate::plugins::history::EditorCommand for InstallLibrary {
 }
 
 fn save_to_path(world: &mut World, path: &Path) -> Result<(), String> {
+    crate::plugins::document_state::require_editable(world)?;
     let bytes = capture_project_file_bytes(world)?;
     let key = path.to_string_lossy().into_owned();
     world.resource::<Storage>().0.save(&bytes, &key)?;

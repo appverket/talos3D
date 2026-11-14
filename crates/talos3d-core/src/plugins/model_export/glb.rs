@@ -31,6 +31,7 @@ struct Batch {
 /// frustum. Helpers without an authored ancestor (grid, grips, previews) stay out.
 /// Material images and their effective UVs travel inside the binary artifact.
 pub fn capture_view_glb(world: &mut World) -> Result<Vec<u8>, String> {
+    crate::plugins::document_state::require_editable(world)?;
     if world
         .get_resource::<crate::plugins::history::PendingCommandQueue>()
         .is_some_and(|q| !q.is_empty())

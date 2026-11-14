@@ -16,6 +16,33 @@ impl Plugin for DocumentStatePlugin {
     }
 }
 
+/// Installed by a product or viewer while the open document is read-only.
+/// Absence preserves the normal editable workspace.
+#[derive(Resource)]
+pub struct ReadOnlyDocument;
+
+pub fn set_read_only(world: &mut World) {
+    crate::plugins::transform::cancel_for_external_command(world);
+    if let Some(mut queue) =
+        world.get_resource_mut::<crate::plugins::history::PendingCommandQueue>()
+    {
+        queue.clear();
+    }
+    if let Some(mut tool) = world.get_resource_mut::<NextState<crate::plugins::tools::ActiveTool>>()
+    {
+        tool.set(crate::plugins::tools::ActiveTool::Select);
+    }
+    world.insert_resource(ReadOnlyDocument);
+}
+
+pub fn require_editable(world: &World) -> Result<(), String> {
+    if world.contains_resource::<ReadOnlyDocument>() {
+        Err("This document is read-only.".into())
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Resource, Debug, Clone, Default)]
 pub struct DocumentState {
     pub current_path: Option<PathBuf>,

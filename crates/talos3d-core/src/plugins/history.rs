@@ -226,6 +226,7 @@ pub(crate) struct HistoryTransaction {
 
 impl HistoryTransaction {
     pub(crate) fn begin(world: &mut World) -> Result<Self, String> {
+        super::document_state::require_editable(world)?;
         if !world.resource::<PendingCommandQueue>().is_empty() {
             return Err(
                 "pending commands or an open command group must finish before commit".into(),
@@ -396,6 +397,10 @@ pub(crate) fn apply_pending_history_commands_for_test(world: &mut World) {
 pub(crate) fn apply_pending_history_commands(world: &mut World) {
     if !world.resource::<PendingCommandQueue>().is_empty() {
         super::transform::cancel_for_external_command(world);
+        if world.contains_resource::<super::document_state::ReadOnlyDocument>() {
+            world.resource_mut::<PendingCommandQueue>().clear();
+            return;
+        }
     }
     let (pending_commands, pending_actions) = {
         let mut pending_command_queue = world.resource_mut::<PendingCommandQueue>();
@@ -602,6 +607,27 @@ mod tests {
         world.insert_resource(CounterA::default());
         world.insert_resource(LogB::default());
         world
+    }
+
+    #[test]
+    fn read_only_denies_queued_gesture_and_undo_and_allows_edits_after_unlock() {
+        let mut world = world_with_history();
+        world
+            .resource_mut::<PendingCommandQueue>()
+            .push_command(Box::new(IncrementCounterCommand));
+        apply_pending_history_commands_for_test(&mut world);
+        super::super::document_state::set_read_only(&mut world);
+        let mut queue = world.resource_mut::<PendingCommandQueue>();
+        queue.push_command(Box::new(IncrementCounterCommand));
+        queue.queue_undo();
+        apply_pending_history_commands_for_test(&mut world);
+        assert_eq!(world.resource::<CounterA>().0, 1);
+        assert_eq!(world.resource::<History>().undo_stack_len(), 1);
+        assert!(HistoryTransaction::begin(&mut world).is_err());
+        world.remove_resource::<super::super::document_state::ReadOnlyDocument>();
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands_for_test(&mut world);
+        assert_eq!(world.resource::<CounterA>().0, 0);
     }
 
     /// Pins `begin_group`/`end_group` atomicity: 2+ heterogeneous sub-commands

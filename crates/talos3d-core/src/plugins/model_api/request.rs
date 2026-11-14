@@ -7,6 +7,8 @@ pub(super) struct ModelApiReceiver(pub(super) Mutex<mpsc::Receiver<ModelApiReque
 #[cfg(feature = "model-api")]
 pub(super) enum ModelApiRequest {
     Guarded {
+        needs_base: bool,
+        needs_edit: bool,
         request: Box<ModelApiRequest>,
         response: oneshot::Sender<ApiResult<()>>,
     },
@@ -1262,8 +1264,21 @@ pub(super) type ApiResult<T> = Result<T, String>;
 #[cfg(feature = "model-api")]
 pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
     match request {
-        ModelApiRequest::Guarded { request, response } => {
-            let result = crate::plugins::authored_edit_plan::requests::ensure_authored_base(world);
+        ModelApiRequest::Guarded {
+            request,
+            response,
+            needs_base,
+            needs_edit,
+        } => {
+            let result = (|| {
+                if needs_edit {
+                    crate::plugins::document_state::require_editable(world)?;
+                }
+                if needs_base {
+                    crate::plugins::authored_edit_plan::requests::ensure_authored_base(world)?;
+                }
+                Ok(())
+            })();
             if result.is_ok() {
                 handle_model_api_request(world, *request);
             }

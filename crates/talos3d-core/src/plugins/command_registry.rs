@@ -512,8 +512,26 @@ pub fn queue_command_invocation_resource(
     });
 }
 
+fn permitted_in_document(world: &World, descriptor: &CommandDescriptor) -> bool {
+    !world.contains_resource::<super::document_state::ReadOnlyDocument>()
+        || descriptor.category == CommandCategory::View
+        || matches!(
+            descriptor.id.as_str(),
+            "core.open"
+                | "core.open_recent"
+                | "core.select_tool"
+                | "core.select_all"
+                | "core.deselect"
+                | "core.show_command_palette"
+                | "core.zoom_to_extents"
+                | "core.zoom_to_selection"
+                | "talos3d.private_projects"
+        )
+}
+
 pub fn command_enabled(world: &World, descriptor: &CommandDescriptor) -> bool {
-    !descriptor.requires_selection || selection_count(world) > 0
+    permitted_in_document(world, descriptor)
+        && (!descriptor.requires_selection || selection_count(world) > 0)
 }
 
 pub fn selection_count(world: &World) -> usize {
@@ -966,6 +984,9 @@ pub fn execute_command(
         .get(id)
         .map(|index| &registry.commands[*index])
         .ok_or_else(|| format!("Unknown command: {id}"))?;
+    if !permitted_in_document(world, &command.descriptor) {
+        return Err("This document is read-only.".into());
+    }
     let handler = command.handler;
     let preset = command.preset.clone();
     handler(world, preset.as_ref().unwrap_or(parameters))

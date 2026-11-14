@@ -109,6 +109,8 @@ fn live_native_gesture_fences_rpc_in_same_app_dispatch() {
     request::handle_model_api_request(
         &mut world,
         ModelApiRequest::Guarded {
+            needs_base: true,
+            needs_edit: true,
             request: Box::new(ModelApiRequest::EditPlan {
                 action: "apply".into(),
                 parameters: json!({"plan_id":candidate["plan_id"]}),

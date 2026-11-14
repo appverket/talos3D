@@ -1058,6 +1058,7 @@ pub(crate) fn cancel_for_external_command(world: &mut World) {
 }
 
 fn begin_plan_interaction(world: &mut World) -> Result<(), String> {
+    crate::plugins::document_state::require_editable(world)?;
     let base = world.resource::<History>().revision_token();
     let id = world
         .resource_mut::<AuthoredEditPlanRegistry>()

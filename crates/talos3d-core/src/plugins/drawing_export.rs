@@ -494,6 +494,7 @@ pub(crate) fn export_drawing_now_with_format(
 }
 
 pub fn export_drawing_to_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
+    crate::plugins::document_state::require_editable(world)?;
     let path = normalize_export_path(path);
     let format = viewport_export_format_from_path(&path)?;
     if matches!(format, ViewportExportFormat::Pdf) {
@@ -531,6 +532,7 @@ fn export_sheet_drawing(world: &World, path: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn queue_viewport_export(world: &mut World, path: &Path) -> Result<(), String> {
+    crate::plugins::document_state::require_editable(world)?;
     queue_screenshot_export(
         world,
         path,
@@ -542,6 +544,7 @@ pub(crate) fn queue_viewport_export(world: &mut World, path: &Path) -> Result<()
 
 #[cfg(feature = "model-api")]
 pub(crate) fn queue_app_window_export(world: &mut World, path: &Path) -> Result<(), String> {
+    crate::plugins::document_state::require_editable(world)?;
     queue_screenshot_export(
         world,
         path,

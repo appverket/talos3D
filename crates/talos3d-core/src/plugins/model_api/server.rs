@@ -260,7 +260,7 @@ fn sanitize_schema_node(node: &mut serde_json::Value) {
 }
 
 #[cfg(feature = "model-api")]
-tokio::task_local! { static REQUIRES_AUTHORED_BASE: bool; }
+tokio::task_local! { static REQUEST_ACCESS: (bool, bool); }
 
 #[cfg(feature = "model-api")]
 impl ModelApiServer {
@@ -320,8 +320,23 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         self.tool_call_allowed(name)?;
         self.guidance_call_allowed(name)?;
-        let result = REQUIRES_AUTHORED_BASE
-            .scope(tool_requires_authored_base(name), call)
+        use super::profiles::{tool_category, ToolCategory};
+        let read = matches!(
+            tool_category(name),
+            ToolCategory::SessionContract | ToolCategory::Inspection | ToolCategory::Validation
+        ) || matches!(
+            name,
+            "load_project"
+                | "open_project"
+                | "list_commands"
+                | "invoke_command"
+                | "set_selection"
+                | "get_world_aabb"
+                | "set_camera"
+                | "list_entities"
+        );
+        let result = REQUEST_ACCESS
+            .scope((tool_requires_authored_base(name), !read), call)
             .await?;
         if result.is_error != Some(true) {
             self.guidance_state.observe_success(name, observed.as_ref());
@@ -379,12 +394,14 @@ impl ModelApiServer {
     ) -> Result<T, String> {
         let (response, receiver) = oneshot::channel();
         let mut request = build(response);
-        let guarded = REQUIRES_AUTHORED_BASE
+        let (needs_base, needs_edit) = REQUEST_ACCESS
             .try_with(|value| *value)
-            .unwrap_or(false);
-        let guard_receiver = if guarded {
+            .unwrap_or((false, false));
+        let guard_receiver = if needs_base || needs_edit {
             let (response, receiver) = oneshot::channel();
             request = ModelApiRequest::Guarded {
+                needs_base,
+                needs_edit,
                 request: Box::new(request),
                 response,
             };

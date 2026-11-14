@@ -397,6 +397,19 @@ fn project_transport_text(bytes: Vec<u8>) -> Result<String, String> {
 }
 
 fn dispatch_tool(world: &mut World, tool_name: &str, args: Value) -> Result<Value, String> {
+    if !matches!(
+        tool_name,
+        "project_open"
+            | "project_status"
+            | "browser_session_info"
+            | "list_entity_types"
+            | "list_entities"
+            | "get_entity"
+            | "model_summary"
+            | "set_selection"
+    ) {
+        crate::plugins::document_state::require_editable(world)?;
+    }
     match tool_name {
         "project_library_install" => {
             let bytes = args
