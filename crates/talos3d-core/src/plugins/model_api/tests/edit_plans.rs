@@ -486,7 +486,10 @@ fn governed_mcp_plan_pins_host_revision_and_refuses_withdrawal_without_mutation(
 fn unrelated_release_does_not_invalidate_pinned_mcp_proposal() {
     let (mut world, id, store, pinned) = governed_transform_fixture();
     let candidate = preview(&mut world, id);
-    assert_eq!(candidate["harness_dependency_evidence"]["release_sequence"], 1);
+    assert_eq!(
+        candidate["harness_dependency_evidence"]["release_sequence"],
+        1
+    );
     store
         .accept(transform_release_manifest(2, false, true))
         .unwrap();
@@ -502,7 +505,10 @@ fn unrelated_release_does_not_invalidate_pinned_mcp_proposal() {
         json!([pinned])
     );
     assert_eq!(inspected["digest"], candidate["digest"]);
-    assert_eq!(inspected["harness_dependency_evidence"]["release_sequence"], 2);
+    assert_eq!(
+        inspected["harness_dependency_evidence"]["release_sequence"],
+        2
+    );
     store.unavailable("offline test".into());
     let offline = call(
         &mut world,
@@ -516,7 +522,10 @@ fn unrelated_release_does_not_invalidate_pinned_mcp_proposal() {
         offline["harness_dependency_evidence"]["freshness"],
         "last_known_unverified"
     );
-    assert_eq!(offline["harness_dependency_evidence"]["release_sequence"], 2);
+    assert_eq!(
+        offline["harness_dependency_evidence"]["release_sequence"],
+        2
+    );
     let depth = world.resource::<History>().undo_stack_len();
     let receipt = call(&mut world, "apply", json!({"plan_id":candidate["plan_id"]})).unwrap();
     assert_eq!(receipt["applied"], true);
