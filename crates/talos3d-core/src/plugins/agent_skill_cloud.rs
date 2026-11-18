@@ -96,7 +96,11 @@ pub(crate) async fn request(
 ) -> Result<Vec<u8>, String> {
     let client = reqwest::Client::builder()
         // A redirect must not forward a private contribution to another endpoint.
-        .redirect(if body.is_some() { reqwest::redirect::Policy::none() } else { reqwest::redirect::Policy::limited(10) })
+        .redirect(if body.is_some() {
+            reqwest::redirect::Policy::none()
+        } else {
+            reqwest::redirect::Policy::limited(10)
+        })
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;

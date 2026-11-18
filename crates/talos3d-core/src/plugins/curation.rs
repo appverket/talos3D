@@ -250,8 +250,13 @@ impl CurationReleaseStore {
         if expected.is_some_and(|key| key != state.authority) {
             return Err("Curation connection changed while refreshing".into());
         }
-        if state.conflicting_sequence.is_some_and(|sequence| manifest.sequence <= sequence) {
-            return Err("Conflicting curation release sequence requires a newer signed release".into());
+        if state
+            .conflicting_sequence
+            .is_some_and(|sequence| manifest.sequence <= sequence)
+        {
+            return Err(
+                "Conflicting curation release sequence requires a newer signed release".into(),
+            );
         }
         if let Some(old) = &state.manifest {
             if manifest.sequence < old.sequence {

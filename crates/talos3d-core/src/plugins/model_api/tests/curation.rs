@@ -166,7 +166,10 @@ async fn curation_is_discoverable_without_a_configured_service() {
         assert!(profile_allows(profile, "report_harness_incident"));
         assert_eq!(
             profile_allows(profile, "submit_pending_harness_incidents"),
-            matches!(profile, CapabilityProfile::Curation | CapabilityProfile::Full)
+            matches!(
+                profile,
+                CapabilityProfile::Curation | CapabilityProfile::Full
+            )
         );
     }
     drop(server);

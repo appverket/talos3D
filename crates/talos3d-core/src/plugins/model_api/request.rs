@@ -2555,10 +2555,21 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         ModelApiRequest::HarnessIncidentContext(response) => {
             world.init_resource::<crate::plugins::curation::reporting::HarnessIncidentStore>();
             let _ = response.send((
-                world.get_resource::<crate::plugins::curation::reporting::HarnessIncidentPolicy>().cloned().unwrap_or_default(),
-                world.resource::<crate::plugins::curation::reporting::HarnessIncidentStore>().clone(),
-                world.get_resource::<crate::plugins::curation::CurationConnection>().cloned().unwrap_or_default(),
-                world.get_resource::<crate::plugins::agent_skills::AgentCorpusConnection>().cloned().unwrap_or_default(),
+                world
+                    .get_resource::<crate::plugins::curation::reporting::HarnessIncidentPolicy>()
+                    .cloned()
+                    .unwrap_or_default(),
+                world
+                    .resource::<crate::plugins::curation::reporting::HarnessIncidentStore>()
+                    .clone(),
+                world
+                    .get_resource::<crate::plugins::curation::CurationConnection>()
+                    .cloned()
+                    .unwrap_or_default(),
+                world
+                    .get_resource::<crate::plugins::agent_skills::AgentCorpusConnection>()
+                    .cloned()
+                    .unwrap_or_default(),
             ));
         }
         ModelApiRequest::ListAgentSkills { filter, response } => {

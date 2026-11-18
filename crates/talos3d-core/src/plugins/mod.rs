@@ -1,8 +1,6 @@
 #[cfg(feature = "model-api")]
 pub mod agent_skill_cloud;
 pub mod agent_skills;
-#[cfg(feature = "model-api")]
-pub mod curation;
 pub mod assembly_pattern_drafts;
 pub mod asset_browser;
 pub mod assistant_chat;
@@ -21,6 +19,8 @@ pub mod component_family;
 pub mod component_structure_quality;
 pub mod constraint_spec;
 pub mod corpus_gap;
+#[cfg(feature = "model-api")]
+pub mod curation;
 pub mod cursor;
 pub mod definition_authoring;
 pub mod definition_browser;
