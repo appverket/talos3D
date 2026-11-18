@@ -306,6 +306,11 @@ impl HarnessIncidentStore {
                     !r.submitted
                         && r.source == source
                         && r.credential_fingerprint == credential_fingerprint
+                        // Older explicit reports may use the now-reserved
+                        // code. Retain those locally for host review; never
+                        // export them as an automatic detector observation.
+                        && (r.observation.failure_code != REQUIRED_GUIDANCE_FAILURE
+                            || r.detector.as_deref() == Some(REQUIRED_GUIDANCE_DETECTOR))
                 })
                 .take(MAX_SUBMIT)
                 .cloned()
@@ -547,19 +552,25 @@ mod tests {
     }
 
     #[cfg(feature = "model-api")]
-    #[test]
-    fn explicit_reports_cannot_claim_or_preseed_host_detection() {
+    #[tokio::test]
+    async fn explicit_reports_cannot_claim_or_preseed_host_detection() {
         let store = HarnessIncidentStore::default();
-        let policy = HarnessIncidentPolicy::default();
-        let connection = CurationConnection::default();
+        let policy = HarnessIncidentPolicy {
+            export_enabled: true,
+            ..Default::default()
+        };
+        let connection = CurationConnection {
+            base_url: "https://example.test/v1/curation".into(),
+            ..Default::default()
+        };
         let mut spoof = request(None);
         spoof.failure_code = REQUIRED_GUIDANCE_FAILURE.into();
         assert!(store
-            .report(spoof, &policy, &connection, None)
+            .report(spoof, &policy, &connection, Some("original"))
             .unwrap_err()
             .contains("reserved"));
         let first = store
-            .report_missing_required_guidance(&policy, &connection, None)
+            .report_missing_required_guidance(&policy, &connection, Some("original"))
             .unwrap();
         let first_id = first["event_id"].as_str().unwrap();
         // Simulate a legacy record created before the code became reserved.
@@ -571,7 +582,7 @@ mod tests {
             .unwrap()
             .detector = None;
         let second = store
-            .report_missing_required_guidance(&policy, &connection, None)
+            .report_missing_required_guidance(&policy, &connection, Some("original"))
             .unwrap();
         assert_ne!(first["event_id"], second["event_id"]);
         let second_id = second["event_id"].as_str().unwrap();
@@ -583,10 +594,21 @@ mod tests {
             .unwrap()
             .submitted = true;
         let duplicate = store
-            .report_missing_required_guidance(&policy, &connection, None)
+            .report_missing_required_guidance(&policy, &connection, Some("original"))
             .unwrap();
         assert_eq!(duplicate["event_id"], second["event_id"]);
         assert_eq!(duplicate["submitted"], true);
+        // The only unsubmitted record is the unmarked legacy spoof. Selecting
+        // nothing must succeed without contacting this deliberately unavailable
+        // service, even though host export and matching identity are present.
+        let corpus = AgentCorpusConnection {
+            base_url: "https://example.test/v1/corpus".into(),
+            bearer_token: Some("original".into()),
+            ..Default::default()
+        };
+        let submit = store.submit(&policy, &connection, &corpus).await.unwrap();
+        assert_eq!(submit["status"], "no_eligible_pending_reports");
+        assert_eq!(store.load(&policy).unwrap().records.len(), 2);
     }
 
     fn request(id: Option<String>) -> ReportHarnessIncident {

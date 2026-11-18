@@ -1453,7 +1453,9 @@ geometry, customer context or arbitrary evidence payload is accepted. Reuse the
 returned event ID when retrying; conflicting content or identity is refused.
 The automatic detector failure code is reserved; explicit reports cannot claim
 it. Local records retain a host-only detector marker, and legacy unmarked
-records cannot pre-seed automatic deduplication. This marker is private local
+records cannot pre-seed automatic deduplication. Unmarked legacy records using
+the reserved code remain local for host review and are excluded from submission.
+This marker is private local
 evidence, not a remote cryptographic attestation.
 
 The host can insert curation::reporting::HarnessIncidentPolicy and
