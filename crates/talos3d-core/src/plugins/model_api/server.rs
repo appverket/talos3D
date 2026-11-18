@@ -71,19 +71,57 @@ impl ModelApiServer {
             .await
             .unwrap_or_default()
     }
+    async fn curation_context(
+        &self,
+    ) -> (
+        crate::plugins::curation::CurationConnection,
+        crate::plugins::curation::CurationReleaseStore,
+    ) {
+        self.round_trip(ModelApiRequest::CurationContext)
+            .await
+            .unwrap_or_default()
+    }
+    async fn curation_status(
+        &self,
+        refresh: bool,
+        observation: Option<&crate::plugins::curation::RemedyKey>,
+        artifact_id: Option<&str>,
+    ) -> Value {
+        let (connection, store) = self.curation_context().await;
+        store.bind(&connection);
+        let configured = !connection.base_url.is_empty();
+        if refresh && configured {
+            let _ = store.reconcile(&connection).await;
+        }
+        let tools = profile_tool_catalog()
+            .tools_for(CapabilityProfile::Full)
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        store.status_for(configured, &tools, observation, artifact_id)
+    }
     async fn cloud_skill_list(
         &self,
         filter: crate::plugins::agent_skills::AgentSkillSearch,
     ) -> (Vec<crate::plugins::agent_skills::AgentSkillSummary>, Value) {
         use crate::plugins::agent_skill_cloud as cloud;
         let local = self.request_list_agent_skills(filter.clone()).await;
-        let index = cloud::index(&self.corpus_connection().await).await;
+        let connection = self.corpus_connection().await;
+        let (_, store) = self.curation_context().await;
+        let index = cloud::index(&connection).await.and_then(|index| {
+            store.observe_skill_index(&connection, &index)?;
+            Ok(index)
+        });
         let status = cloud::status(&index);
         let mut by_id = local
             .into_iter()
             .map(|s| (s.id.clone(), s))
             .collect::<std::collections::BTreeMap<_, _>>();
-        if let Ok(index) = index {
+        by_id.retain(|id, _| !store.skill_fallback_blocked(id.as_str()));
+        if let Ok(mut index) = index {
+            index.skills.retain(|entry| {
+                !store.revision_withdrawn(&format!("skill:{}", entry.skill.id), &entry.content_hash)
+            });
             for id in &index.withdrawn_skill_ids {
                 by_id.remove(id);
             }
@@ -5723,6 +5761,7 @@ impl ModelApiServer {
         let mut value = serde_json::to_value(welcome)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         value["cloud_corpus"] = cloud_status;
+        value["curation"] = self.curation_status(true, None, None).await;
         json_tool_result(value)
     }
 
@@ -5790,7 +5829,10 @@ impl ModelApiServer {
                 None,
             )
         })?;
-        structured_json_tool_result(state)
+        let mut value = serde_json::to_value(state)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        value["curation"] = self.curation_status(false, None, None).await;
+        structured_json_tool_result(value)
     }
 
     #[tool(
@@ -9139,7 +9181,11 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     ) -> Result<CallToolResult, McpError> {
         use crate::plugins::agent_skill_cloud as cloud;
         let connection = self.corpus_connection().await;
-        let index = cloud::index(&connection).await;
+        let (_, store) = self.curation_context().await;
+        let index = cloud::index(&connection).await.and_then(|index| {
+            store.observe_skill_index(&connection, &index)?;
+            Ok(index)
+        });
         if let Ok(index) = &index {
             if index.withdrawn_skill_ids.contains(&params.skill_id) {
                 return Err(McpError::invalid_params(
@@ -9148,6 +9194,15 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                 ));
             }
             if let Some(entry) = index.skills.iter().find(|e| e.skill.id == params.skill_id) {
+                if store.revision_withdrawn(
+                    &format!("skill:{}", params.skill_id),
+                    &entry.content_hash,
+                ) {
+                    return Err(McpError::invalid_params(
+                        "This skill revision is a known withdrawal; refresh curation status and use a compatible replacement",
+                        None,
+                    ));
+                }
                 let mut bundle = cloud::bundle(&connection, &entry.content_hash)
                     .await
                     .map_err(|e| McpError::internal_error(e, None))?;
@@ -9188,6 +9243,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                 return json_tool_result(value);
             }
         }
+        if store.skill_fallback_blocked(&params.skill_id) {
+            return Err(McpError::invalid_params(
+                "Known withdrawn skill; stale bundled fallback remains suppressed even while cloud freshness is unverified",
+                None,
+            ));
+        }
         let skill = self
             .request_get_agent_skill(params.skill_id)
             .await
@@ -9205,9 +9266,26 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     )]
     pub(super) async fn get_agent_corpus_status_tool(&self) -> Result<CallToolResult, McpError> {
         use crate::plugins::agent_skill_cloud as cloud;
-        json_tool_result(cloud::status(
-            &cloud::index(&self.corpus_connection().await).await,
-        ))
+        let connection = self.corpus_connection().await;
+        let (_, store) = self.curation_context().await;
+        let index = cloud::index(&connection).await.and_then(|index| {
+            store.observe_skill_index(&connection, &index)?;
+            Ok(index)
+        });
+        let mut status = cloud::status(&index);
+        status["curation"] = self.curation_status(true, None, None).await;
+        json_tool_result(status)
+    }
+
+    #[tool(
+        name = "get_agent_curation_status",
+        description = "Reconcile the host-configured signed curation release manifest at task boundaries or reconnect. Optionally match remedies locally against public gap/failure vocabulary. Returns compatible revisions, known withdrawals and honest freshness; never exports incident or project data and never acknowledges a remedy or replays a failed edit."
+    )]
+    pub(super) async fn get_agent_curation_status_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::curation::CurationStatusRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(self.curation_status(true, params.observation.as_ref(), params.artifact_id.as_deref()).await)
     }
 
     #[tool(

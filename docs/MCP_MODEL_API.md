@@ -1384,6 +1384,46 @@ facts, geometry-producing knowledge and product families belong in existing
 recipes, Definitions, catalogs, source passages and validators; skills explain
 how to use those assets and do not create a competing geometry or rule engine.
 
+### Governed curation release reconciliation
+
+Hosts may explicitly insert `plugins::curation::CurationConnection` with a
+curation service base URL and operator-trusted public signing keys. It is disabled
+by default and is separate from the skill corpus URL. The public release feed
+receives no user account credential, private incident ID or project data.
+
+`get_agent_curation_status` is available in every capability profile. It fetches
+`<base_url>/releases`, verifies the signed `talos3d.curation-release.v1` manifest,
+and reports its sequence, bounded artifact notices, required-tool compatibility
+and freshness. Optional `observation` fields (`gap_kind`, `element_class`,
+`path_kind`, `target_state`, `capability_id`, `contract_revision`) match remedies
+locally. All declared remedy constraints must be present in the observation.
+The full feed has at most 1,000 entries, including withdrawn revisions alongside
+at most one active revision per artifact. A response includes at most 16 notices
+within a 16 KiB notice budget and explicitly reports truncation; applicability
+summaries include at most four remedy keys. Narrow by public `artifact_id` or
+observation when needed. Matching uses every declared key before summarization.
+
+Negotiation and `get_agent_corpus_status` also reconcile this feed. The next
+`get_agent_guidance_state` response includes retained curation status without
+performing network work. A new sequence does not invalidate every edit plan,
+acknowledge a repair, wake the agent or change authored geometry. Re-fetch relevant
+artifacts and re-plan recorded intent at a safe boundary. An absent required tool
+remains an app-update prerequisite.
+
+Known withdrawn revisions and legacy skill-index withdrawals suppress stale
+bundled fallback even during an outage and across MCP sessions in the same app.
+A newer release does not erase older withdrawal tombstones. Rollbacks and
+conflicting same-sequence manifests are refused. Retention in this slice is
+**application lifetime**, not disk-persistent: a restarted app must reconcile
+again. An offline app reports freshness as unverified. The bounded cache fails
+closed for fallback if its withdrawal capacity is exhausted.
+
+This is a signed next-call/reconnect slice, not the full incident service or
+notification proof. `notifications_available` remains false. No incident export,
+background provider invocation, shared-plan withdrawal gate or persistent event
+subscription is enabled by this addition; those require their own integration
+and product acceptance evidence.
+
 ### Bounded deformation of measured geometry
 
 `definition.create` / `definition.update` accept `DeformableMesh` in the canonical

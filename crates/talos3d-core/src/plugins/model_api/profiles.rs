@@ -239,6 +239,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("find_agent_skills", ToolCategory::SessionContract),
     ("get_agent_skill", ToolCategory::SessionContract),
     ("get_agent_corpus_status", ToolCategory::SessionContract),
+    ("get_agent_curation_status", ToolCategory::SessionContract),
     ("get_agent_skill_resource", ToolCategory::SessionContract),
     ("contribute_agent_skill", ToolCategory::CurationExtended),
     (

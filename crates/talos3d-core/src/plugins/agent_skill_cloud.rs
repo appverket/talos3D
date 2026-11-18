@@ -89,7 +89,7 @@ fn url(c: &AgentCorpusConnection, path: &str) -> Result<String, String> {
     Ok(format!("{base}{path}"))
 }
 #[cfg(not(target_arch = "wasm32"))]
-async fn request(
+pub(crate) async fn request(
     c: &AgentCorpusConnection,
     path: &str,
     body: Option<&Value>,
@@ -172,7 +172,7 @@ async fn request_local(
 // rmcp handlers require Send futures on every target. Browser Fetch futures are
 // JS-local; spawn them on the browser executor and await only the Send channel.
 #[cfg(target_arch = "wasm32")]
-async fn request(
+pub(crate) async fn request(
     c: &AgentCorpusConnection,
     path: &str,
     body: Option<&Value>,
@@ -186,7 +186,7 @@ async fn request(
     rx.await
         .map_err(|_| "Browser corpus request cancelled".to_string())?
 }
-pub fn decode_index(bytes: &[u8], trusted_keys: &[String]) -> Result<SkillIndex, String> {
+pub(crate) fn verify_signed_json(bytes: &[u8], trusted_keys: &[String]) -> Result<Value, String> {
     use ed25519_dalek::{Signature, VerifyingKey};
     let mut value: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     let signature = value
@@ -215,7 +215,10 @@ pub fn decode_index(bytes: &[u8], trusted_keys: &[String]) -> Result<SkillIndex,
         .map_err(|e| e.to_string())?
         .verify_strict(&digest, &Signature::from_bytes(&signature))
         .map_err(|_| "Invalid corpus signature")?;
-    serde_json::from_value(value).map_err(|e| e.to_string())
+    Ok(value)
+}
+pub fn decode_index(bytes: &[u8], trusted_keys: &[String]) -> Result<SkillIndex, String> {
+    serde_json::from_value(verify_signed_json(bytes, trusted_keys)?).map_err(|e| e.to_string())
 }
 pub async fn index(c: &AgentCorpusConnection) -> Result<SkillIndex, String> {
     let i = decode_index(&request(c, "/skills", None).await?, &c.trusted_public_keys)?;

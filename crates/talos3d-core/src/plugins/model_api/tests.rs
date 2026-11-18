@@ -15287,3 +15287,6 @@ fn mcp_material_batch_is_atomic_and_undoable() {
         Some(&MaterialAssignment::new("ground"))
     );
 }
+
+#[cfg(feature = "model-api")]
+mod curation;

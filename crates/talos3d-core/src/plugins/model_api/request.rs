@@ -970,6 +970,12 @@ pub(super) enum ModelApiRequest {
         response: oneshot::Sender<ApiResult<GuidanceCardInfo>>,
     },
     AgentCorpusConnection(oneshot::Sender<crate::plugins::agent_skills::AgentCorpusConnection>),
+    CurationContext(
+        oneshot::Sender<(
+            crate::plugins::curation::CurationConnection,
+            crate::plugins::curation::CurationReleaseStore,
+        )>,
+    ),
     ListAgentSkills {
         filter: crate::plugins::agent_skills::AgentSkillSearch,
         response: oneshot::Sender<Vec<crate::plugins::agent_skills::AgentSkillSummary>>,
@@ -2525,6 +2531,18 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
                     .cloned()
                     .unwrap_or_default(),
             );
+        }
+        ModelApiRequest::CurationContext(response) => {
+            world.init_resource::<crate::plugins::curation::CurationReleaseStore>();
+            let _ = response.send((
+                world
+                    .get_resource::<crate::plugins::curation::CurationConnection>()
+                    .cloned()
+                    .unwrap_or_default(),
+                world
+                    .resource::<crate::plugins::curation::CurationReleaseStore>()
+                    .clone(),
+            ));
         }
         ModelApiRequest::ListAgentSkills { filter, response } => {
             let _ = response.send(handle_list_agent_skills(world, filter));
