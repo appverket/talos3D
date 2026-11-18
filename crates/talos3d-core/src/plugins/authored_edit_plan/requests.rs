@@ -115,5 +115,19 @@ pub fn inspect(world: &World, plan: &AuthoredEditPlan) -> Value {
         .or_else(|| plan.preflight(world).map(|r| r.summary()));
     value["can_apply_now"] = json!(refusal.is_none());
     value["apply_refusal"] = json!(refusal);
+    // Live verifier evidence is deliberately outside the immutable plan digest.
+    // It describes the last reconciliation, never a guarantee about future delivery.
+    value["harness_dependency_evidence"] = if plan.context().harness_dependencies.is_empty() {
+        json!({"coverage":"undeclared", "freshness":"not_applicable"})
+    } else {
+        #[cfg(feature = "model-api")]
+        let evidence = world
+            .get_resource::<crate::plugins::curation::CurationReleaseStore>()
+            .map(|store| store.dependency_evidence())
+            .unwrap_or_else(|| json!({"freshness":"unavailable"}));
+        #[cfg(not(feature = "model-api"))]
+        let evidence = json!({"freshness":"unavailable"});
+        evidence
+    };
     value
 }

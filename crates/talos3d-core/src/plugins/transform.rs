@@ -3632,6 +3632,142 @@ mod tests {
         assert_eq!(capture_snapshot(&world, ElementId(1)), Some(group));
     }
 
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn withdrawn_harness_dependency_restores_native_preview_without_mesh_invalidation() {
+        use crate::plugins::{
+            authored_edit_plan::{capture_snapshot, dependencies::HarnessPlannerBindings},
+            curation::{
+                CurationConnection, CurationReleaseStore, ReleaseArtifact, ReleaseManifest,
+                RELEASE_SCHEMA,
+            },
+            history::{apply_pending_history_commands_for_test as drain, PendingCommandQueue},
+            modeling::{
+                mesh_generation::{triangle_mesh_asset, NeedsMesh},
+                primitives::TriangleMesh,
+            },
+        };
+        let (mut world, group, mesh, mesh_entity) = linked_mesh_world();
+        let store = CurationReleaseStore::default();
+        store.bind(&CurationConnection {
+            base_url: "https://curation.example.test/v1/curation".into(),
+            trusted_public_keys: vec!["ab".repeat(32)],
+        });
+        let manifest = |sequence, withdrawn| ReleaseManifest {
+            schema: RELEASE_SCHEMA.into(),
+            sequence,
+            releases: vec![ReleaseArtifact {
+                artifact_id: "skill:test.transform".into(),
+                revision: "r1".into(),
+                remedy_keys: vec![],
+                required_tool_ids: vec![],
+                withdrawn,
+                refresh_required: withdrawn,
+            }],
+        };
+        store.accept(manifest(1, false)).unwrap();
+        let dependency = store.pin_dependency("skill:test.transform", "r1").unwrap();
+        let pinned = serde_json::to_value(&dependency).unwrap();
+        let mut bindings = HarnessPlannerBindings::default();
+        bindings
+            .bind("core.transform", 1, vec![dependency])
+            .unwrap();
+        world.insert_resource(bindings);
+        world.insert_resource(store.clone());
+
+        // Seed the real render asset once. NeedsMesh is the mesh-generation gate;
+        // every subsequent preview/confirmation step must leave it absent.
+        let render = triangle_mesh_asset(world.get::<TriangleMesh>(mesh_entity).unwrap());
+        let positions = render
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap()
+            .to_vec();
+        world.init_resource::<Assets<Mesh>>();
+        let handle = world.resource_mut::<Assets<Mesh>>().add(render);
+        world
+            .entity_mut(mesh_entity)
+            .insert((Mesh3d(handle.clone()), Transform::IDENTITY))
+            .remove::<NeedsMesh>();
+        let assert_render_reused = |world: &World| {
+            assert_eq!(world.get::<Mesh3d>(mesh_entity).unwrap().id(), handle.id());
+            assert!(
+                world.get::<NeedsMesh>(mesh_entity).is_none(),
+                "preview/refusal must queue zero geometry rebuilds"
+            );
+            let meshes = world.resource::<Assets<Mesh>>();
+            assert_eq!(meshes.len(), 1);
+            assert_eq!(
+                meshes
+                    .get(&handle)
+                    .unwrap()
+                    .attribute(Mesh::ATTRIBUTE_POSITION)
+                    .unwrap()
+                    .as_float3()
+                    .unwrap(),
+                positions.as_slice()
+            );
+        };
+        let base_revision = world.resource::<History>().revision_token();
+        let base_depth = world.resource::<History>().undo_stack_len();
+        start_transform_mode_with_options(
+            &mut world,
+            TransformMode::Moving,
+            TransformStartOptions {
+                initial_cursor: Some(Vec3::ZERO),
+                ..default()
+            },
+        )
+        .unwrap();
+        update_transform_preview(&mut world);
+        let captured = world
+            .resource::<ActiveTransformPreview>()
+            .plan
+            .clone()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&captured.context().harness_dependencies).unwrap(),
+            serde_json::json!([pinned])
+        );
+        assert_eq!(
+            world.get::<Transform>(mesh_entity).unwrap().translation,
+            Vec3::X * 2.
+        );
+        assert_eq!(capture_snapshot(&world, ElementId(2)), Some(mesh.clone()));
+        assert_render_reused(&world);
+        update_transform_preview(&mut world);
+        assert!(Arc::ptr_eq(
+            &captured,
+            world
+                .resource::<ActiveTransformPreview>()
+                .plan
+                .as_ref()
+                .unwrap()
+        ));
+        assert_render_reused(&world);
+
+        store.accept(manifest(2, true)).unwrap();
+        world.resource_mut::<TransformState>().confirm_on_release = true;
+        confirm_transform(&mut world);
+        assert_eq!(
+            *world.get::<Transform>(mesh_entity).unwrap(),
+            Transform::IDENTITY
+        );
+        assert!(world
+            .resource::<StatusBarData>()
+            .hint
+            .to_lowercase()
+            .contains("withdraw"));
+        assert!(world.resource::<PendingCommandQueue>().is_empty());
+        drain(&mut world);
+        assert_eq!(world.resource::<History>().revision_token(), base_revision);
+        assert_eq!(world.resource::<History>().undo_stack_len(), base_depth);
+        assert_eq!(capture_snapshot(&world, ElementId(2)), Some(mesh));
+        assert_eq!(capture_snapshot(&world, ElementId(1)), Some(group));
+        assert_render_reused(&world);
+    }
+
     fn map_large_linked_fixture(world: &mut World) -> Entity {
         use crate::plugins::modeling::group::LinkedModelIdMapping;
         let root = find_entity_by_element_id_readonly(world, ElementId(1)).unwrap();

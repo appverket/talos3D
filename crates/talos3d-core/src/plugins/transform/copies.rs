@@ -18,6 +18,7 @@ pub(super) struct LastCopy {
     angle: f32,
     pivot: Vec3,
     bytes_per_copy: usize,
+    harness_dependencies: Vec<crate::plugins::authored_edit_plan::dependencies::HarnessDependency>,
     pub(super) input: String,
 }
 
@@ -170,9 +171,11 @@ fn queue_copies(
     world: &mut World,
     revision: ModelRevision,
     after: Vec<BoxedEntity>,
+    harness_dependencies: Vec<crate::plugins::authored_edit_plan::dependencies::HarnessDependency>,
 ) -> Result<(), String> {
     let context = PlanContext {
         planner_id: "core.transform.copy".into(),
+        harness_dependencies,
         planner_version: 1,
         request_kind: "copy".into(),
         intent: "Copy transformed geometry".into(),
@@ -221,6 +224,7 @@ pub(super) fn commit(
         angle: active.display_value.unwrap_or_default(),
         pivot,
         bytes_per_copy: plan.retained_bytes(),
+        harness_dependencies: plan.context().harness_dependencies.clone(),
         input: String::new(),
     });
     world
@@ -285,7 +289,17 @@ pub(super) fn repeat(world: &mut World, last: &LastCopy) -> Result<(), String> {
             .map(|(_, s)| s.clone())
             .collect();
         let after = rigid_after(before.iter(), motion, last.pivot);
-        let draft = prepare_transform_edit(world, &last.state, before, after);
+        let mut draft = prepare_transform_edit(world, &last.state, before, after);
+        crate::plugins::authored_edit_plan::dependencies::capture_context(
+            world,
+            &mut draft.context,
+        )?;
+        if draft.context.harness_dependencies != last.harness_dependencies {
+            return Err(
+                "Copy planner harness dependencies changed; create a new reviewed copy preview"
+                    .into(),
+            );
+        }
         if !draft.context.refusals.is_empty() {
             return Err(draft.context.findings.join("; "));
         }
@@ -296,7 +310,12 @@ pub(super) fn repeat(world: &mut World, last: &LastCopy) -> Result<(), String> {
     if copies.is_empty() {
         return Ok(());
     }
-    queue_copies(world, last.revision.clone(), copies)
+    queue_copies(
+        world,
+        last.revision.clone(),
+        copies,
+        last.harness_dependencies.clone(),
+    )
 }
 
 pub(super) fn input(world: &mut World, events: &[KeyboardInput]) {

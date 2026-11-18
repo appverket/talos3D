@@ -192,6 +192,9 @@ struct ReleaseState {
     // A later manifest can replace an artifact, but never forget an already
     // withdrawn revision. No global sequence is used as an edit-plan revision.
     tombstones: BTreeSet<(String, String)>,
+    // Only successfully issued host pins survive ordinary manifest replacement.
+    // Bounded process-local ledger; restart requires rebind to current releases.
+    verified_revisions: BTreeSet<(String, String)>,
     fresh: bool,
     error: Option<String>,
     overflow: bool,
@@ -217,6 +220,22 @@ fn authority(base: &str, keys: &[String]) -> String {
     keys.dedup();
     format!("{}|{}", base.trim_end_matches('/'), keys.join(","))
 }
+// Source-scoped failures apply to all declarations; unrelated active release
+// churn does not. Only successful host pins consume the historical pin ledger.
+fn dependency_state_ready(state: &ReleaseState) -> Result<(), String> {
+    if state.manifest.is_none() {
+        return Err(
+            "Harness dependency verification unavailable; no authenticated release state".into(),
+        );
+    }
+    if state.authority.split('|').next().is_none_or(str::is_empty) {
+        return Err("Harness dependency verifier is not bound to a host source".into());
+    }
+    if state.overflow || state.conflicting_sequence.is_some() {
+        return Err("Harness dependency verification unavailable: withdrawal evidence is exhausted or conflicting".into());
+    }
+    Ok(())
+}
 impl CurationReleaseStore {
     pub fn bind(&self, connection: &CurationConnection) {
         let mut state = self.0.lock().expect("curation state poisoned");
@@ -225,6 +244,7 @@ impl CurationReleaseStore {
             state.authority = key;
             state.manifest = None;
             state.tombstones.clear();
+            state.verified_revisions.clear();
             state.fresh = false;
             state.error = None;
             state.overflow = false;
@@ -340,6 +360,108 @@ impl CurationReleaseStore {
             || state.skill_tombstones.contains(skill_id)
             || state.tombstones.iter().any(|(id, _)| id == &artifact_id)
     }
+    /// Pin an exact currently released entry for trusted host/planner declaration.
+    /// Authentication is last-known: offline cache reuse is not a freshness claim.
+    /// The host must ensure this artifact really is used by the installed planner.
+    pub fn pin_dependency(
+        &self,
+        artifact_id: &str,
+        revision: &str,
+    ) -> Result<super::authored_edit_plan::dependencies::HarnessDependency, String> {
+        // This is a host registration boundary, not an input/command hot path.
+        // Validate everything under one lock before retaining any evidence.
+        let mut state = self.0.lock().expect("curation state poisoned");
+        dependency_state_ready(&state)?;
+        let dependency = super::authored_edit_plan::dependencies::HarnessDependency {
+            authority_digest: blake3::hash(state.authority.as_bytes())
+                .to_hex()
+                .to_string(),
+            artifact_id: artifact_id.into(),
+            revision: revision.into(),
+        };
+        super::authored_edit_plan::dependencies::normalize(&mut vec![dependency.clone()])?;
+        let key = (artifact_id.to_owned(), revision.to_owned());
+        if state.tombstones.contains(&key) {
+            return Err("Cannot pin a withdrawn harness dependency".into());
+        }
+        if !state.manifest.as_ref().is_some_and(|manifest| {
+            manifest
+                .releases
+                .iter()
+                .any(|r| r.artifact_id == artifact_id && r.revision == revision && !r.withdrawn)
+        }) {
+            return Err(
+                "Harness dependency is not an authenticated currently released entry".into(),
+            );
+        }
+        if !state.verified_revisions.contains(&key)
+            && state.verified_revisions.len() >= MAX_TOMBSTONES
+        {
+            return Err("Harness dependency pin capacity reached; existing pins remain valid. Restart and rebind against current verified releases to recover.".into());
+        }
+        state.verified_revisions.insert(key);
+        Ok(dependency)
+    }
+
+    /// Bounded in-memory admission against authenticated last-known knowledge.
+    /// Ordinary new revisions do not invalidate an older trusted pin; ALL known
+    /// withdrawals do. No service availability or global sequence fence is used.
+    pub fn check_dependencies(
+        &self,
+        dependencies: &[super::authored_edit_plan::dependencies::HarnessDependency],
+    ) -> Result<(), String> {
+        use super::authored_edit_plan::dependencies::{normalize, MAX_HARNESS_DEPENDENCIES};
+        if dependencies.is_empty() {
+            return Ok(());
+        }
+        if dependencies.len() > MAX_HARNESS_DEPENDENCIES {
+            return Err("Too many harness dependencies".into());
+        }
+        normalize(&mut dependencies.to_vec())?;
+        let state = self.0.lock().expect("curation state poisoned");
+        dependency_state_ready(&state)?;
+        let authority = blake3::hash(state.authority.as_bytes())
+            .to_hex()
+            .to_string();
+        for dependency in dependencies {
+            if dependency.authority_digest != authority {
+                return Err("Harness dependency authority changed; restore its trusted host source or create a new preview".into());
+            }
+            let key = (dependency.artifact_id.clone(), dependency.revision.clone());
+            if state.tombstones.contains(&key) {
+                return Err(format!(
+                    "Harness dependency {}@{} is withdrawn",
+                    dependency.artifact_id, dependency.revision
+                ));
+            }
+            if !state.verified_revisions.contains(&key) {
+                return Err(
+                    "Unknown harness dependency revision; no authenticated evidence was retained"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Live bounded diagnostics, deliberately outside an immutable plan digest.
+    /// A successful past reconciliation is never a current-network freshness claim.
+    pub fn dependency_evidence(&self) -> Value {
+        let state = self.0.lock().expect("curation state poisoned");
+        let verification_error = state.error.is_some() || dependency_state_ready(&state).is_err();
+        json!({
+            "release_sequence": state.manifest.as_ref().map(|manifest| manifest.sequence),
+            "freshness": if state.fresh && !verification_error {
+                "verified_at_last_reconciliation"
+            } else {
+                "last_known_unverified"
+            },
+            "freshness_scope": "last_reconciliation",
+            "verification_error": verification_error,
+            "cache_error": state.cache_error.is_some(),
+        })
+    }
+
     pub fn revision_withdrawn(&self, artifact_id: &str, revision: &str) -> bool {
         let state = self.0.lock().expect("curation state poisoned");
         state.overflow
@@ -564,6 +686,118 @@ mod tests {
         assert!(store.skill_fallback_blocked("core.test"));
         assert!(!store.skill_fallback_blocked("core.other"));
     }
+    fn bound_dependency_store() -> CurationReleaseStore {
+        let store = CurationReleaseStore::default();
+        store.bind(&CurationConnection {
+            base_url: "https://curation.example.test/v1/curation".into(),
+            trusted_public_keys: vec!["ab".repeat(32)],
+        });
+        store
+    }
+
+    #[test]
+    fn unrelated_manifest_churn_does_not_consume_pins_or_block_existing_plan_dependencies() {
+        let store = bound_dependency_store();
+        store
+            .accept(manifest(1, vec![release("skill:used", "r1", false)]))
+            .unwrap();
+        let dependency = store.pin_dependency("skill:used", "r1").unwrap();
+        for batch in 0..5 {
+            store
+                .accept(manifest(
+                    batch + 2,
+                    (0..1000)
+                        .map(|id| {
+                            release(
+                                &format!("skill:unrelated.{}", batch * 1000 + id),
+                                "r1",
+                                false,
+                            )
+                        })
+                        .collect(),
+                ))
+                .unwrap();
+            store
+                .check_dependencies(std::slice::from_ref(&dependency))
+                .unwrap();
+        }
+        assert_eq!(store.0.lock().unwrap().verified_revisions.len(), 1);
+        // Previously issued refs remain usable, but a fresh host declaration
+        // cannot claim a revision no longer in the current authenticated manifest.
+        assert!(store.pin_dependency("skill:used", "r1").is_err());
+        assert_eq!(store.0.lock().unwrap().verified_revisions.len(), 1);
+    }
+
+    #[test]
+    fn failed_pins_never_consume_evidence_and_full_ledger_preserves_existing_pins() {
+        let store = bound_dependency_store();
+        let mut first = None;
+        for (batch, start) in (0..MAX_TOMBSTONES).step_by(1000).enumerate() {
+            let end = (start + 1000).min(MAX_TOMBSTONES);
+            store
+                .accept(manifest(
+                    batch as u64 + 1,
+                    (start..end)
+                        .map(|id| release(&format!("skill:pinned.{id}"), "r1", false))
+                        .collect(),
+                ))
+                .unwrap();
+            for id in start..end {
+                let pin = store
+                    .pin_dependency(&format!("skill:pinned.{id}"), "r1")
+                    .unwrap();
+                first.get_or_insert(pin);
+            }
+        }
+        store
+            .accept(manifest(6, vec![release("skill:extra", "r1", false)]))
+            .unwrap();
+        for (artifact, revision) in [
+            ("skill:extra", "r1"),
+            ("skill:missing", "r1"),
+            ("bad", "r1"),
+        ] {
+            assert!(store.pin_dependency(artifact, revision).is_err());
+            assert_eq!(
+                store.0.lock().unwrap().verified_revisions.len(),
+                MAX_TOMBSTONES
+            );
+        }
+        store
+            .check_dependencies(std::slice::from_ref(first.as_ref().unwrap()))
+            .unwrap();
+
+        let store = bound_dependency_store();
+        store
+            .accept(manifest(1, vec![release("skill:used", "r1", false)]))
+            .unwrap();
+        let pin = store.pin_dependency("skill:used", "r1").unwrap();
+        store
+            .accept(manifest(2, vec![release("skill:used", "r1", true)]))
+            .unwrap();
+        assert!(store.pin_dependency("skill:used", "r1").is_err());
+        assert!(store.check_dependencies(&[pin]).is_err());
+        assert_eq!(store.0.lock().unwrap().verified_revisions.len(), 1);
+
+        // Rejected source states must not index otherwise present active entries.
+        for rejection in ["unbound", "overflow", "conflict"] {
+            let store = bound_dependency_store();
+            store
+                .accept(manifest(1, vec![release("skill:unused", "r1", false)]))
+                .unwrap();
+            {
+                let mut state = store.0.lock().unwrap();
+                match rejection {
+                    "unbound" => state.authority.clear(),
+                    "overflow" => state.overflow = true,
+                    _ => state.conflicting_sequence = Some(1),
+                }
+            }
+            assert!(store.pin_dependency("skill:unused", "r1").is_err());
+            assert!(store.0.lock().unwrap().verified_revisions.is_empty());
+        }
+    }
+
     #[test]
     fn status_is_bounded_and_does_not_acknowledge_or_mutate_releases() {
         let store = CurationReleaseStore::default();

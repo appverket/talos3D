@@ -858,19 +858,27 @@ pub(crate) fn enqueue_apply_entity_changes(world: &mut World, command: ApplyEnti
         return;
     }
 
-    let (before, after, refusal) =
-        match prepare_entity_changes(world, command.clone()) {
-            Ok(draft) if draft.source_artifacts.is_empty() && draft.semantic_intents.is_empty() => {
-                (draft.before, draft.after, None)
-            }
-            result => (
+    let (before, after, refusal) = match prepare_entity_changes(world, command.clone()) {
+        Ok(draft)
+            if draft.source_artifacts.is_empty()
+                && draft.semantic_intents.is_empty()
+                && !crate::plugins::authored_edit_plan::dependencies::has_declared_dependencies(
+                    world,
+                    &draft.context,
+                ) =>
+        {
+            (draft.before, draft.after, None)
+        }
+        result => {
+            (
                 command.before,
                 command.after,
                 Some(result.err().unwrap_or_else(|| {
                     "This edit requires an explicit captured semantic plan".into()
                 })),
-            ),
-        };
+            )
+        }
+    };
     // Queue refusals too: history preflight must reject the entire enclosing
     // command group, not silently drop one invalid edit while applying siblings.
     world

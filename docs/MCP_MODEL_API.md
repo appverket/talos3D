@@ -1439,9 +1439,53 @@ present in the signed curation feed.
 
 Service-to-host delivery is separate from host-to-agent activation:
 `service_events_connected` reports the former, while `notifications_available`
-remains false for the latter. No incident export, background provider invocation
-or shared-plan withdrawal gate is enabled here. Exact-product acceptance and
-integration with the incident workflow remain separate requirements.
+remains false for the latter. Feed configuration alone does not enable incident
+export, background provider invocation or declare planner dependencies.
+
+#### Captured-plan dependency admission
+
+Trusted host/capability code can install `HarnessPlannerBindings` from
+`plugins::authored_edit_plan::dependencies` for an exact planner ID and version.
+`CurationReleaseStore::pin_dependency` resolves a specific active verified
+artifact revision; bindings never infer dependencies from agent text or adopt
+the latest revision automatically. There is no MCP setter for host bindings.
+
+Captured plans retain up to 32 normalized immutable references (authority digest,
+namespaced artifact ID and revision) in `context.harness_dependencies`. These
+participate in the content fingerprint and appear in preview/inspection.
+`captured.harness_dependency_coverage` is `host_declared` or `undeclared`.
+Live `harness_dependency_evidence` in inspection reports the last reconciliation
+sequence and freshness separately from the immutable digest; it is not a promise
+that no newer update exists.
+Empty declarations preserve legacy behavior and do not certify that an agent's
+reasoning used current guidance. Existing planners require explicit host wiring;
+this API is not automatic coverage for all commands, recipes or arbitrary agents.
+
+Admission checks only cached authenticated state at capture, before queue
+consumption, at command execution and before redo. A known withdrawn dependency,
+changed authority, unknown revision, missing verifier or exhausted safety cache
+refuses the edit with a refresh/re-preview instruction. An unrelated release,
+or a newer revision without withdrawal, does not invalidate a previously verified
+pinned revision. Offline admission uses last-known evidence; it cannot prove that
+no newer withdrawal exists. No network, disk access or corpus scan occurs in
+the command/input path.
+The execution-time preflight is the admission point: a withdrawal observed after
+that check applies to subsequent edits/redo and does not retroactively undo the
+edit already admitted.
+
+Undo remains available. Refused redo preserves the redo entry and model/history
+revision; grouped redo checks all children before applying any. Repeated copies
+retain their dependencies, while a legacy property path that would discard
+declared dependencies requires an explicit captured plan. A preview's original
+`can_commit` result is not a perpetual authorization: application rechecks it.
+On refusal, refresh status and obtain a new reviewed preview against current
+intent/model state; never replay the failed mutation automatically.
+
+Captured previews and undo/redo history remain transient application state.
+Opening/replacing a document invalidates them; they are not saved dependency
+certificates or resumable queued mutations. The separate signed host cache
+retains withdrawal evidence across restart, and fresh plans must declare their
+dependencies again. Persisted project geometry is not automatically re-certified.
 
 ### Private harness incident reporting
 

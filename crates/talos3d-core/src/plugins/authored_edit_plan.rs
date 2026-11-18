@@ -1,5 +1,6 @@
 //! ADR-065's transient, immutable mutation carrier. AuthoringScript remains the
 //! durable IR. Presentation borrows captured snapshots; apply never replans.
+pub mod dependencies;
 pub mod modifiers;
 pub mod requests;
 mod semantic_state;
@@ -34,6 +35,9 @@ pub struct InteractionId(pub String);
 pub struct PlanContext {
     pub planner_id: String,
     pub planner_version: u32,
+    /// Explicit trusted host/planner declarations; empty means undeclared coverage.
+    #[serde(default)]
+    pub harness_dependencies: Vec<dependencies::HarnessDependency>,
     pub request_kind: String,
     pub mutation_scope: String,
     pub intent: String,
@@ -129,7 +133,7 @@ impl AuthoredEditPlan {
         world: &World,
         interaction_id: Option<InteractionId>,
         base: ModelRevision,
-        context: PlanContext,
+        mut context: PlanContext,
         before: Vec<BoxedEntity>,
         after: Vec<BoxedEntity>,
         semantic_intents: SemanticPlan,
@@ -172,6 +176,13 @@ impl AuthoredEditPlan {
                     ));
                 }
             }
+        }
+        dependencies::capture_context(world, &mut context).map_err(|error| {
+            PlanError::InvalidSnapshots(format!("Invalid harness dependency declaration: {error}"))
+        })?;
+        if let Some(refusal) = dependencies::admission(world, &context.harness_dependencies) {
+            context.refusals.push(refusal.reason.clone());
+            context.findings.push(refusal.summary());
         }
         let can_commit = context.refusals.is_empty();
         let mut plan = Self {
@@ -285,6 +296,7 @@ impl AuthoredEditPlan {
     /// the carrier; the digest preserves it because dependency order matters.
     pub fn content(&self) -> Value {
         json!({"format":"talos.authored_edit_plan.transient.v1","base_model_revision":self.base_model_revision,
+            "harness_dependency_coverage":if self.context.harness_dependencies.is_empty(){"undeclared"}else{"host_declared"},
             "context":self.context,"before":self.before_snapshots.iter().map(BoxedEntity::to_json).collect::<Vec<_>>(),
             "after":self.after_snapshots.iter().map(BoxedEntity::to_json).collect::<Vec<_>>(),
             "semantic_intents":self.semantic_intents,"semantic_changes":self.semantic_changes,
@@ -293,6 +305,9 @@ impl AuthoredEditPlan {
     }
 
     fn preflight(&self, world: &World) -> Option<Refusal> {
+        if let Some(refusal) = dependencies::admission(world, &self.context.harness_dependencies) {
+            return Some(refusal);
+        }
         let refusal = |reason: &str| Refusal {
             violated: None,
             reason: reason.into(),
@@ -649,6 +664,9 @@ impl EditorCommand for CapturedPlanCommand {
     }
     fn preflight(&self, world: &World) -> Option<Refusal> {
         self.0.preflight(world)
+    }
+    fn redo_preflight(&self, world: &World) -> Option<Refusal> {
+        dependencies::admission(world, &self.0.context.harness_dependencies)
     }
     fn semantic_plan(&self, _world: &World) -> SemanticPlan {
         self.0.semantic_intents.clone()

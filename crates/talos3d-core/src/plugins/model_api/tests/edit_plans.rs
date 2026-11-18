@@ -374,3 +374,155 @@ fn semantic_declaration_compatibility_tools_are_undoable_and_fence_old_plans() {
             .contains("semantic before-state")
     );
 }
+
+fn governed_transform_fixture() -> (
+    World,
+    u64,
+    crate::plugins::curation::CurationReleaseStore,
+    Value,
+) {
+    use crate::plugins::{
+        authored_edit_plan::dependencies::HarnessPlannerBindings,
+        curation::{CurationConnection, CurationReleaseStore},
+    };
+    let (mut world, id) = fixture();
+    let store = CurationReleaseStore::default();
+    // This fixture is the trusted host boundary; wire tests use signed manifests.
+    store.bind(&CurationConnection {
+        base_url: "https://curation.example.test/v1/curation".into(),
+        trusted_public_keys: vec!["ab".repeat(32)],
+    });
+    store
+        .accept(transform_release_manifest(1, false, false))
+        .unwrap();
+    let dependency = store.pin_dependency("skill:test.transform", "r1").unwrap();
+    let pinned = serde_json::to_value(&dependency).unwrap();
+    let mut bindings = HarnessPlannerBindings::default();
+    bindings
+        .bind("core.transform", 1, vec![dependency])
+        .unwrap();
+    world.insert_resource(bindings);
+    world.insert_resource(store.clone());
+    (world, id, store, pinned)
+}
+
+fn transform_release_manifest(
+    sequence: u64,
+    withdrawn: bool,
+    unrelated: bool,
+) -> crate::plugins::curation::ReleaseManifest {
+    use crate::plugins::curation::{ReleaseArtifact, ReleaseManifest, RELEASE_SCHEMA};
+    let mut releases = vec![ReleaseArtifact {
+        artifact_id: "skill:test.transform".into(),
+        revision: "r1".into(),
+        remedy_keys: vec![],
+        required_tool_ids: vec![],
+        withdrawn,
+        refresh_required: withdrawn,
+    }];
+    if unrelated {
+        releases.push(ReleaseArtifact {
+            artifact_id: "skill:test.unrelated".into(),
+            revision: "r2".into(),
+            remedy_keys: vec![],
+            required_tool_ids: vec![],
+            withdrawn: false,
+            refresh_required: false,
+        });
+    }
+    ReleaseManifest {
+        schema: RELEASE_SCHEMA.into(),
+        sequence,
+        releases,
+    }
+}
+
+#[test]
+fn governed_mcp_plan_pins_host_revision_and_refuses_withdrawal_without_mutation() {
+    let (mut world, id, store, pinned) = governed_transform_fixture();
+    let before = get_entity_snapshot(&world, ElementId(id)).unwrap();
+    let history = world.resource::<History>().revision_token();
+    let depth = world.resource::<History>().undo_stack_len();
+    let candidate = preview(&mut world, id);
+    assert_eq!(
+        candidate["captured"]["context"]["harness_dependencies"],
+        json!([pinned])
+    );
+    assert_eq!(
+        candidate["captured"]["harness_dependency_coverage"],
+        "host_declared"
+    );
+    assert_eq!(candidate["can_apply_now"], true);
+    assert_eq!(get_entity_snapshot(&world, ElementId(id)).unwrap(), before);
+    store
+        .accept(transform_release_manifest(2, true, false))
+        .unwrap();
+    let inspected = call(
+        &mut world,
+        "inspect",
+        json!({"plan_id":candidate["plan_id"]}),
+    )
+    .unwrap();
+    assert_eq!(
+        inspected["captured"], candidate["captured"],
+        "withdrawal must not rewrite the captured proposal"
+    );
+    assert_eq!(inspected["digest"], candidate["digest"]);
+    assert_eq!(inspected["can_apply_now"], false);
+    assert!(inspected["apply_refusal"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("withdraw"));
+    let error = call(&mut world, "apply", json!({"plan_id":candidate["plan_id"]})).unwrap_err();
+    assert!(error.to_lowercase().contains("withdraw"), "{error}");
+    assert_eq!(get_entity_snapshot(&world, ElementId(id)).unwrap(), before);
+    assert_eq!(world.resource::<History>().revision_token(), history);
+    assert_eq!(world.resource::<History>().undo_stack_len(), depth);
+    assert!(world.resource::<PendingCommandQueue>().is_empty());
+}
+
+#[test]
+fn unrelated_release_does_not_invalidate_pinned_mcp_proposal() {
+    let (mut world, id, store, pinned) = governed_transform_fixture();
+    let candidate = preview(&mut world, id);
+    assert_eq!(candidate["harness_dependency_evidence"]["release_sequence"], 1);
+    store
+        .accept(transform_release_manifest(2, false, true))
+        .unwrap();
+    let inspected = call(
+        &mut world,
+        "inspect",
+        json!({"plan_id":candidate["plan_id"]}),
+    )
+    .unwrap();
+    assert_eq!(inspected["can_apply_now"], true);
+    assert_eq!(
+        inspected["captured"]["context"]["harness_dependencies"],
+        json!([pinned])
+    );
+    assert_eq!(inspected["digest"], candidate["digest"]);
+    assert_eq!(inspected["harness_dependency_evidence"]["release_sequence"], 2);
+    store.unavailable("offline test".into());
+    let offline = call(
+        &mut world,
+        "inspect",
+        json!({"plan_id":candidate["plan_id"]}),
+    )
+    .unwrap();
+    assert_eq!(offline["can_apply_now"], true);
+    assert_eq!(offline["digest"], candidate["digest"]);
+    assert_eq!(
+        offline["harness_dependency_evidence"]["freshness"],
+        "last_known_unverified"
+    );
+    assert_eq!(offline["harness_dependency_evidence"]["release_sequence"], 2);
+    let depth = world.resource::<History>().undo_stack_len();
+    let receipt = call(&mut world, "apply", json!({"plan_id":candidate["plan_id"]})).unwrap();
+    assert_eq!(receipt["applied"], true);
+    assert_eq!(world.resource::<History>().undo_stack_len(), depth + 1);
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(id)).unwrap(),
+        candidate["captured"]["after"][0]
+    );
+}

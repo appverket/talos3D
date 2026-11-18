@@ -46,6 +46,11 @@ pub trait EditorCommand: Send + Sync + 'static {
         None
     }
 
+    /// Replay safety checks must not reuse a captured original model revision.
+    fn redo_preflight(&self, _world: &World) -> Option<Refusal> {
+        None
+    }
+
     fn redo(&mut self, world: &mut World) {
         self.apply(world);
     }
@@ -80,6 +85,12 @@ impl EditorCommand for GroupedCommand {
         self.commands
             .iter()
             .find_map(|command| command.preflight(world))
+    }
+
+    fn redo_preflight(&self, world: &World) -> Option<Refusal> {
+        self.commands
+            .iter()
+            .find_map(|command| command.redo_preflight(world))
     }
 
     /// A group is evaluated as one plan, so a refusal anywhere in the group
@@ -156,6 +167,10 @@ impl History {
     /// command never entered history.
     pub fn undo_stack_len(&self) -> usize {
         self.undo_stack.len()
+    }
+
+    pub fn redo_stack_len(&self) -> usize {
+        self.redo_stack.len()
     }
 
     pub fn model_revision(&self) -> u64 {
@@ -538,6 +553,11 @@ fn redo_last_command(world: &mut World) {
         return;
     };
 
+    if let Some(refusal) = command.redo_preflight(world) {
+        record_refusals(world, command.label(), vec![refusal]);
+        world.resource_mut::<History>().redo_stack.push(command);
+        return;
+    }
     let message = format!("Redo: {}", command.label());
     command.redo(world);
 
@@ -598,6 +618,68 @@ mod tests {
         fn undo(&mut self, world: &mut World) {
             world.resource_mut::<LogB>().0.pop();
         }
+    }
+
+    #[derive(Resource)]
+    struct ReplayBlocked;
+
+    struct GuardedAppendLogCommand;
+    impl EditorCommand for GuardedAppendLogCommand {
+        fn label(&self) -> &'static str {
+            "Guarded append"
+        }
+        fn apply(&mut self, world: &mut World) {
+            world.resource_mut::<LogB>().0.push("guarded");
+        }
+        fn undo(&mut self, world: &mut World) {
+            world.resource_mut::<LogB>().0.pop();
+        }
+        fn redo_preflight(&self, world: &World) -> Option<Refusal> {
+            world.contains_resource::<ReplayBlocked>().then(|| Refusal {
+                violated: None,
+                reason: "Replay dependency withdrawn".into(),
+                observed: "test guard".into(),
+                repair: "review replacement".into(),
+                contrasts: vec![],
+            })
+        }
+    }
+
+    #[test]
+    fn grouped_redo_refusal_is_atomic_and_retains_replay_entry() {
+        let mut world = world_with_history();
+        {
+            let mut queue = world.resource_mut::<PendingCommandQueue>();
+            queue.begin_group("guarded group");
+            queue.push_command(Box::new(IncrementCounterCommand));
+            queue.push_command(Box::new(GuardedAppendLogCommand));
+            queue.end_group();
+        }
+        apply_pending_history_commands_for_test(&mut world);
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands_for_test(&mut world);
+        world.insert_resource(ReplayBlocked);
+        let revision = world.resource::<History>().revision_token();
+        world.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands_for_test(&mut world);
+        assert_eq!(world.resource::<CounterA>().0, 0);
+        assert!(world.resource::<LogB>().0.is_empty());
+        assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+        assert_eq!(world.resource::<History>().redo_stack_len(), 1);
+        assert_eq!(world.resource::<History>().revision_token(), revision);
+        assert!(world
+            .resource::<SemanticEnforcement>()
+            .last_refusal()
+            .unwrap()
+            .reason
+            .contains("withdrawn"));
+        world.remove_resource::<ReplayBlocked>();
+        world.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands_for_test(&mut world);
+        assert_eq!(world.resource::<CounterA>().0, 1);
+        assert_eq!(world.resource::<LogB>().0, vec!["guarded"]);
+        assert_eq!(world.resource::<History>().redo_stack_len(), 0);
+        assert_eq!(world.resource::<History>().undo_stack_len(), 1);
     }
 
     fn world_with_history() -> World {

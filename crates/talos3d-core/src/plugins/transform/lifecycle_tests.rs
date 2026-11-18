@@ -214,7 +214,69 @@ fn native_history_action_cancels_presentation_before_the_action_runs() {
 #[test]
 #[ignore = "explicit local CPU stage measurement; not a presented-frame latency claim"]
 fn bounded_full_candidate_stage_benchmark() {
+    measure_bounded_full_candidate_stage(0);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+#[ignore = "explicit local CPU stage measurement with 32 dependencies; not presented-frame latency"]
+fn bounded_full_candidate_stage_benchmark_with_32_harness_dependencies() {
+    measure_bounded_full_candidate_stage(32);
+}
+
+fn measure_bounded_full_candidate_stage(dependency_count: usize) {
     let mut world = fixture();
+    #[cfg(feature = "model-api")]
+    if dependency_count > 0 {
+        use crate::plugins::{
+            authored_edit_plan::dependencies::HarnessPlannerBindings,
+            curation::{
+                CurationConnection, CurationReleaseStore, ReleaseArtifact, ReleaseManifest,
+                RELEASE_SCHEMA,
+            },
+        };
+        let store = CurationReleaseStore::default();
+        store.bind(&CurationConnection {
+            base_url: "https://curation.example.test/v1/curation".into(),
+            trusted_public_keys: vec!["ab".repeat(32)],
+        });
+        // Explicitly pin all 4096 retained revisions while each batch is
+        // current, outside the timer. Unrelated unpinned release history must
+        // not consume this cache. The timed path looks up only its 32 pins.
+        let mut dependencies = Vec::new();
+        for (sequence, start) in (0..4096).step_by(1000).enumerate() {
+            let releases = (start..(start + 1000).min(4096))
+                .map(|id| ReleaseArtifact {
+                    artifact_id: format!("skill:benchmark.{id}"),
+                    revision: "r1".into(),
+                    remedy_keys: vec![],
+                    required_tool_ids: vec![],
+                    withdrawn: false,
+                    refresh_required: false,
+                })
+                .collect();
+            store
+                .accept(ReleaseManifest {
+                    schema: RELEASE_SCHEMA.into(),
+                    sequence: sequence as u64 + 1,
+                    releases,
+                })
+                .unwrap();
+            for id in start..(start + 1000).min(4096) {
+                let dependency = store
+                    .pin_dependency(&format!("skill:benchmark.{id}"), "r1")
+                    .unwrap();
+                if (4000..4000 + dependency_count).contains(&id) {
+                    dependencies.push(dependency);
+                }
+            }
+        }
+        assert_eq!(dependencies.len(), dependency_count);
+        let mut bindings = HarnessPlannerBindings::default();
+        bindings.bind("core.transform", 1, dependencies).unwrap();
+        world.insert_resource(bindings);
+        world.insert_resource(store);
+    }
     for id in 2..=4352 {
         let snapshot: BoxedEntity = PrimitiveSnapshot {
             element_id: ElementId(id),
@@ -245,14 +307,21 @@ fn bounded_full_candidate_stage_benchmark() {
         let start = std::time::Instant::now();
         update_transform_preview(&mut world);
         let elapsed = start.elapsed().as_secs_f64() * 1000.;
-        assert!(world.resource::<ActiveTransformPreview>().plan.is_some());
+        let plan = world
+            .resource::<ActiveTransformPreview>()
+            .plan
+            .as_ref()
+            .unwrap();
+        assert!(plan.can_commit());
+        assert_eq!(plan.context().harness_dependencies.len(), dependency_count);
         if i >= 10 {
             times.push(elapsed);
         }
     }
     times.sort_by(f64::total_cmp);
     let p95 = times[94];
-    eprintln!("candidate CPU stage:256 selected/4096 unrelated/100 samples; p95={p95:.3}ms");
+    let worst = times[99];
+    eprintln!("candidate CPU stage:256 selected/4096 unrelated/{dependency_count} dependencies/100 samples; p95={p95:.3}ms worst={worst:.3}ms");
     assert!(p95 <= 20., "fixed CPU stage budget exceeded: {p95}ms");
 }
 
@@ -595,6 +664,88 @@ fn displayed_move_copy_and_internal_array_keep_source_and_endpoint_through_histo
         capture_snapshot(&world, ElementId(10)).unwrap().center(),
         shown
     );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn repeated_copy_inherits_harness_dependency_at_queue_and_execution() {
+    use crate::plugins::{
+        authored_edit_plan::dependencies::HarnessPlannerBindings,
+        curation::{
+            CurationConnection, CurationReleaseStore, ReleaseArtifact, ReleaseManifest,
+            RELEASE_SCHEMA,
+        },
+    };
+    for withdraw_before_queue in [true, false] {
+        let mut world = fixture();
+        world.resource_mut::<ElementIdAllocator>().set_next(10);
+        let store = CurationReleaseStore::default();
+        store.bind(&CurationConnection {
+            base_url: "https://curation.example.test/v1/curation".into(),
+            trusted_public_keys: vec!["ab".repeat(32)],
+        });
+        let manifest = |sequence, withdrawn| ReleaseManifest {
+            schema: RELEASE_SCHEMA.into(),
+            sequence,
+            releases: vec![ReleaseArtifact {
+                artifact_id: "skill:test.copy".into(),
+                revision: "r1".into(),
+                remedy_keys: vec![],
+                required_tool_ids: vec![],
+                withdrawn,
+                refresh_required: withdrawn,
+            }],
+        };
+        store.accept(manifest(1, false)).unwrap();
+        let dependency = store.pin_dependency("skill:test.copy", "r1").unwrap();
+        let mut bindings = HarnessPlannerBindings::default();
+        // Intentionally do not bind core.transform.copy: the derived repeated
+        // command must inherit what the original displayed planner actually used.
+        bindings
+            .bind("core.transform", 1, vec![dependency.clone()])
+            .unwrap();
+        world.insert_resource(bindings);
+        world.insert_resource(store.clone());
+        let source = capture_snapshot(&world, ElementId(1)).unwrap();
+        copies::toggle(&mut world);
+        update_transform_preview(&mut world);
+        let first = world
+            .resource::<ActiveTransformPreview>()
+            .plan
+            .clone()
+            .unwrap();
+        assert_eq!(first.context().harness_dependencies, vec![dependency]);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Enter);
+        confirm_transform(&mut world);
+        drain(&mut world);
+        let endpoint = capture_snapshot(&world, ElementId(10)).unwrap();
+        assert_eq!(endpoint.center(), Vec3::X * 2.);
+        let revision = world.resource::<History>().revision_token();
+        let depth = world.resource::<History>().undo_stack_len();
+        let mut last = world.remove_resource::<copies::LastCopy>().unwrap();
+        last.input = "/4".into();
+        if withdraw_before_queue {
+            store.accept(manifest(2, true)).unwrap();
+            let error = copies::repeat(&mut world, &last).unwrap_err();
+            assert!(error.to_lowercase().contains("withdraw"), "{error}");
+            assert!(world.resource::<PendingCommandQueue>().is_empty());
+        } else {
+            copies::repeat(&mut world, &last).unwrap();
+            assert!(!world.resource::<PendingCommandQueue>().is_empty());
+            store.accept(manifest(2, true)).unwrap();
+        }
+        drain(&mut world);
+        assert_eq!(world.resource::<History>().revision_token(), revision);
+        assert_eq!(world.resource::<History>().undo_stack_len(), depth);
+        assert_eq!(capture_snapshot(&world, ElementId(1)), Some(source));
+        assert_eq!(capture_snapshot(&world, ElementId(10)), Some(endpoint));
+        assert_eq!(world.query::<&ElementId>().iter(&world).count(), 2);
+        for id in 11..14 {
+            assert!(capture_snapshot(&world, ElementId(id)).is_none());
+        }
+    }
 }
 
 #[test]

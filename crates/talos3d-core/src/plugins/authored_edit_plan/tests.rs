@@ -453,3 +453,210 @@ fn aggregate_memory_budget_evicts_old_plans_before_entry_count_limit() {
     assert!(registry.get(second.plan_id()).is_some());
     assert_eq!(registry.plans.len(), 1);
 }
+
+#[cfg(feature = "model-api")]
+mod harness_dependencies {
+    use super::*;
+    use crate::plugins::{
+        authored_edit_plan::dependencies::HarnessPlannerBindings,
+        curation::{
+            CurationConnection, CurationReleaseStore, ReleaseArtifact, ReleaseManifest,
+            RELEASE_SCHEMA,
+        },
+    };
+    fn manifest(sequence: u64, revision: &str, withdrawn: bool) -> ReleaseManifest {
+        ReleaseManifest {
+            schema: RELEASE_SCHEMA.into(),
+            sequence,
+            releases: vec![ReleaseArtifact {
+                artifact_id: "skill:test.plan".into(),
+                revision: revision.into(),
+                remedy_keys: vec![],
+                required_tool_ids: vec![],
+                withdrawn,
+                // Conservative admission deliberately blocks ALL known withdrawals.
+                refresh_required: false,
+            }],
+        }
+    }
+    fn fixture() -> (World, CurationReleaseStore) {
+        let mut world = world();
+        snapshot(1, 0.).apply_to(&mut world);
+        let store = CurationReleaseStore::default();
+        store.bind(&CurationConnection {
+            base_url: "https://test.example/v1/curation".into(),
+            trusted_public_keys: vec!["a".repeat(64)],
+        });
+        store.accept(manifest(1, "r1", false)).unwrap();
+        let mut bindings = HarnessPlannerBindings::default();
+        bindings
+            .bind(
+                "test",
+                0,
+                vec![store.pin_dependency("skill:test.plan", "r1").unwrap()],
+            )
+            .unwrap();
+        world.insert_resource(bindings);
+        world.insert_resource(store.clone());
+        (world, store)
+    }
+    fn move_plan(world: &mut World) -> Arc<AuthoredEditPlan> {
+        let plan = candidate(world, None, vec![snapshot(1, 0.)], vec![snapshot(1, 2.)]);
+        publish(world, plan)
+    }
+    #[test]
+    fn withdrawal_refuses_before_consumption_and_again_at_history_drain() {
+        for after_queue in [false, true] {
+            let (mut world, store) = fixture();
+            let plan = move_plan(&mut world);
+            assert_eq!(plan.context().harness_dependencies.len(), 1);
+            assert_eq!(
+                plan.content()["harness_dependency_coverage"],
+                "host_declared"
+            );
+            let before_revision = world.resource::<History>().revision_token();
+            if after_queue {
+                queue_captured_plan(&mut world, plan.plan_id()).unwrap();
+            }
+            store.accept(manifest(2, "r1", true)).unwrap();
+            if !after_queue {
+                assert!(matches!(
+                    queue_captured_plan(&mut world, plan.plan_id()),
+                    Err(PlanError::Refused(_))
+                ));
+                assert!(world
+                    .resource::<AuthoredEditPlanRegistry>()
+                    .get(plan.plan_id())
+                    .is_some());
+            }
+            drain(&mut world);
+            assert_eq!(
+                capture_snapshot(&world, ElementId(1)),
+                Some(snapshot(1, 0.))
+            );
+            assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+            assert_eq!(
+                world.resource::<History>().revision_token(),
+                before_revision
+            );
+            if after_queue {
+                assert!(world
+                    .resource::<SemanticEnforcement>()
+                    .last_refusal()
+                    .unwrap()
+                    .reason
+                    .contains("withdrawn"));
+            }
+        }
+    }
+    #[test]
+    fn ordinary_replacement_and_offline_last_known_state_preserve_pins_and_redo() {
+        let (mut world, store) = fixture();
+        let plan = move_plan(&mut world);
+        let digest = plan.digest().to_owned();
+        store.accept(manifest(2, "r2", false)).unwrap();
+        store.unavailable("offline".into());
+        assert_eq!(plan.digest(), digest);
+        queue_captured_plan(&mut world, plan.plan_id()).unwrap();
+        drain(&mut world);
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        drain(&mut world);
+        world.resource_mut::<PendingCommandQueue>().queue_redo();
+        drain(&mut world);
+        assert_eq!(
+            capture_snapshot(&world, ElementId(1)),
+            Some(snapshot(1, 2.))
+        );
+        // Undo is still available after a later withdrawal; redo is retained but refused.
+        store.accept(manifest(3, "r1", true)).unwrap();
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        drain(&mut world);
+        let revision = world.resource::<History>().revision_token();
+        for _ in 0..2 {
+            world.resource_mut::<PendingCommandQueue>().queue_redo();
+            drain(&mut world);
+            assert_eq!(
+                capture_snapshot(&world, ElementId(1)),
+                Some(snapshot(1, 0.))
+            );
+            assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+            assert_eq!(world.resource::<History>().redo_stack_len(), 1);
+            assert_eq!(world.resource::<History>().revision_token(), revision);
+        }
+    }
+    #[test]
+    fn dependency_identity_is_fingerprinted_and_unknown_or_changed_authorities_refuse() {
+        let (mut world, store) = fixture();
+        let r1 = move_plan(&mut world);
+        store.accept(manifest(2, "r2", false)).unwrap();
+        let r2 = store.pin_dependency("skill:test.plan", "r2").unwrap();
+        world
+            .resource_mut::<HarnessPlannerBindings>()
+            .bind("test", 0, vec![r2.clone()])
+            .unwrap();
+        let replacement = move_plan(&mut world);
+        assert_ne!(r1.digest(), replacement.digest());
+        assert_eq!(r1.context().harness_dependencies[0].revision, "r1");
+        let mut unknown = r2;
+        unknown.revision = "never-authenticated".into();
+        world
+            .resource_mut::<HarnessPlannerBindings>()
+            .bind("test", 0, vec![unknown])
+            .unwrap();
+        let invalid = move_plan(&mut world);
+        assert!(!invalid.can_commit());
+        assert!(queue_captured_plan(&mut world, invalid.plan_id()).is_err());
+        store.bind(&CurationConnection {
+            base_url: "https://another.example/v1/curation".into(),
+            trusted_public_keys: vec!["a".repeat(64)],
+        });
+        store.accept(manifest(1, "r1", false)).unwrap();
+        assert!(queue_captured_plan(&mut world, r1.plan_id()).is_err());
+        // Undeclared legacy plans remain explicitly outside this coverage.
+        world.remove_resource::<HarnessPlannerBindings>();
+        let ordinary = move_plan(&mut world);
+        assert_eq!(
+            ordinary.content()["harness_dependency_coverage"],
+            "undeclared"
+        );
+        queue_captured_plan(&mut world, ordinary.plan_id()).unwrap();
+        drain(&mut world);
+        assert_eq!(
+            capture_snapshot(&world, ElementId(1)),
+            Some(snapshot(1, 2.))
+        );
+    }
+    #[test]
+    fn legacy_property_queue_cannot_discard_a_host_binding() {
+        use crate::plugins::commands::{enqueue_apply_entity_changes, ApplyEntityChangesCommand};
+        let (mut world, store) = fixture();
+        world
+            .resource_mut::<HarnessPlannerBindings>()
+            .bind(
+                "core.authored_changes",
+                1,
+                vec![store.pin_dependency("skill:test.plan", "r1").unwrap()],
+            )
+            .unwrap();
+        enqueue_apply_entity_changes(
+            &mut world,
+            ApplyEntityChangesCommand {
+                label: "legacy",
+                before: vec![snapshot(1, 0.)],
+                after: vec![snapshot(1, 9.)],
+            },
+        );
+        drain(&mut world);
+        assert_eq!(
+            capture_snapshot(&world, ElementId(1)),
+            Some(snapshot(1, 0.))
+        );
+        assert_eq!(world.resource::<History>().undo_stack_len(), 0);
+        assert!(world
+            .resource::<SemanticEnforcement>()
+            .last_refusal()
+            .unwrap()
+            .reason
+            .contains("explicit captured"));
+    }
+}
