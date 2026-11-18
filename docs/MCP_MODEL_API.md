@@ -1413,16 +1413,35 @@ remains an app-update prerequisite.
 Known withdrawn revisions and legacy skill-index withdrawals suppress stale
 bundled fallback even during an outage and across MCP sessions in the same app.
 A newer release does not erase older withdrawal tombstones. Rollbacks and
-conflicting same-sequence manifests are refused. Retention in this slice is
-**application lifetime**, not disk-persistent: a restarted app must reconcile
-again. An offline app reports freshness as unverified. The bounded cache fails
-closed for fallback if its withdrawal capacity is exhausted.
+conflicting same-sequence manifests are refused. Without an explicit host cache,
+retention is application lifetime. An offline app reports freshness as unverified.
+The bounded cache fails closed for fallback if withdrawal capacity is exhausted.
 
-This is a signed next-call/reconnect slice, not the full incident service or
-notification proof. `notifications_available` remains false. No incident export,
-background provider invocation, shared-plan withdrawal gate or persistent event
-subscription is enabled by this addition; those require their own integration
-and product acceptance evidence.
+Native hosts can start `CurationSubscriber::start(connection, store, cache_path)`
+with the same `CurationReleaseStore` installed in the app. It creates a dedicated
+background runtime, connects to `<base_url>/events`, consumes public numeric
+`release_sequence` SSE hints, and fetches/verifies the complete signed manifest.
+The stream connects before reconciliation, and reconnect reconciles even if
+hints were missed. Frames are bounded to 4 KiB; duplicate hints are coalesced;
+reconnect backoff is bounded at 15 seconds. No network or cache I/O runs on the
+UI thread. Keep the returned resource alive; drop/`stop` cancels, and explicit
+`shutdown` also joins the background thread during host shutdown.
+
+An optional absolute cache path is chosen by the host, never by an agent tool.
+The atomically replaced file contains source-bound signed public envelopes, no
+account credential or project state. Restore re-verifies every envelope against
+the current trusted keys before applying any state. It retains older signed
+withdrawal evidence if a newer feed omits it, bounded to 64 envelopes and 8 MiB.
+Restored freshness remains unverified until a live reconciliation. Status reports
+`cached_release_sequence` and cache failures separately from the live sequence;
+legacy skill-index-only withdrawals remain application-lifetime unless also
+present in the signed curation feed.
+
+Service-to-host delivery is separate from host-to-agent activation:
+`service_events_connected` reports the former, while `notifications_available`
+remains false for the latter. No incident export, background provider invocation
+or shared-plan withdrawal gate is enabled here. Exact-product acceptance and
+integration with the incident workflow remain separate requirements.
 
 ### Bounded deformation of measured geometry
 

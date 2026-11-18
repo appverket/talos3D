@@ -10,6 +10,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(all(feature = "model-api", not(target_arch = "wasm32")))]
+mod native;
+#[cfg(all(feature = "model-api", not(target_arch = "wasm32")))]
+pub use native::CurationSubscriber;
+
 pub const RELEASE_SCHEMA: &str = "talos3d.curation-release.v1";
 const MAX_ARTIFACTS: usize = 1000;
 const MAX_TOMBSTONES: usize = 4096;
@@ -163,14 +168,17 @@ pub fn decode_manifest(bytes: &[u8], trusted_keys: &[String]) -> Result<ReleaseM
     manifest.validate()?;
     Ok(manifest)
 }
-pub async fn fetch_manifest(connection: &CurationConnection) -> Result<ReleaseManifest, String> {
+async fn fetch_envelope(connection: &CurationConnection) -> Result<Vec<u8>, String> {
     let public_connection = AgentCorpusConnection {
         base_url: connection.base_url.clone(),
         bearer_token: None,
         trusted_public_keys: connection.trusted_public_keys.clone(),
     };
+    agent_skill_cloud::request(&public_connection, "/releases", None).await
+}
+pub async fn fetch_manifest(connection: &CurationConnection) -> Result<ReleaseManifest, String> {
     decode_manifest(
-        &agent_skill_cloud::request(&public_connection, "/releases", None).await?,
+        &fetch_envelope(connection).await?,
         &connection.trusted_public_keys,
     )
 }
@@ -189,6 +197,10 @@ struct ReleaseState {
     skill_epoch: Option<i64>,
     skill_tombstones: BTreeSet<String>,
     skill_overflow: bool,
+    service_events_connected: bool,
+    cache_restored: bool,
+    cached_release_sequence: Option<u64>,
+    cache_error: Option<String>,
 }
 /// Application-lifetime state shared across MCP sessions. It is deliberately
 /// not project state and does not mutate authored models. Hosts must persist
@@ -213,6 +225,10 @@ impl CurationReleaseStore {
             state.fresh = false;
             state.error = None;
             state.overflow = false;
+            state.service_events_connected = false;
+            state.cache_restored = false;
+            state.cached_release_sequence = None;
+            state.cache_error = None;
         }
     }
     /// Accept a manifest already verified by the host. Prefer `reconcile` for
@@ -372,7 +388,8 @@ impl CurationReleaseStore {
             "known_withdrawal_count":state.tombstones.len(),
             "known_skill_withdrawal_count":state.skill_tombstones.len(),
             "freshness_scope":"last_reconciliation","error":state.error,
-            "notifications_available":false,"retention":"application_lifetime",
+            "notifications_available":false,"retention":if state.cache_restored {"signed_host_cache"} else {"application_lifetime"},
+            "service_events_connected":state.service_events_connected,"cached_release_sequence":state.cached_release_sequence,"cache_error":state.cache_error,
             "shared_export_enabled":false,
             "next_action":"Refresh applicable artifacts at a safe task boundary; re-plan current intent against current project state. Narrow by public artifact_id or observation if truncated. Do not replay failed calls or alter authored geometry automatically.",
             "note":"Delivery is not acknowledgement or project verification. Offline freshness is unknown; known withdrawals still suppress stale fallback. An app update may be required."})
