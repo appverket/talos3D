@@ -137,6 +137,38 @@ async fn curation_is_discoverable_without_a_configured_service() {
     assert_eq!(status["freshness"], "unverified");
     assert_eq!(status["release_sequence"], Value::Null);
     assert_eq!(status["shared_export_enabled"], false);
+    use crate::plugins::curation::reporting::{ObservationKind, ReportHarnessIncident};
+    let recorded: Value = server
+        .report_harness_incident_tool(Parameters(ReportHarnessIncident {
+            event_id: None,
+            kind: ObservationKind::CorpusGap,
+            applicability: RemedyKey {
+                gap_kind: Some("missing_path".into()),
+                ..Default::default()
+            },
+            failure_code: "no_curated_path".into(),
+            app_revision: "test-build".into(),
+        }))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    assert_eq!(recorded["recorded_locally"], true);
+    assert_eq!(recorded["submitted"], false);
+    let submitted: Value = server
+        .submit_pending_harness_incidents_tool()
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    assert_eq!(submitted["status"], "export_disabled");
+    for profile in CapabilityProfile::ALL {
+        assert!(profile_allows(profile, "report_harness_incident"));
+        assert_eq!(
+            profile_allows(profile, "submit_pending_harness_incidents"),
+            matches!(profile, CapabilityProfile::Curation | CapabilityProfile::Full)
+        );
+    }
     drop(server);
     worker.await.unwrap();
 }

@@ -95,6 +95,8 @@ pub(crate) async fn request(
     body: Option<&Value>,
 ) -> Result<Vec<u8>, String> {
     let client = reqwest::Client::builder()
+        // A redirect must not forward a private contribution to another endpoint.
+        .redirect(if body.is_some() { reqwest::redirect::Policy::none() } else { reqwest::redirect::Policy::limited(10) })
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
@@ -142,6 +144,9 @@ async fn request_local(
     } else {
         gloo_net::http::Request::get(&endpoint)
     };
+    if body.is_some() {
+        r = r.redirect(web_sys::RequestRedirect::Error);
+    }
     if let Some(token) = &c.bearer_token {
         r = r.header("Authorization", &format!("Bearer {token}"));
     }

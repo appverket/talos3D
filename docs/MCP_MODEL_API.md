@@ -1443,6 +1443,44 @@ remains false for the latter. No incident export, background provider invocation
 or shared-plan withdrawal gate is enabled here. Exact-product acceptance and
 integration with the incident workflow remain separate requirements.
 
+### Private harness incident reporting
+
+The report_harness_incident tool is an optional, local-only observation route
+available in every profile. It accepts a stable optional event_id, a typed kind,
+applicability in the public remedy vocabulary, failure_code and app_revision.
+Identifiers are bounded to 160 ASCII letters/digits or ._:-; no free-text prompt,
+geometry, customer context or arbitrary evidence payload is accepted. Reuse the
+returned event ID when retrying; conflicting content or identity is refused.
+
+The host can insert curation::reporting::HarnessIncidentPolicy and
+HarnessIncidentStore. Export is off by default. Optional pending_path must be
+an absolute host-owned private path outside source/project repositories. Native
+persistence atomically replaces a bounded private file (128 records, 512 KiB).
+Without it, retention is application lifetime; browser persistence needs a host
+adapter. Completed receipts remain retained for local idempotency; capacity
+exhaustion requires explicit host review, never silent loss of pending reports.
+
+The submit_pending_harness_incidents tool is available in curation/full profiles
+(next to skill contribution); local reporting is available in every profile.
+Submission sends at most eight records only when the host explicitly enabled export. The model cannot change that setting. The
+talos3d.curation-observation.v1 payload gets export_authorized:true only at this
+boundary; recording a report does not authorize export. The credential comes
+from the existing host AgentCorpusConnection, never from an MCP argument.
+Credentials can be forwarded only to the same URL origin as that connection.
+
+Pending records are bound to the exact curation source and a SHA-256 credential
+fingerprint. The private file stores only the fingerprint, not the bearer;
+receipts and errors expose neither. A different account or rotated credential
+does not adopt old records. Reports made without an authenticated credential stay
+local after later sign-in. These conservative cases require explicit host review;
+there is no model-accessible rebind. Offline delivery failures retain stable event
+IDs for idempotent retries, including a lost server receipt before local commit.
+
+This slice records deliberate reports, not automatic failure telemetry. An intake
+receipt proves neither diagnosis nor remedy acceptance. No provider work or
+project mutation starts as a side effect, and production contribution/retention
+policies remain separately governed.
+
 ### Bounded deformation of measured geometry
 
 `definition.create` / `definition.update` accept `DeformableMesh` in the canonical

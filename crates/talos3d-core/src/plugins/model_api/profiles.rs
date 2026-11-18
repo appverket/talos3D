@@ -240,6 +240,8 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("get_agent_skill", ToolCategory::SessionContract),
     ("get_agent_corpus_status", ToolCategory::SessionContract),
     ("get_agent_curation_status", ToolCategory::SessionContract),
+    ("report_harness_incident", ToolCategory::SessionContract),
+    ("submit_pending_harness_incidents", ToolCategory::CurationExtended),
     ("get_agent_skill_resource", ToolCategory::SessionContract),
     ("contribute_agent_skill", ToolCategory::CurationExtended),
     (

@@ -98,7 +98,11 @@ impl ModelApiServer {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect();
-        store.status_for(configured, &tools, observation, artifact_id)
+        let mut status = store.status_for(configured, &tools, observation, artifact_id);
+        let (policy, _, _, _) = self.round_trip(ModelApiRequest::HarnessIncidentContext)
+            .await.unwrap_or_default();
+        status["shared_export_enabled"] = json!(policy.export_enabled);
+        status
     }
     async fn cloud_skill_list(
         &self,
@@ -9286,6 +9290,33 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         Parameters(params): Parameters<crate::plugins::curation::CurationStatusRequest>,
     ) -> Result<CallToolResult, McpError> {
         json_tool_result(self.curation_status(true, params.observation.as_ref(), params.artifact_id.as_deref()).await)
+    }
+
+    #[tool(
+        name = "report_harness_incident",
+        description = "Optionally record a minimized harness observation in the private host pending store. Supply only public failure/applicability identifiers, never prompts, geometry or customer facts. Reuse event_id on retries. This does not export data, enable host policy, start an optimizer or change the model."
+    )]
+    pub(super) async fn report_harness_incident_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::curation::reporting::ReportHarnessIncident>,
+    ) -> Result<CallToolResult, McpError> {
+        let (policy, store, connection, corpus) = self
+            .round_trip(ModelApiRequest::HarnessIncidentContext)
+            .await.map_err(|_| McpError::internal_error("Private incident host unavailable", None))?;
+        json_tool_result(store.report(params, &policy, &connection, corpus.bearer_token.as_deref())
+            .map_err(|error| McpError::invalid_params(error, None))?)
+    }
+
+    #[tool(
+        name = "submit_pending_harness_incidents",
+        description = "Submit at most eight eligible private pending observations only when the host user/operator explicitly enabled shared export. Uses the host credential without exposing it. Reports from other sources, accounts, rotated credentials or unauthenticated sessions remain local; no automatic rebind. A receipt means incident intake, not repair."
+    )]
+    pub(super) async fn submit_pending_harness_incidents_tool(&self) -> Result<CallToolResult, McpError> {
+        let (policy, store, connection, corpus) = self
+            .round_trip(ModelApiRequest::HarnessIncidentContext)
+            .await.map_err(|_| McpError::internal_error("Private incident host unavailable", None))?;
+        json_tool_result(store.submit(&policy, &connection, &corpus).await
+            .map_err(|error| McpError::invalid_params(error, None))?)
     }
 
     #[tool(

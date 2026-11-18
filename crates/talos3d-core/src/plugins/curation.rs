@@ -15,6 +15,8 @@ mod native;
 #[cfg(all(feature = "model-api", not(target_arch = "wasm32")))]
 pub use native::CurationSubscriber;
 
+pub mod reporting;
+
 pub const RELEASE_SCHEMA: &str = "talos3d.curation-release.v1";
 const MAX_ARTIFACTS: usize = 1000;
 const MAX_TOMBSTONES: usize = 4096;
@@ -390,7 +392,7 @@ impl CurationReleaseStore {
             "freshness_scope":"last_reconciliation","error":state.error,
             "notifications_available":false,"retention":if state.cache_restored {"signed_host_cache"} else {"application_lifetime"},
             "service_events_connected":state.service_events_connected,"cached_release_sequence":state.cached_release_sequence,"cache_error":state.cache_error,
-            "shared_export_enabled":false,
+            "automatic_export_enabled":false,
             "next_action":"Refresh applicable artifacts at a safe task boundary; re-plan current intent against current project state. Narrow by public artifact_id or observation if truncated. Do not replay failed calls or alter authored geometry automatically.",
             "note":"Delivery is not acknowledgement or project verification. Offline freshness is unknown; known withdrawals still suppress stale fallback. An app update may be required."})
     }
@@ -566,6 +568,6 @@ mod tests {
         assert_eq!(first["releases"].as_array().unwrap().len(), MAX_NOTICES);
         assert_eq!(first["truncated"], true);
         assert_eq!(first, store.status(true, &BTreeSet::new(), None));
-        assert_eq!(first["shared_export_enabled"], false);
+        assert_eq!(first["automatic_export_enabled"], false);
     }
 }
