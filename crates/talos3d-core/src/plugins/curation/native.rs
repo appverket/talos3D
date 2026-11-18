@@ -77,16 +77,38 @@ impl Cache {
         if state.authority != self.authority {
             return Err("Curation source changed during cache restore".into());
         }
-        // A startup restore cannot overwrite a newer in-process reconciliation.
-        if state.manifest.is_none() {
-            state.manifest = restored.manifest.take();
-            state.tombstones = std::mem::take(&mut restored.tombstones);
+        // Either MCP or the subscriber may win startup. Always merge verified
+        // withdrawal evidence; use the highest sequence as the rollback floor.
+        let mut tombstones = state.tombstones.clone();
+        tombstones.extend(std::mem::take(&mut restored.tombstones));
+        if tombstones.len() > MAX_TOMBSTONES {
+            state.overflow = true;
             state.fresh = false;
-            state.cache_restored = true;
-            state.cached_release_sequence = restored.cached_release_sequence;
-            // Legacy skill-index withdrawals have a separate authority and may
-            // already have been learned by an MCP session before startup.
+            state.cache_error = Some("Curation withdrawal cache full; fallback is disabled".into());
+            tombstones = tombstones.into_iter().take(MAX_TOMBSTONES).collect();
         }
+        state.tombstones = tombstones;
+        state.cache_restored = true;
+        state.cached_release_sequence = state
+            .cached_release_sequence
+            .max(restored.cached_release_sequence);
+        if let Some(cached) = restored.manifest.take() {
+            match state.manifest.as_ref() {
+                Some(live) if live.sequence == cached.sequence && live != &cached => {
+                    state.conflicting_sequence = Some(cached.sequence);
+                    state.fresh = false;
+                    state.error =
+                        Some("Conflicting cached and live curation release sequence".into());
+                    state.cache_error = state.error.clone();
+                }
+                Some(live) if live.sequence >= cached.sequence => {}
+                _ => {
+                    state.manifest = Some(cached);
+                    state.fresh = false;
+                }
+            }
+        }
+        // Legacy skill-index withdrawals retain their independent authority.
         Ok(())
     }
     fn record(&mut self, bytes: &[u8], connection: &CurationConnection) -> Result<(), String> {
@@ -103,6 +125,9 @@ impl Cache {
                 &serde_json::to_vec(old).map_err(|e| e.to_string())?,
                 &connection.trusted_public_keys,
             )?;
+            if previous.sequence == manifest.sequence && previous != manifest {
+                return Err("Conflicting curation cache release sequence".into());
+            }
             if previous.sequence > manifest.sequence {
                 return Err("Curation cache rollback refused".into());
             }
@@ -363,14 +388,17 @@ async fn connected(
             .map_err(|_| "Curation event read failed")?
             .ok_or("Curation event stream closed")?;
         if let Some(sequence) = frames.push(&chunk)? {
-            let current = store
-                .0
-                .lock()
-                .expect("curation state poisoned")
-                .manifest
-                .as_ref()
-                .map(|m| m.sequence);
-            if current.is_none_or(|current| sequence > current) {
+            let needs_refresh = {
+                let state = store.0.lock().expect("curation state poisoned");
+                let current = state.manifest.as_ref().map(|m| m.sequence);
+                current.is_none_or(|current| sequence > current)
+                    || (path.is_some()
+                        && (state
+                            .cached_release_sequence
+                            .is_none_or(|cached| sequence > cached)
+                            || state.cache_error.is_some()))
+            };
+            if needs_refresh {
                 refresh(connection, store, cache, path).await?;
             }
         }
@@ -518,6 +546,90 @@ mod tests {
         assert!(!restored.revision_withdrawn("skill:test.cached", "r2"));
     }
     #[test]
+    fn startup_restore_merges_tombstones_and_preserves_highest_verified_sequence() {
+        let key = SigningKey::from_bytes(&[22; 32]);
+        let connection = connection(&key);
+        let mut cache = Cache::empty(&connection);
+        cache.record(&signed(&key, 2, true), &connection).unwrap();
+        for live_sequence in [1, 3] {
+            let store = CurationReleaseStore::default();
+            store.bind(&connection);
+            store
+                .accept(
+                    decode_manifest(
+                        &signed(&key, live_sequence, false),
+                        &connection.trusted_public_keys,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            cache.restore(&connection, &store).unwrap();
+            assert!(store.revision_withdrawn("skill:test.cached", "r1"));
+            let status = store.status(true, &BTreeSet::new(), None);
+            assert_eq!(status["release_sequence"], live_sequence.max(2));
+            assert_eq!(
+                status["freshness"],
+                if live_sequence < 2 {
+                    "unverified"
+                } else {
+                    "verified"
+                }
+            );
+            assert!(store
+                .accept(
+                    decode_manifest(&signed(&key, 1, false), &connection.trusted_public_keys)
+                        .unwrap()
+                )
+                .is_err());
+        }
+        // Cached snapshot itself may no longer carry a live-learned withdrawal.
+        let mut newer_cache = Cache::empty(&connection);
+        newer_cache
+            .record(&signed(&key, 3, false), &connection)
+            .unwrap();
+        let store = CurationReleaseStore::default();
+        store.bind(&connection);
+        store
+            .accept(
+                decode_manifest(&signed(&key, 2, true), &connection.trusted_public_keys).unwrap(),
+            )
+            .unwrap();
+        newer_cache.restore(&connection, &store).unwrap();
+        assert!(store.revision_withdrawn("skill:test.cached", "r1"));
+        assert_eq!(
+            store.status(true, &BTreeSet::new(), None)["release_sequence"],
+            3
+        );
+    }
+
+    #[test]
+    fn conflicting_startup_sequence_keeps_withdrawals_and_requires_newer_release() {
+        let key = SigningKey::from_bytes(&[23; 32]);
+        let connection = connection(&key);
+        let mut cache = Cache::empty(&connection);
+        cache.record(&signed(&key, 2, true), &connection).unwrap();
+        let store = CurationReleaseStore::default();
+        store.bind(&connection);
+        let live =
+            decode_manifest(&signed(&key, 2, false), &connection.trusted_public_keys).unwrap();
+        store.accept(live.clone()).unwrap();
+        cache.restore(&connection, &store).unwrap();
+        assert!(store.revision_withdrawn("skill:test.cached", "r1"));
+        assert_eq!(
+            store.status(true, &BTreeSet::new(), None)["freshness"],
+            "unverified"
+        );
+        assert!(store.accept(live).is_err());
+        assert!(cache.record(&signed(&key, 2, false), &connection).is_err());
+        store
+            .accept(
+                decode_manifest(&signed(&key, 3, false), &connection.trusted_public_keys).unwrap(),
+            )
+            .unwrap();
+        assert!(store.revision_withdrawn("skill:test.cached", "r1"));
+    }
+
+    #[test]
     fn event_frames_are_bounded_fragmented_and_coalesced() {
         let mut frames = Frames::default();
         assert_eq!(
@@ -591,12 +703,36 @@ mod tests {
             CurationSubscriber::start(connection.clone(), store.clone(), Some(path.clone()))
                 .unwrap();
         wait_sequence(&store, 1).await;
+        // MCP can reconcile before the same sequence reaches the SSE stream.
+        // The hint must still fetch/persist the envelope, not just compare RAM.
         *body.lock().unwrap() = signed(&key, 2, true);
+        store.reconcile(&connection).await.unwrap();
+        assert_eq!(
+            store.status(true, &BTreeSet::new(), None)["release_sequence"],
+            2
+        );
         hints.send(2).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if store.0.lock().unwrap().cached_release_sequence == Some(2) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("SSE must persist a sequence already reconciled by MCP");
+        let restored_before_reconnect = CurationReleaseStore::default();
+        restored_before_reconnect.bind(&connection);
+        Cache::load(&path, &connection)
+            .unwrap()
+            .restore(&connection, &restored_before_reconnect)
+            .unwrap();
+        assert!(restored_before_reconnect.revision_withdrawn("skill:test.cached", "r1"));
         wait_sequence(&store, 2).await;
         assert!(store.revision_withdrawn("skill:test.cached", "r1"));
         hints.send(u64::MAX).unwrap();
-        *body.lock().unwrap() = signed(&key, 3, true);
+        *body.lock().unwrap() = signed(&key, 3, false);
         wait_sequence(&store, 3).await;
         subscription.shutdown().unwrap();
         assert!(

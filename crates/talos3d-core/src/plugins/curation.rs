@@ -195,6 +195,7 @@ struct ReleaseState {
     fresh: bool,
     error: Option<String>,
     overflow: bool,
+    conflicting_sequence: Option<u64>,
     skill_authority: String,
     skill_epoch: Option<i64>,
     skill_tombstones: BTreeSet<String>,
@@ -227,6 +228,7 @@ impl CurationReleaseStore {
             state.fresh = false;
             state.error = None;
             state.overflow = false;
+            state.conflicting_sequence = None;
             state.service_events_connected = false;
             state.cache_restored = false;
             state.cached_release_sequence = None;
@@ -247,6 +249,9 @@ impl CurationReleaseStore {
         let mut state = self.0.lock().expect("curation state poisoned");
         if expected.is_some_and(|key| key != state.authority) {
             return Err("Curation connection changed while refreshing".into());
+        }
+        if state.conflicting_sequence.is_some_and(|sequence| manifest.sequence <= sequence) {
+            return Err("Conflicting curation release sequence requires a newer signed release".into());
         }
         if let Some(old) = &state.manifest {
             if manifest.sequence < old.sequence {
@@ -269,6 +274,7 @@ impl CurationReleaseStore {
         }
         state.tombstones = tombstones;
         state.manifest = Some(manifest);
+        state.conflicting_sequence = None;
         state.fresh = true;
         state.error = None;
         Ok(())
