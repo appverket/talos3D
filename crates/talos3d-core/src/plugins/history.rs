@@ -194,6 +194,7 @@ impl History {
 /// operation must not leave either authored state or a redo-able fragment
 /// behind. The model revision still advances for each compensating undo, so a
 /// preview created before the failed attempt remains safely stale.
+#[cfg(feature = "model-api")]
 pub(crate) fn rollback_to_undo_depth(world: &mut World, target_depth: usize) -> usize {
     let mut rolled_back = 0;
     while world.resource::<History>().undo_stack_len() > target_depth {

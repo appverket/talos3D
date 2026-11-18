@@ -172,6 +172,7 @@ pub fn validation_as_str(validation: &ValidationStatus) -> &'static str {
 
 /// Knowledge changes use the same before/after history path as model commands,
 /// so private learning participates in autosave revision fences and undo/redo.
+#[cfg(feature = "model-api")]
 pub(crate) fn apply_knowledge_update<T: bevy::prelude::Resource + Clone>(
     world: &mut bevy::prelude::World,
     before: T,

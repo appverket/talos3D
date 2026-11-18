@@ -1395,7 +1395,6 @@ pub(crate) struct MeshSubject {
 
 #[derive(Clone, Copy)]
 pub(crate) struct SceneTriangle {
-    pub(crate) entity: Entity,
     pub(crate) a: Vec3,
     pub(crate) b: Vec3,
     pub(crate) c: Vec3,
@@ -1468,7 +1467,6 @@ pub(crate) fn collect_scene_triangles(
                 continue;
             };
             triangles.push(SceneTriangle {
-                entity: subject.entity,
                 a: subject.mesh_transform.transform_point(Vec3::from(a)),
                 b: subject.mesh_transform.transform_point(Vec3::from(b)),
                 c: subject.mesh_transform.transform_point(Vec3::from(c)),
@@ -2048,7 +2046,6 @@ mod tests {
         // Triangle straddles the cut, but its intersection with the viewing ray
         // is below it. It must not hide the retained edge behind the cut.
         let triangle = SceneTriangle {
-            entity: Entity::from_bits(2),
             a: Vec3::new(-2.0, -1.0, 0.0),
             b: Vec3::new(2.0, -1.0, 0.0),
             c: Vec3::new(0.0, 1.0, 0.0),
@@ -2077,13 +2074,11 @@ mod tests {
         let d = Vec3::new(-2.0, y_max, z);
         vec![
             SceneTriangle {
-                entity: Entity::from_bits(2),
                 a,
                 b,
                 c,
             },
             SceneTriangle {
-                entity: Entity::from_bits(2),
                 a,
                 b: c,
                 c: d,
@@ -2231,7 +2226,6 @@ mod tests {
         // Actual transformed cottage door31 stile vertices. The former f32
         // centroid predicate claimed this west door hid an entire east corner.
         let mut triangle = SceneTriangle {
-            entity: Entity::from_bits(2),
             a: Vec3::new(2.330899953842163, 0.06999999284744263, -1.4349998235702515),
             b: Vec3::new(2.390899896621704, 0.06999999284744263, -1.434999704360962),
             c: Vec3::new(2.390899896621704, 1.9500000476837158, -1.434999704360962),

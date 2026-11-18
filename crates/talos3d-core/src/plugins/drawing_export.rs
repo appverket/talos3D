@@ -554,7 +554,7 @@ pub(crate) fn queue_app_window_export(world: &mut World, path: &Path) -> Result<
     )
 }
 
-#[cfg(feature = "model-api")]
+#[cfg(all(feature = "model-api", target_arch = "wasm32"))]
 pub(crate) fn queue_memory_screenshot(
     world: &mut World,
     include_ui: bool,
@@ -1010,6 +1010,7 @@ fn write_rgb_to_path(path: &Path, rgb: &RgbImage) -> Result<(), String> {
     }
 }
 
+#[cfg(any(test, all(feature = "model-api", not(target_arch = "wasm32"))))]
 pub(crate) fn screenshot_quality_warning_for_path(path: &Path) -> Result<Option<String>, String> {
     let dynamic = image::open(path)
         .map_err(|error| format!("cannot inspect screenshot '{}': {error}", path.display()))?;

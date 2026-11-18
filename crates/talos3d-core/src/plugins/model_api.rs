@@ -1,12 +1,15 @@
+#[cfg(feature = "model-api")]
 use crate::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "model-api")]
 pub mod concept_tools;
 #[cfg(feature = "model-api")]
 mod recipe_history;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "model-api"))]
 use crate::plugins::history::apply_pending_history_commands;
-use std::collections::{BTreeSet, HashMap, HashSet};
+#[cfg(feature = "model-api")]
+use std::collections::{BTreeSet, HashSet};
+use std::collections::HashMap;
 
 #[cfg(feature = "model-api")]
 use bevy::window::PrimaryWindow;
@@ -21,9 +24,11 @@ use serde_json::Value;
 #[cfg(feature = "model-api")]
 use crate::authored_entity::AuthoredEntity;
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
+use crate::capability_registry::{CapabilityRegistry, SelectableSubobjectRef};
+#[cfg(feature = "model-api")]
 use crate::capability_registry::{
-    CapabilityRegistry, FaceId, GeneratedEdgeRef, GeneratedFaceRef, SelectableSubobjectInfo,
-    SelectableSubobjectRef, SubobjectDisplayOverrides, SubobjectSelection,
+    FaceId, GeneratedEdgeRef, GeneratedFaceRef, SelectableSubobjectInfo,
+    SubobjectDisplayOverrides, SubobjectSelection,
 };
 #[cfg(feature = "model-api")]
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};

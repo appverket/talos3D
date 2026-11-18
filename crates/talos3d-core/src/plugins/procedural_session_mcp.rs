@@ -412,8 +412,6 @@ impl Plugin for ProceduralSessionMcpPlugin {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use bevy::prelude::*;
-
     use super::*;
     use crate::curation::procedural_session::{
         FindingSeverity, ProceduralSessionRegistry, SessionFinding, SessionToolDescriptor,

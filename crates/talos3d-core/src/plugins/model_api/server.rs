@@ -21,6 +21,7 @@ pub(crate) struct ModelApiServer {
 pub(super) enum ModelApiTransportSecurity {
     LocalStdio,
     InstanceBearerHttp,
+    #[cfg(target_arch = "wasm32")]
     BrowserAttachedRelay,
 }
 
@@ -28,6 +29,7 @@ pub(super) enum ModelApiTransportSecurity {
 impl ModelApiTransportSecurity {
     pub(super) fn session_info(self, loopback: bool) -> SessionSecurityInfo {
         match self {
+            #[cfg(target_arch = "wasm32")]
             Self::BrowserAttachedRelay => SessionSecurityInfo {
                 transport_scope: "browser_attached_relay".into(),
                 authentication_assurance: "authenticated_host_and_session_bound_relay_bearer".into(),
@@ -264,6 +266,7 @@ tokio::task_local! { static REQUEST_ACCESS: (bool, bool); }
 
 #[cfg(feature = "model-api")]
 impl ModelApiServer {
+    #[cfg(target_arch = "wasm32")]
     pub(super) fn for_browser(sender: ModelApiRequestSender) -> Self {
         let mut server = Self::new(sender);
         server.transport_security = ModelApiTransportSecurity::BrowserAttachedRelay;
@@ -2924,7 +2927,7 @@ fn tool_requires_authored_base(name: &str) -> bool {
     guarded && !matches!(name, "list_edit_requests" | "inspect_edit_plan")
 }
 
-#[cfg(feature = "model-api")]
+#[cfg(all(feature = "model-api", any(test, target_arch = "wasm32")))]
 include!(concat!(env!("OUT_DIR"), "/mcp_without_peer.rs"));
 
 // Hand-written (instead of `#[tool_handler]`) so tools/list and tools/call are
