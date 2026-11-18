@@ -2072,18 +2072,7 @@ mod tests {
         let b = Vec3::new(2.0, y_min, z);
         let c = Vec3::new(2.0, y_max, z);
         let d = Vec3::new(-2.0, y_max, z);
-        vec![
-            SceneTriangle {
-                a,
-                b,
-                c,
-            },
-            SceneTriangle {
-                a,
-                b: c,
-                c: d,
-            },
-        ]
+        vec![SceneTriangle { a, b, c }, SceneTriangle { a, b: c, c: d }]
     }
 
     #[test]

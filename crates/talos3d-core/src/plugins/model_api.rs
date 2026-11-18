@@ -7,9 +7,9 @@ mod recipe_history;
 
 #[cfg(all(test, feature = "model-api"))]
 use crate::plugins::history::apply_pending_history_commands;
+use std::collections::HashMap;
 #[cfg(feature = "model-api")]
 use std::collections::{BTreeSet, HashSet};
-use std::collections::HashMap;
 
 #[cfg(feature = "model-api")]
 use bevy::window::PrimaryWindow;
@@ -27,8 +27,8 @@ use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::{CapabilityRegistry, SelectableSubobjectRef};
 #[cfg(feature = "model-api")]
 use crate::capability_registry::{
-    FaceId, GeneratedEdgeRef, GeneratedFaceRef, SelectableSubobjectInfo,
-    SubobjectDisplayOverrides, SubobjectSelection,
+    FaceId, GeneratedEdgeRef, GeneratedFaceRef, SelectableSubobjectInfo, SubobjectDisplayOverrides,
+    SubobjectSelection,
 };
 #[cfg(feature = "model-api")]
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
