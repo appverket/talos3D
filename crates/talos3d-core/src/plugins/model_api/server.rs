@@ -2137,8 +2137,56 @@ impl ModelApiServer {
     }
 
     async fn request_get_guidance_card(&self, card_id: String) -> ApiResult<GuidanceCardInfo> {
-        self.round_trip(|response| ModelApiRequest::GetGuidanceCard { card_id, response })
-            .await?
+        let advertised_session = self.guidance_state.required_card_session(&card_id);
+        let card = self
+            .round_trip(|response| ModelApiRequest::GetGuidanceCard {
+                card_id: card_id.clone(),
+                response,
+            })
+            .await?;
+        if let Some(card) = card {
+            return Ok(card);
+        }
+        let mut error = format!("guidance card not found: '{card_id}'");
+        if advertised_session.is_some()
+            && advertised_session == self.guidance_state.required_card_session(&card_id)
+        {
+            // This path runs only on a proven missing required card, never on
+            // normal discovery, refusals or an arbitrary caller-supplied id.
+            match self.capture_missing_required_guidance().await {
+                Ok(receipt) => error.push_str(&format!(
+                    "; harness incident recorded locally (event_id: {}). Export remains host-controlled; no repair has run.",
+                    receipt["event_id"].as_str().unwrap_or_default()
+                )),
+                Err(()) => error.push_str(
+                    "; automatic private incident capture unavailable. The guidance failure remains unresolved.",
+                ),
+            }
+        }
+        Err(error)
+    }
+
+    async fn capture_missing_required_guidance(&self) -> Result<Value, ()> {
+        let (policy, store, connection, corpus) = self
+            .round_trip(ModelApiRequest::HarnessIncidentContext)
+            .await
+            .map_err(|_| ())?;
+        let record = move || {
+            store.report_missing_required_guidance(
+                &policy,
+                &connection,
+                corpus.bearer_token.as_deref(),
+            )
+        };
+        // Persistence (including fsync) must never run on the Bevy/UI thread
+        // or a native async executor thread. Await the bounded write so the
+        // error receipt is truthful and no detached write can be lost at exit.
+        #[cfg(not(target_arch = "wasm32"))]
+        let result = tokio::task::spawn_blocking(record).await.map_err(|_| ())?;
+        // Browser storage is in-memory; configured native paths are refused.
+        #[cfg(target_arch = "wasm32")]
+        let result = record();
+        result.map_err(|_| ())
     }
 
     async fn request_list_agent_skills(
@@ -9343,11 +9391,15 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .round_trip(ModelApiRequest::HarnessIncidentContext)
             .await
             .map_err(|_| McpError::internal_error("Private incident host unavailable", None))?;
-        json_tool_result(
-            store
-                .report(params, &policy, &connection, corpus.bearer_token.as_deref())
-                .map_err(|error| McpError::invalid_params(error, None))?,
-        )
+        let record =
+            move || store.report(params, &policy, &connection, corpus.bearer_token.as_deref());
+        #[cfg(not(target_arch = "wasm32"))]
+        let result = tokio::task::spawn_blocking(record)
+            .await
+            .map_err(|_| McpError::internal_error("Private incident host unavailable", None))?;
+        #[cfg(target_arch = "wasm32")]
+        let result = record();
+        json_tool_result(result.map_err(|error| McpError::invalid_params(error, None))?)
     }
 
     #[tool(

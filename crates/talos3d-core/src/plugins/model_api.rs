@@ -15871,10 +15871,15 @@ pub fn handle_list_guidance_cards(world: &World, task: Option<String>) -> Vec<Gu
 
 #[cfg(feature = "model-api")]
 pub fn handle_get_guidance_card(world: &World, card_id: String) -> ApiResult<GuidanceCardInfo> {
+    lookup_guidance_card(world, &card_id)
+        .ok_or_else(|| format!("guidance card not found: '{card_id}'"))
+}
+
+#[cfg(feature = "model-api")]
+fn lookup_guidance_card(world: &World, card_id: &str) -> Option<GuidanceCardInfo> {
     guidance_cards(world)
         .into_iter()
         .find(|card| card.id == card_id)
-        .ok_or_else(|| format!("guidance card not found: '{card_id}'"))
 }
 
 /// Card id for the active authoring guidance. Shared by the capability snapshot

@@ -17,3 +17,6 @@ private/
 /site/
 __pycache__/
 *.pyc
+
+# Local checkout ownership; durable assignment lives in FP.
+/WORKTREE_PURPOSE.md

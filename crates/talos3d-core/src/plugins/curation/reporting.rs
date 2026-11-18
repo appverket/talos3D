@@ -15,6 +15,8 @@ const PENDING_SCHEMA: &str = "talos3d.private-pending-incidents.v1";
 const MAX_PENDING: usize = 128;
 const MAX_BYTES: usize = 512 * 1024;
 const MAX_SUBMIT: usize = 8;
+const REQUIRED_GUIDANCE_FAILURE: &str = "negotiated_required_guidance_missing";
+const REQUIRED_GUIDANCE_DETECTOR: &str = "negotiated_required_guidance.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +89,10 @@ struct PendingRecord {
     source: String,
     credential_fingerprint: Option<String>,
     submitted: bool,
+    /// Local provenance only. Legacy/explicit records cannot impersonate the
+    /// host's detector merely by supplying identical observation fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detector: Option<String>,
 }
 #[derive(Default)]
 struct PendingState {
@@ -153,9 +159,52 @@ impl HarnessIncidentStore {
         connection: &CurationConnection,
         bearer: Option<&str>,
     ) -> Result<Value, String> {
+        if request.failure_code == REQUIRED_GUIDANCE_FAILURE {
+            return Err("This failure code is reserved for verified host detection".into());
+        }
+        self.report_inner(request, policy, connection, bearer, false)
+    }
+
+    /// Only the host's verified negotiated-guidance detector calls this. No
+    /// caller-supplied identifiers or session/project content enter the record.
+    #[cfg(feature = "model-api")]
+    pub(crate) fn report_missing_required_guidance(
+        &self,
+        policy: &HarnessIncidentPolicy,
+        connection: &CurationConnection,
+        bearer: Option<&str>,
+    ) -> Result<Value, String> {
+        self.report_inner(
+            ReportHarnessIncident {
+                event_id: None,
+                kind: ObservationKind::BrokenGuidanceReference,
+                applicability: RemedyKey {
+                    gap_kind: Some("required_guidance_unavailable".into()),
+                    capability_id: Some("core.model_api".into()),
+                    contract_revision: Some("agent_welcome.v2".into()),
+                    ..Default::default()
+                },
+                failure_code: REQUIRED_GUIDANCE_FAILURE.into(),
+                app_revision: format!("core.{}", env!("CARGO_PKG_VERSION")),
+            },
+            policy,
+            connection,
+            bearer,
+            true,
+        )
+    }
+
+    fn report_inner(
+        &self,
+        request: ReportHarnessIncident,
+        policy: &HarnessIncidentPolicy,
+        connection: &CurationConnection,
+        bearer: Option<&str>,
+        deduplicate_content: bool,
+    ) -> Result<Value, String> {
         let source = source(connection)?;
         let credential_fingerprint = fingerprint(bearer);
-        let observation = Observation {
+        let mut observation = Observation {
             schema: OBSERVATION_SCHEMA.into(),
             event_id: match request.event_id {
                 Some(id) => uuid::Uuid::parse_str(&id)
@@ -171,6 +220,22 @@ impl HarnessIncidentStore {
         };
         observation.validate_local()?;
         let mut state = self.load(policy)?;
+        // Coalesce this detector's signal per core version and host identity,
+        // including after restart/submission. Check and insert under one lock.
+        // Explicit reports retain their caller-selected event semantics.
+        if deduplicate_content {
+            if let Some(old) = state.records.values().find(|record| {
+                record.detector.as_deref() == Some(REQUIRED_GUIDANCE_DETECTOR)
+                    && record.observation.kind == observation.kind
+                    && record.observation.applicability == observation.applicability
+                    && record.observation.failure_code == observation.failure_code
+                    && record.observation.app_revision == observation.app_revision
+                    && record.source == source
+                    && record.credential_fingerprint == credential_fingerprint
+            }) {
+                observation.event_id = old.observation.event_id.clone();
+            }
+        }
         if let Some(old) = state.records.get(&observation.event_id) {
             if old.observation != observation
                 || old.source != source
@@ -193,6 +258,7 @@ impl HarnessIncidentStore {
             source,
             credential_fingerprint,
             submitted: false,
+            detector: deduplicate_content.then(|| REQUIRED_GUIDANCE_DETECTOR.into()),
         };
         let mut candidate = state.records.clone();
         candidate.insert(observation.event_id.clone(), record);
@@ -405,6 +471,124 @@ fn write_pending(_: &Path, _: &[u8]) -> Result<(), String> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn automatic_signal_deduplicates_atomically_across_restart_and_identity() {
+        let dir = std::env::temp_dir().join(format!("talos-dedup-{}", uuid::Uuid::new_v4()));
+        let policy = HarnessIncidentPolicy {
+            pending_path: Some(dir.join("pending.json")),
+            ..Default::default()
+        };
+        let connection = CurationConnection {
+            base_url: "https://example.test/v1/curation".into(),
+            ..Default::default()
+        };
+        let store = HarnessIncidentStore::default();
+        let ids = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        store
+                            .report_missing_required_guidance(
+                                &policy,
+                                &connection,
+                                Some("original"),
+                            )
+                            .unwrap()
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|t| t.join().unwrap()["event_id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        });
+        assert!(ids.iter().all(|id| *id == ids[0]));
+        let restarted = HarnessIncidentStore::default();
+        let same = restarted
+            .report_missing_required_guidance(&policy, &connection, Some("original"))
+            .unwrap();
+        assert_eq!(same["event_id"], ids[0]);
+        assert_eq!(same["duplicate"], true);
+        let rotated = restarted
+            .report_missing_required_guidance(&policy, &connection, Some("rotated"))
+            .unwrap();
+        assert_ne!(rotated["event_id"], same["event_id"]);
+        let other_source = CurationConnection {
+            base_url: "https://other.test/v1/curation".into(),
+            ..Default::default()
+        };
+        assert_ne!(
+            restarted
+                .report_missing_required_guidance(&policy, &other_source, Some("original"))
+                .unwrap()["event_id"],
+            same["event_id"]
+        );
+        assert_eq!(restarted.load(&policy).unwrap().records.len(), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn automatic_signal_respects_capacity_without_evicting_explicit_reports() {
+        let store = HarnessIncidentStore::default();
+        let policy = HarnessIncidentPolicy::default();
+        let connection = CurationConnection::default();
+        for _ in 0..MAX_PENDING {
+            store
+                .report(request(None), &policy, &connection, None)
+                .unwrap();
+        }
+        assert!(store
+            .report_missing_required_guidance(&policy, &connection, None)
+            .unwrap_err()
+            .contains("capacity"));
+        assert_eq!(store.load(&policy).unwrap().records.len(), MAX_PENDING);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn explicit_reports_cannot_claim_or_preseed_host_detection() {
+        let store = HarnessIncidentStore::default();
+        let policy = HarnessIncidentPolicy::default();
+        let connection = CurationConnection::default();
+        let mut spoof = request(None);
+        spoof.failure_code = REQUIRED_GUIDANCE_FAILURE.into();
+        assert!(store
+            .report(spoof, &policy, &connection, None)
+            .unwrap_err()
+            .contains("reserved"));
+        let first = store
+            .report_missing_required_guidance(&policy, &connection, None)
+            .unwrap();
+        let first_id = first["event_id"].as_str().unwrap();
+        // Simulate a legacy record created before the code became reserved.
+        store
+            .load(&policy)
+            .unwrap()
+            .records
+            .get_mut(first_id)
+            .unwrap()
+            .detector = None;
+        let second = store
+            .report_missing_required_guidance(&policy, &connection, None)
+            .unwrap();
+        assert_ne!(first["event_id"], second["event_id"]);
+        let second_id = second["event_id"].as_str().unwrap();
+        store
+            .load(&policy)
+            .unwrap()
+            .records
+            .get_mut(second_id)
+            .unwrap()
+            .submitted = true;
+        let duplicate = store
+            .report_missing_required_guidance(&policy, &connection, None)
+            .unwrap();
+        assert_eq!(duplicate["event_id"], second["event_id"]);
+        assert_eq!(duplicate["submitted"], true);
+    }
+
     fn request(id: Option<String>) -> ReportHarnessIncident {
         ReportHarnessIncident {
             event_id: id,

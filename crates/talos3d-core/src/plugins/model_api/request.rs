@@ -969,7 +969,9 @@ pub(super) enum ModelApiRequest {
     },
     GetGuidanceCard {
         card_id: String,
-        response: oneshot::Sender<ApiResult<GuidanceCardInfo>>,
+        // Absence is distinct from a failed request/transport. The detector
+        // must never turn a channel failure into a missing-card diagnosis.
+        response: oneshot::Sender<Option<GuidanceCardInfo>>,
     },
     AgentCorpusConnection(oneshot::Sender<crate::plugins::agent_skills::AgentCorpusConnection>),
     CurationContext(
@@ -2545,7 +2547,7 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             let _ = response.send(handle_list_guidance_cards(world, task));
         }
         ModelApiRequest::GetGuidanceCard { card_id, response } => {
-            let _ = response.send(handle_get_guidance_card(world, card_id));
+            let _ = response.send(lookup_guidance_card(world, &card_id));
         }
         ModelApiRequest::AgentCorpusConnection(response) => {
             let _ = response.send(

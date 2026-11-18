@@ -1451,10 +1451,15 @@ applicability in the public remedy vocabulary, failure_code and app_revision.
 Identifiers are bounded to 160 ASCII letters/digits or ._:-; no free-text prompt,
 geometry, customer context or arbitrary evidence payload is accepted. Reuse the
 returned event ID when retrying; conflicting content or identity is refused.
+The automatic detector failure code is reserved; explicit reports cannot claim
+it. Local records retain a host-only detector marker, and legacy unmarked
+records cannot pre-seed automatic deduplication. This marker is private local
+evidence, not a remote cryptographic attestation.
 
 The host can insert curation::reporting::HarnessIncidentPolicy and
 HarnessIncidentStore. Export is off by default. Optional pending_path must be
-an absolute host-owned private path outside source/project repositories. Native
+an absolute host-owned private path outside source/project repositories and
+exclusive to one live application instance; cross-process locking is not provided. Native
 persistence atomically replaces a bounded private file (128 records, 512 KiB).
 Without it, retention is application lifetime; browser persistence needs a host
 adapter. Completed receipts remain retained for local idempotency; capacity
@@ -1476,8 +1481,32 @@ local after later sign-in. These conservative cases require explicit host review
 there is no model-accessible rebind. Offline delivery failures retain stable event
 IDs for idempotent retries, including a lost server receipt before local commit.
 
-This slice records deliberate reports, not automatic failure telemetry. An intake
-receipt proves neither diagnosis nor remedy acceptance. No provider work or
+Automatic capture also covers one narrow, server-proven signal: a card required
+by `negotiate_agent_session` no longer resolves when fetched directly or through
+`get_agent_guidance_packet`. The current negotiated session must still match
+before and after resolution. Unknown caller-supplied ids, unnegotiated clients,
+transport failures, successful lookups and concurrent renegotiation do not
+produce this signal. A snapshot-only client is not covered by this detector.
+This observes a broken continuation contract; it does not establish root cause.
+Renegotiate to load the current contract after a capability change.
+
+The observation contains only fixed public failure/applicability identifiers and
+the Core package version, not the card id, session id, revision anchor, task,
+prompt, guidance body or model content. Automatic signals coalesce into one
+retained event per Core package version, contract, service and credential binding,
+including after restart/submission. They are evidence of presence, not occurrence
+counts or exact-build telemetry; explicit reports keep their event-id semantics.
+The existing 128-record/512-KiB limits apply without eviction. Native persistence
+runs on a blocking worker, outside both the Bevy/UI and async executor threads;
+the failed request awaits it so its local receipt is truthful. Failed persistence
+leaves the original guidance error visible and reports capture unavailable.
+Healthy reads add only a bounded negotiated-card membership lookup, with no
+extra World request, filesystem access, network request or background task.
+
+Capture never exports automatically, starts a curator/provider, or changes the
+model. The existing host-authorized submission and durable event service remain
+the route to curator activation. An intake receipt proves neither diagnosis nor
+remedy acceptance. No provider work or
 project mutation starts as a side effect, and production contribution/retention
 policies remain separately governed.
 

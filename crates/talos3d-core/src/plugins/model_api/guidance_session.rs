@@ -237,6 +237,17 @@ impl GuidanceSessionStore {
             .unwrap_or_default()
     }
 
+    /// Proof that this card was required by the current server-issued welcome.
+    /// The opaque session id is local only and fences concurrent renegotiation.
+    pub fn required_card_session(&self, card_id: &str) -> Option<String> {
+        self.0
+            .lock()
+            .expect("guidance session lock poisoned")
+            .as_ref()
+            .filter(|session| session.required_cards.iter().any(|id| id == card_id))
+            .map(|session| session.id.clone())
+    }
+
     pub fn required_skills(&self) -> Vec<String> {
         self.0
             .lock()
