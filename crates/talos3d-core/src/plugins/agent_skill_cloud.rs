@@ -108,10 +108,11 @@ impl SkillIndex {
             let exact = text.contains(&query);
             let words = query_terms(&text);
             let matched = terms.intersection(&words).count();
-            // Require at least half the informative query terms, and at least
-            // two for multi-term queries. A lone generic overlap is not a hit.
-            let relevant =
-                !terms.is_empty() && matched >= terms.len().div_ceil(2).max(terms.len().min(2));
+            // Partial-reference discovery must tolerate extra question modifiers.
+            // Require half the terms up to four strong matches, and at least
+            // two for multi-term queries. Retrieval is not coverage approval.
+            let relevant = !terms.is_empty()
+                && matched >= terms.len().div_ceil(2).min(4).max(terms.len().min(2));
             if exact || relevant {
                 let mut summary = skill.clone();
                 summary.source_path = Some(format!("cloud:{}", entry.content_hash));
@@ -502,6 +503,36 @@ pub async fn search_passages(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    #[test]
+    fn long_question_modifiers_do_not_hide_a_relevant_supplement() {
+        let make = |id: &str, title: &str| {
+            let skill: AgentSkill = serde_json::from_value(json!({
+                "id":id,"title":title,"summary":"Reference procedure","body_markdown":"Read references."
+            })).unwrap();
+            SkillIndexEntry {
+                content_hash: "a".repeat(64),
+                skill: skill.summary_info(),
+                sequence: 1,
+            }
+        };
+        let index = SkillIndex {
+            schema: SCHEMA.into(),
+            epoch: 1,
+            withdrawn_skill_ids: vec![],
+            skills: vec![
+                make("relevant", "Module cache loading replacement"),
+                make("weak", "Cache loading"),
+                make("unrelated", "Invoice cache"),
+            ],
+        };
+        let query = AgentSkillSearch { query: Some("modules loading caches replacement optional remote asynchronous staging validation".into()), tags: vec![] };
+        let hits = index.filter(&query);
+        assert_eq!(
+            hits.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["relevant"]
+        );
+    }
+
     #[test]
     fn supplemental_references_are_discoverable_by_natural_terms() {
         let make = |id: &str, title: &str, tags: Vec<&str>| {

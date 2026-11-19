@@ -1592,8 +1592,9 @@ still needs a fresh evaluation contract and available budget. Nothing grants
 release authority or replays a model edit.
 
 Cloud reference discovery ranks exact phrases first and also returns supplements
-matching at least half the informative query terms (at least two for multi-term
-queries), with simple inflection normalization. Explicit tag filters still apply.
+matching at least half the informative query terms, capped at four required
+matches for long questions (at least two for multi-term queries), with simple
+inflection normalization. Extra modifiers must not hide a relevant partial reference. Explicit tag filters still apply.
 This is bounded lexical retrieval, not proof that a passage answers the whole
 question: fetch exact revisions, check their scope and report remaining gaps.
 The existing maximum of 16 retrieved bundles per request is unchanged; no search
