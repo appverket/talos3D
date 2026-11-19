@@ -108,6 +108,75 @@ impl ModelApiServer {
         status["shared_export_enabled"] = json!(policy.export_enabled);
         status
     }
+    async fn capture_knowledge_gap(&self, topic: String, question: String, kind: String) -> Value {
+        let Ok((policy, store, connection, corpus)) = self
+            .round_trip(ModelApiRequest::HarnessIncidentContext)
+            .await
+        else {
+            return json!({"status":"capture_unavailable"});
+        };
+        let (p, st, c, credential) = (
+            policy.clone(),
+            store.clone(),
+            connection.clone(),
+            corpus.bearer_token.clone(),
+        );
+        let record = move || st.report_gap(topic, question, kind, &p, &c, credential.as_deref());
+        #[cfg(not(target_arch = "wasm32"))]
+        let result = tokio::task::spawn_blocking(record)
+            .await
+            .unwrap_or_else(|_| Err("Capture unavailable".into()));
+        #[cfg(target_arch = "wasm32")]
+        let result = record();
+        match result {
+            Ok(mut receipt) => {
+                receipt["submission"] = store
+                    .submit(&policy, &connection, &corpus)
+                    .await
+                    .unwrap_or_else(|_| json!({"status":"delivery_unavailable"}));
+                receipt["next_tool"] = json!("get_harness_incident_status");
+                receipt
+            }
+            Err(_) => {
+                json!({"status":"capture_unavailable","note":"The knowledge gap remains unresolved; no repair is queued."})
+            }
+        }
+    }
+
+    async fn capture_operation_failure(&self, capability: &'static str) -> Value {
+        let Ok((policy, store, connection, corpus)) = self
+            .round_trip(ModelApiRequest::HarnessIncidentContext)
+            .await
+        else {
+            return json!({"status":"capture_unavailable"});
+        };
+        let (p, st, c, credential) = (
+            policy.clone(),
+            store.clone(),
+            connection.clone(),
+            corpus.bearer_token.clone(),
+        );
+        let record = move || st.report_operation_failure(capability, &p, &c, credential.as_deref());
+        #[cfg(not(target_arch = "wasm32"))]
+        let result = tokio::task::spawn_blocking(record)
+            .await
+            .unwrap_or_else(|_| Err("Capture unavailable".into()));
+        #[cfg(target_arch = "wasm32")]
+        let result = record();
+        match result {
+            Ok(mut receipt) => {
+                receipt["submission"] = store
+                    .submit(&policy, &connection, &corpus)
+                    .await
+                    .unwrap_or_else(|_| json!({"status":"delivery_unavailable"}));
+                receipt["next_tool"] = json!("get_harness_incident_status");
+                receipt["note"]=json!("An unsuccessful operation was observed; its cause is not yet diagnosed. No arguments, error text or geometry were exported.");
+                receipt
+            }
+            Err(_) => json!({"status":"capture_unavailable"}),
+        }
+    }
+
     async fn cloud_skill_list(
         &self,
         filter: crate::plugins::agent_skills::AgentSkillSearch,
@@ -2171,13 +2240,13 @@ impl ModelApiServer {
             .round_trip(ModelApiRequest::HarnessIncidentContext)
             .await
             .map_err(|_| ())?;
-        let record = move || {
-            store.report_missing_required_guidance(
-                &policy,
-                &connection,
-                corpus.bearer_token.as_deref(),
-            )
-        };
+        let (p, st, c, credential) = (
+            policy.clone(),
+            store.clone(),
+            connection.clone(),
+            corpus.bearer_token.clone(),
+        );
+        let record = move || st.report_missing_required_guidance(&p, &c, credential.as_deref());
         // Persistence (including fsync) must never run on the Bevy/UI thread
         // or a native async executor thread. Await the bounded write so the
         // error receipt is truthful and no detached write can be lost at exit.
@@ -2186,7 +2255,12 @@ impl ModelApiServer {
         // Browser storage is in-memory; configured native paths are refused.
         #[cfg(target_arch = "wasm32")]
         let result = record();
-        result.map_err(|_| ())
+        let mut receipt = result.map_err(|_| ())?;
+        receipt["submission"] = store
+            .submit(&policy, &connection, &corpus)
+            .await
+            .unwrap_or_else(|_| json!({"status":"delivery_unavailable"}));
+        Ok(receipt)
     }
 
     async fn request_list_agent_skills(
@@ -4256,7 +4330,8 @@ impl CapabilitySnapshotInfo {
                 "list_element_classes".into(),
                 "select_recipe".into(),
                 "request_corpus_expansion".into(),
-                "save_recipe_draft".into(),
+                "get_harness_incident_status".into(),
+                "search_corpus_knowledge".into(),
                 "materialize_learned_asset".into(),
                 "list_agent_skills".into(),
                 "get_agent_skill".into(),
@@ -5316,10 +5391,19 @@ pub(super) struct RequestCorpusExpansionRequest {
 }
 
 #[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub(super) struct KnowledgeSearchRequest {
+    pub query: String,
+}
+
+#[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct LookupSourcePassageRequest {
     pub(super) passage_ref: String,
+    /// Optional immutable cloud revision returned by search_corpus_knowledge.
+    #[serde(default)]
+    pub(super) content_hash: Option<String>,
 }
 
 #[cfg(feature = "model-api")]
@@ -8791,11 +8875,26 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<CuratedPathDiscoveryRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let requested = params.clone();
         let discovery = self
             .request_discover_curated_paths(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(discovery)
+        let mut value = serde_json::to_value(&discovery)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if discovery.no_curated_path.is_some() {
+            let topic = requested
+                .element_class
+                .unwrap_or_else(|| "unspecified_knowledge".into());
+            let question = requested
+                .query
+                .filter(|q| !q.trim().is_empty())
+                .unwrap_or_else(|| format!("Missing {} coverage for {topic}", discovery.path_kind));
+            value["curation"] = self
+                .capture_knowledge_gap(topic, question, discovery.path_kind)
+                .await;
+        }
+        json_tool_result(value)
     }
 
     #[tool(
@@ -8825,10 +8924,16 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<InstantiateRecipeRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .request_instantiate_recipe(params)
-            .await
-            .map_err(|error| McpError::invalid_params(error, None))?;
+        let result = match self.request_instantiate_recipe(params).await {
+            Ok(value) => value,
+            Err(error) => {
+                let receipt = self.capture_operation_failure("instantiate_recipe").await;
+                return Err(McpError::invalid_params(
+                    error,
+                    Some(json!({"curation":receipt})),
+                ));
+            }
+        };
         json_tool_result(result)
     }
 
@@ -8974,6 +9079,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<RequestCorpusExpansionRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let requested = params.clone();
         let gap = self
             .request_request_corpus_expansion(
                 params.element_class,
@@ -8983,7 +9089,24 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             )
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(gap)
+        let mut value =
+            serde_json::to_value(gap).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        value["curation"] = self
+            .capture_knowledge_gap(
+                requested
+                    .element_class
+                    .unwrap_or_else(|| "unspecified_knowledge".into()),
+                requested.rationale,
+                requested.kind,
+            )
+            .await;
+        value["repair_owner"] = json!("talos_curator");
+        value["required_next_tools"] = json!([
+            "get_harness_incident_status",
+            "get_agent_curation_status",
+            "search_corpus_knowledge"
+        ]);
+        json_tool_result(value)
     }
 
     #[tool(
@@ -8995,6 +9118,19 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<LookupSourcePassageRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(hash) = params.content_hash {
+            let connection = self.corpus_connection().await;
+            let (_, store) = self.curation_context().await;
+            let value = crate::plugins::agent_skill_cloud::released_passage(
+                &connection,
+                &store,
+                &hash,
+                &params.passage_ref,
+            )
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+            return json_tool_result(value);
+        }
         let info = self
             .request_lookup_source_passage(params.passage_ref)
             .await
@@ -9358,6 +9494,19 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         });
         let mut status = cloud::status(&index);
         status["curation"] = self.curation_status(true, None, None).await;
+        if let Ok((policy, pending, curation, corpus)) = self
+            .round_trip(ModelApiRequest::HarnessIncidentContext)
+            .await
+        {
+            status["pending_delivery"] = pending
+                .submit(&policy, &curation, &corpus)
+                .await
+                .unwrap_or_else(|_| json!({"status":"delivery_unavailable"}));
+            status["retry_delivery"] = pending
+                .submit_feedback(&policy, &curation, &corpus)
+                .await
+                .unwrap_or_else(|_| json!({"status":"delivery_unavailable"}));
+        }
         json_tool_result(status)
     }
 
@@ -9380,8 +9529,87 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     #[tool(
+        name = "search_corpus_knowledge",
+        description = "Search reviewed cloud reference passages by topic. Returns immutable revision and lookup_source_passage arguments. Grounding knowledge is not an executable recipe or structural certification. An empty verified result records a local corpus gap; export requires host permission. Private/bundled passages remain available by lookup_source_passage without a content_hash."
+    )]
+    pub(super) async fn search_corpus_knowledge_tool(
+        &self,
+        Parameters(params): Parameters<KnowledgeSearchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.query.trim().is_empty() || params.query.len() > 160 {
+            return Err(McpError::invalid_params(
+                "Bounded knowledge query required",
+                None,
+            ));
+        }
+        let connection = self.corpus_connection().await;
+        let (_, store) = self.curation_context().await;
+        let mut result =
+            crate::plugins::agent_skill_cloud::search_passages(&connection, &store, &params.query)
+                .await
+                .map_err(|_| {
+                    McpError::internal_error(
+                        "Cloud knowledge unavailable; coverage is unknown",
+                        None,
+                    )
+                })?;
+        if result["passages"].as_array().is_some_and(|v| v.is_empty())
+            && result["truncated"] == false
+        {
+            result["curation"] = self
+                .capture_knowledge_gap(
+                    params.query.clone(),
+                    format!("Missing recorded information about {}", params.query),
+                    "passage".into(),
+                )
+                .await;
+        }
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "get_harness_incident_status",
+        description = "Read private delivery and curator status for a locally retained event_id using the original host account. Local-only is not queued repair. A release is not a verified project outcome."
+    )]
+    pub(super) async fn get_harness_incident_status_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::curation::reporting::IncidentStatusRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let (policy, store, connection, corpus) = self
+            .round_trip(ModelApiRequest::HarnessIncidentContext)
+            .await
+            .map_err(|_| McpError::internal_error("Host unavailable", None))?;
+        json_tool_result(
+            store
+                .incident_status(&params.event_id, &policy, &connection, &corpus)
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?,
+        )
+    }
+
+    #[tool(
+        name = "report_harness_retry_outcome",
+        description = "Submit a bounded private outcome after actually retrying with a released remedy. Reuse feedback_id for transport retries. Only public evidence codes, no project prose or geometry. This does not close corpus gaps, certify construction, publish content or replay edits. A durable private outbox retains delivery failures; submit_pending_harness_incidents retries the same identifiers."
+    )]
+    pub(super) async fn report_harness_retry_outcome_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::curation::reporting::RetryOutcome>,
+    ) -> Result<CallToolResult, McpError> {
+        let (policy, store, connection, corpus) = self
+            .round_trip(ModelApiRequest::HarnessIncidentContext)
+            .await
+            .map_err(|_| McpError::internal_error("Host unavailable", None))?;
+        json_tool_result(
+            store
+                .feedback(params, &policy, &connection, &corpus)
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?,
+        )
+    }
+
+    #[tool(
         name = "report_harness_incident",
-        description = "Optionally record a minimized harness observation in the private host pending store. Supply only public failure/applicability identifiers, never prompts, geometry or customer facts. Reuse event_id on retries. This does not export data, enable host policy, start an optimizer or change the model."
+        description = "Optionally record a minimized harness observation in the private host pending store. Supply only public failure/applicability identifiers, never prompts, geometry or customer facts. Reuse event_id on retries. Delivery is attempted only under existing host export permission; recording cannot enable that permission or change the model."
     )]
     pub(super) async fn report_harness_incident_tool(
         &self,
@@ -9391,15 +9619,26 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .round_trip(ModelApiRequest::HarnessIncidentContext)
             .await
             .map_err(|_| McpError::internal_error("Private incident host unavailable", None))?;
-        let record =
-            move || store.report(params, &policy, &connection, corpus.bearer_token.as_deref());
+        let (p, st, c, credential) = (
+            policy.clone(),
+            store.clone(),
+            connection.clone(),
+            corpus.bearer_token.clone(),
+        );
+        let record = move || st.report(params, &p, &c, credential.as_deref());
         #[cfg(not(target_arch = "wasm32"))]
         let result = tokio::task::spawn_blocking(record)
             .await
             .map_err(|_| McpError::internal_error("Private incident host unavailable", None))?;
         #[cfg(target_arch = "wasm32")]
         let result = record();
-        json_tool_result(result.map_err(|error| McpError::invalid_params(error, None))?)
+        let mut receipt = result.map_err(|error| McpError::invalid_params(error, None))?;
+        receipt["submission"] = store
+            .submit(&policy, &connection, &corpus)
+            .await
+            .unwrap_or_else(|_| json!({"status":"delivery_unavailable"}));
+        receipt["next_tool"] = json!("get_harness_incident_status");
+        json_tool_result(receipt)
     }
 
     #[tool(
@@ -9413,12 +9652,15 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .round_trip(ModelApiRequest::HarnessIncidentContext)
             .await
             .map_err(|_| McpError::internal_error("Private incident host unavailable", None))?;
-        json_tool_result(
-            store
-                .submit(&policy, &connection, &corpus)
-                .await
-                .map_err(|error| McpError::invalid_params(error, None))?,
-        )
+        let mut receipt = store
+            .submit(&policy, &connection, &corpus)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        receipt["retry_feedback"] = store
+            .submit_feedback(&policy, &connection, &corpus)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(receipt)
     }
 
     #[tool(
@@ -10399,10 +10641,16 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<crate::plugins::parametric_mcp::CreateParametricRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let resp = self
-            .request_parametric_create(params)
-            .await
-            .map_err(|e| McpError::invalid_params(e, None))?;
+        let resp = match self.request_parametric_create(params).await {
+            Ok(value) => value,
+            Err(error) => {
+                let receipt = self.capture_operation_failure("parametric.create").await;
+                return Err(McpError::invalid_params(
+                    error,
+                    Some(json!({"curation":receipt})),
+                ));
+            }
+        };
         json_tool_result(resp)
     }
 

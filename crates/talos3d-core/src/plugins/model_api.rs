@@ -14230,8 +14230,9 @@ fn capability_snapshot_next_tools() -> Vec<String> {
         "parametric.list_types",
         "list_corpus_gaps",
         "request_corpus_expansion",
-        "save_recipe_draft",
-        "save_assembly_pattern_draft",
+        "search_corpus_knowledge",
+        "get_harness_incident_status",
+        "report_harness_retry_outcome",
         "materialize_learned_asset",
         "definition.create",
         "definition.instantiate",
@@ -14243,7 +14244,6 @@ fn capability_snapshot_next_tools() -> Vec<String> {
         "list_agent_skills",
         "find_agent_skills",
         "get_agent_skill",
-        "save_agent_skill_draft",
         "get_authoring_guidance",
     ]
     .map(String::from)
@@ -14252,25 +14252,26 @@ fn capability_snapshot_next_tools() -> Vec<String> {
 
 #[cfg(feature = "model-api")]
 fn curated_gap_required_next_tools() -> Vec<String> {
-    vec![
-        "request_corpus_expansion".into(),
-        "save_recipe_draft or save_assembly_pattern_draft or definition.create".into(),
-        "set_recipe_draft_status or definition.draft.publish".into(),
-        "select_recipe with include_session_drafts=true".into(),
-        "materialize_learned_asset or instantiate_recipe or definition.instantiate_hosted".into(),
-        "run_validation_v2".into(),
-        "take_screenshot".into(),
+    [
+        "request_corpus_expansion",
+        "get_harness_incident_status",
+        "get_agent_corpus_status",
+        "search_corpus_knowledge",
+        "discover_curated_paths",
+        "report_harness_retry_outcome",
     ]
+    .map(String::from)
+    .to_vec()
 }
 
 #[cfg(feature = "model-api")]
 fn curated_gap_completion_criteria() -> Vec<String> {
     vec![
-        "Gap record exists and remains open until usable knowledge is installed.".into(),
-        "Acquired knowledge is represented as a recipe draft, assembly pattern draft, or Definition rather than ad-hoc geometry.".into(),
-        "The selected path reports executable=true, or a Definition/host contract validates before placement.".into(),
-        "Geometry is produced through materialize_learned_asset, instantiate_recipe, or Definition instantiation; consultable-only drafts do not close the gap.".into(),
-        "Validation and screenshot review pass before the client reports completion.".into(),
+        "Gap is recorded; local-only capture is not a queued curator repair.".into(),
+        "Talos's curator acquires grounded knowledge, independently evaluates a candidate and releases an immutable remedy.".into(),
+        "Reference coverage and executable authoring coverage are separate: a grounding passage does not close a missing geometry or engineering path.".into(),
+        "The user's agent rediscovers the released path and plans a fresh attempt against the current model; no failed edit is replayed automatically.".into(),
+        "Report the actual retry outcome; geometry requires an executable path, validation and screenshot review.".into(),
     ]
 }
 
@@ -16453,7 +16454,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "dkg.close_gap".into(),
             title: "Close The Gap As Knowledge".into(),
             task_tags: vec!["curation".into(), "draft".into()],
-            summary: "After recording a gap, acquire evidence, normalize vocabulary into reusable aliases, classify scope (generic vs jurisdiction/standard/product/catalog), install the right corpus asset, and prove rediscovery; consultable-only drafts and one-off geometry do not close authoring gaps.".into(),
+            summary: "Talos's curator owns acquisition and release. The user's agent reports the gap and retries with reviewed knowledge. For an assigned curator: acquire evidence, normalize vocabulary into reusable aliases, classify scope (generic vs jurisdiction/standard/product/catalog), install the right corpus asset, and prove rediscovery; consultable-only drafts and one-off geometry do not close authoring gaps.".into(),
             referenced_tool_ids: vec![
                 "discover_curated_paths".into(),
                 "select_recipe".into(),
@@ -16478,7 +16479,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "source_passage_refs": []
             })],
             body_markdown: Some(
-                "When domain practice affects geometry, semantics, validation, or procurement, close the gap as scoped knowledge, not as a local modeling trick.\n\nScope every claim before saving it: generic physical principle; jurisdiction or region; code/standard/regulatory source; manufacturer or product line; off-the-shelf catalog row; or project-only assumption. Use the most specific applicable scope. Do not hard-code any country into the harness: infer the project/request region when explicit, otherwise keep the knowledge generic or ask/record the region gap. For physical dimensions, interfaces, materials, tolerances and product configurations, prefer region-applicable regulations, standards, supplier catalogs, and manufacturer instructions before generic defaults.\n\nRetrieve progressively and narrowly. First discover by element class, path kind, target state, region/jurisdiction when known, and the natural user terms plus normalized terms. Read only the guidance cards, passages, catalog rows, and Definitions needed for the next authoring decision; do not flood the agent context with a whole regional corpus.\n\nChoose the corpus asset by reuse shape: parametric family for sized systems such as repeated components or layered assemblies; Definition library entry for composable parts such as parts, fixtures, hosted components, and reusable product assemblies; recipe or assembly pattern for domain procedures and layered systems; catalog row/material spec for procurement and BOM identity; validator or rule pack for hard requirements.\n\nBOM-relevant knowledge must preserve catalog/provider identity and off-the-shelf dimensions where available. Do not invent component dimensions, material thicknesses, connection requirements or product sizes from generic memory when the prompt or project locale implies a regional supply chain. If evidence is missing, record the CorpusGap and leave the value as an explicit assumption instead of promoting it.\n\nAfter saving passages/drafts/Definitions/catalog-backed assets, rediscover using the natural user terms and the normalized English terms, then use the discovered executable or consultable path.".into(),
+                "Ownership: the user's agent records gaps through request_corpus_expansion or search_corpus_knowledge, checks get_harness_incident_status, and retries after reviewed release. Local-only is not queued repair. A reference passage is grounding, not an executable recipe. The acquisition instructions below apply to the Talos curator or an explicitly assigned acquisition task; use the curation profile for draft tools.\n\nWhen domain practice affects geometry, semantics, validation, or procurement, close the gap as scoped knowledge, not as a local modeling trick.\n\nScope every claim before saving it: generic physical principle; jurisdiction or region; code/standard/regulatory source; manufacturer or product line; off-the-shelf catalog row; or project-only assumption. Use the most specific applicable scope. Do not hard-code any country into the harness: infer the project/request region when explicit, otherwise keep the knowledge generic or ask/record the region gap. For physical dimensions, interfaces, materials, tolerances and product configurations, prefer region-applicable regulations, standards, supplier catalogs, and manufacturer instructions before generic defaults.\n\nRetrieve progressively and narrowly. First discover by element class, path kind, target state, region/jurisdiction when known, and the natural user terms plus normalized terms. Read only the guidance cards, passages, catalog rows, and Definitions needed for the next authoring decision; do not flood the agent context with a whole regional corpus.\n\nChoose the corpus asset by reuse shape: parametric family for sized systems such as repeated components or layered assemblies; Definition library entry for composable parts such as parts, fixtures, hosted components, and reusable product assemblies; recipe or assembly pattern for domain procedures and layered systems; catalog row/material spec for procurement and BOM identity; validator or rule pack for hard requirements.\n\nBOM-relevant knowledge must preserve catalog/provider identity and off-the-shelf dimensions where available. Do not invent component dimensions, material thicknesses, connection requirements or product sizes from generic memory when the prompt or project locale implies a regional supply chain. If evidence is missing, record the CorpusGap and leave the value as an explicit assumption instead of promoting it.\n\nAfter saving passages/drafts/Definitions/catalog-backed assets, rediscover using the natural user terms and the normalized English terms, then use the discovered executable or consultable path.".into(),
             ),
         ..GuidanceCardInfo::default()
         },

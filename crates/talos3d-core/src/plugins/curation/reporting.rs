@@ -10,6 +10,32 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeRequest {
+    /// Missing subject, not a claim that a representation exists.
+    pub topic: String,
+    /// Private, bounded explanation. Export requires separate host permission.
+    pub question: String,
+}
+impl KnowledgeRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.topic.trim().is_empty()
+            || self.topic.len() > 160
+            || self.question.trim().is_empty()
+            || self.question.len() > 2048
+            || self
+                .topic
+                .chars()
+                .chain(self.question.chars())
+                .any(|c| c.is_control() && c != '\n')
+        {
+            return Err("Knowledge request needs a bounded topic and question".into());
+        }
+        Ok(())
+    }
+}
+
 pub const OBSERVATION_SCHEMA: &str = "talos3d.curation-observation.v1";
 const PENDING_SCHEMA: &str = "talos3d.private-pending-incidents.v1";
 const MAX_PENDING: usize = 128;
@@ -37,6 +63,8 @@ pub struct Observation {
     pub failure_code: String,
     pub app_revision: String,
     pub export_authorized: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_request: Option<KnowledgeRequest>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -48,7 +76,46 @@ pub struct ReportHarnessIncident {
     pub applicability: RemedyKey,
     pub failure_code: String,
     pub app_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_request: Option<KnowledgeRequest>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IncidentStatusRequest {
+    pub event_id: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetryOutcome {
+    pub event_id: String,
+    pub feedback_id: String,
+    pub artifact_id: String,
+    pub revision: String,
+    /// succeeded, failed or inconclusive. This is reported project evidence, not independent acceptance.
+    pub outcome: String,
+    pub evidence_codes: Vec<String>,
+}
+impl RetryOutcome {
+    pub fn validate(&self) -> Result<(), String> {
+        if uuid::Uuid::parse_str(&self.event_id).is_err()
+            || uuid::Uuid::parse_str(&self.feedback_id).is_err()
+            || !identifier(&self.artifact_id)
+            || self.revision.len() != 64
+            || !self
+                .revision
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !["succeeded", "failed", "inconclusive"].contains(&self.outcome.as_str())
+            || self.evidence_codes.is_empty()
+            || self.evidence_codes.len() > 16
+            || !self.evidence_codes.iter().all(|v| identifier(v))
+        {
+            return Err("Invalid bounded retry outcome".into());
+        }
+        Ok(())
+    }
+}
+
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 160
@@ -69,6 +136,9 @@ impl Observation {
         {
             return Err("Incidents require bounded public failure/applicability identifiers; no prose, prompts or geometry".into());
         }
+        if let Some(request) = &self.knowledge_request {
+            request.validate()?;
+        }
         if self.export_authorized {
             return Err("Local incident records cannot grant export authority".into());
         }
@@ -79,6 +149,8 @@ impl Observation {
 #[derive(Clone, Default, Resource)]
 pub struct HarnessIncidentPolicy {
     pub export_enabled: bool,
+    /// Separate authorization for bounded prose, never inferred from identifier-only export.
+    pub knowledge_export_enabled: bool,
     /// Optional host-owned private cache, outside project/source repositories.
     pub pending_path: Option<PathBuf>,
 }
@@ -89,10 +161,20 @@ struct PendingRecord {
     source: String,
     credential_fingerprint: Option<String>,
     submitted: bool,
+    #[serde(default)]
+    incident_id: Option<String>,
+    #[serde(default)]
+    feedback: Vec<PendingFeedback>,
     /// Local provenance only. Legacy/explicit records cannot impersonate the
     /// host's detector merely by supplying identical observation fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detector: Option<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingFeedback {
+    report: RetryOutcome,
+    submitted: bool,
 }
 #[derive(Default)]
 struct PendingState {
@@ -159,10 +241,12 @@ impl HarnessIncidentStore {
         connection: &CurationConnection,
         bearer: Option<&str>,
     ) -> Result<Value, String> {
-        if request.failure_code == REQUIRED_GUIDANCE_FAILURE {
+        if [REQUIRED_GUIDANCE_FAILURE, "operation_unsuccessful"]
+            .contains(&request.failure_code.as_str())
+        {
             return Err("This failure code is reserved for verified host detection".into());
         }
-        self.report_inner(request, policy, connection, bearer, false)
+        self.report_inner(request, policy, connection, bearer, None)
     }
 
     /// Only the host's verified negotiated-guidance detector calls this. No
@@ -176,6 +260,7 @@ impl HarnessIncidentStore {
     ) -> Result<Value, String> {
         self.report_inner(
             ReportHarnessIncident {
+                knowledge_request: None,
                 event_id: None,
                 kind: ObservationKind::BrokenGuidanceReference,
                 applicability: RemedyKey {
@@ -190,7 +275,34 @@ impl HarnessIncidentStore {
             policy,
             connection,
             bearer,
-            true,
+            Some(REQUIRED_GUIDANCE_DETECTOR),
+        )
+    }
+
+    #[cfg(feature = "model-api")]
+    pub(crate) fn report_operation_failure(
+        &self,
+        capability: &'static str,
+        policy: &HarnessIncidentPolicy,
+        connection: &CurationConnection,
+        bearer: Option<&str>,
+    ) -> Result<Value, String> {
+        self.report_inner(
+            ReportHarnessIncident {
+                event_id: None,
+                kind: ObservationKind::ExecutionFailure,
+                applicability: RemedyKey {
+                    capability_id: Some(capability.into()),
+                    ..Default::default()
+                },
+                failure_code: "operation_unsuccessful".into(),
+                app_revision: format!("core.{}", env!("CARGO_PKG_VERSION")),
+                knowledge_request: None,
+            },
+            policy,
+            connection,
+            bearer,
+            Some("host.operation_result.v1"),
         )
     }
 
@@ -200,7 +312,7 @@ impl HarnessIncidentStore {
         policy: &HarnessIncidentPolicy,
         connection: &CurationConnection,
         bearer: Option<&str>,
-        deduplicate_content: bool,
+        detector: Option<&str>,
     ) -> Result<Value, String> {
         let source = source(connection)?;
         let credential_fingerprint = fingerprint(bearer);
@@ -217,15 +329,17 @@ impl HarnessIncidentStore {
             failure_code: request.failure_code,
             app_revision: request.app_revision,
             export_authorized: false,
+            knowledge_request: request.knowledge_request,
         };
         observation.validate_local()?;
         let mut state = self.load(policy)?;
         // Coalesce this detector's signal per core version and host identity,
         // including after restart/submission. Check and insert under one lock.
         // Explicit reports retain their caller-selected event semantics.
-        if deduplicate_content {
+        if detector.is_some() {
             if let Some(old) = state.records.values().find(|record| {
-                record.detector.as_deref() == Some(REQUIRED_GUIDANCE_DETECTOR)
+                record.detector.as_deref() == detector
+                    && record.observation.knowledge_request == observation.knowledge_request
                     && record.observation.kind == observation.kind
                     && record.observation.applicability == observation.applicability
                     && record.observation.failure_code == observation.failure_code
@@ -258,7 +372,9 @@ impl HarnessIncidentStore {
             source,
             credential_fingerprint,
             submitted: false,
-            detector: deduplicate_content.then(|| REQUIRED_GUIDANCE_DETECTOR.into()),
+            incident_id: None,
+            feedback: Vec::new(),
+            detector: detector.map(str::to_owned),
         };
         let mut candidate = state.records.clone();
         candidate.insert(observation.event_id.clone(), record);
@@ -268,6 +384,226 @@ impl HarnessIncidentStore {
             json!({"event_id":observation.event_id,"recorded_locally":true,"duplicate":false,"submitted":false,"export_enabled":policy.export_enabled,"durability":if policy.pending_path.is_some(){"private_host_file"}else{"application_lifetime"},"note":"Recording is local. Export requires explicit host policy and the original service/credential; no investigation or provider execution is started."}),
         )
     }
+    pub fn report_gap(
+        &self,
+        topic: String,
+        question: String,
+        kind: String,
+        policy: &HarnessIncidentPolicy,
+        connection: &CurationConnection,
+        bearer: Option<&str>,
+    ) -> Result<Value, String> {
+        let request = KnowledgeRequest { topic, question };
+        request.validate()?;
+        // Stable identity per source/account/content; no raw topic in public remedy identifiers.
+        let identity = serde_json::to_vec(&(
+            source(connection)?,
+            fingerprint(bearer),
+            &request,
+            &kind,
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .map_err(|_| "Invalid knowledge request")?;
+        let digest = Sha256::digest(identity);
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        self.report(
+            ReportHarnessIncident {
+                event_id: Some(uuid::Uuid::from_bytes(bytes).to_string()),
+                kind: ObservationKind::CorpusGap,
+                applicability: RemedyKey {
+                    gap_kind: Some("missing_knowledge".into()),
+                    path_kind: Some(kind),
+                    ..Default::default()
+                },
+                failure_code: "corpus_coverage_missing".into(),
+                app_revision: format!("core.{}", env!("CARGO_PKG_VERSION")),
+                knowledge_request: Some(request),
+            },
+            policy,
+            connection,
+            bearer,
+        )
+    }
+
+    pub async fn incident_status(
+        &self,
+        event_id: &str,
+        policy: &HarnessIncidentPolicy,
+        connection: &CurationConnection,
+        corpus: &AgentCorpusConnection,
+    ) -> Result<Value, String> {
+        let record = self.bound_record(event_id, policy, connection, corpus)?;
+        let Some(id) = record.incident_id else {
+            return Ok(
+                json!({"event_id":event_id,"status":"local_only","submitted":false,
+                "knowledge_export_enabled":policy.knowledge_export_enabled}),
+            );
+        };
+        let auth = AgentCorpusConnection {
+            base_url: connection.base_url.clone(),
+            bearer_token: corpus.bearer_token.clone(),
+            trusted_public_keys: Vec::new(),
+        };
+        let bytes = agent_skill_cloud::request(&auth, &format!("/incidents/{id}"), None).await?;
+        let mut result: Value =
+            serde_json::from_slice(&bytes).map_err(|_| "Invalid incident status")?;
+        result["event_id"] = json!(event_id);
+        Ok(result)
+    }
+
+    fn bound_record(
+        &self,
+        event_id: &str,
+        policy: &HarnessIncidentPolicy,
+        connection: &CurationConnection,
+        corpus: &AgentCorpusConnection,
+    ) -> Result<PendingRecord, String> {
+        uuid::Uuid::parse_str(event_id).map_err(|_| "Invalid event identity")?;
+        let state = self.load(policy)?;
+        let record = state
+            .records
+            .get(event_id)
+            .ok_or("Incident unavailable for this host identity")?;
+        if record.source != source(connection)?
+            || record.credential_fingerprint != fingerprint(corpus.bearer_token.as_deref())
+        {
+            return Err("Incident unavailable for this host identity".into());
+        }
+        if record.incident_id.is_some() {
+            let origin = reqwest::Url::parse(&connection.base_url)
+                .map_err(|_| "Invalid incident source")?
+                .origin();
+            let credential_origin = reqwest::Url::parse(&corpus.base_url)
+                .map_err(|_| "Invalid credential source")?
+                .origin();
+            if origin != credential_origin {
+                return Err("Incident unavailable for this host identity".into());
+            }
+        }
+        Ok(record.clone())
+    }
+
+    pub async fn feedback(
+        &self,
+        request: RetryOutcome,
+        policy: &HarnessIncidentPolicy,
+        connection: &CurationConnection,
+        corpus: &AgentCorpusConnection,
+    ) -> Result<Value, String> {
+        request.validate()?;
+        if !policy.export_enabled {
+            return Err("Host export policy is disabled".into());
+        }
+        let record = self.bound_record(&request.event_id, policy, connection, corpus)?;
+        if record.incident_id.is_none() {
+            return Err("Incident has not been submitted".into());
+        }
+        {
+            let mut state = self.load(policy)?;
+            let mut candidate = state.records.clone();
+            let current = candidate
+                .get_mut(&request.event_id)
+                .ok_or("Incident unavailable")?;
+            if let Some(old) = current
+                .feedback
+                .iter()
+                .find(|v| v.report.feedback_id == request.feedback_id)
+            {
+                if serde_json::to_value(&old.report).ok() != serde_json::to_value(&request).ok() {
+                    return Err("Feedback identity already has another payload".into());
+                }
+            } else {
+                if current.feedback.len() >= 32 {
+                    return Err("Private retry feedback capacity reached".into());
+                }
+                current.feedback.push(PendingFeedback {
+                    report: request.clone(),
+                    submitted: false,
+                });
+                persist(policy, &candidate)?;
+                state.records = candidate;
+            }
+        }
+        let delivery = self.submit_feedback(policy, connection, corpus).await?;
+        let current = self.bound_record(&request.event_id, policy, connection, corpus)?;
+        let submitted = current
+            .feedback
+            .iter()
+            .any(|v| v.report.feedback_id == request.feedback_id && v.submitted);
+        Ok(
+            json!({"recorded_locally":true,"submitted":submitted,"feedback_id":request.feedback_id,
+            "independently_verified":false,"delivery":delivery}),
+        )
+    }
+
+    pub async fn submit_feedback(
+        &self,
+        policy: &HarnessIncidentPolicy,
+        connection: &CurationConnection,
+        corpus: &AgentCorpusConnection,
+    ) -> Result<Value, String> {
+        if !policy.export_enabled {
+            return Ok(json!({"status":"export_disabled","submitted_count":0}));
+        }
+        let records = self.load(policy)?.records.clone();
+        let auth = AgentCorpusConnection {
+            base_url: connection.base_url.clone(),
+            bearer_token: corpus.bearer_token.clone(),
+            trusted_public_keys: Vec::new(),
+        };
+        let mut submitted = 0;
+        for (event_id, record) in records {
+            if self
+                .bound_record(&event_id, policy, connection, corpus)
+                .is_err()
+            {
+                continue;
+            }
+            let Some(id) = record.incident_id else {
+                continue;
+            };
+            for pending in record.feedback.iter().filter(|v| !v.submitted) {
+                if submitted >= MAX_SUBMIT {
+                    return Ok(json!({"status":"batch_complete","submitted_count":submitted}));
+                }
+                let body = serde_json::to_value(&pending.report).map_err(|_| "Invalid outcome")?;
+                let bytes = match agent_skill_cloud::request(
+                    &auth,
+                    &format!("/incidents/{id}/feedback"),
+                    Some(&body),
+                )
+                .await
+                {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        return Ok(
+                            json!({"status":"delivery_unavailable","submitted_count":submitted}),
+                        )
+                    }
+                };
+                let receipt: Value =
+                    serde_json::from_slice(&bytes).map_err(|_| "Invalid outcome receipt")?;
+                if receipt["recorded"] != true {
+                    return Err("Invalid outcome receipt".into());
+                }
+                let mut state = self.load(policy)?;
+                let mut candidate = state.records.clone();
+                if let Some(current) = candidate.get_mut(&event_id).and_then(|r| {
+                    r.feedback
+                        .iter_mut()
+                        .find(|v| v.report.feedback_id == pending.report.feedback_id)
+                }) {
+                    current.submitted = true;
+                }
+                persist(policy, &candidate)?;
+                state.records = candidate;
+                submitted += 1;
+            }
+        }
+        Ok(json!({"status":"submitted","submitted_count":submitted}))
+    }
+
     pub async fn submit(
         &self,
         policy: &HarnessIncidentPolicy,
@@ -304,6 +640,7 @@ impl HarnessIncidentStore {
                 .values()
                 .filter(|r| {
                     !r.submitted
+                        && (r.observation.knowledge_request.is_none() || policy.knowledge_export_enabled)
                         && r.source == source
                         && r.credential_fingerprint == credential_fingerprint
                         // Older explicit reports may use the now-reserved
@@ -311,6 +648,8 @@ impl HarnessIncidentStore {
                         // export them as an automatic detector observation.
                         && (r.observation.failure_code != REQUIRED_GUIDANCE_FAILURE
                             || r.detector.as_deref() == Some(REQUIRED_GUIDANCE_DETECTOR))
+                        && (r.observation.failure_code != "operation_unsuccessful"
+                            || r.detector.as_deref() == Some("host.operation_result.v1"))
                 })
                 .take(MAX_SUBMIT)
                 .cloned()
@@ -368,6 +707,7 @@ impl HarnessIncidentStore {
                     return Err("Local report identity changed during delivery".into());
                 }
                 current.submitted = true;
+                current.incident_id = receipt["incident_id"].as_str().map(str::to_owned);
             }
             persist(policy, &candidate)?;
             state.records = candidate;
@@ -403,6 +743,15 @@ fn read_pending(path: &Path) -> Result<BTreeMap<String, PendingRecord>, String> 
     }
     for (id, record) in &parsed.records {
         record.observation.validate_local()?;
+        if record.feedback.len() > 32 {
+            return Err("Invalid feedback capacity".into());
+        }
+        for feedback in &record.feedback {
+            feedback.report.validate()?;
+            if feedback.report.event_id != *id {
+                return Err("Invalid feedback identity".into());
+            }
+        }
         if id != &record.observation.event_id {
             return Err("Invalid private incident cache identity".into());
         }
@@ -475,6 +824,89 @@ fn write_pending(_: &Path, _: &[u8]) -> Result<(), String> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    #[tokio::test]
+    async fn knowledge_opt_in_and_retry_outbox_survive_restart_without_rebinding() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = HarnessIncidentPolicy {
+            export_enabled: true,
+            knowledge_export_enabled: false,
+            pending_path: Some(dir.path().join("pending.json")),
+        };
+        let connection = CurationConnection {
+            base_url: "http://127.0.0.1:1/v1/curation".into(),
+            trusted_public_keys: vec![],
+        };
+        let corpus = AgentCorpusConnection {
+            base_url: "http://127.0.0.1:1/v1/corpus".into(),
+            bearer_token: Some("synthetic".into()),
+            trusted_public_keys: vec![],
+        };
+        let store = HarnessIncidentStore::default();
+        let gap = || {
+            store
+                .report_gap(
+                    "attic trusses".into(),
+                    "What are they and how are they designed?".into(),
+                    "passage".into(),
+                    &policy,
+                    &connection,
+                    corpus.bearer_token.as_deref(),
+                )
+                .unwrap()
+        };
+        let first = gap();
+        let event = first["event_id"].as_str().unwrap();
+        assert_eq!(gap()["duplicate"], true);
+        assert_eq!(
+            store.submit(&policy, &connection, &corpus).await.unwrap()["status"],
+            "no_eligible_pending_reports"
+        );
+        // Simulate a previously acknowledged intake; the offline outcome must be retained.
+        {
+            let mut state = store.load(&policy).unwrap();
+            let row = state.records.get_mut(event).unwrap();
+            row.submitted = true;
+            row.incident_id = Some(uuid::Uuid::new_v4().to_string());
+            persist(&policy, &state.records).unwrap();
+        }
+        let report = RetryOutcome {
+            event_id: event.into(),
+            feedback_id: uuid::Uuid::new_v4().to_string(),
+            artifact_id: "skill:architecture.attic".into(),
+            revision: "a".repeat(64),
+            outcome: "inconclusive".into(),
+            evidence_codes: vec!["lookup.unavailable".into()],
+        };
+        let receipt = store
+            .feedback(report.clone(), &policy, &connection, &corpus)
+            .await
+            .unwrap();
+        assert_eq!(receipt["recorded_locally"], true);
+        assert_eq!(receipt["submitted"], false);
+        let restarted = HarnessIncidentStore::default();
+        assert_eq!(
+            restarted
+                .bound_record(event, &policy, &connection, &corpus)
+                .unwrap()
+                .feedback
+                .len(),
+            1
+        );
+        let mut changed = report;
+        changed.outcome = "succeeded".into();
+        assert!(restarted
+            .feedback(changed, &policy, &connection, &corpus)
+            .await
+            .is_err());
+        let rotated = AgentCorpusConnection {
+            bearer_token: Some("rotated".into()),
+            ..corpus
+        };
+        assert!(restarted
+            .bound_record(event, &policy, &connection, &rotated)
+            .is_err());
+    }
+
     use super::*;
     #[cfg(feature = "model-api")]
     #[test]
@@ -613,6 +1045,7 @@ mod tests {
 
     fn request(id: Option<String>) -> ReportHarnessIncident {
         ReportHarnessIncident {
+            knowledge_request: None,
             event_id: id,
             kind: ObservationKind::CorpusGap,
             applicability: RemedyKey {

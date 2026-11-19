@@ -5967,11 +5967,11 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(gap
         .required_next_tools
         .iter()
-        .any(|tool| tool.contains("materialize_learned_asset")));
+        .any(|tool| tool == "get_harness_incident_status"));
     assert!(gap
         .completion_criteria
         .iter()
-        .any(|criterion| criterion.contains("consultable-only drafts do not close")));
+        .any(|criterion| criterion.contains("a grounding passage does not close")));
     assert!(discovery
         .guidance_card_ids
         .contains(&"dkg.no_curated_path".to_string()));
@@ -14339,13 +14339,12 @@ mod capability_profiles {
             "instantiate_recipe",
             "list_generation_priors",
             "request_corpus_expansion",
-            "acquire_corpus_passage",
             "lookup_source_passage",
+            "search_corpus_knowledge",
+            "get_harness_incident_status",
+            "report_harness_retry_outcome",
             "list_catalog_providers",
             "catalog_query",
-            "save_recipe_draft",
-            "save_assembly_pattern_draft",
-            "set_recipe_draft_status",
             "materialize_learned_asset",
             // definitions / parametric
             "definition.create",
@@ -14439,6 +14438,22 @@ mod capability_profiles {
             authoring_bytes * 100 <= full_bytes * 60,
             "authoring schema bytes ({authoring_bytes}) should be at most 60% of full ({full_bytes})"
         );
+    }
+
+    #[test]
+    fn curator_owns_acquisition_while_authoring_reports_gaps() {
+        let authoring = profile_tool_names(CapabilityProfile::Authoring);
+        let curation = profile_tool_names(CapabilityProfile::Curation);
+        for tool in [
+            "acquire_corpus_passage",
+            "save_recipe_draft",
+            "save_assembly_pattern_draft",
+            "set_recipe_draft_status",
+            "save_agent_skill_draft",
+        ] {
+            assert!(!authoring.contains(tool));
+            assert!(curation.contains(tool));
+        }
     }
 
     /// Read-only contract for the inspection profile: nothing that writes the

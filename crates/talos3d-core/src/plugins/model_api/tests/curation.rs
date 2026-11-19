@@ -140,6 +140,7 @@ async fn curation_is_discoverable_without_a_configured_service() {
     use crate::plugins::curation::reporting::{ObservationKind, ReportHarnessIncident};
     let recorded: Value = server
         .report_harness_incident_tool(Parameters(ReportHarnessIncident {
+            knowledge_request: None,
             event_id: None,
             kind: ObservationKind::CorpusGap,
             applicability: RemedyKey {

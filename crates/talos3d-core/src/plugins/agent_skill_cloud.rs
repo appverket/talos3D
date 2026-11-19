@@ -327,9 +327,178 @@ pub struct SkillRevisionRequest {
     pub content_hash: String,
 }
 
+/// Typed grounding assets carried by the existing immutable bundle transport.
+/// They are read through passage APIs, never installed as executable skills.
+fn passage_resources(
+    bundle: &SkillBundle,
+) -> Result<Vec<super::knowledge_persistence::PersistedPassage>, String> {
+    let mut passages = Vec::new();
+    for (path, resource) in &bundle.resources {
+        if !path.starts_with("passages/") {
+            continue;
+        }
+        if resource.media_type != "application/json" {
+            return Err("Invalid passage resource type".into());
+        }
+        let passage: super::knowledge_persistence::PersistedPassage =
+            serde_json::from_str(&resource.content)
+                .map_err(|_| "Invalid typed passage resource")?;
+        if passage.passage_ref.is_empty()
+            || passage.passage_ref.len() > 160
+            || passage.text.trim().is_empty()
+            || passage.text.len() > 64 * 1024
+            || passage.citation.trim().is_empty()
+            || passage
+                .source_url
+                .as_deref()
+                .is_none_or(|url| !url.starts_with("https://"))
+            || passage.license.as_deref().is_none_or(str::is_empty)
+            || passage.proactive_guidance.is_some()
+            || passage.meta.is_some()
+            || passages
+                .iter()
+                .any(|p: &super::knowledge_persistence::PersistedPassage| {
+                    p.passage_ref == passage.passage_ref
+                })
+        {
+            return Err(
+                "Passage requires source/rights and cannot claim bootstrap or curation authority"
+                    .into(),
+            );
+        }
+        passages.push(passage);
+    }
+    Ok(passages)
+}
+
+async fn admitted_index(
+    c: &AgentCorpusConnection,
+    store: &super::curation::CurationReleaseStore,
+) -> Result<SkillIndex, String> {
+    let index = index(c).await?;
+    store.observe_skill_index(c, &index)?;
+    Ok(index)
+}
+
+pub async fn released_passage(
+    c: &AgentCorpusConnection,
+    store: &super::curation::CurationReleaseStore,
+    hash: &str,
+    passage_ref: &str,
+) -> Result<Value, String> {
+    let index = admitted_index(c, store).await?;
+    let entry = index
+        .skills
+        .iter()
+        .find(|e| e.content_hash == hash)
+        .ok_or("Passage revision is not a current released corpus revision")?;
+    let artifact_id = format!("skill:{}", entry.skill.id);
+    if store.revision_withdrawn(&artifact_id, hash) {
+        return Err("Passage revision withdrawn".into());
+    }
+    let bundle = bundle(c, hash).await?;
+    let passage = passage_resources(&bundle)?
+        .into_iter()
+        .find(|p| p.passage_ref == passage_ref)
+        .ok_or("Passage absent from revision")?;
+    let latest = admitted_index(c, store).await?;
+    if !latest.skills.iter().any(|e| e.content_hash == hash)
+        || store.revision_withdrawn(&artifact_id, hash)
+    {
+        return Err("Passage revision changed or withdrawn during retrieval; rediscover".into());
+    }
+    Ok(
+        json!({"passage_ref":passage.passage_ref,"text":passage.text,"source":passage.citation,
+        "source_url":passage.source_url,"jurisdiction":passage.jurisdiction,"license":passage.license,
+        "scope":"shared_release","trust":"reviewed_reference","content_hash":hash,"artifact_id":artifact_id,
+        "executable":false,"delivery":"verified_cloud_passage","note":"Grounding only; not structural sizing certification or a recipe. No project or refinement state changed."}),
+    )
+}
+
+pub async fn search_passages(
+    c: &AgentCorpusConnection,
+    store: &super::curation::CurationReleaseStore,
+    query: &str,
+) -> Result<Value, String> {
+    let index = admitted_index(c, store).await?;
+    let search = AgentSkillSearch {
+        query: Some(query.into()),
+        tags: Vec::new(),
+    };
+    let hits = index.filter(&search);
+    let mut result = Vec::new();
+    for hit in hits.iter().take(16) {
+        let entry = index
+            .skills
+            .iter()
+            .find(|e| e.skill.id == hit.id)
+            .ok_or("Invalid corpus index")?;
+        let artifact_id = format!("skill:{}", hit.id);
+        if store.revision_withdrawn(&artifact_id, &entry.content_hash) {
+            continue;
+        }
+        let bundle = bundle(c, &entry.content_hash).await?;
+        for p in passage_resources(&bundle)? {
+            result.push(json!({"passage_ref":p.passage_ref,"citation":p.citation,"jurisdiction":p.jurisdiction,
+                "artifact_id":artifact_id,"content_hash":entry.content_hash,"executable":false,
+                "next_tool":"lookup_source_passage","arguments":{"passage_ref":p.passage_ref,"content_hash":entry.content_hash}}));
+        }
+    }
+    Ok(
+        json!({"schema":"talos3d.knowledge-search.v1","scope":"reviewed_cloud_references","epoch":index.epoch,
+        "passages":result,"truncated":hits.len()>16,"executable":false}),
+    )
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    #[test]
+    fn passage_assets_cannot_install_authority_and_require_source_rights() {
+        let skill:AgentSkill=serde_json::from_value(json!({"id":"test.references","title":"References","summary":"Grounded references","body_markdown":"Read references."})).unwrap();
+        let passage = json!({"passage_ref":"test.concept","text":"A referenced concept.","citation":"Primary source",
+            "source_url":"https://example.org/source","license":"original_paraphrase"});
+        let mut bundle = SkillBundle {
+            schema: SCHEMA.into(),
+            skill,
+            provenance: Value::Null,
+            resources: BTreeMap::from([(
+                "passages/concept.json".into(),
+                SkillResource {
+                    media_type: "application/json".into(),
+                    content: passage.to_string(),
+                },
+            )]),
+        };
+        assert_eq!(passage_resources(&bundle).unwrap().len(), 1);
+        let mut invalid = passage.clone();
+        invalid["license"] = Value::Null;
+        bundle
+            .resources
+            .get_mut("passages/concept.json")
+            .unwrap()
+            .content = invalid.to_string();
+        assert!(passage_resources(&bundle).is_err());
+        let mut invalid = passage.clone();
+        invalid["source_url"] = json!("file:///private");
+        bundle
+            .resources
+            .get_mut("passages/concept.json")
+            .unwrap()
+            .content = invalid.to_string();
+        assert!(passage_resources(&bundle).is_err());
+        bundle
+            .resources
+            .get_mut("passages/concept.json")
+            .unwrap()
+            .content = passage.to_string();
+        let duplicate = bundle.resources["passages/concept.json"].clone();
+        bundle
+            .resources
+            .insert("passages/duplicate.json".into(), duplicate);
+        assert!(passage_resources(&bundle).is_err());
+    }
+
     #[test]
     fn signed_index_rejects_forgery_and_untrusted_keys() {
         use ed25519_dalek::{Signer, SigningKey};
