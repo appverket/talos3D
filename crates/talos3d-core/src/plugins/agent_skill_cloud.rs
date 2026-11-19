@@ -45,35 +45,84 @@ pub struct SkillIndex {
     #[serde(default)]
     pub withdrawn_skill_ids: Vec<String>,
 }
+// Request-time lexical retrieval, not a claim that a reference answers the
+// whole question. Supplements can use different wording from the first repair.
+fn query_terms(text: &str) -> std::collections::BTreeSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| {
+            !word.is_empty()
+                && !matches!(
+                    *word,
+                    "a" | "an"
+                        | "and"
+                        | "the"
+                        | "of"
+                        | "for"
+                        | "in"
+                        | "on"
+                        | "to"
+                        | "with"
+                        | "from"
+                )
+        })
+        .map(|word| {
+            let mut stem = word;
+            for suffix in ["ing", "ed", "s"] {
+                if word.len() > suffix.len() + 3
+                    && word.ends_with(suffix)
+                    && !(suffix == "s" && word.ends_with("ss"))
+                {
+                    stem = &word[..word.len() - suffix.len()];
+                    break;
+                }
+            }
+            if stem.len() > 3 && stem.ends_with('e') {
+                stem = &stem[..stem.len() - 1];
+            }
+            stem.to_owned()
+        })
+        .collect()
+}
 impl SkillIndex {
     pub fn filter(&self, search: &AgentSkillSearch) -> Vec<AgentSkillSummary> {
-        self.skills
-            .iter()
-            .filter(|e| {
-                let s = &e.skill;
-                let query = search.query.as_deref().unwrap_or_default().to_lowercase();
-                let text = format!(
-                    "{} {} {} {}",
-                    s.id,
-                    s.title,
-                    s.summary,
-                    s.task_tags.join(" ")
-                )
-                .to_lowercase();
-                text.contains(&query)
-                    && search
-                        .tags
-                        .iter()
-                        .all(|t| s.task_tags.iter().any(|v| v.eq_ignore_ascii_case(t)))
-            })
-            .map(|e| {
-                let mut s = e.skill.clone();
-                s.source_path = Some(format!("cloud:{}", e.content_hash));
-                s
-            })
-            .collect()
+        let query = search.query.as_deref().unwrap_or_default().to_lowercase();
+        let terms = query_terms(&query);
+        let mut hits = Vec::new();
+        for entry in &self.skills {
+            let skill = &entry.skill;
+            if !search
+                .tags
+                .iter()
+                .all(|tag| skill.task_tags.iter().any(|v| v.eq_ignore_ascii_case(tag)))
+            {
+                continue;
+            }
+            let text = format!(
+                "{} {} {} {}",
+                skill.id,
+                skill.title,
+                skill.summary,
+                skill.task_tags.join(" ")
+            )
+            .to_lowercase();
+            let exact = text.contains(&query);
+            let words = query_terms(&text);
+            let matched = terms.intersection(&words).count();
+            // Require at least half the informative query terms, and at least
+            // two for multi-term queries. A lone generic overlap is not a hit.
+            let relevant =
+                !terms.is_empty() && matched >= terms.len().div_ceil(2).max(terms.len().min(2));
+            if exact || relevant {
+                let mut summary = skill.clone();
+                summary.source_path = Some(format!("cloud:{}", entry.content_hash));
+                hits.push(((exact, matched), summary));
+            }
+        }
+        hits.sort_by(|a, b| b.0.cmp(&a.0));
+        hits.into_iter().map(|(_, summary)| summary).collect()
     }
 }
+
 fn url(c: &AgentCorpusConnection, path: &str) -> Result<String, String> {
     if c.base_url.is_empty() {
         return Err("No cloud corpus configured by this application".into());
@@ -453,6 +502,67 @@ pub async fn search_passages(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    #[test]
+    fn supplemental_references_are_discoverable_by_natural_terms() {
+        let make = |id: &str, title: &str, tags: Vec<&str>| {
+            let skill: AgentSkill = serde_json::from_value(json!({
+                "id":id,"title":title,"summary":"Reference procedure","body_markdown":"Read references.","task_tags":tags
+            })).unwrap();
+            SkillIndexEntry {
+                content_hash: "a".repeat(64),
+                skill: skill.summary_info(),
+                sequence: 1,
+            }
+        };
+        assert_eq!(query_terms("modules loading"), query_terms("module loaded"));
+        let index = SkillIndex {
+            schema: SCHEMA.into(),
+            epoch: 1,
+            withdrawn_skill_ids: vec![],
+            skills: vec![
+                make(
+                    "supplement",
+                    "Cache invalidation during module replacement",
+                    vec!["cache invalidation", "module replacement"],
+                ),
+                make(
+                    "first",
+                    "Module loading and cache invalidation",
+                    vec!["loading"],
+                ),
+                make("unrelated", "Cache invoice audit", vec!["billing"]),
+            ],
+        };
+        let search = AgentSkillSearch {
+            query: Some("module loading and cache invalidation".into()),
+            tags: vec![],
+        };
+        let hits = index.filter(&search);
+        assert_eq!(
+            hits.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+            vec!["first", "supplement"]
+        );
+        assert!(hits
+            .iter()
+            .all(|v| v.source_path.as_deref() == Some(&format!("cloud:{}", "a".repeat(64)))));
+        assert_eq!(
+            index
+                .filter(&AgentSkillSearch {
+                    query: Some("modules cache invalidation".into()),
+                    tags: vec!["MODULE REPLACEMENT".into()]
+                })
+                .len(),
+            1
+        );
+        assert!(index
+            .filter(&AgentSkillSearch {
+                query: Some("unknown transport protocol".into()),
+                tags: vec![]
+            })
+            .is_empty());
+        assert_eq!(index.filter(&AgentSkillSearch::default()).len(), 3);
+    }
+
     #[test]
     fn passage_assets_cannot_install_authority_and_require_source_rights() {
         let skill:AgentSkill=serde_json::from_value(json!({"id":"test.references","title":"References","summary":"Grounded references","body_markdown":"Read references."})).unwrap();

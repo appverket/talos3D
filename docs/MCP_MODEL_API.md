@@ -1590,3 +1590,11 @@ feedback id, with the original source/identity binding, so it is available throu
 `get_harness_incident_status`. The worker reads residuals in private history; it
 still needs a fresh evaluation contract and available budget. Nothing grants
 release authority or replays a model edit.
+
+Cloud reference discovery ranks exact phrases first and also returns supplements
+matching at least half the informative query terms (at least two for multi-term
+queries), with simple inflection normalization. Explicit tag filters still apply.
+This is bounded lexical retrieval, not proof that a passage answers the whole
+question: fetch exact revisions, check their scope and report remaining gaps.
+The existing maximum of 16 retrieved bundles per request is unchanged; no search
+work runs in the viewport/input loop.
