@@ -5603,6 +5603,28 @@ fn lighting_round_trip_and_restore_default_rig() {
 }
 
 #[cfg(feature = "model-api")]
+#[test]
+fn knowledge_search_includes_bundled_references_without_exporting_text() {
+    let mut world = World::new();
+    seed_recipe_draft_corpus(&mut world);
+    let found = handle_search_local_corpus_passages(&world, "mono truss");
+    assert_eq!(found["passages"].as_array().unwrap().len(), 1);
+    let hit = &found["passages"][0];
+    assert_eq!(hit["delivery"], "local_registry");
+    assert!(hit.get("content_hash").is_none());
+    assert!(hit.get("text").is_none());
+    let passage =
+        handle_lookup_source_passage(&world, hit["passage_ref"].as_str().unwrap().into()).unwrap();
+    assert!(passage.text.contains("continuous support path"));
+    assert!(
+        handle_search_local_corpus_passages(&world, "unrecorded subject")["passages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[cfg(feature = "model-api")]
 fn seed_recipe_draft_corpus(world: &mut World) {
     use crate::capability_registry::{CorpusProvenance, LicenseTag, PassageRef};
     use crate::plugins::corpus_gap::{CorpusGapQueue, CorpusPassageRegistry};

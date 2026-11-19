@@ -5394,6 +5394,9 @@ pub(super) struct RequestCorpusExpansionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub(super) struct KnowledgeSearchRequest {
     pub query: String,
+    /// all (default) includes bundled/project passages; shared requests shared-cloud coverage only.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[cfg(feature = "model-api")]
@@ -9530,7 +9533,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "search_corpus_knowledge",
-        description = "Search reviewed cloud reference passages by topic. Returns immutable revision and lookup_source_passage arguments. Grounding knowledge is not an executable recipe or structural certification. An empty verified result records a local corpus gap; export requires host permission. Private/bundled passages remain available by lookup_source_passage without a content_hash."
+        description = "Search bundled/project and reviewed cloud reference passages by topic (scope=all by default). scope=shared explicitly asks for shared reference coverage only. Returns scope, provenance and lookup_source_passage arguments; cloud results pin an immutable revision. Grounding knowledge is not an executable recipe or structural certification. An empty verified result records a scoped local corpus gap; export requires host permission. Cloud unavailability means coverage is unknown, not absent. Local passages stay local and resolve without a content_hash."
     )]
     pub(super) async fn search_corpus_knowledge_tool(
         &self,
@@ -9542,28 +9545,59 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                 None,
             ));
         }
+        let scope = params.scope.as_deref().unwrap_or("all");
+        if !["all", "shared"].contains(&scope) {
+            return Err(McpError::invalid_params(
+                "scope must be all or shared",
+                None,
+            ));
+        }
+        let local = if scope == "all" {
+            self.round_trip(|response| ModelApiRequest::SearchLocalCorpusPassages {
+                query: params.query.clone(),
+                response,
+            })
+            .await
+            .map_err(|_| McpError::internal_error("Local knowledge coverage unavailable", None))?
+        } else {
+            json!({"passages":[],"truncated":false})
+        };
         let connection = self.corpus_connection().await;
         let (_, store) = self.curation_context().await;
-        let mut result =
+        let cloud =
             crate::plugins::agent_skill_cloud::search_passages(&connection, &store, &params.query)
-                .await
-                .map_err(|_| {
-                    McpError::internal_error(
-                        "Cloud knowledge unavailable; coverage is unknown",
-                        None,
-                    )
-                })?;
-        if result["passages"].as_array().is_some_and(|v| v.is_empty())
+                .await;
+        let available = cloud.is_ok();
+        let mut result = cloud
+            .unwrap_or_else(|_| json!({"passages":[],"truncated":false,"coverage_unknown":true}));
+        result["scope"] = json!(scope);
+        result["cloud_available"] = json!(available);
+        result["truncated"] = json!(result["truncated"] == true || local["truncated"] == true);
+        result["passages"]
+            .as_array_mut()
+            .unwrap()
+            .extend(local["passages"].as_array().unwrap().iter().cloned());
+        if available
+            && result["passages"].as_array().is_some_and(Vec::is_empty)
             && result["truncated"] == false
         {
             result["curation"] = self
                 .capture_knowledge_gap(
                     params.query.clone(),
-                    format!("Missing recorded information about {}", params.query),
-                    "passage".into(),
+                    format!(
+                        "Missing recorded reference coverage in {scope} scope for {}",
+                        params.query
+                    ),
+                    if scope == "shared" {
+                        "shared_passage"
+                    } else {
+                        "passage"
+                    }
+                    .into(),
                 )
                 .await;
         }
+
         json_tool_result(result)
     }
 

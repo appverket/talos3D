@@ -910,6 +910,10 @@ pub(super) enum ModelApiRequest {
         rationale: String,
         response: oneshot::Sender<ApiResult<CorpusGapInfo>>,
     },
+    SearchLocalCorpusPassages {
+        query: String,
+        response: oneshot::Sender<serde_json::Value>,
+    },
     LookupSourcePassage {
         passage_ref: String,
         response: oneshot::Sender<ApiResult<PassageLookupInfo>>,
@@ -2455,6 +2459,9 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
                 kind,
                 rationale,
             ));
+        }
+        ModelApiRequest::SearchLocalCorpusPassages { query, response } => {
+            let _ = response.send(handle_search_local_corpus_passages(world, &query));
         }
         ModelApiRequest::LookupSourcePassage {
             passage_ref,

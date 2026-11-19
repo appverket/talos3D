@@ -18583,6 +18583,32 @@ pub fn handle_request_corpus_expansion(
 }
 
 /// Look up a passage in the `CorpusPassageRegistry`.
+/// Search existing bundled/project grounding without uploading its contents.
+/// Work is linear in reference text only when explicitly queried, never per frame.
+#[cfg(feature = "model-api")]
+fn handle_search_local_corpus_passages(world: &World, query: &str) -> serde_json::Value {
+    let query = query.trim().to_lowercase().replace('_', " ");
+    let mut hits = Vec::new();
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
+    {
+        for (id, entry) in registry.iter() {
+            if id.to_lowercase().replace('_', " ").contains(&query)
+                || entry.text.to_lowercase().contains(&query)
+            {
+                hits.push(serde_json::json!({"passage_ref":id,"citation":entry.provenance.source,
+                    "scope":crate::plugins::knowledge_assets::scope_as_str(entry.scope),
+                    "trust":format!("{:?}",entry.trust).to_ascii_lowercase(),"delivery":"local_registry",
+                    "executable":false,"next_tool":"lookup_source_passage","arguments":{"passage_ref":id}}));
+            }
+        }
+    }
+    hits.sort_by(|a, b| a["passage_ref"].as_str().cmp(&b["passage_ref"].as_str()));
+    let truncated = hits.len() > 32;
+    hits.truncate(32);
+    serde_json::json!({"passages":hits,"truncated":truncated})
+}
+
 #[cfg(feature = "model-api")]
 pub fn handle_lookup_source_passage(
     world: &World,
