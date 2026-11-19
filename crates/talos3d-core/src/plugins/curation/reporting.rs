@@ -94,6 +94,10 @@ pub struct RetryOutcome {
     /// succeeded, failed or inconclusive. This is reported project evidence, not independent acceptance.
     pub outcome: String,
     pub evidence_codes: Vec<String>,
+    /// Remaining reference questions from an actual retry, not project design inputs.
+    /// Requires the host's separate knowledge-export permission.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub residual_knowledge_gaps: Vec<KnowledgeRequest>,
 }
 impl RetryOutcome {
     pub fn validate(&self) -> Result<(), String> {
@@ -109,11 +113,56 @@ impl RetryOutcome {
             || self.evidence_codes.is_empty()
             || self.evidence_codes.len() > 16
             || !self.evidence_codes.iter().all(|v| identifier(v))
+            || self.residual_knowledge_gaps.len() > 4
+            || self
+                .residual_knowledge_gaps
+                .iter()
+                .any(|g| g.validate().is_err())
+            || (self.outcome == "succeeded" && !self.residual_knowledge_gaps.is_empty())
         {
             return Err("Invalid bounded retry outcome".into());
         }
         Ok(())
     }
+}
+
+// The service may queue a continuation in the same transaction as feedback.
+// Retain that receipt with the original host binding, so a second MCP cycle can
+// inspect and report against it without a coordinator manufacturing local state.
+fn retain_followup(
+    records: &mut BTreeMap<String, PendingRecord>,
+    parent: &PendingRecord,
+    report: &RetryOutcome,
+    receipt: &Value,
+) -> Result<(), String> {
+    if receipt["followup"].is_null() {
+        return Ok(());
+    }
+    let incident = receipt["followup"]["incident_id"]
+        .as_str()
+        .filter(|v| uuid::Uuid::parse_str(v).is_ok())
+        .ok_or("Invalid continuation receipt")?;
+    let mut child = parent.clone();
+    child.observation.event_id = report.feedback_id.clone();
+    child.incident_id = Some(incident.into());
+    child.submitted = true;
+    child.feedback.clear();
+    child.detector = None;
+    if let Some(old) = records.get(&report.feedback_id) {
+        if old.observation != child.observation
+            || old.source != child.source
+            || old.credential_fingerprint != child.credential_fingerprint
+            || old.incident_id != child.incident_id
+        {
+            return Err("Continuation conflicts with an existing private record".into());
+        }
+    } else {
+        if records.len() >= MAX_PENDING {
+            return Err("Private incident capacity reached".into());
+        }
+        records.insert(report.feedback_id.clone(), child);
+    }
+    Ok(())
 }
 
 fn identifier(value: &str) -> bool {
@@ -495,6 +544,9 @@ impl HarnessIncidentStore {
         if !policy.export_enabled {
             return Err("Host export policy is disabled".into());
         }
+        if !request.residual_knowledge_gaps.is_empty() && !policy.knowledge_export_enabled {
+            return Err("Host knowledge export policy is disabled".into());
+        }
         let record = self.bound_record(&request.event_id, policy, connection, corpus)?;
         if record.incident_id.is_none() {
             return Err("Incident has not been submitted".into());
@@ -560,10 +612,16 @@ impl HarnessIncidentStore {
             {
                 continue;
             }
-            let Some(id) = record.incident_id else {
+            let Some(ref id) = record.incident_id else {
                 continue;
             };
             for pending in record.feedback.iter().filter(|v| !v.submitted) {
+                // Revoking prose export also fences previously queued residual questions.
+                if !pending.report.residual_knowledge_gaps.is_empty()
+                    && !policy.knowledge_export_enabled
+                {
+                    continue;
+                }
                 if submitted >= MAX_SUBMIT {
                     return Ok(json!({"status":"batch_complete","submitted_count":submitted}));
                 }
@@ -589,6 +647,7 @@ impl HarnessIncidentStore {
                 }
                 let mut state = self.load(policy)?;
                 let mut candidate = state.records.clone();
+                retain_followup(&mut candidate, &record, &pending.report, &receipt)?;
                 if let Some(current) = candidate.get_mut(&event_id).and_then(|r| {
                     r.feedback
                         .iter_mut()
@@ -876,6 +935,7 @@ mod tests {
             revision: "a".repeat(64),
             outcome: "inconclusive".into(),
             evidence_codes: vec!["lookup.unavailable".into()],
+            residual_knowledge_gaps: vec![],
         };
         let receipt = store
             .feedback(report.clone(), &policy, &connection, &corpus)
@@ -892,6 +952,52 @@ mod tests {
                 .len(),
             1
         );
+        let parent = restarted
+            .bound_record(event, &policy, &connection, &corpus)
+            .unwrap();
+        let mut records = BTreeMap::new();
+        let continuation = json!({"followup":{"incident_id":uuid::Uuid::new_v4().to_string()}});
+        retain_followup(&mut records, &parent, &report, &continuation).unwrap();
+        retain_followup(&mut records, &parent, &report, &continuation).unwrap();
+        assert_eq!(records.len(), 1);
+        let child = &records[&report.feedback_id];
+        assert!(child.submitted && child.feedback.is_empty() && child.detector.is_none());
+        assert_eq!(child.credential_fingerprint, parent.credential_fingerprint);
+        let changed_receipt = json!({"followup":{"incident_id":uuid::Uuid::new_v4().to_string()}});
+        assert!(retain_followup(&mut records, &parent, &report, &changed_receipt).is_err());
+        let mut residual = report.clone();
+        residual.feedback_id = uuid::Uuid::new_v4().to_string();
+        residual.residual_knowledge_gaps = vec![KnowledgeRequest {
+            topic: "remaining reference".into(),
+            question: "What storage guidance is recorded?".into(),
+        }];
+        assert!(store
+            .feedback(residual.clone(), &policy, &connection, &corpus)
+            .await
+            .unwrap_err()
+            .contains("knowledge export"));
+        let mut allowed = policy.clone();
+        allowed.knowledge_export_enabled = true;
+        assert_eq!(
+            store
+                .feedback(residual.clone(), &allowed, &connection, &corpus)
+                .await
+                .unwrap()["submitted"],
+            false
+        );
+        // Revoked knowledge permission prevents a later outbox flush.
+        assert_eq!(
+            store
+                .submit_feedback(&policy, &connection, &corpus)
+                .await
+                .unwrap()["submitted_count"],
+            0
+        );
+        residual.outcome = "succeeded".into();
+        assert!(residual.validate().is_err());
+        residual.outcome = "inconclusive".into();
+        residual.residual_knowledge_gaps[0].question = "x".repeat(2049);
+        assert!(residual.validate().is_err());
         let mut changed = report;
         changed.outcome = "succeeded".into();
         assert!(restarted

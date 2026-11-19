@@ -1573,3 +1573,20 @@ constraints are justified by source evidence. It makes no claim to recover a
 manufacturer's parametric design history. Evaluation uses the ordinary shared
 occurrence preflight, GPU mesh cache, material/compound, transform and persistence
 paths. No import recognition runs in the viewport loop.
+
+### Residual reference gaps after a retry
+
+`report_harness_retry_outcome` accepts optional `residual_knowledge_gaps`, up to
+four `{topic, question}` objects using the same 160/2048-byte bounds as knowledge
+requests. Report actual remaining reference needs, omitting private project facts.
+The host must separately authorize knowledge export; revoking it also prevents
+pending residual prose from being delivered. Older identifier-only reports remain
+compatible. `succeeded` with residual gaps is rejected.
+
+A `failed` outcome, or an `inconclusive` outcome with explicit residual gaps, can
+queue a continuation through the existing intake. An inconclusive outcome alone
+does not queue work. The host durably retains the continuation receipt under the
+feedback id, with the original source/identity binding, so it is available through
+`get_harness_incident_status`. The worker reads residuals in private history; it
+still needs a fresh evaluation contract and available budget. Nothing grants
+release authority or replays a model edit.

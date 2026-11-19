@@ -9623,7 +9623,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "report_harness_retry_outcome",
-        description = "Submit a bounded private outcome after actually retrying with a released remedy. Reuse feedback_id for transport retries. Only public evidence codes, no project prose or geometry. This does not close corpus gaps, certify construction, publish content or replay edits. A durable private outbox retains delivery failures; submit_pending_harness_incidents retries the same identifiers."
+        description = "Submit a bounded private outcome after actually retrying with a released remedy. Reuse feedback_id for transport retries. Use public evidence codes. Optional residual_knowledge_gaps carry up to four bounded reference questions and require host knowledge-export permission; omit private project facts. An inconclusive retry with residual gaps can queue a bounded follow-up, requiring fresh evaluation and worker budget. This does not close corpus gaps, certify construction, publish content or replay edits. A durable private outbox retains delivery failures; submit_pending_harness_incidents retries the same identifiers."
     )]
     pub(super) async fn report_harness_retry_outcome_tool(
         &self,
