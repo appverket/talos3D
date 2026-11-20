@@ -2039,7 +2039,10 @@ fn apply_material_assignments(
     mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
     primitive_material: Option<Res<crate::plugins::modeling::mesh_generation::PrimitiveMaterial>>,
-    changed_query: Query<(Entity, &MaterialAssignment), Changed<MaterialAssignment>>,
+    changed_query: Query<
+        (Entity, &MaterialAssignment),
+        Or<(Changed<MaterialAssignment>, Added<Mesh3d>)>,
+    >,
     all_query: Query<(Entity, &MaterialAssignment)>,
     surface_debug: Option<Res<crate::plugins::surface_debug::SurfaceDebugRender>>,
 ) {
@@ -2120,7 +2123,11 @@ fn revert_removed_material_assignments(
         let handle = prim_mat.0.clone();
         commands.queue(move |world: &mut World| {
             if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
-                entity_mut.insert(MeshMaterial3d::<StandardMaterial>(handle));
+                // A snapshot/recovery may remove then reassign in one frame.
+                // The removal event must not overwrite the new authored finish.
+                if !entity_mut.contains::<MaterialAssignment>() {
+                    entity_mut.insert(MeshMaterial3d::<StandardMaterial>(handle));
+                }
             }
         });
     }
@@ -2191,6 +2198,24 @@ mod tests {
                 .base_color,
             Color::srgba(0.01, 0.03, 0.09, 1.0)
         );
+        let fallback = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        app.world_mut().insert_resource(
+            crate::plugins::modeling::mesh_generation::PrimitiveMaterial(fallback),
+        );
+        app.world_mut().entity_mut(e).remove::<MaterialAssignment>();
+        app.world_mut()
+            .entity_mut(e)
+            .insert(MaterialAssignment::new("fixture.finish"));
+        app.update();
+        // Meshes can be attached after the assignment was already synchronized
+        // (cached geometry, document restore and preview construction).
+        app.world_mut().entity_mut(e).insert((
+            Mesh3d(Handle::default()),
+            MeshMaterial3d(Handle::<StandardMaterial>::default()),
+        ));
         for _ in 0..20 {
             app.update();
         }
