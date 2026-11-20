@@ -97,6 +97,10 @@ pub struct CurationStatusRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleaseArtifact {
+    /// Exact locally installed executable artifact required. Older clients reject
+    /// this explicit field instead of advertising compatibility from tool names.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runtime_required: bool,
     pub artifact_id: String,
     pub revision: String,
     #[serde(default)]
@@ -132,6 +136,9 @@ impl ReleaseManifest {
         let mut revisions = BTreeSet::new();
         let mut active_ids = BTreeSet::new();
         for release in &self.releases {
+            if release.artifact_id.starts_with("app:") != release.runtime_required {
+                return Err("Executable releases require exact installed runtime evidence".into());
+            }
             token(&release.artifact_id)?;
             token(&release.revision)?;
             if !release.artifact_id.contains(':')
@@ -187,6 +194,7 @@ pub async fn fetch_manifest(connection: &CurationConnection) -> Result<ReleaseMa
 
 #[derive(Default)]
 struct ReleaseState {
+    installed_apps: std::collections::BTreeMap<String, String>,
     authority: String,
     manifest: Option<ReleaseManifest>,
     // A later manifest can replace an artifact, but never forget an already
@@ -237,6 +245,21 @@ fn dependency_state_ready(state: &ReleaseState) -> Result<(), String> {
     Ok(())
 }
 impl CurationReleaseStore {
+    /// Host composition only: network manifests never install executable code.
+    pub fn register_installed_app(&self, id: String, revision: String) {
+        self.0
+            .lock()
+            .expect("curation state poisoned")
+            .installed_apps
+            .insert(id, revision);
+    }
+    pub fn installed_apps(&self) -> std::collections::BTreeMap<String, String> {
+        self.0
+            .lock()
+            .expect("curation state poisoned")
+            .installed_apps
+            .clone()
+    }
     pub fn bind(&self, connection: &CurationConnection) {
         let mut state = self.0.lock().expect("curation state poisoned");
         let key = authority(&connection.base_url, &connection.trusted_public_keys);
@@ -506,7 +529,8 @@ impl CurationReleaseStore {
                 "remedy_keys":r.remedy_keys.iter().take(4).collect::<Vec<_>>(),
                 "applicability_truncated":r.remedy_keys.len()>4,
                 "withdrawn":r.withdrawn,"refresh_required":r.refresh_required,
-                "compatible":missing.is_empty(),"missing_required_tool_ids":missing.iter().take(8).collect::<Vec<_>>(),
+                "compatible":missing.is_empty() && (!r.runtime_required || state.installed_apps.get(&r.artifact_id)==Some(&r.revision)),
+                "runtime_required":r.runtime_required,"installed_runtime_revision":state.installed_apps.get(&r.artifact_id),"missing_required_tool_ids":missing.iter().take(8).collect::<Vec<_>>(),
                 "missing_tool_count":missing.len()});
             let size = serde_json::to_vec(&notice)
                 .expect("release notice serializes")
@@ -534,10 +558,38 @@ impl CurationReleaseStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn executable_release_requires_exact_host_installed_artifact() {
+        let store = CurationReleaseStore::default();
+        let mut app = release("app:example.capability", "revision-one", false);
+        assert!(manifest(1, vec![app.clone()]).validate().is_err());
+        app.runtime_required = true;
+        store.accept(manifest(1, vec![app.clone()])).unwrap();
+        assert_eq!(
+            store.status(true, &BTreeSet::new(), None)["releases"][0]["compatible"],
+            false
+        );
+        store.register_installed_app(app.artifact_id.clone(), "other-revision".into());
+        assert_eq!(
+            store.status(true, &BTreeSet::new(), None)["releases"][0]["compatible"],
+            false
+        );
+        store.register_installed_app(app.artifact_id.clone(), app.revision.clone());
+        assert_eq!(
+            store.status(true, &BTreeSet::new(), None)["releases"][0]["compatible"],
+            true
+        );
+        // Ordinary skill wire format remains compatible with existing clients.
+        assert!(serde_json::to_value(release("skill:test", "r1", false))
+            .unwrap()
+            .get("runtime_required")
+            .is_none());
+    }
     use ed25519_dalek::{Signer, SigningKey};
     use sha2::{Digest, Sha256};
     fn release(id: &str, revision: &str, withdrawn: bool) -> ReleaseArtifact {
         ReleaseArtifact {
+            runtime_required: false,
             artifact_id: id.into(),
             revision: revision.into(),
             remedy_keys: vec![RemedyKey {

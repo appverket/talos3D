@@ -227,6 +227,8 @@ pub struct ToolbarDetails {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InstanceInfo {
+    #[serde(default)]
+    pub installed_app_remedies: std::collections::BTreeMap<String, String>,
     /// Reviewed shared release identities; private project assets are separate.
     #[serde(default)]
     pub shared_corpus_releases: Vec<crate::curation::corpus_release::CorpusReleaseInfo>,
@@ -272,6 +274,7 @@ impl From<&ModelApiRuntimeInfo> for InstanceInfo {
     fn from(value: &ModelApiRuntimeInfo) -> Self {
         Self {
             shared_corpus_releases: Vec::new(),
+            installed_app_remedies: Default::default(),
             instance_id: value.instance_id.clone(),
             app_name: value.app_name.clone(),
             pid: value.pid,

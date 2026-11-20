@@ -14219,6 +14219,7 @@ mod capability_profiles {
         };
         let instance = InstanceInfo {
             shared_corpus_releases: Vec::new(),
+            installed_app_remedies: Default::default(),
             instance_id: "talos3d-test-42".to_string(),
             app_name: "talos3d-test".to_string(),
             pid: 42,

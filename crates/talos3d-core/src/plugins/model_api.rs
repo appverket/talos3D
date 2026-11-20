@@ -3408,6 +3408,9 @@ fn parse_alpha_mode(s: &str) -> crate::plugins::materials::MaterialAlphaMode {
 #[cfg(feature = "model-api")]
 fn handle_get_instance_info(world: &World) -> InstanceInfo {
     let mut info = InstanceInfo::from(world.resource::<ModelApiRuntimeInfo>());
+    if let Some(store) = world.get_resource::<crate::plugins::curation::CurationReleaseStore>() {
+        info.installed_app_remedies = store.installed_apps();
+    }
     #[cfg(target_arch = "wasm32")]
     if let Some(title) = world
         .iter_entities()

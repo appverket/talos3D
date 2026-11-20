@@ -3657,6 +3657,7 @@ mod tests {
             schema: RELEASE_SCHEMA.into(),
             sequence,
             releases: vec![ReleaseArtifact {
+                runtime_required: false,
                 artifact_id: "skill:test.transform".into(),
                 revision: "r1".into(),
                 remedy_keys: vec![],

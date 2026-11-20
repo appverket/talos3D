@@ -1134,7 +1134,7 @@ pub(crate) fn all_occurrence_generated_bounds(world: &World) -> HashMap<ElementI
     bounds
 }
 
-fn occurrence_generated_bounds(world: &World, owner: ElementId) -> Option<EntityBounds> {
+pub(crate) fn occurrence_generated_bounds(world: &World, owner: ElementId) -> Option<EntityBounds> {
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
     let mut any = false;

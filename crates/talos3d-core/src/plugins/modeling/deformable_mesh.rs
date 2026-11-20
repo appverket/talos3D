@@ -10,8 +10,26 @@ use std::collections::{HashMap, HashSet};
 
 pub(super) fn validate(e: &DeformableMeshEvaluator) -> Result<(), String> {
     super::frozen_mesh::evaluate(&e.mesh)?;
-    if e.axes.is_empty() || e.axes.len() > 3 {
-        return Err("Deformable mesh requires 1..=3 axis controls".into());
+    if (e.axes.is_empty() && e.vertex_fields.is_empty())
+        || e.axes.len() > 3
+        || e.vertex_fields.len() > 8
+    {
+        return Err("Deformable mesh requires bounded axis controls or vertex fields".into());
+    }
+    let mut fields = HashSet::new();
+    for field in &e.vertex_fields {
+        if field.parameter.trim().is_empty()
+            || !fields.insert(&field.parameter)
+            || !field.reference_value.is_finite()
+            || field.weights.len() != e.mesh.vertices.len()
+            || field
+                .weights
+                .iter()
+                .flatten()
+                .any(|v| !v.is_finite() || v.abs() > 1000.0)
+        {
+            return Err("Invalid dimensional vertex field".into());
+        }
     }
     let mut seen = HashSet::new();
     for a in &e.axes {
@@ -81,6 +99,23 @@ pub(super) fn evaluate(
             v[a.axis] = targets[i] + fraction * (targets[i + 1] - targets[i]);
         }
     }
+    for field in &e.vertex_fields {
+        let value = super::polygon_evaluator::evaluate_coordinate(
+            &BodyExpr::Reference {
+                path: field.parameter.clone(),
+            },
+            values,
+            units,
+            e.mesh.coordinate_unit,
+        )? as f64
+            / scale;
+        let delta = value - field.reference_value;
+        for (vertex, weight) in mesh.vertices.iter_mut().zip(&field.weights) {
+            for axis in 0..3 {
+                vertex[axis] += weight[axis] * delta;
+            }
+        }
+    }
     super::frozen_mesh::evaluate(&mesh)
 }
 
@@ -88,8 +123,49 @@ pub(super) fn evaluate(
 mod tests {
     use super::*;
     use crate::plugins::modeling::definition::{FrozenMeshEvaluator, MeshAxisDeformation};
+    #[test]
+    fn vertex_field_roundtrips_and_preserves_unaffected_geometry() {
+        use crate::plugins::modeling::definition::MeshVertexField;
+        let mut source = sample();
+        source.axes.clear();
+        source.vertex_fields.push(MeshVertexField {
+            parameter: "lift".into(),
+            reference_value: 0.,
+            weights: vec![[0., 0., 0.], [0., 0.25, 0.], [0., 1., 0.], [0., 0., 0.]],
+        });
+        let source: DeformableMeshEvaluator =
+            serde_json::from_slice(&serde_json::to_vec(&source).unwrap()).unwrap();
+        let units = HashMap::from([("lift".into(), Unit::M)]);
+        let changed = evaluate(
+            &source,
+            &HashMap::from([("lift".into(), serde_json::json!(0.6))]),
+            &units,
+        )
+        .unwrap();
+        assert!((changed.vertices[1].y - 1.15).abs() < 1e-6);
+        assert!((changed.vertices[2].y - 1.6).abs() < 1e-6);
+        assert_eq!(changed.vertices[0], bevy::prelude::Vec3::new(-1., 0., 0.));
+        let original = evaluate(
+            &source,
+            &HashMap::from([("lift".into(), serde_json::json!(0.))]),
+            &units,
+        )
+        .unwrap();
+        assert_eq!(original.vertices[2].y, 1.);
+        assert!(evaluate(&source, &HashMap::new(), &units).is_err());
+        let mut invalid = source.clone();
+        invalid.vertex_fields[0].weights.pop();
+        assert!(validate(&invalid).is_err());
+        let mut invalid = source.clone();
+        invalid.vertex_fields[0].weights[0][1] = f64::NAN;
+        assert!(validate(&invalid).is_err());
+        let mut invalid = source.clone();
+        invalid.vertex_fields[0].weights[0][1] = 1001.;
+        assert!(validate(&invalid).is_err());
+    }
     fn sample() -> DeformableMeshEvaluator {
         DeformableMeshEvaluator {
+            vertex_fields: vec![],
             mesh: FrozenMeshEvaluator {
                 coordinate_unit: Unit::M,
                 vertices: vec![[-1., 0., 0.], [-0.9, 1., 0.], [0.9, 1., 0.], [1., 0., 0.]],

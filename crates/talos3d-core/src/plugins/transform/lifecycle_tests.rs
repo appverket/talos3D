@@ -247,6 +247,7 @@ fn measure_bounded_full_candidate_stage(dependency_count: usize) {
         for (sequence, start) in (0..4096).step_by(1000).enumerate() {
             let releases = (start..(start + 1000).min(4096))
                 .map(|id| ReleaseArtifact {
+                    runtime_required: false,
                     artifact_id: format!("skill:benchmark.{id}"),
                     revision: "r1".into(),
                     remedy_keys: vec![],
@@ -688,6 +689,7 @@ fn repeated_copy_inherits_harness_dependency_at_queue_and_execution() {
             schema: RELEASE_SCHEMA.into(),
             sequence,
             releases: vec![ReleaseArtifact {
+                runtime_required: false,
                 artifact_id: "skill:test.copy".into(),
                 revision: "r1".into(),
                 remedy_keys: vec![],

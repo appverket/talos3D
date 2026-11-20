@@ -885,20 +885,14 @@ fn preview_texture_size_for_display(width: f32, height: f32) -> UVec2 {
 }
 
 fn preview_geometry_bounds(world: &mut World) -> Option<Aabb3d> {
-    let mut min = Vec3::splat(f32::MAX);
-    let mut max = Vec3::splat(f32::MIN);
-    let mut any = false;
-    let mut query =
-        world.query_filtered::<(&ProfileExtrusion, Option<&ShapeRotation>), With<PreviewOnly>>();
-    for (extrusion, rotation) in query.iter(world) {
-        let Some(bounds) = extrusion.bounds(rotation.copied().unwrap_or_default().0) else {
-            continue;
-        };
-        min = min.min(bounds.min);
-        max = max.max(bounds.max);
-        any = true;
-    }
-    any.then_some(Aabb3d { min, max })
+    crate::plugins::modeling::occurrence::occurrence_generated_bounds(
+        world,
+        PREVIEW_ELEMENT_ID_SENTINEL,
+    )
+    .map(|bounds| Aabb3d {
+        min: bounds.min,
+        max: bounds.max,
+    })
 }
 
 /// Arc tessellation resolution for wireframe drawing — matches the value used
@@ -1038,6 +1032,64 @@ fn ray_aabb_intersection(origin: Vec3, direction: Vec3, aabb: Aabb3d) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dimensional_vertex_fields_use_real_preview_and_reuse_unchanged_meshes() {
+        use crate::plugins::modeling::{
+            definition::Definition,
+            mesh_generation::PrimitiveMaterial,
+            occurrence::{occurrence_generated_bounds, RepresentationCache},
+        };
+        let def:Definition=serde_json::from_value(serde_json::json!({
+            "id":"test.field","name":"Dimensional field","definition_kind":"Solid","definition_version":1,
+            "interface":{"parameters":[{"name":"lift","param_type":"Numeric","default_value":0,"override_policy":"Overridable","geometry_affecting":true,"metadata":{"unit":"m"}}]},
+            "body":{"schema_version":1,"evaluators":[{"DeformableMesh":{"mesh":{"coordinate_unit":"m","vertices":[[0,0,0],[1,0,0],[1,1,0]],"faces":[[0,1,2]]},"axes":[],"vertex_fields":[{"parameter":"lift","reference_value":0,"weights":[[0,0,0],[0,0,0],[0,1,0]]}]}}]},"domain_data":{}
+        })).unwrap();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(def.clone());
+        let registry = Arc::new(registry);
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(RepresentationCache::default());
+        world.insert_resource(PrimitiveMaterial(Handle::default()));
+        let camera = world.spawn_empty().id();
+        let light = world.spawn_empty().id();
+        world.insert_resource(DefinitionPreviewScene {
+            current_definition_id: None,
+            render_target: Handle::default(),
+            camera_entity: camera,
+            light_entity: light,
+            occurrence_root: Entity::PLACEHOLDER,
+            current_registry_generation: None,
+            current_overrides_signature: 0,
+            camera_distance_scale: 1.,
+            current_texture_size: UVec2::ONE,
+            requested_texture_size: UVec2::ONE,
+        });
+        let mut target = DefinitionPreviewTarget::default();
+        target.request(def.id.clone(), registry.clone());
+        world.insert_resource(target);
+        sync_preview_to_target(&mut world);
+        let original = occurrence_generated_bounds(&world, PREVIEW_ELEMENT_ID_SENTINEL).unwrap();
+        assert!((original.max.y - 1.).abs() < 1e-6);
+        let mut overrides = OverrideMap::default();
+        overrides.set("lift", serde_json::json!(0.6));
+        world
+            .resource_mut::<DefinitionPreviewTarget>()
+            .request_with_overrides(def.id, registry, overrides);
+        sync_preview_to_target(&mut world);
+        let changed = occurrence_generated_bounds(&world, PREVIEW_ELEMENT_ID_SENTINEL).unwrap();
+        assert!((changed.max.y - 1.6).abs() < 1e-6);
+        let root = world.resource::<DefinitionPreviewScene>().occurrence_root;
+        let count = world.resource::<Assets<Mesh>>().len();
+        for _ in 0..20 {
+            sync_preview_to_target(&mut world);
+        }
+        assert_eq!(
+            root,
+            world.resource::<DefinitionPreviewScene>().occurrence_root
+        );
+        assert_eq!(count, world.resource::<Assets<Mesh>>().len());
+    }
 
     /// Assert that `PREVIEW_RENDER_LAYER` is layer 1 — distinct from the
     /// default layer 0 used by all authored scene content.

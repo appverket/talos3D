@@ -413,6 +413,7 @@ fn transform_release_manifest(
 ) -> crate::plugins::curation::ReleaseManifest {
     use crate::plugins::curation::{ReleaseArtifact, ReleaseManifest, RELEASE_SCHEMA};
     let mut releases = vec![ReleaseArtifact {
+        runtime_required: false,
         artifact_id: "skill:test.transform".into(),
         revision: "r1".into(),
         remedy_keys: vec![],
@@ -422,6 +423,7 @@ fn transform_release_manifest(
     }];
     if unrelated {
         releases.push(ReleaseArtifact {
+            runtime_required: false,
             artifact_id: "skill:test.unrelated".into(),
             revision: "r2".into(),
             remedy_keys: vec![],

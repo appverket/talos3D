@@ -517,6 +517,19 @@ pub struct FrozenMeshEvaluator {
 pub struct DeformableMeshEvaluator {
     pub mesh: FrozenMeshEvaluator,
     pub axes: Vec<MeshAxisDeformation>,
+    /// Authored dimensional displacement fields, evaluated only when dirty.
+    /// Empty for legacy station-only meshes. Each field has one dimensionless
+    /// vector per source vertex; it does not infer semantic construction rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vertex_fields: Vec<MeshVertexField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshVertexField {
+    pub parameter: String,
+    pub reference_value: f64,
+    pub weights: Vec<[f64; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2082,17 +2095,22 @@ impl Definition {
             }
             if let EvaluatorDecl::DeformableMesh(mesh) = evaluator {
                 super::deformable_mesh::validate(mesh)?;
-                for axis in &mesh.axes {
+                for parameter in mesh
+                    .axes
+                    .iter()
+                    .map(|a| &a.parameter)
+                    .chain(mesh.vertex_fields.iter().map(|f| &f.parameter))
+                {
                     if !self
                         .interface
                         .parameters
                         .0
                         .iter()
-                        .any(|p| p.name == axis.parameter && p.geometry_affecting)
+                        .any(|p| &p.name == parameter && p.geometry_affecting)
                     {
                         return Err(format!(
                             "Deformable mesh requires geometry parameter '{}'",
-                            axis.parameter
+                            parameter
                         ));
                     }
                 }

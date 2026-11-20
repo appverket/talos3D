@@ -469,6 +469,7 @@ mod harness_dependencies {
             schema: RELEASE_SCHEMA.into(),
             sequence,
             releases: vec![ReleaseArtifact {
+                runtime_required: false,
                 artifact_id: "skill:test.plan".into(),
                 revision: revision.into(),
                 remedy_keys: vec![],
