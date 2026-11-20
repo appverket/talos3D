@@ -544,6 +544,43 @@ pub fn save_project_to_path(world: &mut World, path: PathBuf) -> Result<PathBuf,
     Ok(path)
 }
 
+/// App-owned local document directory. Deployments may bind this to durable
+/// storage without revealing a host path through agent-side configuration.
+pub fn default_project_directory() -> Result<PathBuf, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        return Err("Local document directories are unavailable in the browser shell".into());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let directory = std::env::var_os("TALOS3D_PROJECTS_DIR")
+            .map(PathBuf::from)
+            .map(Ok)
+            .unwrap_or_else(|| persistence_state_directory().map(|p| p.join("projects")))?;
+        if !directory.is_absolute() {
+            return Err("App-owned project directory must be absolute".into());
+        }
+        Ok(directory)
+    }
+}
+
+/// Preserve ordinary save semantics for an open document; new documents get a
+/// unique app-owned file instead of requiring an agent to guess a writable path.
+pub fn save_project_managed(world: &mut World) -> Result<PathBuf, String> {
+    crate::plugins::document_state::require_editable(world)?;
+    if let Some(path) = world.resource::<DocumentState>().current_path.clone() {
+        return save_project_to_path(world, path);
+    }
+    let directory = default_project_directory()?;
+    #[cfg(not(target_arch = "wasm32"))]
+    std::fs::create_dir_all(&directory)
+        .map_err(|e| format!("Create app-owned project directory: {e}"))?;
+    save_project_to_path(
+        world,
+        directory.join(format!("project-{}.talos3d", new_recovery_id())),
+    )
+}
+
 pub fn load_project_from_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
     load_from_path(world, &path)?;
     Ok(path)

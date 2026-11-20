@@ -3409,6 +3409,12 @@ fn parse_alpha_mode(s: &str) -> crate::plugins::materials::MaterialAlphaMode {
 #[cfg(feature = "model-api")]
 fn handle_get_instance_info(world: &World) -> InstanceInfo {
     let mut info = InstanceInfo::from(world.resource::<ModelApiRuntimeInfo>());
+    info.local_project_storage = match crate::plugins::persistence::default_project_directory() {
+        Ok(directory) => {
+            serde_json::json!({"available":true,"default_directory":directory,"save_tool":"save_project","save_arguments":{},"open_tool":"load_project","note":"Omitting path saves the current file or creates a unique app-owned file. Keep the returned path for reopening. Storage lifetime follows the deployment configuration."})
+        }
+        Err(reason) => serde_json::json!({"available":false,"reason":reason}),
+    };
     if let Some(store) = world.get_resource::<crate::plugins::curation::CurationReleaseStore>() {
         info.installed_app_remedies = store.installed_apps();
     }
@@ -4858,8 +4864,12 @@ fn handle_frame_entities(world: &mut World, element_ids: &[u64]) -> Result<Bound
 
 #[cfg(feature = "model-api")]
 fn handle_save_project(world: &mut World, path: &str) -> Result<String, String> {
-    save_project_to_path(world, std::path::PathBuf::from(path))
-        .map(|path| path.to_string_lossy().to_string())
+    if path.trim().is_empty() {
+        crate::plugins::persistence::save_project_managed(world)
+    } else {
+        save_project_to_path(world, std::path::PathBuf::from(path))
+    }
+    .map(|path| path.to_string_lossy().to_string())
 }
 
 #[cfg(feature = "model-api")]

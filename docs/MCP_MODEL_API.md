@@ -1662,3 +1662,14 @@ preparation leaves the document and allocators unchanged. Candidate inspection
 uses the same preparation and semantic gate. This does not qualify automatic
 reseating of hosted dependents or arbitrary edits/deletions of individual
 parametric members; invalid membership is refused before saving or loading.
+
+### App-owned local project saves
+
+`get_instance_info.local_project_storage` describes the app-owned local project
+directory. `save_project({})` (and `save_model({})`) saves the current file, or
+creates a unique file there when the document has no path. It returns the exact
+path to use with `load_project`. An explicit `path` still performs Save As.
+Native deployments can set `TALOS3D_PROJECTS_DIR` to an absolute durable directory;
+the default is `projects` under the app's document-state directory. Directory
+lifetime is deployment-owned: configuring a scratch directory does not make it
+durable. Browser shells report that this local directory facility is unavailable.

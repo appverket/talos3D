@@ -249,6 +249,9 @@ pub struct InstanceInfo {
     /// Whether the open document contains unsaved changes.
     #[serde(default)]
     pub document_dirty: bool,
+    /// App-owned local storage discovery; does not create a directory or file.
+    #[serde(default)]
+    pub local_project_storage: serde_json::Value,
     /// Length unit of the world/scene coordinate system. Geometry primitives
     /// (`create_box` center/size, occurrence offsets, frame/bbox values) are in
     /// this unit (metres). Architectural recipe/parametric drivers named `*_mm`
@@ -286,6 +289,7 @@ impl From<&ModelApiRuntimeInfo> for InstanceInfo {
             requested_port: value.requested_port,
             current_document_path: None,
             document_dirty: false,
+            local_project_storage: serde_json::Value::Null,
             world_length_unit: "m".to_string(),
             units_note: "World/scene geometry is in METRES (create_box, occurrence offsets, frame bboxes). Recipe/parametric drivers named *_mm are MILLIMETRES, converted internally.".to_string(),
             authoring_guidance_id: None,

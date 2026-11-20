@@ -14250,6 +14250,7 @@ mod capability_profiles {
             requested_port: Some(25020),
             current_document_path: Some("/models/site.talos3d".to_string()),
             document_dirty: false,
+            local_project_storage: serde_json::Value::Null,
             world_length_unit: "m".to_string(),
             units_note: "metres".to_string(),
             authoring_guidance_id: Some("component-structure".to_string()),

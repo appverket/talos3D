@@ -4135,6 +4135,9 @@ pub(super) struct PlaceSheetDimensionRequest {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SaveProjectRequest {
+    /// Omit to save the current file, or a new file in the app-owned directory
+    /// disclosed by get_instance_info.local_project_storage.
+    #[serde(default)]
     pub(super) path: String,
 }
 
@@ -8275,7 +8278,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "save_project",
-        description = "Save the current Talos3D project to a specific path on disk and return the resolved file path."
+        description = "Save the current project and return its resolved path. Omit path to save the current file or create a unique file in the app-owned directory disclosed by get_instance_info.local_project_storage. An explicit path still performs Save As."
     )]
     pub(super) async fn save_project_tool(
         &self,
@@ -8290,7 +8293,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "save_model",
-        description = "Alias for save_project: save the current Talos3D model/project to a specific path on disk and return the resolved file path."
+        description = "Alias for save_project. Omit path to save the current file or create a unique app-owned project file; returns the resolved path for subsequent load_project."
     )]
     pub(super) async fn save_model_tool(
         &self,
@@ -11159,5 +11162,23 @@ mod cloud_skill_client_compatibility {
         let found = relevant_agent_skills(&hello, &[], vec![skill.summary_info()]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "core.edge.review");
+    }
+}
+
+#[cfg(test)]
+mod managed_save_schema_tests {
+    use super::*;
+
+    #[test]
+    fn managed_save_is_discoverable_without_a_host_path() {
+        let request: SaveProjectRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(request.path.is_empty());
+        let schema = serde_json::to_value(schemars::schema_for!(SaveProjectRequest)).unwrap();
+        assert!(!schema["required"]
+            .as_array()
+            .is_some_and(|fields| fields.iter().any(|f| f == "path")));
+        let explicit: SaveProjectRequest =
+            serde_json::from_value(serde_json::json!({"path":"/chosen/project.talos3d"})).unwrap();
+        assert_eq!(explicit.path, "/chosen/project.talos3d");
     }
 }
