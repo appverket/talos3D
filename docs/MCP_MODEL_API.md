@@ -372,7 +372,20 @@ composes the same runtime registries as the normal tools; it is not a second
 knowledge store.
 
 `get_agent_guidance_packet` collapses the old guidance-plus-one-call-per-card
-and must-read-skill bootstrap into one bounded response. Once negotiation
+and must-read-skill bootstrap into one MCP route. Both this tool and
+`get_authoring_guidance` retain their existing shape for small responses. Larger
+responses return `talos3d.guidance-page.v1`: read the `content` fragments as one
+JSON document and follow `next_tool` with `next_arguments` until
+`delivery_complete`. The snapshot SHA-256 remains constant, offsets are UTF-8
+byte offsets, and the server rejects skipped content or cursors from another
+session. No local file or shell tool is needed. Bootstrap stays blocked until
+all pages have been served; delivery records are not proof of comprehension.
+Renegotiating invalidates old cursors. The outer `live_guidance_state` is current;
+any state embedded in the frozen document describes the start of delivery.
+
+The server serializes each snapshot once, retains at most two snapshots of
+2 MB each per MCP connection, and slices bounded fragments on subsequent calls.
+There is no per-frame work. Once negotiation
 activates a guidance session, the Model API rejects mutating calls until that
 packet and the task-relevant recipe/parametric/definition/prior probes are
 complete. The

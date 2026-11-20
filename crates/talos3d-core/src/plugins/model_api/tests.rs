@@ -2661,7 +2661,7 @@ async fn get_authoring_guidance_tool_returns_resource_contents() {
     );
 
     let guidance: AuthoringGuidance = server
-        .get_authoring_guidance_tool()
+        .get_authoring_guidance_tool(Parameters(GuidanceDeliveryRequest::default()))
         .await
         .expect("get_authoring_guidance tool should succeed")
         .into_typed()
@@ -2698,7 +2698,7 @@ async fn get_authoring_guidance_tool_returns_default_when_unset() {
 
     let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
     let guidance: AuthoringGuidance = server
-        .get_authoring_guidance_tool()
+        .get_authoring_guidance_tool(Parameters(GuidanceDeliveryRequest::default()))
         .await
         .expect("get_authoring_guidance tool should succeed")
         .into_typed()
@@ -2781,12 +2781,35 @@ async fn negotiate_agent_session_tool_composes_live_world_state() {
         Some("codex-hooks/v1")
     );
 
-    let packet: AgentGuidancePacket = server
-        .get_agent_guidance_packet_tool()
+    let mut response: serde_json::Value = server
+        .get_agent_guidance_packet_tool(Parameters(GuidanceDeliveryRequest::default()))
         .await
-        .expect("guidance packet should resolve the authoritative guidance and cards")
+        .unwrap()
         .into_typed()
-        .expect("guidance packet should deserialize");
+        .unwrap();
+    let packet: AgentGuidancePacket = if response.get("delivery").is_some() {
+        let mut document = String::new();
+        loop {
+            document.push_str(response["content"].as_str().unwrap());
+            if response["delivery_complete"] == true {
+                break;
+            }
+            assert_eq!(
+                server.guidance_state.snapshot().unwrap().phase,
+                GuidancePhase::Bootstrap
+            );
+            let request = serde_json::from_value(response["next_arguments"].clone()).unwrap();
+            response = server
+                .get_agent_guidance_packet_tool(Parameters(request))
+                .await
+                .unwrap()
+                .into_typed()
+                .unwrap();
+        }
+        serde_json::from_str(&document).unwrap()
+    } else {
+        serde_json::from_value(response).unwrap()
+    };
     assert_eq!(
         packet.required_cards.len(),
         welcome.required_guidance_card_ids.len()
@@ -2796,7 +2819,10 @@ async fn negotiate_agent_session_tool_composes_live_world_state() {
         welcome.capability_snapshot.must_read_agent_skill_ids.len()
     );
     assert!(packet.authoritative_guidance_available);
-    assert_eq!(packet.state.phase, GuidancePhase::Discover);
+    assert_eq!(
+        server.guidance_state.snapshot().unwrap().phase,
+        GuidancePhase::Discover
+    );
 
     let preflight: serde_json::Value = server
         .agent_guidance_preflight_tool(Parameters(GuidancePreflightRequest {
@@ -15348,3 +15374,85 @@ fn mcp_material_batch_is_atomic_and_undoable() {
 
 #[cfg(feature = "model-api")]
 mod curation;
+
+#[cfg(feature = "model-api")]
+#[tokio::test]
+async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegotiation() {
+    let (sender, receiver) = mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut world = init_model_api_test_world();
+        world.insert_resource(crate::plugins::authoring_guidance::AuthoringGuidance {
+            version: 1,
+            prompt_text: "Canonical guidance å屋.\n".repeat(2000),
+            ..Default::default()
+        });
+        while let Ok(request) = receiver.recv() {
+            handle_model_api_request(&mut world, request);
+        }
+    });
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
+    server.guidance_state.start(
+        "revision".into(),
+        Some("inspect".into()),
+        vec![],
+        vec![],
+        vec![],
+    );
+    let mut page: serde_json::Value = server
+        .get_agent_guidance_packet_tool(Parameters(GuidanceDeliveryRequest::default()))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    let old_cursor = page["next_arguments"]["cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut document = String::new();
+    loop {
+        assert!(serde_json::to_string(&page).unwrap().len() < 16_000);
+        document.push_str(page["content"].as_str().unwrap());
+        if page["delivery_complete"] == true {
+            break;
+        }
+        assert_eq!(
+            server.guidance_state.snapshot().unwrap().phase,
+            GuidancePhase::Bootstrap
+        );
+        assert!(server
+            .guidance_state
+            .router_preflight("create_box")
+            .is_some());
+        let args = serde_json::from_value(page["next_arguments"].clone()).unwrap();
+        page = server
+            .get_agent_guidance_packet_tool(Parameters(args))
+            .await
+            .unwrap()
+            .into_typed()
+            .unwrap();
+    }
+    let packet: AgentGuidancePacket = serde_json::from_str(&document).unwrap();
+    assert_eq!(
+        packet.guidance.prompt_text,
+        "Canonical guidance å屋.\n".repeat(2000)
+    );
+    assert_eq!(
+        server.guidance_state.snapshot().unwrap().phase,
+        GuidancePhase::Discover
+    );
+    server
+        .guidance_state
+        .start("new".into(), None, vec![], vec![], vec![]);
+    assert!(server
+        .get_agent_guidance_packet_tool(Parameters(GuidanceDeliveryRequest {
+            cursor: Some(old_cursor)
+        }))
+        .await
+        .is_err());
+    assert_eq!(
+        server.guidance_state.snapshot().unwrap().phase,
+        GuidancePhase::Bootstrap
+    );
+    drop(server);
+    worker.await.unwrap();
+}

@@ -13,6 +13,7 @@ pub(crate) struct ModelApiServer {
     /// Server-owned guidance trajectory shared by the endpoint's stateless
     /// HTTP request handlers. Hooks are optional views over this state.
     pub(super) guidance_state: GuidanceSessionStore,
+    pub(super) guidance_delivery: GuidanceDeliveryStore,
     pub(super) transport_security: ModelApiTransportSecurity,
 }
 
@@ -68,6 +69,38 @@ impl ModelApiTransportSecurity {
 
 #[cfg(feature = "model-api")]
 impl ModelApiServer {
+    fn guidance_delivery_result(
+        &self,
+        mut page: DeliveredGuidance,
+        session_id: Option<String>,
+        packet: bool,
+    ) -> Result<CallToolResult, McpError> {
+        if page.complete {
+            self.guidance_state
+                .mark_delivery_loaded(session_id.as_deref(), packet, page.available)
+                .map_err(|e| McpError::invalid_params(e, None))?;
+        }
+        if page.value.get("delivery").is_some() {
+            page.value["live_guidance_state"] = self
+                .guidance_state
+                .snapshot()
+                .map(|state| {
+                    serde_json::json!({
+                        "guidance_session_id": state.guidance_session_id,
+                        "phase": state.phase,
+                        "refresh_tool": "get_agent_guidance_state"
+                    })
+                })
+                .unwrap_or(serde_json::Value::Null);
+        } else if packet {
+            page.value["state"] = serde_json::to_value(self.guidance_state.snapshot())
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        }
+        // One content block: duplicating structuredContent and text can itself
+        // exceed a provider's inline response limit.
+        json_tool_result(page.value)
+    }
+
     async fn corpus_connection(&self) -> crate::plugins::agent_skills::AgentCorpusConnection {
         self.round_trip(ModelApiRequest::AgentCorpusConnection)
             .await
@@ -348,6 +381,7 @@ impl ModelApiServer {
             tool_router: profile_tool_catalog().router.clone(),
             profile_state: SessionProfileState::new(default_profile_from_env()),
             guidance_state: GuidanceSessionStore::default(),
+            guidance_delivery: GuidanceDeliveryStore::default(),
             transport_security: ModelApiTransportSecurity::LocalStdio,
         }
     }
@@ -364,6 +398,7 @@ impl ModelApiServer {
             tool_router: profile_tool_catalog().router.clone(),
             profile_state,
             guidance_state: GuidanceSessionStore::default(),
+            guidance_delivery: GuidanceDeliveryStore::default(),
             transport_security: ModelApiTransportSecurity::LocalStdio,
         }
     }
@@ -377,6 +412,7 @@ impl ModelApiServer {
             tool_router: profile_tool_catalog().router.clone(),
             profile_state,
             guidance_state: GuidanceSessionStore::default(),
+            guidance_delivery: GuidanceDeliveryStore::default(),
             transport_security: ModelApiTransportSecurity::InstanceBearerHttp,
         }
     }
@@ -3392,7 +3428,7 @@ pub(super) fn assemble_agent_welcome(
         order: bootstrap_steps.len() as u32 + 1,
         action: "get_agent_guidance_packet".to_string(),
         required: true,
-        reason: "Load the authoritative authoring contract and every must-read guidance card in one bounded call."
+        reason: "Load canonical guidance and required cards/skills; follow every returned page until delivery_complete."
             .to_string(),
         arguments: None,
     });
@@ -5946,15 +5982,32 @@ impl ModelApiServer {
 
     #[tool(
         name = "get_agent_guidance_packet",
-        description = "Load the authoritative authoring guidance and every must-read card for the active Agent Welcome in ONE bounded call. This satisfies the guidance/card bootstrap obligations and returns the refreshed progressive-disclosure state. Call after negotiate_agent_session instead of manually fetching the guidance and each required card."
+        description = "Load canonical guidance and all required cards/skills after negotiate_agent_session. Large documents are delivered as bounded revision-pinned JSON fragments: read content and follow next_tool/next_arguments until delivery_complete. Only complete delivery satisfies bootstrap. No filesystem tools are needed."
     )]
-    pub(super) async fn get_agent_guidance_packet_tool(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn get_agent_guidance_packet_tool(
+        &self,
+        Parameters(params): Parameters<GuidanceDeliveryRequest>,
+    ) -> Result<CallToolResult, McpError> {
         if self.guidance_state.snapshot().is_none() {
             return Err(McpError::invalid_params(
                 "no active guidance session; call negotiate_agent_session first",
                 None,
             ));
         }
+        let session_id = self
+            .guidance_state
+            .snapshot()
+            .map(|state| state.guidance_session_id);
+        if let Some(cursor) = params.cursor {
+            let page = self
+                .guidance_delivery
+                .resume(GuidanceDeliveryKind::Packet, session_id.clone(), &cursor)
+                .map_err(|e| McpError::invalid_params(e, None))?;
+            return self.guidance_delivery_result(page, session_id, true);
+        }
+        self.guidance_state
+            .begin_delivery(session_id.as_deref())
+            .map_err(|e| McpError::invalid_params(e, None))?;
         let guidance = self
             .request_get_authoring_guidance()
             .await
@@ -5977,13 +6030,11 @@ impl ModelApiServer {
             required_skills.push(skill);
         }
         let authoritative_guidance_available = !guidance.is_empty();
-        self.guidance_state
-            .mark_guidance_packet_loaded(authoritative_guidance_available);
         let state = self
             .guidance_state
             .snapshot()
-            .expect("guidance session exists after packet load");
-        structured_json_tool_result(AgentGuidancePacket {
+            .expect("active guidance session");
+        let packet = AgentGuidancePacket {
             contract: "talos3d.agent-guidance-packet".to_string(),
             contract_version: 1,
             authoritative_guidance_available,
@@ -5991,7 +6042,18 @@ impl ModelApiServer {
             required_cards,
             required_skills,
             state,
-        })
+        };
+        let page = self
+            .guidance_delivery
+            .begin(
+                GuidanceDeliveryKind::Packet,
+                session_id.clone(),
+                serde_json::to_value(packet)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+                authoritative_guidance_available,
+            )
+            .map_err(|e| McpError::internal_error(e, None))?;
+        self.guidance_delivery_result(page, session_id, true)
     }
 
     #[tool(
@@ -10772,16 +10834,42 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "get_authoring_guidance",
-        description = "Return the canonical Talos3D-owned authoring guidance (COMPONENT_STRUCTURE). Call this immediately after connecting so you know how to structure reusable Definitions, derived variants, and singletons, and how they compose with progressive refinement. The `prompt_text` markdown is authoritative; the `component_structure` struct is a supplementary policy view."
+        description = "Return the canonical Talos3D-owned authoring guidance (COMPONENT_STRUCTURE). Call this immediately after connecting so you know how to structure reusable Definitions, derived variants, and singletons, and how they compose with progressive refinement. The `prompt_text` markdown is authoritative; `component_structure` is supplementary. Large responses use bounded JSON fragments: read content and follow next_tool/next_arguments until delivery_complete, without filesystem access."
     )]
-    pub(super) async fn get_authoring_guidance_tool(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn get_authoring_guidance_tool(
+        &self,
+        Parameters(params): Parameters<GuidanceDeliveryRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let session_id = self
+            .guidance_state
+            .snapshot()
+            .map(|state| state.guidance_session_id);
+        if let Some(cursor) = params.cursor {
+            let page = self
+                .guidance_delivery
+                .resume(GuidanceDeliveryKind::Authoring, session_id.clone(), &cursor)
+                .map_err(|e| McpError::invalid_params(e, None))?;
+            return self.guidance_delivery_result(page, session_id, false);
+        }
+        self.guidance_state
+            .begin_delivery(session_id.as_deref())
+            .map_err(|e| McpError::invalid_params(e, None))?;
         let guidance = self
             .request_get_authoring_guidance()
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
-        self.guidance_state
-            .mark_authoring_guidance(!guidance.is_empty());
-        json_tool_result(guidance)
+        let available = !guidance.is_empty();
+        let page = self
+            .guidance_delivery
+            .begin(
+                GuidanceDeliveryKind::Authoring,
+                session_id.clone(),
+                serde_json::to_value(guidance)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+                available,
+            )
+            .map_err(|e| McpError::internal_error(e, None))?;
+        self.guidance_delivery_result(page, session_id, false)
     }
 
     // --- Semantic Procedural Session (ADR-051, PP-SPS-3) ---

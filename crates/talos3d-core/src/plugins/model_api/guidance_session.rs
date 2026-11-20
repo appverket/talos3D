@@ -257,6 +257,46 @@ impl GuidanceSessionStore {
             .unwrap_or_default()
     }
 
+    pub fn begin_delivery(&self, expected_session: Option<&str>) -> Result<(), String> {
+        let mut guard = self.0.lock().expect("guidance session lock poisoned");
+        if guard.as_ref().map(|session| session.id.as_str()) != expected_session {
+            return Err("guidance session changed; restart guidance loading".into());
+        }
+        if let Some(session) = guard.as_mut() {
+            session.guidance_loaded = false;
+            session.guidance_unavailable = false;
+        }
+        Ok(())
+    }
+
+    pub fn mark_delivery_loaded(
+        &self,
+        expected_session: Option<&str>,
+        packet: bool,
+        available: bool,
+    ) -> Result<(), String> {
+        let mut guard = self.0.lock().expect("guidance session lock poisoned");
+        if guard.as_ref().map(|session| session.id.as_str()) != expected_session {
+            return Err(
+                "guidance session changed during delivery; restart guidance loading".into(),
+            );
+        }
+        if let Some(session) = guard.as_mut() {
+            session.guidance_loaded = available;
+            session.guidance_unavailable = !available;
+            if packet {
+                session
+                    .read_cards
+                    .extend(session.required_cards.iter().cloned());
+                session
+                    .read_skills
+                    .extend(session.required_skills.iter().cloned());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn mark_authoring_guidance(&self, available: bool) {
         if let Some(session) = self
             .0
@@ -269,6 +309,7 @@ impl GuidanceSessionStore {
         }
     }
 
+    #[cfg(test)]
     pub fn mark_guidance_packet_loaded(&self, authoritative_guidance_available: bool) {
         let mut guard = self.0.lock().expect("guidance session lock poisoned");
         let Some(session) = guard.as_mut() else {
@@ -488,7 +529,7 @@ impl GuidanceSession {
                 tool: "get_agent_guidance_packet".to_string(),
                 arguments: None,
                 reason:
-                    "Load the authoritative guidance, every must-read card, and every must-read skill in one bounded call."
+                    "Load the authoritative guidance, required cards and skills; follow every returned page through MCP until delivery_complete."
                         .to_string(),
             });
         }

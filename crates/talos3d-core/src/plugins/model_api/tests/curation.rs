@@ -315,7 +315,7 @@ async fn negotiated_guidance_loss_is_private_deduplicated_and_never_exports() {
         .message
         .contains(event_id));
     assert!(server
-        .get_agent_guidance_packet_tool()
+        .get_agent_guidance_packet_tool(Parameters(GuidanceDeliveryRequest::default()))
         .await
         .unwrap_err()
         .message

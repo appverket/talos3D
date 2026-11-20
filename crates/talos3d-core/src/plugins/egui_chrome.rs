@@ -1189,7 +1189,7 @@ fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str, pairing_code
          fragments.\n\n\
          Confirm that Agent Welcome returns instance id `{instance_id}` before acting. Call \
          `get_agent_guidance_packet` to load the authoritative guidance and all must-read cards \
-         in one bounded response, then follow its progressive `guidance_state.next_actions`. \
+         through bounded MCP pages until `delivery_complete`, then follow `get_agent_guidance_state`. \
          Treat guidance served by the \
          running instance as authoritative, fetch task-specific knowledge progressively, and \
          do not begin model edits until all required bootstrap steps are complete. Verify \

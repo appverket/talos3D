@@ -801,7 +801,13 @@ use profiles::{
 };
 
 #[cfg(feature = "model-api")]
+mod guidance_delivery;
+#[cfg(feature = "model-api")]
 mod guidance_session;
+#[cfg(feature = "model-api")]
+use guidance_delivery::{
+    DeliveredGuidance, GuidanceDeliveryKind, GuidanceDeliveryRequest, GuidanceDeliveryStore,
+};
 #[cfg(feature = "model-api")]
 use guidance_session::{
     hook_tool_name, GuidanceCompletionRequest, GuidancePreflightRequest, GuidanceSessionStore,
