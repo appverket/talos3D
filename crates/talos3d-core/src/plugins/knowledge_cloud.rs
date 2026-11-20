@@ -318,6 +318,19 @@ pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, Stri
                 return Err("Catalog identity/size mismatch".into());
             }
             let id = CatalogProviderId(data.id);
+            // Catalog descriptors have no private/shared scope. Only replace a
+            // catalog already admitted by this loader, never infer ownership
+            // from an identifier supplied by a release.
+            let existing = world
+                .get_resource::<CapabilityRegistry>()
+                .and_then(|r| r.catalog_provider_descriptor(&id));
+            let owned = world
+                .get_resource::<InstalledAssets>()
+                .and_then(|r| r.0.get(&a.id))
+                .is_some_and(|r| r.kind == a.kind && r.runtime_id == id.0);
+            if existing.is_some() && !owned {
+                return Err("Dynamic release cannot overwrite an unowned catalog".into());
+            }
             let provider = CatalogProviderDescriptor {
                 id: id.clone(),
                 label: data.label,
@@ -737,6 +750,35 @@ mod tests {
             .register_private(private)
             .unwrap();
         assert!(install(&mut world, passage("shared")).is_err());
+        assert!(world.get_resource::<InstalledAssets>().is_none());
+    }
+
+    #[test]
+    fn catalog_replacement_requires_existing_dynamic_ownership() {
+        use crate::capability_registry::{CapabilityRegistry, CatalogProviderId};
+        let mut candidate = passage("catalog-one");
+        candidate.asset.id = "test.catalog".into();
+        candidate.asset.kind = "catalog.v1".into();
+        candidate.asset.payload = json!({"id":"test.catalog","label":"Synthetic catalog",
+            "description":"Admission unit fixture","category":{"kind":"Other","value":"fixture"},
+            "region":null,"license":{"kind":"Cc0"},"source_version":"one","rows":[]});
+        let mut world = World::new();
+        install(&mut world, candidate.clone()).unwrap();
+        candidate.asset.payload["source_version"] = json!("two");
+        install(&mut world, candidate.clone()).unwrap();
+        world.remove_resource::<InstalledAssets>();
+        candidate.asset.payload["source_version"] = json!("unowned-overwrite");
+        assert!(install(&mut world, candidate)
+            .unwrap_err()
+            .contains("unowned catalog"));
+        assert_eq!(
+            world
+                .resource::<CapabilityRegistry>()
+                .catalog_provider_descriptor(&CatalogProviderId("test.catalog".into()))
+                .unwrap()
+                .source_version,
+            "two"
+        );
         assert!(world.get_resource::<InstalledAssets>().is_none());
     }
 }
