@@ -243,9 +243,6 @@ pub(super) fn profile_tool_catalog() -> &'static ProfileToolCatalog {
             let schema = std::sync::Arc::make_mut(&mut route.attr.input_schema);
             sanitize_tool_input_schema(schema);
         }
-        // Model-edit pairing is not a delegated curator identity. Profiles are
-        // presentation filters, so even `full` must not expose shared writes.
-        router.map.remove("contribute_agent_skill");
         let all = router.list_all();
         let lists = CapabilityProfile::ALL.map(|profile| {
             std::sync::Arc::new(
@@ -9722,22 +9719,6 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         json_tool_result(
             json!({"content_hash":params.content_hash,"path":params.path,"media_type":resource.media_type,"content":resource.content}),
         )
-    }
-
-    #[tool(
-        name = "contribute_agent_skill",
-        description = "Reserved for an authorized harness-curator MCP session. Ordinary user-agent sessions cannot contribute shared knowledge. Report a CorpusGap and consume a reviewed release instead. Curator-session authorization is not yet available on this transport."
-    )]
-    pub(super) async fn contribute_agent_skill_tool(
-        &self,
-        Parameters(_params): Parameters<crate::plugins::agent_skill_cloud::SkillContribution>,
-    ) -> Result<CallToolResult, McpError> {
-        // A paired model-edit token and the host's signed-in corpus account are
-        // not curator authority. Fail closed until a role-bound curator MCP
-        // transport is implemented; a profile or caller argument cannot grant it.
-        Err(McpError::invalid_request(
-            "curator_mcp_session_required: user-agent contribution is disabled", None,
-        ))
     }
 
     #[tool(
