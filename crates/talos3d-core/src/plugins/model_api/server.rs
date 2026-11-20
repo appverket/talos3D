@@ -8871,6 +8871,111 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     #[tool(
+        name = "list_legacy_knowledge_assets",
+        description = "List shared legacy knowledge candidates for curator migration. Excludes private project/occurrence data and already installed dynamic assets. Portable=false means a native callback cannot be migrated as executable data. Listing grants no publication authority."
+    )]
+    pub(super) async fn list_legacy_knowledge_assets_tool(
+        &self,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(
+            self.round_trip(|response| ModelApiRequest::ListLegacyKnowledgeAssets { response })
+                .await
+                .map_err(|e| McpError::internal_error(e, None))?,
+        )
+    }
+    #[tool(
+        name = "get_legacy_knowledge_asset",
+        description = "Read one shared legacy asset as bounded structured data with a snapshot hash. Inspect evidence and rights independently; embedded trust/review labels are not approval. No filesystem access or model creation is required."
+    )]
+    pub(super) async fn get_legacy_knowledge_asset_tool(
+        &self,
+        Parameters(request): Parameters<crate::plugins::knowledge_cloud::LegacyRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(
+            self.round_trip(|response| ModelApiRequest::GetLegacyKnowledgeAsset {
+                request,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?,
+        )
+    }
+
+    #[tool(
+        name = "list_knowledge_assets",
+        description = "List signed current dynamic knowledge assets and retire installed revisions that have changed or been withdrawn. This retrieves data independently of app builds; it does not edit the model. Use get_knowledge_asset to inspect applicability and install_knowledge_asset to load a compatible exact revision."
+    )]
+    pub(super) async fn list_knowledge_assets_tool(&self) -> Result<CallToolResult, McpError> {
+        let connection = self.corpus_connection().await;
+        let (_, store) = self.curation_context().await;
+        let index = crate::plugins::knowledge_cloud::index(&connection, &store)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let result = self
+            .round_trip(|response| ModelApiRequest::ReconcileKnowledgeAssets { index, response })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "get_knowledge_asset",
+        description = "Read the exact signed released knowledge asset by asset_id and content_hash. Returns typed data, applicability, limitations and evidence. Does not install or instantiate it; a release is not a verified project outcome."
+    )]
+    pub(super) async fn get_knowledge_asset_tool(
+        &self,
+        Parameters(request): Parameters<crate::plugins::knowledge_cloud::AssetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let connection = self.corpus_connection().await;
+        let (_, store) = self.curation_context().await;
+        let asset = crate::plugins::knowledge_cloud::retrieve(&connection, &store, &request)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(crate::plugins::knowledge_cloud::inspect(&asset))
+    }
+
+    #[tool(
+        name = "install_knowledge_asset",
+        description = "Fetch and install one exact current signed knowledge revision into the application registries without rebuilding the app or modifying model entities. Accepts identity only, never caller-supplied asset bytes or trust labels. Rediscover and use the resulting path; validate the authored result separately."
+    )]
+    pub(super) async fn install_knowledge_asset_tool(
+        &self,
+        Parameters(request): Parameters<crate::plugins::knowledge_cloud::AssetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let connection = self.corpus_connection().await;
+        let (_, store) = self.curation_context().await;
+        let admitted = Box::new(
+            crate::plugins::knowledge_cloud::retrieve(&connection, &store, &request)
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?,
+        );
+        let catalog = profile_tool_catalog();
+        let available = catalog
+            .tools_for(CapabilityProfile::Full)
+            .iter()
+            .map(|t| t.name.as_ref())
+            .collect::<std::collections::HashSet<_>>();
+        let missing = crate::plugins::knowledge_cloud::required_tools(&admitted)
+            .iter()
+            .filter(|id| !available.contains(id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(McpError::invalid_params(
+                "Knowledge requires unavailable runtime tools",
+                Some(json!({"missing_required_tool_ids":missing,"route":"CapabilityGap"})),
+            ));
+        }
+        let result = self
+            .round_trip(|response| ModelApiRequest::InstallKnowledgeAsset { admitted, response })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
         name = "discover_curated_paths",
         description = "Additive dynamic-knowledge discovery endpoint. Returns existing curated \
             paths plus an explicit NoCuratedPath gap candidate when recipe, parametric, or prior \
@@ -8883,13 +8988,50 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         Parameters(params): Parameters<CuratedPathDiscoveryRequest>,
     ) -> Result<CallToolResult, McpError> {
         let requested = params.clone();
+        let connection = self.corpus_connection().await;
+        let (_, store) = self.curation_context().await;
+        let remote = crate::plugins::knowledge_cloud::index(&connection, &store).await;
+        if let Ok(index) = &remote {
+            self.round_trip(|response| ModelApiRequest::ReconcileKnowledgeAssets {
+                index: index.clone(),
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        }
         let discovery = self
             .request_discover_curated_paths(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         let mut value = serde_json::to_value(&discovery)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        if discovery.no_curated_path.is_some() {
+        let mut available = Vec::new();
+        if let Ok(index) = &remote {
+            for entry in &index.assets {
+                if entry.asset["path_kind"] != discovery.path_kind {
+                    continue;
+                }
+                if let Some(class) = requested.element_class.as_deref() {
+                    if !entry.asset["element_classes"].as_array().is_some_and(|v| {
+                        v.iter()
+                            .any(|v| v.as_str().is_some_and(|v| v.eq_ignore_ascii_case(class)))
+                    }) {
+                        continue;
+                    }
+                }
+                available.push(json!({"asset":entry.asset,"content_hash":entry.content_hash,"executable":false,"installable":true,"next_tool":"install_knowledge_asset","arguments":{"asset_id":entry.asset["id"],"content_hash":entry.content_hash},"note":"Reviewed portable data; install and rediscover execution/applicability before authoring."}));
+            }
+        }
+        value["cloud_knowledge_available"] = json!(remote.is_ok());
+        if let Err(error) = &remote {
+            value["cloud_knowledge_error"] = json!(error);
+            value["coverage_status"] = json!("unknown_remote_corpus_unavailable");
+        }
+        value["released_knowledge_assets"] = json!(available);
+        if !available.is_empty() {
+            value["no_curated_path"] = serde_json::Value::Null;
+        }
+        if discovery.no_curated_path.is_some() && available.is_empty() && remote.is_ok() {
             let topic = requested
                 .element_class
                 .unwrap_or_else(|| "unspecified_knowledge".into());

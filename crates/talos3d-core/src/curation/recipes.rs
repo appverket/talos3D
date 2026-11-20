@@ -260,6 +260,11 @@ impl RecipeArtifactRegistry {
         }
     }
 
+    pub fn remove(&mut self, id: &AssetId) -> Option<RecipeArtifact> {
+        self.by_family_id.retain(|_, value| value != id);
+        self.entries.remove(id)
+    }
+
     pub fn get(&self, id: &AssetId) -> Option<&RecipeArtifact> {
         self.entries.get(id)
     }

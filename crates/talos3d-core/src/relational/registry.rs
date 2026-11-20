@@ -380,6 +380,11 @@ impl ParametricPlacementContract {
 }
 
 impl ParametricRegistry {
+    pub fn remove(&mut self, id: &str) -> Option<ParametricTypeDef> {
+        self.placement_contracts.remove(id);
+        self.types.remove(id)
+    }
+
     pub fn register(&mut self, def: ParametricTypeDef) {
         self.types.insert(def.id.clone(), def);
     }

@@ -860,6 +860,21 @@ pub(super) enum ModelApiRequest {
         context: serde_json::Value,
         response: oneshot::Sender<ApiResult<Vec<RecipeRankingInfo>>>,
     },
+    ListLegacyKnowledgeAssets {
+        response: oneshot::Sender<serde_json::Value>,
+    },
+    GetLegacyKnowledgeAsset {
+        request: crate::plugins::knowledge_cloud::LegacyRequest,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
+    InstallKnowledgeAsset {
+        admitted: Box<crate::plugins::knowledge_cloud::AdmittedAsset>,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
+    ReconcileKnowledgeAssets {
+        index: crate::plugins::knowledge_cloud::Index,
+        response: oneshot::Sender<serde_json::Value>,
+    },
     DiscoverCuratedPaths {
         request: CuratedPathDiscoveryRequest,
         response: oneshot::Sender<ApiResult<CuratedPathDiscoveryInfo>>,
@@ -2387,6 +2402,18 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             response,
         } => {
             let _ = response.send(handle_select_recipe(world, element_class, context));
+        }
+        ModelApiRequest::ListLegacyKnowledgeAssets { response } => {
+            let _ = response.send(crate::plugins::knowledge_cloud::legacy_list(world));
+        }
+        ModelApiRequest::GetLegacyKnowledgeAsset { request, response } => {
+            let _ = response.send(crate::plugins::knowledge_cloud::legacy_get(world, request));
+        }
+        ModelApiRequest::InstallKnowledgeAsset { admitted, response } => {
+            let _ = response.send(crate::plugins::knowledge_cloud::install(world, *admitted));
+        }
+        ModelApiRequest::ReconcileKnowledgeAssets { index, response } => {
+            let _ = response.send(crate::plugins::knowledge_cloud::reconcile(world, &index));
         }
         ModelApiRequest::DiscoverCuratedPaths { request, response } => {
             let _ = response.send(handle_discover_curated_paths(world, request));

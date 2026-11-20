@@ -2418,6 +2418,8 @@ pub enum DefinitionLibraryScope {
     /// 1 only adds the residency variant — released revisions land
     /// in PP-LIBPUB-2.
     WorkspaceLibrary,
+    /// Signature-verified dynamic corpus library.
+    SharedRelease,
     Bundled,
     ExternalFile,
 }
@@ -2544,6 +2546,14 @@ pub struct DefinitionLibraryRegistry {
 }
 
 impl DefinitionLibraryRegistry {
+    pub fn remove(&mut self, id: &DefinitionLibraryId) -> Option<DefinitionLibrary> {
+        let old = self.libraries.remove(id);
+        if old.is_some() {
+            self.generation.bump();
+        }
+        old
+    }
+
     /// Current change stamp. Differs from the stamp of any prior observation
     /// if the registry could have changed since.
     pub fn generation(&self) -> RegistryGeneration {

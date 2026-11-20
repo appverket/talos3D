@@ -295,6 +295,16 @@ impl CorpusPassageRegistry {
         );
     }
 
+    pub(crate) fn remove_released(&mut self, id: &str) {
+        if self
+            .passages
+            .get(id)
+            .is_some_and(|p| p.scope == crate::curation::Scope::Shipped)
+        {
+            self.passages.remove(id);
+        }
+    }
+
     pub(crate) fn register_released(
         &mut self,
         passage: crate::plugins::knowledge_persistence::PersistedPassage,

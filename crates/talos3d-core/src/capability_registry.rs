@@ -1906,6 +1906,16 @@ impl CapabilityRegistry {
     // --- PP75: Catalog provider descriptors ---
 
     /// Register a catalog provider descriptor. Panics if the id is already registered.
+    pub fn remove_catalog_provider(&mut self, id: &CatalogProviderId) {
+        self.catalog_providers.retain(|p| p.id != *id);
+        self.catalog_provider_index = self
+            .catalog_providers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.id.0.clone(), i))
+            .collect();
+    }
+
     pub fn register_catalog_provider(&mut self, descriptor: CatalogProviderDescriptor) {
         assert!(
             !self

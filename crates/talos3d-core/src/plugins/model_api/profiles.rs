@@ -246,6 +246,11 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
         "report_harness_retry_outcome",
         ToolCategory::SessionContract,
     ),
+    ("list_legacy_knowledge_assets", ToolCategory::Inspection),
+    ("get_legacy_knowledge_asset", ToolCategory::Inspection),
+    ("list_knowledge_assets", ToolCategory::Inspection),
+    ("get_knowledge_asset", ToolCategory::Inspection),
+    ("install_knowledge_asset", ToolCategory::Inspection),
     ("search_corpus_knowledge", ToolCategory::Inspection),
     (
         "submit_pending_harness_incidents",

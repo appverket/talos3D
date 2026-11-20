@@ -207,6 +207,8 @@ struct ReleaseState {
     error: Option<String>,
     overflow: bool,
     conflicting_sequence: Option<u64>,
+    knowledge_authority: String,
+    knowledge_epoch: Option<i64>,
     skill_authority: String,
     skill_epoch: Option<i64>,
     skill_tombstones: BTreeSet<String>,
@@ -347,6 +349,28 @@ impl CurationReleaseStore {
         state.fresh = false;
         state.error = Some(error);
     }
+    pub fn observe_knowledge_index(
+        &self,
+        connection: &super::agent_skills::AgentCorpusConnection,
+        epoch: i64,
+        withdrawn: &[String],
+    ) -> Result<(), String> {
+        let mut state = self.0.lock().expect("curation state poisoned");
+        let key = authority(&connection.base_url, &connection.trusted_public_keys);
+        if state.knowledge_authority != key {
+            state.knowledge_authority = key;
+            state.knowledge_epoch = None;
+        }
+        if state.knowledge_epoch.is_some_and(|old| epoch < old) {
+            return Err("Knowledge index rollback refused".into());
+        }
+        if withdrawn.len() > MAX_TOMBSTONES {
+            return Err("Knowledge withdrawal index exceeds bound".into());
+        }
+        state.knowledge_epoch = Some(epoch);
+        Ok(())
+    }
+
     pub fn observe_skill_index(
         &self,
         connection: &AgentCorpusConnection,
