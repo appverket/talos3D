@@ -13,6 +13,7 @@ pub const SCHEMA: &str = "talos3d.knowledge-asset.v1";
 #[serde(deny_unknown_fields)]
 #[derive(schemars::JsonSchema)]
 pub struct Asset {
+    #[schemars(schema_with = "asset_protocol_schema")]
     pub schema: String,
     pub id: String,
     pub kind: String,
@@ -28,6 +29,10 @@ pub struct Asset {
     pub redistribution_rights: String,
     pub contains_private_context: bool,
 }
+fn asset_protocol_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type":"string","enum":["talos3d.knowledge-asset.v1"]})
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IndexEntry {
     pub content_hash: String,
@@ -79,7 +84,7 @@ pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
         return Err("Candidate or case limit exceeded".into());
     }
     if request.asset.schema != SCHEMA || request.asset.contains_private_context {
-        return Err("Generalized knowledge schema required".into());
+        return Err(format!("Expected schema {SCHEMA} and contains_private_context=false; this is a computational check, not publication"));
     }
     let revision = hex::encode(Sha256::digest(&bytes));
     let mut scratch = World::new();
@@ -645,6 +650,14 @@ mod tests {
                 contains_private_context: false,
             },
         }
+    }
+    #[test]
+    fn candidate_protocol_is_discoverable_without_source() {
+        let schema = serde_json::to_value(schemars::schema_for!(CandidateCheck)).unwrap();
+        assert_eq!(
+            schema["$defs"]["Asset"]["properties"]["schema"]["enum"],
+            json!([SCHEMA])
+        );
     }
     #[test]
     fn candidate_check_is_not_admission_and_rejects_private_content() {
