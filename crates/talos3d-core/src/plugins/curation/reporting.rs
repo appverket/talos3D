@@ -482,7 +482,7 @@ impl HarnessIncidentStore {
         connection: &CurationConnection,
         corpus: &AgentCorpusConnection,
     ) -> Result<Value, String> {
-        let record = self.bound_record(event_id, policy, connection, corpus)?;
+        let record = self.record_for_access(event_id, policy, connection, corpus, true)?;
         let Some(id) = record.incident_id else {
             return Ok(
                 json!({"event_id":event_id,"status":"local_only","submitted":false,
@@ -508,14 +508,41 @@ impl HarnessIncidentStore {
         connection: &CurationConnection,
         corpus: &AgentCorpusConnection,
     ) -> Result<PendingRecord, String> {
+        self.record_for_access(event_id, policy, connection, corpus, false)
+    }
+
+    fn record_for_access(
+        &self,
+        event_id: &str,
+        policy: &HarnessIncidentPolicy,
+        connection: &CurationConnection,
+        corpus: &AgentCorpusConnection,
+        read_submitted_status: bool,
+    ) -> Result<PendingRecord, String> {
         uuid::Uuid::parse_str(event_id).map_err(|_| "Invalid event identity")?;
         let state = self.load(policy)?;
         let record = state
             .records
             .get(event_id)
             .ok_or("Incident unavailable for this host identity")?;
+        // A short-lived credential is not a stable account identity. For an
+        // already submitted receipt only, the read must reach the original
+        // service, which authorizes the incident against the current account.
+        // No private observation is returned or sent by this exception, and
+        // export/feedback retain their exact credential binding.
+        let remote_status_read = read_submitted_status
+            && record.submitted
+            && record
+                .incident_id
+                .as_deref()
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+            && corpus
+                .bearer_token
+                .as_deref()
+                .is_some_and(|token| !token.is_empty());
         if record.source != source(connection)?
-            || record.credential_fingerprint != fingerprint(corpus.bearer_token.as_deref())
+            || (!remote_status_read
+                && record.credential_fingerprint != fingerprint(corpus.bearer_token.as_deref()))
         {
             return Err("Incident unavailable for this host identity".into());
         }
@@ -883,6 +910,118 @@ fn write_pending(_: &Path, _: &[u8]) -> Result<(), String> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    #[cfg(feature = "model-api")]
+    #[tokio::test]
+    async fn submitted_status_uses_server_account_authority_after_token_renewal() {
+        use axum::{
+            http::{HeaderMap, StatusCode},
+            response::IntoResponse,
+            routing::get,
+            Router,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let app = Router::new().route(
+            "/v1/curation/incidents/{id}",
+            get(move |headers: HeaderMap| {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    if headers.get("authorization").and_then(|v| v.to_str().ok())
+                        != Some("Bearer renewed-same-account")
+                    {
+                        return StatusCode::NOT_FOUND.into_response();
+                    }
+                    axum::Json(json!({"state":"queued","released_remedies":[]})).into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let connection = CurationConnection {
+            base_url: format!("http://{address}/v1/curation"),
+            ..Default::default()
+        };
+        let original = AgentCorpusConnection {
+            base_url: format!("http://{address}/v1/corpus"),
+            bearer_token: Some("original".into()),
+            ..Default::default()
+        };
+        let policy = HarnessIncidentPolicy::default();
+        let store = HarnessIncidentStore::default();
+        let receipt = store
+            .report_gap(
+                "roof_system".into(),
+                "Executable path?".into(),
+                "parametric".into(),
+                &policy,
+                &connection,
+                original.bearer_token.as_deref(),
+            )
+            .unwrap();
+        let event = receipt["event_id"].as_str().unwrap();
+        let renewed = AgentCorpusConnection {
+            bearer_token: Some("renewed-same-account".into()),
+            ..original.clone()
+        };
+        // An unsubmitted private observation never crosses the new identity.
+        assert!(store
+            .incident_status(event, &policy, &connection, &renewed)
+            .await
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        {
+            let mut state = store.load(&policy).unwrap();
+            let record = state.records.get_mut(event).unwrap();
+            record.submitted = true;
+            record.incident_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        let status = store
+            .incident_status(event, &policy, &connection, &renewed)
+            .await
+            .unwrap();
+        assert_eq!(status["state"], "queued");
+        assert!(status.get("observation").is_none());
+        // Reading does not rebind export or feedback ownership.
+        assert!(store
+            .bound_record(event, &policy, &connection, &renewed)
+            .is_err());
+        assert!(store
+            .bound_record(event, &policy, &connection, &original)
+            .is_ok());
+        let other_account = AgentCorpusConnection {
+            bearer_token: Some("other-account".into()),
+            ..original.clone()
+        };
+        assert!(store
+            .incident_status(event, &policy, &connection, &other_account)
+            .await
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let wrong_origin = AgentCorpusConnection {
+            base_url: "http://127.0.0.1:1/v1/corpus".into(),
+            ..renewed.clone()
+        };
+        assert!(store
+            .incident_status(event, &policy, &connection, &wrong_origin)
+            .await
+            .is_err());
+        let changed_source = CurationConnection {
+            base_url: format!("http://{address}/another-session"),
+            ..Default::default()
+        };
+        assert!(store
+            .incident_status(event, &policy, &changed_source, &renewed)
+            .await
+            .is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn knowledge_opt_in_and_retry_outbox_survive_restart_without_rebinding() {
         let dir = tempfile::tempdir().unwrap();
