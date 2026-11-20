@@ -1645,3 +1645,13 @@ legacy inspection tools. For legacy inspection without a publication envelope, u
 snapshot hashes and private assets. It leaves evidence and rights unresolved,
 marks the result as inspection-only, and cannot submit or release a candidate.
 Do not invent publication metadata merely to inspect geometry.
+
+### Parametric document continuity
+
+Authored parametric instances retain a private copy of their portable type
+alongside driver overrides, placement and member IDs in the native project.
+Opening the project restores editable instances and membership without installing
+those definitions into the shared registry or granting them publication trust.
+Changes to a shared type do not silently change an existing instance's definition.
+Malformed or missing member identities are rejected before replacing the document.
+This persistence contract alone does not qualify command history or hosting.

@@ -461,6 +461,9 @@ pub struct ParametricInstance {
     pub instance_id: u64,
     pub type_id: String,
     pub overrides: BTreeMap<String, Value>,
+    /// Private authored definition pin. Never registered as shared knowledge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<ParametricTypeDef>,
     /// World-space placement applied to every synthesised geometry member.
     #[serde(default)]
     pub placement: Placement,
@@ -483,7 +486,8 @@ pub struct ParametricSnapshot {
 }
 
 /// Store of live parametric instances (Bevy resource).
-#[derive(Debug, Clone, Default, Resource)]
+#[derive(Debug, Clone, Default, Resource, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParametricStore {
     instances: BTreeMap<u64, ParametricInstance>,
     next_id: u64,
@@ -510,11 +514,69 @@ impl ParametricStore {
                 instance_id: id,
                 type_id: type_id.to_string(),
                 overrides,
+                definition: None,
                 placement,
                 geometry: Vec::new(),
             },
         );
         id
+    }
+
+    /// Pin only to this authored instance; file contents cannot publish a type.
+    pub fn pin_definition(&mut self, id: u64, mut definition: ParametricTypeDef) {
+        definition.public = false;
+        if let Some(instance) = self.instances.get_mut(&id) {
+            instance.definition = Some(definition);
+        }
+    }
+
+    pub fn instances(&self) -> impl Iterator<Item = &ParametricInstance> {
+        self.instances.values()
+    }
+
+    /// Validate before a loaded document replaces live state.
+    pub fn validate_document(
+        &mut self,
+        element_ids: &std::collections::HashSet<u64>,
+    ) -> Result<(), String> {
+        let mut members = std::collections::HashSet::new();
+        for (id, instance) in &mut self.instances {
+            if *id == 0 || *id != instance.instance_id || instance.type_id.is_empty() {
+                return Err("Invalid persisted parametric instance identity".into());
+            }
+            let definition = instance
+                .definition
+                .as_mut()
+                .ok_or("Persisted parametric instance has no definition pin")?;
+            if definition.id != instance.type_id {
+                return Err("Persisted parametric definition identity mismatch".into());
+            }
+            definition.public = false;
+            if !instance
+                .placement
+                .translate
+                .iter()
+                .chain(instance.placement.rotate_euler_deg.iter())
+                .all(|v| v.is_finite())
+            {
+                return Err("Nonfinite persisted parametric placement".into());
+            }
+            for id in &instance.geometry {
+                if !element_ids.contains(id) || !members.insert(*id) {
+                    return Err(
+                        "Persisted parametric member is missing or belongs to multiple instances"
+                            .into(),
+                    );
+                }
+            }
+        }
+        self.next_id = self
+            .next_id
+            .max(self.instances.keys().copied().max().unwrap_or(0));
+        if self.next_id == u64::MAX {
+            return Err("Parametric instance allocator exhausted".into());
+        }
+        Ok(())
     }
 
     /// Record the element ids of synthesised geometry entities for the instance.
@@ -531,7 +593,10 @@ impl ParametricStore {
     /// INSPECT: snapshot of an instance's drivers + derived values.
     pub fn snapshot(&self, registry: &ParametricRegistry, id: u64) -> Option<ParametricSnapshot> {
         let inst = self.instances.get(&id)?;
-        let def = registry.get(&inst.type_id)?;
+        let def = inst
+            .definition
+            .as_ref()
+            .or_else(|| registry.get(&inst.type_id))?;
         let drivers = def.effective_drivers(&inst.overrides);
         let derived = def.derive(&drivers);
         Some(ParametricSnapshot {
@@ -555,8 +620,10 @@ impl ParametricStore {
             .instances
             .get_mut(&id)
             .ok_or_else(|| DriverEditError::UnknownParam(format!("instance {id}")))?;
-        let def = registry
-            .get(&inst.type_id)
+        let def = inst
+            .definition
+            .as_ref()
+            .or_else(|| registry.get(&inst.type_id))
             .ok_or_else(|| DriverEditError::UnknownParam(inst.type_id.clone()))?;
         // Build a service component to enforce policy + report propagation.
         let mut comp = ParametricComponent::new(id, def.params.clone(), &def.edges());
@@ -590,7 +657,10 @@ impl ParametricStore {
         gesture: TransformGesture,
     ) -> Option<TransformOutcome> {
         let inst = self.instances.get(&id)?;
-        let def = registry.get(&inst.type_id)?;
+        let def = inst
+            .definition
+            .as_ref()
+            .or_else(|| registry.get(&inst.type_id))?;
         let current = def
             .transform
             .driver_for(axis)
@@ -616,7 +686,10 @@ impl ParametricStore {
         param: &str,
     ) -> Option<Vec<NodeId>> {
         let inst = self.instances.get(&id)?;
-        let def = registry.get(&inst.type_id)?;
+        let def = inst
+            .definition
+            .as_ref()
+            .or_else(|| registry.get(&inst.type_id))?;
         let comp = ParametricComponent::new(id, def.params.clone(), &def.edges());
         Some(comp.explain(param))
     }

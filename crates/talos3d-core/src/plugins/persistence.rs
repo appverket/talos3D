@@ -1600,6 +1600,15 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         .get_resource::<ProjectExtensions>()
         .map(|e| e.0.clone())
         .unwrap_or_default();
+    extensions.remove("core.parametric_instances.v1");
+    if let Some(store) = world.get_resource::<ParametricStore>() {
+        if store.instances().next().is_some() {
+            extensions.insert(
+                "core.parametric_instances.v1".into(),
+                serde_json::to_value(store).map_err(|e| e.to_string())?,
+            );
+        }
+    }
     extensions.remove("core.project_agent_skills.v1");
     if let Some(registry) = world.get_resource::<crate::plugins::agent_skills::AgentSkillRegistry>()
     {
@@ -2005,6 +2014,17 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         }
     }
 
+    let mut parametric_store: ParametricStore = extensions
+        .get("core.parametric_instances.v1")
+        .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or_default();
+    let parametric_member_ids = recognized
+        .iter()
+        .map(|(snapshot, _)| snapshot.element_id().0)
+        .collect();
+    parametric_store.validate_document(&parametric_member_ids)?;
+
     let mut skill_registry = world
         .get_resource::<crate::plugins::agent_skills::AgentSkillRegistry>()
         .cloned()
@@ -2207,6 +2227,41 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         stamp_authored_entity_dependencies(world, &snapshot);
         restored_snapshots.push(snapshot);
     }
+    // Restore private authored membership after snapshots, in one scene traversal.
+    let parametric_refs: std::collections::HashMap<_, _> = parametric_store
+        .instances()
+        .flat_map(|instance| {
+            instance
+                .geometry
+                .iter()
+                .enumerate()
+                .map(move |(index, id)| {
+                    let member_label = instance
+                        .definition
+                        .as_ref()
+                        .and_then(|d| d.representation.as_ref())
+                        .and_then(|r| r.members.get(index))
+                        .and_then(|m| m.label.clone());
+                    (
+                        *id,
+                        crate::plugins::parametric_mcp::ParametricInstanceRef {
+                            instance_id: instance.instance_id,
+                            member_index: index as u32,
+                            member_label,
+                        },
+                    )
+                })
+        })
+        .collect();
+    let members: Vec<_> = world
+        .query::<(Entity, &ElementId)>()
+        .iter(world)
+        .filter_map(|(entity, id)| parametric_refs.get(&id.0).cloned().map(|r| (entity, r)))
+        .collect();
+    for (entity, membership) in members {
+        world.entity_mut(entity).insert(membership);
+    }
+    world.insert_resource(parametric_store);
     world
         .resource_mut::<ElementIdAllocator>()
         .set_next(next_element_id);
@@ -2420,9 +2475,8 @@ fn clear_scene(world: &mut World) {
         let _ = world.despawn(entity);
     }
 
-    // Parametric instances are transient derivation state, not project
-    // content. Retaining them across load can regenerate geometry belonging to
-    // the document that was just replaced.
+    // Drop the old document's parametric instances. load_project restores only
+    // the new document's validated, privately pinned instances after its entities.
     if world.contains_resource::<ParametricStore>() {
         world.insert_resource(ParametricStore::default());
     }
@@ -2512,6 +2566,115 @@ mod tests {
     fn private_passage(ref_id: &str) -> crate::plugins::knowledge_persistence::PersistedPassage {
         serde_json::from_value(serde_json::json!({"passage_ref":ref_id,"text":"Private design preference", "citation":"Owner brief", "license":"vendor_eula:private","proactive_guidance":{"title":"Private","summary":"Private","task_tags":["authoring"]}})).unwrap()
     }
+    #[test]
+    fn parametric_document_round_trip_pins_type_and_restores_editable_members() {
+        use crate::plugins::modeling::{
+            generic_factory::PrimitiveFactory, profile::ProfileExtrusion,
+        };
+        use crate::plugins::parametric_mcp::*;
+        use crate::relational::param_expr::{Quantity, ScalarExpr, Unit};
+        use crate::relational::registry::*;
+        fn world() -> World {
+            let mut w = shell_world();
+            w.resource_mut::<CapabilityRegistry>()
+                .register_factory(PrimitiveFactory::<ProfileExtrusion>::new());
+            w.init_resource::<ParametricRegistry>();
+            w.init_resource::<ParametricStore>();
+            w.init_resource::<PropertyEditState>();
+            w.init_resource::<TransformState>();
+            w.init_resource::<NextState<ActiveTool>>();
+            w
+        }
+        let mut source = world();
+        let zero = || std::array::from_fn(|_| ScalarExpr::lit(Quantity::mm(0.0)));
+        let created = world_create(
+            &mut source,
+            CreateParametricRequest {
+                defaults: [("width".into(), 1000.0)].into(),
+                driver_units: [("width".into(), Unit::Mm)].into(),
+                representation: Some(ParametricRepresentation {
+                    members: vec![ParametricMember {
+                        size: [
+                            ScalarExpr::param("width"),
+                            ScalarExpr::lit(Quantity::mm(500.0)),
+                            ScalarExpr::lit(Quantity::mm(100.0)),
+                        ],
+                        translate: zero(),
+                        rotate_euler_deg: zero(),
+                        profile_xz: vec![],
+                        label: Some("fixture member".into()),
+                        semantic: None,
+                    }],
+                }),
+                ..default()
+            },
+        )
+        .unwrap();
+        let instance_id = created.snapshot.instance_id;
+        let bytes = capture_project_bytes(&mut source).unwrap();
+        let mut target = world();
+        open_project_bytes(&mut target, &bytes).unwrap();
+        assert!(
+            world_list_types(&mut target).is_empty(),
+            "Document bytes must not register shared types"
+        );
+        let snapshot =
+            world_inspect(&mut target, InspectParametricRequest { instance_id }).unwrap();
+        assert_eq!(snapshot.drivers["width"], 1000.0);
+        assert_eq!(
+            target
+                .query::<&ParametricInstanceRef>()
+                .iter(&target)
+                .count(),
+            1
+        );
+        let changed = world_set_driver(
+            &mut target,
+            SetParametricDriverRequest {
+                instance_id,
+                name: "width".into(),
+                value: serde_json::json!(2000.0),
+            },
+        )
+        .unwrap();
+        assert_eq!(changed.element_ids.len(), 1);
+        let shape = target
+            .query::<&ProfileExtrusion>()
+            .iter(&target)
+            .next()
+            .unwrap();
+        assert_eq!(
+            shape.profile,
+            crate::plugins::modeling::profile::Profile2d::rectangle(2.0, 0.1)
+        );
+        let edited = capture_project_bytes(&mut target).unwrap();
+        open_project_bytes(&mut source, &edited).unwrap();
+        assert_eq!(
+            world_inspect(&mut source, InspectParametricRequest { instance_id })
+                .unwrap()
+                .drivers["width"],
+            2000.0
+        );
+        // Malformed membership is refused before replacing the current document.
+        let mut malformed: Value = crate::plugins::project_codec::decode(&edited).unwrap();
+        malformed["core.parametric_instances.v1"]["instances"][instance_id.to_string()]
+            ["geometry"] = serde_json::json!([999999]);
+        assert!(open_project_bytes(&mut source, &serde_json::to_vec(&malformed).unwrap()).is_err());
+        assert_eq!(
+            world_inspect(&mut source, InspectParametricRequest { instance_id })
+                .unwrap()
+                .drivers["width"],
+            2000.0
+        );
+        let clean = capture_project_bytes(&mut world()).unwrap();
+        open_project_bytes(&mut target, &clean).unwrap();
+        assert!(target
+            .resource::<ParametricStore>()
+            .instances()
+            .next()
+            .is_none());
+    }
+
     #[test]
     fn private_agent_skills_survive_project_open_without_shipped_trust_or_cross_project_leak() {
         use crate::plugins::agent_skills::*;
@@ -2815,7 +2978,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_scene_resets_transient_parametric_instances() {
+    fn clear_scene_resets_previous_document_parametric_instances() {
         let mut world = World::new();
         world.insert_resource(ParametricStore::default());
         let instance_id = world

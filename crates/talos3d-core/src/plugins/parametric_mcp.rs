@@ -306,7 +306,9 @@ pub fn world_create(
 
     let instance_id = {
         let mut store = world.resource_mut::<ParametricStore>();
-        store.instantiate_with(&effective_type_id, req.overrides.clone(), placement)
+        let id = store.instantiate_with(&effective_type_id, req.overrides.clone(), placement);
+        store.pin_definition(id, reg.get(&effective_type_id).unwrap().clone());
+        id
     };
 
     // Synthesise representation geometry using the effective (post-override) drivers.
@@ -348,7 +350,11 @@ fn synthesize_parametric_geometry(
     type_id: &str,
     instance_id: u64,
 ) -> Result<Vec<u64>, String> {
-    let Some(type_def) = reg.get(type_id) else {
+    let pinned = world
+        .get_resource::<ParametricStore>()
+        .and_then(|store| store.get(instance_id))
+        .and_then(|instance| instance.definition.clone());
+    let Some(type_def) = pinned.as_ref().or_else(|| reg.get(type_id)) else {
         return Ok(Vec::new());
     };
 
