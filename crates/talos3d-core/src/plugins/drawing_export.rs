@@ -1060,7 +1060,7 @@ fn screenshot_quality(rgb: &RgbImage) -> Option<ScreenshotQuality> {
     })
 }
 
-fn screenshot_quality_warning(rgb: &RgbImage) -> Option<String> {
+pub(crate) fn screenshot_quality_warning(rgb: &RgbImage) -> Option<String> {
     let quality = screenshot_quality(rgb)?;
     let dynamic_range = quality.max_luma.saturating_sub(quality.min_luma);
     if quality.max_luma <= 2 {

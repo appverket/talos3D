@@ -1616,3 +1616,24 @@ requires review and grants no publication authority. Registry membership alone
 proves neither source grounding nor privacy/redistribution clearance. Only the
 authorized curator may use reviewed candidates in the shared publication flow.
 This inspection tool does not implement dynamic publication or installation.
+
+## Isolated candidate observations
+
+`evaluate_knowledge_candidate` accepts an untrusted `parametric_type.v1` asset,
+initial driver overrides, placement and an ordered list of driver edits. It
+executes the ordinary parametric create/update handlers in a disposable World,
+using only public element-class schemas from the product. Its observations use
+the existing AABB, overlap and floating checks. Only derived meshes reach a
+separate GPU render layer; the response contains the exact candidate hash,
+observations and inline PNG. No candidate registry or authored entity enters the
+open document, and no file is read or written by this operation.
+
+One evaluation runs at a time, bounded to 128 members, 16 edits, 100,000 vertices
+and a 768-square image. Expression evaluation and mesh preparation run off the
+frame thread; rendering uses the existing Bevy mesh and material pipeline.
+Temporary render resources are reclaimed after capture, cancellation or timeout.
+Unsupported kinds fail explicitly. Neutral inspection materials, approximate
+AABBs and a rendered image do not establish source rights, structural design,
+hosting, undo/redo, native save/reload, or a successful user retry. Independent
+acceptance must test those separately; candidate evaluation never authorizes
+publication or installs a released asset.

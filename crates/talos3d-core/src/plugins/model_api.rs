@@ -207,6 +207,7 @@ impl Plugin for ModelApiPlugin {
 
 #[cfg(feature = "model-api")]
 fn register_shared_model_api_harness(app: &mut App) {
+    crate::plugins::knowledge_cloud::candidate_runtime::register(app);
     // Ensure the Semantic Procedural Session substrate (ADR-051) is
     // installed so `procedural_session.*` tools have resources to
     // operate on. Idempotent — `ProceduralSessionMcpPlugin` adds

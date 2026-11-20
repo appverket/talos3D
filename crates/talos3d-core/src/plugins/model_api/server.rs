@@ -8917,6 +8917,53 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     #[tool(
+        name = "evaluate_knowledge_candidate",
+        description = "Execute a bounded parametric candidate in a disposable scene using ordinary create/driver handlers, report AABB checks and return an isolated GPU image. Never installs candidate knowledge or edits the user document. Supports parametric_type.v1 only, at most128 members and16 edits. Neutral render materials; no rights, structural, hosting, undo or saved-file qualification. Unsupported asset kinds are capability gaps."
+    )]
+    pub(super) async fn evaluate_knowledge_candidate_tool(
+        &self,
+        Parameters(request): Parameters<
+            crate::plugins::knowledge_cloud::candidate_runtime::Request,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        // One bounded offline computation. The frame thread only uploads the
+        // prepared meshes; it never runs candidate expressions or serializes
+        // observations. No private document data enters the worker.
+        static SLOT: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
+        let permit = SLOT
+            .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)))
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| McpError::invalid_params("Candidate evaluator busy", None))?;
+        let classes = self
+            .round_trip(|response| ModelApiRequest::CandidateRuntimeClasses { response })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let (scene, _permit) = tokio::task::spawn_blocking(move || {
+            (
+                crate::plugins::knowledge_cloud::candidate_runtime::evaluate(request, classes),
+                permit,
+            )
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let scene = scene.map_err(|e| McpError::invalid_params(e, None))?;
+        let (report, png) = self
+            .round_trip(|response| ModelApiRequest::EvaluateKnowledgeCandidate {
+                scene: Box::new(scene),
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        Ok(CallToolResult::success(vec![
+            Content::json(report)?,
+            Content::image(png, "image/png"),
+        ]))
+    }
+
+    #[tool(
         name = "list_knowledge_assets",
         description = "List signed current dynamic knowledge assets and retire installed revisions that have changed or been withdrawn. This retrieves data independently of app builds; it does not edit the model. Use get_knowledge_asset to inspect applicability and install_knowledge_asset to load a compatible exact revision."
     )]

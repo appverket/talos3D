@@ -867,6 +867,14 @@ pub(super) enum ModelApiRequest {
         request: crate::plugins::knowledge_cloud::LegacyRequest,
         response: oneshot::Sender<ApiResult<serde_json::Value>>,
     },
+    CandidateRuntimeClasses {
+        response: oneshot::Sender<Vec<crate::capability_registry::ElementClassDescriptor>>,
+    },
+    EvaluateKnowledgeCandidate {
+        scene: Box<crate::plugins::knowledge_cloud::candidate_runtime::Scene>,
+        response:
+            oneshot::Sender<crate::plugins::knowledge_cloud::candidate_runtime::RuntimeResult>,
+    },
     InstallKnowledgeAsset {
         admitted: Box<crate::plugins::knowledge_cloud::AdmittedAsset>,
         response: oneshot::Sender<ApiResult<serde_json::Value>>,
@@ -2408,6 +2416,16 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::GetLegacyKnowledgeAsset { request, response } => {
             let _ = response.send(crate::plugins::knowledge_cloud::legacy_get(world, request));
+        }
+        ModelApiRequest::CandidateRuntimeClasses { response } => {
+            let classes = world
+                .get_resource::<crate::capability_registry::CapabilityRegistry>()
+                .map(|r| r.element_class_descriptors().to_vec())
+                .unwrap_or_default();
+            let _ = response.send(classes);
+        }
+        ModelApiRequest::EvaluateKnowledgeCandidate { scene, response } => {
+            crate::plugins::knowledge_cloud::candidate_runtime::start(world, *scene, response);
         }
         ModelApiRequest::InstallKnowledgeAsset { admitted, response } => {
             let _ = response.send(crate::plugins::knowledge_cloud::install(world, *admitted));

@@ -782,3 +782,6 @@ mod tests {
         assert!(world.get_resource::<InstalledAssets>().is_none());
     }
 }
+
+#[path = "knowledge_candidate.rs"]
+pub mod candidate_runtime;
