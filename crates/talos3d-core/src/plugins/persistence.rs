@@ -1978,6 +1978,15 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         }
         if let Some(factory) = registry.factory_for(&record.type_name) {
             let snapshot = factory.from_persisted_json(&record.data)?;
+            // Older/extracted documents may carry a stale allocator watermark.
+            // Never reuse an authored identity when editing the loaded document.
+            next_element_id = next_element_id.max(
+                snapshot
+                    .element_id()
+                    .0
+                    .checked_add(1)
+                    .ok_or_else(|| "Project element identity space is exhausted".to_string())?,
+            );
             recognized.push((snapshot, record.semantic));
         } else {
             opaque.push(record);
@@ -4206,9 +4215,13 @@ mod tests {
         let project = build_project_file(&mut source).unwrap();
         let encoded = serde_json::to_string(&project).unwrap();
         // Exercise the actual byte parser, not Value-to-Value deserialization.
-        let decoded: ProjectFile = serde_json::from_str(&encoded).unwrap();
+        let mut decoded: ProjectFile = serde_json::from_str(&encoded).unwrap();
+        // A stale saved watermark must not let the next edit overwrite a group
+        // or relation. Exercise the actual load path, including sidecars.
+        decoded.next_element_id = 1;
         let mut target = world();
         load_project(&mut target, decoded).unwrap();
+        assert!(target.resource::<ElementIdAllocator>().next_id().0 > pair.1 .0);
         let root = entity_for_element_id(&target, ElementId(1)).unwrap();
         assert_eq!(target.get::<ObligationSet>(root), Some(&obligations));
         assert_eq!(target.get::<ClaimGrounding>(root), Some(&grounding));
