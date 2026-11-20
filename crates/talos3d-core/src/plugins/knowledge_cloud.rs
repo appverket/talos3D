@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 pub const SCHEMA: &str = "talos3d.knowledge-asset.v1";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(schemars::JsonSchema)]
 pub struct Asset {
     pub schema: String,
     pub id: String,
@@ -59,6 +60,67 @@ struct InstalledAsset {
     revision: String,
     kind: String,
     runtime_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateCheck {
+    pub asset: Asset,
+    /// Parametric driver cases only. An empty list checks defaults.
+    #[serde(default)]
+    pub driver_cases: Vec<BTreeMap<String, Value>>,
+}
+
+/// Uses the same decoder/validation as admission, in disposable registries.
+/// No entity, release, trust decision or project state escapes this check.
+pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
+    let bytes = serde_json::to_vec(&request.asset).map_err(|e| e.to_string())?;
+    if bytes.len() > 1_048_576 || request.driver_cases.len() > 16 {
+        return Err("Candidate or case limit exceeded".into());
+    }
+    if request.asset.schema != SCHEMA || request.asset.contains_private_context {
+        return Err("Generalized knowledge schema required".into());
+    }
+    let revision = hex::encode(Sha256::digest(&bytes));
+    let mut scratch = World::new();
+    install(
+        &mut scratch,
+        AdmittedAsset {
+            asset: request.asset.clone(),
+            revision: revision.clone(),
+        },
+    )?;
+    let mut cases = Vec::new();
+    if request.asset.kind == "parametric_type.v1" {
+        let definition: crate::relational::registry::ParametricTypeDef =
+            decode(request.asset.payload["definition"].clone())?;
+        let inputs = if request.driver_cases.is_empty() {
+            vec![BTreeMap::new()]
+        } else {
+            request.driver_cases
+        };
+        for drivers in inputs {
+            let members = definition.evaluate_representation(&drivers).ok_or(
+                "No emitting representation: this candidate cannot close an executable path gap",
+            )??;
+            cases.push(
+                json!({"drivers":drivers,"members":members.iter().map(|m| json!({
+                "size":m.size,"translate":m.translate,"rotate_euler_deg":m.rotate_euler_deg,
+                "profile_xz":m.profile_xz,"label":m.label
+            })).collect::<Vec<_>>()}),
+            );
+        }
+    } else if !request.driver_cases.is_empty() {
+        return Err("Driver cases apply only to parametric_type.v1".into());
+    }
+    Ok(
+        json!({"content_hash":revision,"structural_validation":"passed","parametric_cases":cases,
+        "installed":false,"released":false,"model_modified":false,
+        "limitations":["No independent source, rights or applicability approval.",
+            "No rendered model, placement, load-bearing or construction acceptance.",
+            "Recipe and Definition bodies are structurally checked; this does not execute an authoring episode."],
+        "next_step":"Use independent review and runtime acceptance appropriate to the declared asset scope; never treat this check as publication approval."}),
+    )
 }
 
 pub async fn index(
@@ -343,6 +405,34 @@ pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, Stri
     )
 }
 
+/// A document load replaces its private registry, not verified session releases.
+/// Only copies already admitted in this process are eligible; project bytes are
+/// deliberately not a trust source. Private document identities take precedence.
+pub fn retain_session_libraries(
+    world: &World,
+    target: &mut super::modeling::definition::DefinitionLibraryRegistry,
+) {
+    use super::modeling::definition::{DefinitionLibraryRegistry, DefinitionLibraryScope};
+    let (Some(installed), Some(libraries)) = (
+        world.get_resource::<InstalledAssets>(),
+        world.get_resource::<DefinitionLibraryRegistry>(),
+    ) else {
+        return;
+    };
+    for library in libraries.list() {
+        if library.scope == DefinitionLibraryScope::SharedRelease
+            && installed.0.get(&library.id.0).is_some_and(|asset| {
+                asset.kind == "definition_library.v1"
+                    && library.source_path.as_deref()
+                        == Some(format!("corpus:{}@{}", library.id.0, asset.revision).as_str())
+            })
+            && target.get(&library.id).is_none()
+        {
+            target.insert(library.clone());
+        }
+    }
+}
+
 pub fn reconcile(world: &mut World, index: &Index) -> Value {
     let removed: Vec<_> = world
         .get_resource::<InstalledAssets>()
@@ -467,7 +557,7 @@ pub fn legacy_list(world: &World) -> Value {
             .cmp(&b["kind"].as_str())
             .then(a["id"].as_str().cmp(&b["id"].as_str()))
     });
-    json!({"assets":items,"publication_authorized":false,"notice":"Legacy shared content is a migration candidate, not independently reviewed knowledge. Resolve evidence, rights, applicability and limitations before curator submission. Unsupported native bodies must become explicit gaps."})
+    json!({"assets":items,"coverage":{"portable_kinds":["catalog.v1","corpus_passage.v1","definition_library.v1","parametric_type.v1","recipe.v1"],"excluded_private_content":["document_definitions","occurrences","project_passages","private_parametric_types"],"unsupported_dynamic_kinds":["native_recipe_bodies","generation_priors","native_constraints"],"procedures":"Inspect list_agent_skills and exact resources separately; this inventory is not exhaustive of every compiled registry."},"publication_authorized":false,"notice":"Legacy shared content is a migration candidate, not independently reviewed knowledge. Resolve evidence, rights, applicability and limitations before curator submission. Unsupported native bodies must become explicit gaps."})
 }
 pub fn legacy_get(world: &World, request: LegacyRequest) -> Result<Value, String> {
     if !legacy_list(world)["assets"].as_array().is_some_and(|v| {
@@ -556,6 +646,30 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn candidate_check_is_not_admission_and_rejects_private_content() {
+        let asset = passage("candidate").asset;
+        let checked = check_candidate(CandidateCheck {
+            asset: asset.clone(),
+            driver_cases: vec![],
+        })
+        .unwrap();
+        assert_eq!(checked["installed"], false);
+        assert_eq!(checked["released"], false);
+        assert_eq!(checked["model_modified"], false);
+        assert_eq!(
+            checked["content_hash"],
+            hex::encode(Sha256::digest(serde_json::to_vec(&asset).unwrap()))
+        );
+        let mut private = asset;
+        private.contains_private_context = true;
+        assert!(check_candidate(CandidateCheck {
+            asset: private,
+            driver_cases: vec![]
+        })
+        .is_err());
+    }
+
     #[test]
     fn replacement_and_withdrawal_update_only_shared_registries() {
         let mut world = World::new();

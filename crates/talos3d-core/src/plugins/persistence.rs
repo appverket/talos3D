@@ -704,7 +704,11 @@ pub fn new_document(world: &mut World) {
     world.insert_resource(TextureRegistry::default());
     reseed_builtin_materials(world);
     world.insert_resource(DefinitionRegistry::default());
-    world.insert_resource(DefinitionLibraryRegistry::default());
+    #[allow(unused_mut)]
+    let mut libraries = DefinitionLibraryRegistry::default();
+    #[cfg(feature = "model-api")]
+    super::knowledge_cloud::retain_session_libraries(world, &mut libraries);
+    world.insert_resource(libraries);
     if let Err(error) = apply_registered_bundled_definition_libraries(world) {
         error!("Failed to restore bundled definition libraries for new document: {error}");
     }
@@ -1481,7 +1485,11 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         }
     }
     for lib in world.resource::<DefinitionLibraryRegistry>().list() {
-        if lib.scope != crate::plugins::modeling::definition::DefinitionLibraryScope::Bundled {
+        if !matches!(
+            lib.scope,
+            crate::plugins::modeling::definition::DefinitionLibraryScope::Bundled
+                | crate::plugins::modeling::definition::DefinitionLibraryScope::SharedRelease
+        ) {
             for def in lib.definitions.values() {
                 if let Some(a) = &def.material_assignment {
                     collect(a)
@@ -1515,7 +1523,11 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     };
     let mut definition_library_registry = DefinitionLibraryRegistry::default();
     for library in world.resource::<DefinitionLibraryRegistry>().list() {
-        if library.scope != crate::plugins::modeling::definition::DefinitionLibraryScope::Bundled {
+        if !matches!(
+            library.scope,
+            crate::plugins::modeling::definition::DefinitionLibraryScope::Bundled
+                | crate::plugins::modeling::definition::DefinitionLibraryScope::SharedRelease
+        ) {
             definition_library_registry.insert(library.clone());
         }
     }
@@ -2126,6 +2138,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         }
     }
     let mut definition_library_registry = definition_libraries.unwrap_or_default();
+    definition_library_registry.demote_unverified_shared_scopes();
     for (library_id, migrated) in definition_library_registry.migrate_legacy_material_assignments()
     {
         info!(
@@ -2140,6 +2153,8 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
                 .join(", "),
         );
     }
+    #[cfg(feature = "model-api")]
+    super::knowledge_cloud::retain_session_libraries(world, &mut definition_library_registry);
     world.insert_resource(definition_library_registry);
     if let Err(error) = apply_registered_bundled_definition_libraries(world) {
         error!("Failed to restore bundled definition libraries after project load: {error}");
@@ -3011,6 +3026,15 @@ mod tests {
             tags: vec!["test".to_string()],
             definitions: default(),
             draft_status: crate::plugins::modeling::definition::DefinitionDraftStatus::default(),
+        });
+        libraries.insert(DefinitionLibrary {
+            id: DefinitionLibraryId("test.dynamic-library".into()),
+            name: "Shared test fixture".into(),
+            scope: DefinitionLibraryScope::SharedRelease,
+            source_path: None,
+            tags: vec![],
+            definitions: default(),
+            draft_status: default(),
         });
         world.insert_resource(libraries);
 

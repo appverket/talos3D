@@ -2546,6 +2546,19 @@ pub struct DefinitionLibraryRegistry {
 }
 
 impl DefinitionLibraryRegistry {
+    /// Project bytes cannot assert current shared release admission.
+    pub fn demote_unverified_shared_scopes(&mut self) {
+        for library in self.libraries.values_mut() {
+            if matches!(
+                library.scope,
+                DefinitionLibraryScope::Bundled | DefinitionLibraryScope::SharedRelease
+            ) {
+                library.scope = DefinitionLibraryScope::DocumentLocal;
+                self.generation.bump();
+            }
+        }
+    }
+
     pub fn remove(&mut self, id: &DefinitionLibraryId) -> Option<DefinitionLibrary> {
         let old = self.libraries.remove(id);
         if old.is_some() {

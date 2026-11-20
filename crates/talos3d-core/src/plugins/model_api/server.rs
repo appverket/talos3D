@@ -8903,6 +8903,20 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     #[tool(
+        name = "check_knowledge_candidate",
+        description = "Check a typed candidate through the runtime payload decoder in disposable registries, without installation, publication or model edits. Parametric driver cases return evaluated member geometry. Recipe/Definition checks are structural only. Independent source review and rendered authoring acceptance remain required."
+    )]
+    pub(super) async fn check_knowledge_candidate_tool(
+        &self,
+        Parameters(request): Parameters<crate::plugins::knowledge_cloud::CandidateCheck>,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(
+            crate::plugins::knowledge_cloud::check_candidate(request)
+                .map_err(|e| McpError::invalid_params(e, None))?,
+        )
+    }
+
+    #[tool(
         name = "list_knowledge_assets",
         description = "List signed current dynamic knowledge assets and retire installed revisions that have changed or been withdrawn. This retrieves data independently of app builds; it does not edit the model. Use get_knowledge_asset to inspect applicability and install_knowledge_asset to load a compatible exact revision."
     )]

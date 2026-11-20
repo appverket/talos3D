@@ -169,8 +169,13 @@ pub(crate) async fn request(
         .map_err(|_| "Cloud corpus request failed".to_string())?;
     if !response.status().is_success() {
         return Err(format!(
-            "Cloud corpus HTTP {}; reconnect account for contributions",
-            response.status().as_u16()
+            "Cloud corpus HTTP {}; {}",
+            response.status().as_u16(),
+            match response.status().as_u16() {
+                401 | 403 => "corpus access was rejected; check the authorized connection",
+                404 => "requested corpus endpoint or revision is unavailable",
+                _ => "corpus service request did not succeed",
+            }
         ));
     }
     let mut bytes = Vec::new();

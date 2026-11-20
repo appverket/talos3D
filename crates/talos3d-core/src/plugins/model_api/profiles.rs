@@ -251,6 +251,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("list_knowledge_assets", ToolCategory::Inspection),
     ("get_knowledge_asset", ToolCategory::Inspection),
     ("install_knowledge_asset", ToolCategory::Inspection),
+    ("check_knowledge_candidate", ToolCategory::Inspection),
     ("search_corpus_knowledge", ToolCategory::Inspection),
     (
         "submit_pending_harness_incidents",
