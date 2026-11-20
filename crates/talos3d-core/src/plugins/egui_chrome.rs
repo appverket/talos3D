@@ -3518,10 +3518,15 @@ fn draw_agent_connection_window(
             };
 
             if *paired {
-                ui.label("An agent connection has already been paired with this app session.");
-                ui.label("Existing agents can reconnect with their session credential. The previous one-time pairing code has been used and cannot connect another agent.");
+                ui.label("This app session is already paired. Multiple local clients can reconnect using its existing credential.");
                 ui.monospace(http_url);
-                ui.weak("To start a new pairing session, save your model and restart the app.");
+                if std::env::var_os("TALOS3D_MCP_HEADERS_HELPER").is_some() {
+                    ui.label("Your development launcher manages the connection. Use the workspace MCP tools or the configured credential helper; no new pairing code is needed.");
+                    ui.weak("Restarting through the launcher pairs again automatically. The curator configuration is separate from model-agent connections.");
+                } else {
+                    ui.label("The one-time pairing code has been used. Reuse the credential returned by pairing; the code itself cannot be reused.");
+                    ui.weak("If that credential is lost, save your model and restart the app for a new pairing session.");
+                }
                 return;
             }
 

@@ -310,6 +310,12 @@ establish a named user, delegated agent identity, or independent command
 authorization policy; the local desktop/OS session is the user-presence trust
 boundary.
 
+Multiple local clients may reuse the same process-lifetime bearer while each
+negotiates its own MCP session. Pairing is not an exclusive agent lease. When
+`TALOS3D_MCP_HEADERS_HELPER` is configured, the paired onboarding dialog directs
+clients to the launcher-managed credential helper instead of a restart loop.
+The separate curator configuration does not choose the model-editing client.
+
 The app defaults to a generated pairing code. A repeatable local test harness,
 or a local development launcher the user invokes, may provision a code of at least
 32 non-whitespace characters through `TALOS3D_MODEL_API_TOKEN`; Talos3D still
