@@ -4684,8 +4684,11 @@ pub struct PassageLookupInfo {
     pub source: String,
     pub source_version: String,
     pub jurisdiction: Option<String>,
-    /// `LicenseTag::as_str()` label.
+    /// Original recorded license declaration when available; otherwise the tag.
     pub license: String,
+    /// Recorded legacy provenance/pack metadata, not independent review proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_metadata: Option<serde_json::Value>,
 }
 
 /// Scaffolded rule-pack draft, returned by `draft_rule_pack`.

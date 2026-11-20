@@ -18590,15 +18590,33 @@ pub fn handle_request_corpus_expansion(
 /// Work is linear in reference text only when explicitly queried, never per frame.
 #[cfg(feature = "model-api")]
 fn handle_search_local_corpus_passages(world: &World, query: &str) -> serde_json::Value {
-    let query = query.trim().to_lowercase().replace('_', " ");
+    let query = query.trim().to_lowercase();
+    let terms: Vec<_> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if terms.is_empty() {
+        return serde_json::json!({"passages":[],"truncated":false});
+    }
     let mut hits = Vec::new();
     if let Some(registry) =
         world.get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
     {
         for (id, entry) in registry.iter() {
-            if id.to_lowercase().replace('_', " ").contains(&query)
-                || entry.text.to_lowercase().contains(&query)
-            {
+            let pack = entry
+                .persisted
+                .as_ref()
+                .and_then(|p| p.meta.as_ref())
+                .and_then(|meta| meta.pack_membership.as_ref())
+                .map(|p| p.pack_id.0.as_str())
+                .unwrap_or_default();
+            let searchable =
+                format!("{id} {pack} {} {}", entry.text, entry.provenance.source).to_lowercase();
+            let words: std::collections::BTreeSet<_> = searchable
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if terms.iter().all(|term| words.contains(term)) {
                 hits.push(serde_json::json!({"passage_ref":id,"citation":entry.provenance.source,
                     "scope":crate::plugins::knowledge_assets::scope_as_str(entry.scope),
                     "trust":format!("{:?}",entry.trust).to_ascii_lowercase(),"delivery":"local_registry",
@@ -18637,7 +18655,18 @@ pub fn handle_lookup_source_passage(
         source: entry.provenance.source.clone(),
         source_version: entry.provenance.source_version.clone(),
         jurisdiction: entry.provenance.jurisdiction.clone(),
-        license: entry.provenance.license.as_str().to_string(),
+        license: entry
+            .persisted
+            .as_ref()
+            .and_then(|p| p.license.clone())
+            .unwrap_or_else(|| entry.provenance.license.as_str().to_string()),
+        recorded_metadata: entry
+            .persisted
+            .as_ref()
+            .and_then(|p| p.meta.as_ref())
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| e.to_string())?,
     })
 }
 

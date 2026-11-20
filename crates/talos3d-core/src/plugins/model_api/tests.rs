@@ -5609,6 +5609,16 @@ fn knowledge_search_includes_bundled_references_without_exporting_text() {
     seed_recipe_draft_corpus(&mut world);
     let found = handle_search_local_corpus_passages(&world, "mono truss");
     assert_eq!(found["passages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        handle_search_local_corpus_passages(&world, "mono-truss")["passages"],
+        found["passages"]
+    );
+    assert!(
+        handle_search_local_corpus_passages(&world, "---")["passages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     let hit = &found["passages"][0];
     assert_eq!(hit["delivery"], "local_registry");
     assert!(hit.get("content_hash").is_none());
