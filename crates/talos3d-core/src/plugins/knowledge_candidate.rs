@@ -25,12 +25,61 @@ pub struct Request {
     /// Ordered edits exercise the same driver-update handler as ordinary MCP.
     #[serde(default)]
     pub edits: Vec<DriverEdit>,
+    #[serde(skip)]
+    #[schemars(skip)]
+    inspection_snapshot: Option<String>,
 }
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DriverEdit {
     pub name: String,
     pub value: Value,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyEvaluation {
+    pub id: String,
+    /// Exact snapshot_sha256 returned by get_legacy_knowledge_asset.
+    pub snapshot_sha256: String,
+    #[serde(default)]
+    pub drivers: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub placement: Placement,
+    #[serde(default)]
+    pub edits: Vec<DriverEdit>,
+}
+/// The caller supplies identity, never a fabricated publication envelope. The
+/// exact server-owned legacy receipt is inspected without resolving its rights.
+pub fn from_legacy(input: LegacyEvaluation, receipt: Value) -> Result<Request, String> {
+    if receipt["kind"] != "parametric_type.v1"
+        || receipt["id"] != input.id
+        || receipt["snapshot_sha256"] != input.snapshot_sha256
+    {
+        return Err("Legacy snapshot changed or identity mismatched; retrieve it again".into());
+    }
+    Ok(Request {
+        asset: knowledge_cloud::Asset {
+            schema: knowledge_cloud::SCHEMA.into(),
+            id: input.id,
+            kind: "parametric_type.v1".into(),
+            title: "Unreviewed legacy runtime inspection".into(),
+            description: "Inspection-only snapshot; not a publication candidate".into(),
+            element_classes: vec![],
+            path_kind: "parametric".into(),
+            required_tool_ids: vec![],
+            payload: receipt["payload"].clone(),
+            applicability: String::new(),
+            limitations: vec![],
+            evidence: vec![],
+            redistribution_rights: String::new(),
+            contains_private_context: false,
+        },
+        drivers: input.drivers,
+        placement: input.placement,
+        edits: input.edits,
+        inspection_snapshot: Some(input.snapshot_sha256),
+    })
 }
 
 pub struct Scene {
@@ -152,6 +201,7 @@ pub fn evaluate(request: Request, classes: Vec<ElementClassDescriptor>) -> Resul
         report: json!({
             "schema":"talos3d.candidate-runtime-observation.v1", "content_hash":revision,
             "runtime":"isolated_parametric_handlers", "initial":before, "edits":steps,
+        "legacy_inspection":request.inspection_snapshot.as_ref().map(|hash|json!({"snapshot_sha256":hash,"rights":"unresolved","publication_candidate":false})),
             "final":final_observed,"snapshot":snapshot,"mesh_vertices":vertices,
             "cpu_elapsed_ms":started.elapsed().as_secs_f64()*1000.0,
             "model_modified":false,"installed":false,"released":false,
@@ -447,12 +497,75 @@ mod tests {
             asset,
             drivers: default(),
             placement: default(),
+            inspection_snapshot: None,
             edits: vec![DriverEdit {
                 name: "width".into(),
                 value: json!(2000.0),
             }],
         }
     }
+    #[test]
+    fn legacy_inspection_binds_snapshot_without_inventing_rights() {
+        use crate::relational::registry::{ParametricRegistry, ParametricTypeDef};
+        let sample = request();
+        let definition: ParametricTypeDef =
+            serde_json::from_value(sample.asset.payload["definition"].clone()).unwrap();
+        let mut world = World::new();
+        world.init_resource::<ParametricRegistry>();
+        world
+            .resource_mut::<ParametricRegistry>()
+            .register(definition.clone());
+        let receipt = knowledge_cloud::legacy_get(
+            &world,
+            knowledge_cloud::LegacyRequest {
+                id: definition.id.clone(),
+                kind: "parametric_type.v1".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            receipt["runtime_inspection"]["next_tool"],
+            "evaluate_legacy_knowledge_asset"
+        );
+        let hash = receipt["snapshot_sha256"].as_str().unwrap().to_owned();
+        let input = || LegacyEvaluation {
+            id: definition.id.clone(),
+            snapshot_sha256: hash.clone(),
+            drivers: default(),
+            placement: default(),
+            edits: vec![],
+        };
+        let inspected = from_legacy(input(), receipt.clone()).unwrap();
+        assert!(inspected.asset.evidence.is_empty());
+        assert!(inspected.asset.redistribution_rights.is_empty());
+        let scene = evaluate(inspected, vec![]).unwrap();
+        assert_eq!(scene.report["legacy_inspection"]["rights"], "unresolved");
+        assert_eq!(
+            scene.report["legacy_inspection"]["publication_candidate"],
+            false
+        );
+        let mut stale = input();
+        stale.snapshot_sha256 = "0".repeat(64);
+        assert!(from_legacy(stale, receipt)
+            .err()
+            .unwrap()
+            .contains("snapshot changed"));
+        world
+            .resource_mut::<ParametricRegistry>()
+            .remove(&definition.id);
+        let mut private = definition;
+        private.public = false;
+        world.resource_mut::<ParametricRegistry>().register(private);
+        assert!(knowledge_cloud::legacy_get(
+            &world,
+            knowledge_cloud::LegacyRequest {
+                id: "test.candidate".into(),
+                kind: "parametric_type.v1".into(),
+            }
+        )
+        .is_err());
+    }
+
     #[test]
     fn scratch_runtime_uses_real_geometry_and_driver_updates() {
         let scene = evaluate(request(), vec![]).unwrap();

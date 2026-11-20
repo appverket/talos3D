@@ -1637,3 +1637,11 @@ AABBs and a rendered image do not establish source rights, structural design,
 hosting, undo/redo, native save/reload, or a successful user retry. Independent
 acceptance must test those separately; candidate evaluation never authorizes
 publication or installs a released asset.
+
+Select the `curation` profile through `set_session_profile` for candidate and
+legacy inspection tools. For legacy inspection without a publication envelope, use the
+`runtime_inspection.next_tool` and exact arguments returned by
+`get_legacy_knowledge_asset`. `evaluate_legacy_knowledge_asset` rejects stale
+snapshot hashes and private assets. It leaves evidence and rights unresolved,
+marks the result as inspection-only, and cannot submit or release a candidate.
+Do not invent publication metadata merely to inspect geometry.

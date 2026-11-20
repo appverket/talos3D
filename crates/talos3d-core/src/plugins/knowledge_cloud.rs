@@ -634,8 +634,14 @@ pub fn legacy_get(world: &World, request: LegacyRequest) -> Result<Value, String
     if bytes.len() > cloud::MAX_BYTES {
         return Err("Legacy asset exceeds capture bound".into());
     }
+    let snapshot_sha256 = hex::encode(Sha256::digest(bytes));
+    let runtime_inspection = (request.kind == "parametric_type.v1").then(|| json!({
+        "next_tool":"evaluate_legacy_knowledge_asset", "arguments":{"id":request.id,"snapshot_sha256":snapshot_sha256},
+        "purpose":"Inspection-only runtime observations; do not invent candidate rights or evidence", "rights":"unresolved", "publication_candidate":false
+    }));
     Ok(
-        json!({"kind":request.kind,"id":request.id,"payload":payload,"snapshot_sha256":hex::encode(Sha256::digest(bytes)),"review_required":true,"publication_authorized":false}),
+        json!({"kind":request.kind,"id":request.id,"payload":payload,"snapshot_sha256":snapshot_sha256,
+        "review_required":true,"publication_authorized":false,"runtime_inspection":runtime_inspection}),
     )
 }
 

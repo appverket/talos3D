@@ -6111,7 +6111,7 @@ impl ModelApiServer {
         description = "Switch (or report) this session's capability profile, which gates the \
             advertised MCP tool surface. Profiles: 'authoring' (default; the standard \
             authoring loop), 'inspection' (read-only inspection + validation + capture), \
-            'curation' (knowledge curation: drafts, libraries, specs, passages), \
+            'curation' (knowledge curation: drafts, libraries, specs, passages, legacy inspection and candidate evaluation), \
             'ux-automation' (UI/view/clip-plane/toolbar automation), 'focused-authoring' (bounded semantic/curated loop), 'full' (every tool). \
             Omit 'profile' to report the current profile without changing it. On change the \
             stdio emits tools/list_changed; HTTP clients should re-fetch tools/list."
@@ -8914,6 +8914,34 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             crate::plugins::knowledge_cloud::check_candidate(request)
                 .map_err(|e| McpError::invalid_params(e, None))?,
         )
+    }
+
+    #[tool(
+        name = "evaluate_legacy_knowledge_asset",
+        description = "Inspect an exact shared legacy parametric snapshot in an isolated GPU scene without manufacturing a publication candidate. Pass the id and snapshot_sha256 from get_legacy_knowledge_asset; rights and evidence remain unresolved. Optional drivers, placement and ordered edits. Rejects changed snapshots and private assets. Never installs, submits, reviews or publishes knowledge or edits the user model."
+    )]
+    pub(super) async fn evaluate_legacy_knowledge_asset_tool(
+        &self,
+        Parameters(input): Parameters<
+            crate::plugins::knowledge_cloud::candidate_runtime::LegacyEvaluation,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        let receipt = self
+            .round_trip(|response| ModelApiRequest::GetLegacyKnowledgeAsset {
+                request: crate::plugins::knowledge_cloud::LegacyRequest {
+                    kind: "parametric_type.v1".into(),
+                    id: input.id.clone(),
+                },
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let request =
+            crate::plugins::knowledge_cloud::candidate_runtime::from_legacy(input, receipt)
+                .map_err(|e| McpError::invalid_params(e, None))?;
+        self.evaluate_knowledge_candidate_tool(Parameters(request))
+            .await
     }
 
     #[tool(

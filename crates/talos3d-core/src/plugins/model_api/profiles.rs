@@ -80,7 +80,7 @@ impl CapabilityProfile {
             }
             CapabilityProfile::Curation => {
                 "Knowledge curation: corpus acquisition, recipe/assembly-pattern drafts, \
-                 definition libraries/workspaces, material specs, rule packs, agent skills."
+                 definition libraries/workspaces, material specs, rule packs, agent skills, legacy snapshot inspection and isolated candidate evaluation."
             }
             CapabilityProfile::UxAutomation => {
                 "UI automation: pointer/keyboard simulation, named views, clip planes, \
@@ -246,13 +246,23 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
         "report_harness_retry_outcome",
         ToolCategory::SessionContract,
     ),
-    ("list_legacy_knowledge_assets", ToolCategory::Inspection),
-    ("get_legacy_knowledge_asset", ToolCategory::Inspection),
+    (
+        "list_legacy_knowledge_assets",
+        ToolCategory::CurationExtended,
+    ),
+    ("get_legacy_knowledge_asset", ToolCategory::CurationExtended),
     ("list_knowledge_assets", ToolCategory::Inspection),
     ("get_knowledge_asset", ToolCategory::Inspection),
     ("install_knowledge_asset", ToolCategory::Inspection),
-    ("check_knowledge_candidate", ToolCategory::Inspection),
-    ("evaluate_knowledge_candidate", ToolCategory::Inspection),
+    ("check_knowledge_candidate", ToolCategory::CurationExtended),
+    (
+        "evaluate_knowledge_candidate",
+        ToolCategory::CurationExtended,
+    ),
+    (
+        "evaluate_legacy_knowledge_asset",
+        ToolCategory::CurationExtended,
+    ),
     ("search_corpus_knowledge", ToolCategory::Inspection),
     (
         "submit_pending_harness_incidents",
