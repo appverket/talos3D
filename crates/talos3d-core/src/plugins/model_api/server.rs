@@ -243,6 +243,9 @@ pub(super) fn profile_tool_catalog() -> &'static ProfileToolCatalog {
             let schema = std::sync::Arc::make_mut(&mut route.attr.input_schema);
             sanitize_tool_input_schema(schema);
         }
+        // Model-edit pairing is not a delegated curator identity. Profiles are
+        // presentation filters, so even `full` must not expose shared writes.
+        router.map.remove("contribute_agent_skill");
         let all = router.list_all();
         let lists = CapabilityProfile::ALL.map(|profile| {
             std::sync::Arc::new(
@@ -3065,9 +3068,10 @@ impl ServerHandler for ModelApiServer {
              Before editing: get_instance_info, negotiate_agent_session with your task, then \
              get_agent_guidance_packet and the discovery paths it requests. \
              list_agent_skills/get_agent_skill read released cloud knowledge; check \
-             get_agent_corpus_status at task boundaries for newer revisions. Reusable new \
-             procedures belong in contribute_agent_skill with generalized references/evidence; \
-             private project facts belong in project knowledge, never local-only skills. \
+             get_agent_corpus_status at task boundaries for newer revisions. Only the harness \
+             curator may add shared knowledge, through its authorized Talos3D MCP connection. \
+             User agents report gaps and consume released knowledge; they do not submit \
+             shared contributions. Private project facts remain private project knowledge. \
              The tool surface is gated by a capability profile; this session advertises the '{}' profile \
              ({} of {} tools). Call set_session_profile to switch profiles \
              (authoring, inspection, curation, ux-automation, full).",
@@ -3460,7 +3464,7 @@ pub(super) fn assemble_agent_welcome(
         required_invariants: vec![
             "Confirm AgentWelcome.instance.instance_id before acting.".to_string(),
             "Check get_agent_corpus_status at task boundaries, after learning and before authoring; fetch changed skill revisions and their pinned resources. Cloud outage means freshness is unverified.".to_string(),
-            "Contribute useful generalized new procedures through contribute_agent_skill, including resources, applicability, limitations, rights and regression evidence. Private facts stay in project knowledge; domain assets use recipes/Definitions/catalogs/validators. Do not leave reusable Talos3D knowledge only in local provider skills.".to_string(),
+            "Only the harness curator adds shared knowledge through its authorized Talos3D MCP connection and independent review/release. User agents report CorpusGaps and consume releases. Do not substitute source changes, seed files, direct publication or a component-specific app rebuild. Private project facts remain private project knowledge.".to_string(),
             "Treat get_authoring_guidance from the running instance as authoritative."
                 .to_string(),
             "Use curated recipes, parametrics, definitions, and priors when present; report a CorpusGap instead of bluffing missing construction knowledge."
@@ -9722,17 +9726,18 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "contribute_agent_skill",
-        description = "Durably contribute a generalized reusable procedure and supporting references/helper sources to the shared cloud corpus using the signed-in host account. Include applicability, limitations, evidence/regression results and redistribution rights; remove private project facts. Contributions await operator review before global discovery. Reuse this for useful skills learned during work instead of leaving them only in a provider's local skill directory. No code is executed and no private project is uploaded automatically."
+        description = "Reserved for an authorized harness-curator MCP session. Ordinary user-agent sessions cannot contribute shared knowledge. Report a CorpusGap and consume a reviewed release instead. Curator-session authorization is not yet available on this transport."
     )]
     pub(super) async fn contribute_agent_skill_tool(
         &self,
-        Parameters(params): Parameters<crate::plugins::agent_skill_cloud::SkillContribution>,
+        Parameters(_params): Parameters<crate::plugins::agent_skill_cloud::SkillContribution>,
     ) -> Result<CallToolResult, McpError> {
-        let response =
-            crate::plugins::agent_skill_cloud::contribute(&self.corpus_connection().await, params)
-                .await
-                .map_err(|e| McpError::invalid_params(e, None))?;
-        json_tool_result(response)
+        // A paired model-edit token and the host's signed-in corpus account are
+        // not curator authority. Fail closed until a role-bound curator MCP
+        // transport is implemented; a profile or caller argument cannot grant it.
+        Err(McpError::invalid_request(
+            "curator_mcp_session_required: user-agent contribution is disabled", None,
+        ))
     }
 
     #[tool(
@@ -9783,7 +9788,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "save_agent_skill_draft",
         description = "Save a private project-scoped agent skill draft (undoable and persisted with the project). Use this for new operating \
-            private procedures learned during an MCP session. Reusable generalized procedures should use contribute_agent_skill; shipped promotion remains a \
+            private procedures learned during an MCP session. Shared procedures are created only by the harness curator through authorized MCP; shipped promotion remains a \
             separate curation step."
     )]
     pub(super) async fn save_agent_skill_draft_tool(

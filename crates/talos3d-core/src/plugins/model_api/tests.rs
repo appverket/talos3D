@@ -14119,6 +14119,15 @@ mod capability_profiles {
     }
 
     #[test]
+    fn user_profiles_cannot_grant_shared_knowledge_write_authority() {
+        let catalog = profile_tool_catalog();
+        assert!(!catalog.router.has_route("contribute_agent_skill"));
+        for profile in CapabilityProfile::ALL {
+            assert!(!profile_tool_names(profile).contains("contribute_agent_skill"));
+        }
+    }
+
+    #[test]
     fn full_profile_exposes_entire_router() {
         let catalog = profile_tool_catalog();
         assert_eq!(

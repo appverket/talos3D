@@ -1373,10 +1373,11 @@ project accounts, Postgres metadata/audit and immutable R2 bundles.
   boundaries, after learning, and before authoring. Re-fetch changed procedures.
   No tool can retroactively update text already in an agent's context. App/tool
   schema changes still require compatible application releases.
-- `contribute_agent_skill` (curation): persist a generalized bundle, applicable
-  scope, limitations, source/regression evidence and redistribution rights.
-  A receipt identifies a durable candidate, not a release. Reusable procedures
-  belong here rather than only in a provider's home-directory skill store.
+- `contribute_agent_skill`: reserved for role-bound harness-curator MCP access.
+  It is not advertised to ordinary agents and fails closed on the current
+  model-edit transport. Host sign-in and a capability profile do not establish
+  curator authority. Report gaps and consume reviewed releases instead.
+
 - `list_agent_skill_contributions`, `get_agent_skill_contribution`,
   `review_agent_skill_contribution`: the authenticated publisher review path.
   Release requires confidentiality, rights and regression review. Released bytes

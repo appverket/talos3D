@@ -84,10 +84,12 @@ tool surface.
 Talos3D workflows should be discoverable through MCP rather than depending on
 provider-local skill installation. Use `list_agent_skills`, `get_agent_skill`
 and pinned `get_agent_skill_resource` reads; check `get_agent_corpus_status`
-at task boundaries and before authoring. Contribute useful generalized new
-procedures, references/helper source, applicability, limitations, source rights
-and regression evidence through `contribute_agent_skill`. Operator review
-releases immutable cloud revisions. Keep private facts in private project
-knowledge and domain/executable assets in the owning capability's existing
-curation substrates. Core owns the generic protocol/client; domain knowledge
-must remain in domain packs. See `docs/MCP_MODEL_API.md`.
+at task boundaries and before authoring. Only the harness curator may add shared
+knowledge through its authorized Talos3D MCP connection and independent review
+and release. User agents report gaps and consume releases. Engineers repair
+generic infrastructure; they must not supply domain knowledge through code,
+seed files or direct publication. Missing domain assets are not a reason to
+compile a component into the app. Guidance must not require development files.
+Every functional test uses a fresh subagent with no prior context, no source
+access and no host command-execution tools; enforce these restrictions outside
+the prompt. Unit/static checks are separate from functional acceptance.
