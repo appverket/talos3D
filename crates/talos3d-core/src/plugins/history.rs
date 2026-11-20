@@ -475,7 +475,10 @@ pub(crate) fn apply_pending_history_commands(world: &mut World) {
 ///
 /// Admits unconditionally when no graph is installed: a build without a domain
 /// pack must keep authoring, not refuse everything.
-fn evaluate_command_admissibility(world: &World, command: &dyn EditorCommand) -> Verdict {
+pub(crate) fn evaluate_command_admissibility(
+    world: &World,
+    command: &dyn EditorCommand,
+) -> Verdict {
     if let Some(refusal) = command.preflight(world) {
         return Verdict::Refuse(vec![refusal]);
     }

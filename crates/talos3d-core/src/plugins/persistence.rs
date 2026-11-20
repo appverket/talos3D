@@ -1601,8 +1601,14 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         .map(|e| e.0.clone())
         .unwrap_or_default();
     extensions.remove("core.parametric_instances.v1");
-    if let Some(store) = world.get_resource::<ParametricStore>() {
+    if let Some(mut store) = world.get_resource::<ParametricStore>().cloned() {
         if store.instances().next().is_some() {
+            let element_ids = world
+                .query::<&ElementId>()
+                .iter(world)
+                .map(|id| id.0)
+                .collect();
+            store.validate_document(&element_ids)?;
             extensions.insert(
                 "core.parametric_instances.v1".into(),
                 serde_json::to_value(store).map_err(|e| e.to_string())?,
@@ -2665,6 +2671,16 @@ mod tests {
                 .unwrap()
                 .drivers["width"],
             2000.0
+        );
+        let member = source
+            .query_filtered::<Entity, With<ParametricInstanceRef>>()
+            .iter(&source)
+            .next()
+            .unwrap();
+        source.despawn(member);
+        assert!(
+            capture_project_bytes(&mut source).is_err(),
+            "Do not write an unloadable document after unsupported member deletion"
         );
         let clean = capture_project_bytes(&mut world()).unwrap();
         open_project_bytes(&mut target, &clean).unwrap();

@@ -32,6 +32,9 @@ use crate::relational::registry::{
 };
 use crate::relational::transform::{TransformAxis, TransformGesture, TransformOutcome};
 
+#[path = "parametric_edit.rs"]
+mod edit;
+
 // --- request / response DTOs -----------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -227,6 +230,13 @@ pub fn world_list_types(world: &mut World) -> Vec<ParametricTypeInfo> {
 }
 
 pub fn world_create(
+    world: &mut World,
+    req: CreateParametricRequest,
+) -> Result<CreateParametricResponse, String> {
+    edit::create(world, req)
+}
+
+fn direct_create(
     world: &mut World,
     req: CreateParametricRequest,
 ) -> Result<CreateParametricResponse, String> {
@@ -427,12 +437,21 @@ fn synthesize_parametric_geometry(
             None => vec![None; members.len()],
         };
 
+    let old_ids = world
+        .resource::<ParametricStore>()
+        .get(instance_id)
+        .map(|instance| instance.geometry.clone())
+        .unwrap_or_default();
     let mut element_ids: Vec<u64> = Vec::with_capacity(members.len());
     for (member_index, (m, maybe_semantic)) in members.into_iter().zip(semantics).enumerate() {
         // Only the model-api feature consumes the semantic annotation below.
         #[cfg(not(feature = "model-api"))]
         let _ = maybe_semantic;
-        let eid = world.resource::<ElementIdAllocator>().next_id();
+        let eid = old_ids
+            .get(member_index)
+            .copied()
+            .map(ElementId)
+            .unwrap_or_else(|| world.resource::<ElementIdAllocator>().next_id());
 
         // Sizes mm → m. height (Y) drives extrusion height; width
         // (X) and depth (Z) form the rectangular profile.
@@ -603,6 +622,13 @@ pub fn world_set_driver(
     world: &mut World,
     req: SetParametricDriverRequest,
 ) -> Result<SetDriverResponse, String> {
+    edit::set_driver(world, req)
+}
+
+fn direct_set_driver(
+    world: &mut World,
+    req: SetParametricDriverRequest,
+) -> Result<SetDriverResponse, String> {
     let reg = world
         .get_resource::<ParametricRegistry>()
         .cloned()
@@ -664,14 +690,25 @@ pub fn world_transform(
     world: &mut World,
     req: ParametricTransformRequest,
 ) -> Result<TransformOutcome, String> {
+    edit::transform(world, req)
+}
+
+fn direct_transform(
+    world: &mut World,
+    req: ParametricTransformRequest,
+) -> Result<TransformOutcome, String> {
     let reg = world
         .get_resource::<ParametricRegistry>()
         .cloned()
         .unwrap_or_default();
-    let mut store = world.resource_mut::<ParametricStore>();
-    store
+    let outcome = world
+        .resource_mut::<ParametricStore>()
         .transform(&reg, req.instance_id, req.axis, req.gesture)
-        .ok_or_else(|| format!("unknown parametric instance {}", req.instance_id))
+        .ok_or_else(|| format!("unknown parametric instance {}", req.instance_id))?;
+    if matches!(outcome, TransformOutcome::DriverEdit { .. }) {
+        world_resynthesize(world, &reg, req.instance_id)?;
+    }
+    Ok(outcome)
 }
 
 pub fn world_explain(
@@ -1038,6 +1075,128 @@ mod tests {
 
     // ---- P1a: re-synthesis on set_driver -----------------------------------
 
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn parametric_late_member_failure_leaves_document_and_allocator_unchanged() {
+        use crate::relational::registry::ParametricMemberSemantic;
+        let mut app = app();
+        let world = app.world_mut();
+        let mut broken = repr_box_type();
+        broken.id = "test.late_failure".into();
+        broken.representation.as_mut().unwrap().members[1].semantic =
+            Some(ParametricMemberSemantic {
+                element_class: Some("missing.fixture.class".into()),
+                ..default()
+            });
+        world.resource_mut::<ParametricRegistry>().register(broken);
+        let next = world.resource::<ElementIdAllocator>().next_value();
+        assert!(world_create(
+            world,
+            CreateParametricRequest {
+                type_id: "test.late_failure".into(),
+                ..default()
+            }
+        )
+        .is_err());
+        assert_eq!(world.resource::<ElementIdAllocator>().next_value(), next);
+        assert!(world
+            .resource::<ParametricStore>()
+            .instances()
+            .next()
+            .is_none());
+        assert_eq!(world.query::<&ProfileExtrusion>().iter(world).count(), 0);
+    }
+
+    #[test]
+    fn parametric_history_restores_drivers_geometry_and_identity_atomically() {
+        use crate::plugins::history::{
+            apply_pending_history_commands, History, PendingCommandQueue,
+        };
+        let mut app = app();
+        let w = app.world_mut();
+        w.init_resource::<History>();
+        w.init_resource::<PendingCommandQueue>();
+        let created = world_create(
+            w,
+            CreateParametricRequest {
+                type_id: "test.repr_box".into(),
+                ..default()
+            },
+        )
+        .unwrap();
+        let id = created.snapshot.instance_id;
+        assert_eq!(w.resource::<History>().undo_stack_len(), 1);
+        let before = serde_json::to_value(w.resource::<ParametricStore>()).unwrap();
+        let next_id = w.resource::<ElementIdAllocator>().next_value();
+        assert!(world_set_driver(
+            w,
+            SetParametricDriverRequest {
+                instance_id: id,
+                name: "width".into(),
+                value: json!("not a number")
+            }
+        )
+        .is_err());
+        assert_eq!(
+            serde_json::to_value(w.resource::<ParametricStore>()).unwrap(),
+            before
+        );
+        assert_eq!(w.resource::<ElementIdAllocator>().next_value(), next_id);
+        assert_eq!(w.query::<&ProfileExtrusion>().iter(w).count(), 2);
+        assert_eq!(w.resource::<History>().undo_stack_len(), 1);
+        world_transform(
+            w,
+            ParametricTransformRequest {
+                instance_id: id,
+                axis: TransformAxis::X,
+                gesture: TransformGesture::SetExtent { value: 2500.0 },
+            },
+        )
+        .unwrap();
+        assert_eq!(w.resource::<History>().undo_stack_len(), 2);
+        assert_eq!(
+            w.resource::<ParametricStore>().get(id).unwrap().geometry,
+            created.element_ids
+        );
+        let widths = |w: &mut World| {
+            w.query::<&ProfileExtrusion>()
+                .iter(w)
+                .map(|p| p.profile.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(widths(w)
+            .iter()
+            .all(|p| *p == Profile2d::rectangle(2.5, 0.1)));
+        w.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands(w);
+        assert_eq!(
+            world_inspect(w, InspectParametricRequest { instance_id: id })
+                .unwrap()
+                .drivers["width"],
+            1000.0
+        );
+        assert!(widths(w)
+            .iter()
+            .all(|p| *p == Profile2d::rectangle(1.0, 0.1)));
+        w.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands(w);
+        assert!(widths(w)
+            .iter()
+            .all(|p| *p == Profile2d::rectangle(2.5, 0.1)));
+        w.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands(w);
+        w.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands(w);
+        assert!(w.resource::<ParametricStore>().get(id).is_none());
+        assert_eq!(w.query::<&ProfileExtrusion>().iter(w).count(), 0);
+        w.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands(w);
+        assert_eq!(
+            w.resource::<ParametricStore>().get(id).unwrap().geometry,
+            created.element_ids
+        );
+    }
+
     #[test]
     fn set_driver_resynthesize_replaces_geometry() {
         let mut app = app();
@@ -1069,18 +1228,11 @@ mod tests {
         let new_ids = dr.element_ids;
         assert_eq!(new_ids.len(), 2, "should still have 2 members");
 
-        // Old element ids must be gone from the world.
         for old_eid in &old_ids {
             let mut q = w.query::<&crate::plugins::identity::ElementId>();
-            let still_exists = q.iter(w).any(|e| e.0 == *old_eid);
-            assert!(
-                !still_exists,
-                "old entity {old_eid} should have been despawned"
-            );
+            assert_eq!(q.iter(w).filter(|e| e.0 == *old_eid).count(), 1);
         }
-
-        // New ids should differ.
-        assert_ne!(old_ids, new_ids, "new element ids should differ from old");
+        assert_eq!(old_ids, new_ids, "driver edits preserve member identities");
 
         // Instance geometry list must be updated.
         let store = w.resource::<ParametricStore>();

@@ -1654,4 +1654,11 @@ Opening the project restores editable instances and membership without installin
 those definitions into the shared registry or granting them publication trust.
 Changes to a shared type do not silently change an existing instance's definition.
 Malformed or missing member identities are rejected before replacing the document.
-This persistence contract alone does not qualify command history or hosting.
+Create, driver edits and driver-mapped transforms prepare the same isolated
+before/after command before changing the authored world. The normal command
+pipeline records geometry and instance state together for undo/redo. Stable
+member identities retain authored presentation and semantic bindings; failed
+preparation leaves the document and allocators unchanged. Candidate inspection
+uses the same preparation and semantic gate. This does not qualify automatic
+reseating of hosted dependents or arbitrary edits/deletions of individual
+parametric members; invalid membership is refused before saving or loading.

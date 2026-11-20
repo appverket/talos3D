@@ -522,6 +522,23 @@ impl ParametricStore {
         id
     }
 
+    pub(crate) fn isolated(&self, instance_id: Option<u64>) -> Self {
+        Self {
+            instances: instance_id
+                .and_then(|id| self.instances.get(&id).cloned())
+                .map(|instance| [(instance.instance_id, instance)].into())
+                .unwrap_or_default(),
+            next_id: self.next_id,
+        }
+    }
+    pub(crate) fn restore_instance(&mut self, id: u64, instance: Option<ParametricInstance>) {
+        self.instances.remove(&id);
+        if let Some(instance) = instance {
+            self.next_id = self.next_id.max(id);
+            self.instances.insert(id, instance);
+        }
+    }
+
     /// Pin only to this authored instance; file contents cannot publish a type.
     pub fn pin_definition(&mut self, id: u64, mut definition: ParametricTypeDef) {
         definition.public = false;
@@ -673,7 +690,16 @@ impl ParametricStore {
         let outcome = map_transform(&def.transform, axis, gesture, current);
         // if it resolved to a driver edit, apply it
         if let TransformOutcome::DriverEdit { driver, new_value } = &outcome {
-            let _ = self.set_driver(registry, id, driver, Value::from(*new_value));
+            if !new_value.is_finite()
+                || self
+                    .set_driver(registry, id, driver, Value::from(*new_value))
+                    .is_err()
+            {
+                return Some(TransformOutcome::Refused {
+                    axis,
+                    options: vec![super::transform::RefusalOption::Cancel],
+                });
+            }
         }
         Some(outcome)
     }
