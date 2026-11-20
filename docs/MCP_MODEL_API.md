@@ -1606,3 +1606,13 @@ This is bounded lexical retrieval, not proof that a passage answers the whole
 question: fetch exact revisions, check their scope and report remaining gaps.
 The existing maximum of 16 retrieved bundles per request is unchanged; no search
 work runs in the viewport/input loop.
+
+### Inspecting parametric knowledge for migration
+
+`parametric.get_type({"type_id":"<id from parametric.list_types>"})` reads one
+registered definition, including expression data, emitting representation and
+placement contract, without creating model entities. The response explicitly
+requires review and grants no publication authority. Registry membership alone
+proves neither source grounding nor privacy/redistribution clearance. Only the
+authorized curator may use reviewed candidates in the shared publication flow.
+This inspection tool does not implement dynamic publication or installation.

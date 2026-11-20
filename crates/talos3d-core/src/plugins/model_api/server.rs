@@ -10647,6 +10647,22 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     #[tool(
+        name = "parametric.get_type",
+        description = "Read one registered parametric type as serialized data, including drivers, expressions, representation and placement contract. Use an id from parametric.list_types. Does not create or modify model entities. Registry presence is not evidence of source grounding, privacy clearance, independent review or publication authority; the curator must establish these before migration."
+    )]
+    pub(super) async fn parametric_get_type_tool(
+        &self,
+        Parameters(request): Parameters<crate::plugins::parametric_mcp::GetParametricTypeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .round_trip(|response| ModelApiRequest::ParametricGetType { request, response })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
         name = "parametric.create",
         description = "Instantiate a parametric component of the given `type_id` (from \
         parametric.list_types). Returns a `CreateParametricResponse` containing: `snapshot` \

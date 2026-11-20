@@ -1034,6 +1034,10 @@ pub(super) enum ModelApiRequest {
     ParametricListTypes {
         response: oneshot::Sender<Vec<crate::plugins::parametric_mcp::ParametricTypeInfo>>,
     },
+    ParametricGetType {
+        request: crate::plugins::parametric_mcp::GetParametricTypeRequest,
+        response: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
     ParametricCreate {
         request: crate::plugins::parametric_mcp::CreateParametricRequest,
         response: oneshot::Sender<
@@ -2633,6 +2637,11 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         ModelApiRequest::ParametricListTypes { response } => {
             let r = crate::plugins::parametric_mcp::world_list_types(world);
             let _ = response.send(r);
+        }
+        ModelApiRequest::ParametricGetType { request, response } => {
+            let _ = response.send(crate::plugins::parametric_mcp::world_get_type(
+                world, request,
+            ));
         }
         ModelApiRequest::ParametricCreate { request, response } => {
             let r = crate::plugins::parametric_mcp::world_create(world, request);

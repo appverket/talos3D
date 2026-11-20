@@ -51,6 +51,36 @@ pub struct ParametricTypeInfo {
     pub placement_contract: Option<ParametricPlacementContract>,
 }
 
+/// Read a single registered definition as portable data without creating a model
+/// instance. Registry presence does not certify provenance or publication rights.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct GetParametricTypeRequest {
+    pub type_id: String,
+}
+
+pub fn world_get_type(world: &World, request: GetParametricTypeRequest) -> Result<Value, String> {
+    let registry = world
+        .get_resource::<ParametricRegistry>()
+        .ok_or("Parametric registry unavailable")?;
+    let definition = registry
+        .get(&request.type_id)
+        .ok_or("Unknown parametric type")?;
+    let value = serde_json::json!({
+        "schema":"talos3d.parametric-type-inspection.v1",
+        "definition":definition,
+        "placement_contract":registry.placement_contract(&request.type_id),
+        "review_required":true,
+        "publication_authorized":false,
+        "provenance_status":"Registry presence alone establishes neither source grounding nor redistribution rights. Curator review must resolve provenance and privacy before sharing."
+    });
+    let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("Parametric definition exceeds inspection size limit".into());
+    }
+    Ok(value)
+}
+
 fn type_info(
     definition: &ParametricTypeDef,
     placement_contract: Option<&ParametricPlacementContract>,
@@ -789,6 +819,36 @@ mod tests {
             reg.register(repr_box_type());
         }
         app
+    }
+
+    #[test]
+    fn type_inspection_preserves_executable_data_without_model_mutation_or_trust_promotion() {
+        let app = app();
+        let world = app.world();
+        let count = world.entities().len();
+        let value = world_get_type(
+            world,
+            GetParametricTypeRequest {
+                type_id: "test.repr_box".into(),
+            },
+        )
+        .unwrap();
+        let restored: ParametricTypeDef =
+            serde_json::from_value(value["definition"].clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(repr_box_type()).unwrap()
+        );
+        assert_eq!(world.entities().len(), count);
+        assert_eq!(value["review_required"], true);
+        assert_eq!(value["publication_authorized"], false);
+        assert!(world_get_type(
+            world,
+            GetParametricTypeRequest {
+                type_id: "absent".into()
+            }
+        )
+        .is_err());
     }
 
     // ---- original round-trip test ------------------------------------------

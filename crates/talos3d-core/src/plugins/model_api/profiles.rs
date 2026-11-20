@@ -601,6 +601,7 @@ pub(super) const FOCUSED_AUTHORING_TOOLS: &[&str] = &[
     "occurrence.explain",
     "occurrence.resolve",
     "parametric.list_types",
+    "parametric.get_type",
     "parametric.create",
     "parametric.inspect",
     "parametric.explain",
