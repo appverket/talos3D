@@ -55,6 +55,7 @@ pub mod input_ownership;
 pub mod interference;
 pub mod keymap;
 pub mod knowledge_assets;
+#[cfg(feature = "model-api")]
 pub mod knowledge_cloud;
 pub mod knowledge_persistence;
 pub mod layers;

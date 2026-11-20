@@ -295,6 +295,7 @@ impl CorpusPassageRegistry {
         );
     }
 
+    #[cfg(feature = "model-api")]
     pub(crate) fn remove_released(&mut self, id: &str) {
         if self
             .passages
