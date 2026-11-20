@@ -1548,7 +1548,8 @@ impl Plugin for MaterialPlugin {
                     revert_removed_material_assignments,
                 )
                     .chain()
-                    .in_set(MaterialSyncSet::ApplyAssignments),
+                    .in_set(MaterialSyncSet::ApplyAssignments)
+                    .after(crate::plugins::modeling::mesh_generation::MeshGenerationSet::Generate),
             )
             .register_command(
                 CommandDescriptor {
@@ -2141,6 +2142,66 @@ fn uuid_v4() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_mesh_material_is_replaced_by_authored_assignment_in_same_frame() {
+        use crate::plugins::modeling::mesh_generation::MeshGenerationSet;
+        #[derive(Component)]
+        struct PendingMesh;
+        fn attach_default(
+            mut commands: Commands,
+            q: Query<Entity, With<PendingMesh>>,
+            mut assets: ResMut<Assets<StandardMaterial>>,
+        ) {
+            for e in &q {
+                commands
+                    .entity(e)
+                    .insert(MeshMaterial3d(assets.add(StandardMaterial::default())))
+                    .remove::<PendingMesh>();
+            }
+        }
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>();
+        app.add_plugins(MaterialPlugin);
+        app.add_systems(Update, attach_default.in_set(MeshGenerationSet::Generate));
+        let mut finish = MaterialDef::new("Fixture finish");
+        finish.id = "fixture.finish".into();
+        finish.base_color = [0.01, 0.03, 0.09, 1.0];
+        app.world_mut()
+            .resource_mut::<MaterialRegistry>()
+            .upsert(finish.clone());
+        let e = app
+            .world_mut()
+            .spawn((PendingMesh, MaterialAssignment::new("fixture.finish")))
+            .id();
+        app.update();
+        let handle = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(e)
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap()
+                .base_color,
+            Color::srgba(0.01, 0.03, 0.09, 1.0)
+        );
+        for _ in 0..20 {
+            app.update();
+        }
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(e)
+                .unwrap()
+                .0,
+            handle
+        );
+    }
 
     #[test]
     fn embedded_material_texture_tiles_beyond_unit_uvs() {
