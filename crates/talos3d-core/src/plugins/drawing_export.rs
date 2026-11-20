@@ -601,6 +601,16 @@ fn queue_screenshot_export(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.to_string()),
         }
+        // Parent existence is not write permission (notably in a native app
+        // sandbox). Check this exact destination before starting GPU work, so
+        // an impossible export does not become a minute-long file poll.
+        let probe = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| format!("Screenshot destination is not writable: {e}"))?;
+        drop(probe);
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
     }
     world.resource_mut::<ViewportExportState>().pending = Some(PendingViewportExport {
         #[cfg(feature = "model-api")]

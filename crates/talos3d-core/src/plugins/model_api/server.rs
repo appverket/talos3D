@@ -4014,7 +4014,7 @@ pub(super) struct SplitBoxFaceRequest {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct TakeScreenshotRequest {
-    /// File path to save the screenshot. Defaults to /tmp/talos_screenshot.png.
+    /// Optional output path. Omit for a unique capture in the app-owned project directory.
     #[serde(default = "default_screenshot_path")]
     pub(super) path: String,
     /// Include egui app chrome and panels instead of returning the cropped modeling viewport.
@@ -4199,7 +4199,7 @@ fn default_clip_plane_normal() -> [f32; 3] {
 
 #[cfg(feature = "model-api")]
 fn default_screenshot_path() -> String {
-    "/tmp/talos_screenshot.png".to_string()
+    String::new()
 }
 
 #[cfg(feature = "model-api")]
@@ -8093,7 +8093,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "take_screenshot",
-        description = "Capture a screenshot, save it to disk, and return both its path and inline image content for PNG/JPEG/WebP so network-only agents can inspect the pixels. By default the image is cropped to the active modeling viewport so app chrome is excluded, while authored viewport annotations such as dimensions remain visible. Pass include_ui=true to capture the full app window with egui panels and chrome for UX validation. PDF and SVG return the saved path."
+        description = "Capture a screenshot, save it to disk (omit path for a unique app-owned capture), and return both its path and inline image content for PNG/JPEG/WebP so network-only agents can inspect the pixels. By default the image is cropped to the active modeling viewport so app chrome is excluded, while authored viewport annotations such as dimensions remain visible. Pass include_ui=true to capture the full app window with egui panels and chrome for UX validation. PDF and SVG return the saved path."
     )]
     pub(super) async fn take_screenshot_tool(
         &self,
@@ -11173,6 +11173,12 @@ mod managed_save_schema_tests {
     fn managed_save_is_discoverable_without_a_host_path() {
         let request: SaveProjectRequest = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(request.path.is_empty());
+        let screenshot: TakeScreenshotRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(
+            screenshot.path.is_empty(),
+            "Screenshot defaults must not guess host /tmp paths"
+        );
         let schema = serde_json::to_value(schemars::schema_for!(SaveProjectRequest)).unwrap();
         assert!(!schema["required"]
             .as_array()

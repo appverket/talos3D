@@ -1673,3 +1673,8 @@ Native deployments can set `TALOS3D_PROJECTS_DIR` to an absolute durable directo
 the default is `projects` under the app's document-state directory. Directory
 lifetime is deployment-owned: configuring a scratch directory does not make it
 durable. Browser shells report that this local directory facility is unavailable.
+
+`take_screenshot({})` likewise uses a unique PNG under the app-owned project
+`captures` directory and returns both its path and inline pixels. Explicit
+native destinations are checked for write access before GPU capture is queued,
+so a sandbox-denied path fails immediately rather than timing out in file polling.

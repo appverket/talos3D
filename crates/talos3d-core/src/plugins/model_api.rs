@@ -4523,8 +4523,14 @@ fn handle_take_screenshot(
 ) -> Result<String, String> {
     use std::path::PathBuf;
 
-    let path_buf = PathBuf::from(path);
-    let path_owned = path.to_string();
+    let path_buf = if path.trim().is_empty() {
+        crate::plugins::persistence::default_project_directory()?
+            .join("captures")
+            .join(format!("capture-{}.png", uuid::Uuid::new_v4().simple()))
+    } else {
+        PathBuf::from(path)
+    };
+    let path_owned = path_buf.to_string_lossy().into_owned();
     if include_ui {
         crate::plugins::drawing_export::queue_app_window_export(world, &path_buf)?;
     } else {
