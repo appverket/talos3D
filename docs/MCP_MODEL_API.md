@@ -1776,3 +1776,8 @@ It does not infer geographic equivalence, exclusion, applicability or structural
 suitability. The probe is available in restricted knowledge sessions, reconciles
 staged authorization before use, and records a native observation with request
 and response hashes. All domain declarations continue to come from provider data.
+
+Restricted `knowledge_review` and `knowledge_use` sessions permit
+`lookup_source_passage`, including immutable revisions returned by shared corpus
+search. Reading source evidence does not require model-authoring authority.
+Model writes and publication remain outside those read-only permissions.

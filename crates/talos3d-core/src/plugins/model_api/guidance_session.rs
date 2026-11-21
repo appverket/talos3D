@@ -84,6 +84,7 @@ pub(super) fn knowledge_review_tool(tool: &str) -> bool {
             | "check_knowledge_candidate"
             | "get_knowledge_payload_schema"
             | "search_corpus_knowledge"
+            | "lookup_source_passage"
             | "list_catalog_providers"
             | "catalog_query"
             | "probe_catalog_scope"
@@ -932,6 +933,7 @@ mod tests {
             "install_knowledge_asset",
             "catalog_query",
             "probe_catalog_scope",
+            "lookup_source_passage",
             "discover_curated_paths",
             "report_harness_incident",
             "get_harness_incident_status",
@@ -1016,6 +1018,7 @@ mod tests {
             "check_knowledge_candidate",
             "catalog_query",
             "probe_catalog_scope",
+            "lookup_source_passage",
             "set_session_profile",
         ] {
             assert!(store.router_preflight(tool).is_none(), "{tool}");
