@@ -10,30 +10,7 @@ use std::collections::BTreeMap;
 
 pub mod evaluation;
 
-pub const SCHEMA: &str = "talos3d.knowledge-asset.v1";
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[derive(schemars::JsonSchema)]
-pub struct Asset {
-    #[schemars(schema_with = "asset_protocol_schema")]
-    pub schema: String,
-    pub id: String,
-    pub kind: String,
-    pub title: String,
-    pub description: String,
-    pub element_classes: Vec<String>,
-    pub path_kind: String,
-    pub required_tool_ids: Vec<String>,
-    pub payload: Value,
-    pub applicability: String,
-    pub limitations: Vec<String>,
-    pub evidence: Vec<String>,
-    pub redistribution_rights: String,
-    pub contains_private_context: bool,
-}
-fn asset_protocol_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({"type":"string","enum":["talos3d.knowledge-asset.v1"]})
-}
+pub use talos3d_knowledge_protocol::{Asset, SCHEMA};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -87,16 +64,25 @@ pub struct CandidateCheck {
 /// Uses the same decoder/validation as admission, in disposable registries.
 /// No entity, release, trust decision or project state escapes this check.
 pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
+    request
+        .asset
+        .validate_envelope()
+        .map_err(|error| error.to_string())?;
+    let mut checked = check_payload(request)?;
+    checked["envelope_validation"] = json!("passed");
+    Ok(checked)
+}
+
+// Payload inspection is also used for exact server-owned legacy snapshots whose
+// provenance/rights remain unresolved. It never establishes candidate eligibility.
+fn check_payload(request: CandidateCheck) -> Result<Value, String> {
     let bytes = serde_json::to_vec(&request.asset).map_err(|e| e.to_string())?;
-    if bytes.len() > 1_048_576 || request.driver_cases.len() > 16 {
+    if request.driver_cases.len() > 16 {
         return Err("Candidate or case limit exceeded".into());
-    }
-    if request.asset.schema != SCHEMA || request.asset.contains_private_context {
-        return Err(format!("Expected schema {SCHEMA} and contains_private_context=false; this is a computational check, not publication"));
     }
     let revision = hex::encode(Sha256::digest(&bytes));
     let mut scratch = World::new();
-    install(
+    install_payload(
         &mut scratch,
         AdmittedAsset {
             asset: request.asset.clone(),
@@ -128,7 +114,7 @@ pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
         return Err("Driver cases apply only to parametric_type.v1".into());
     }
     Ok(
-        json!({"content_hash":revision,"structural_validation":"passed","parametric_cases":cases,
+        json!({"content_hash":revision,"payload_validation":"passed", "structural_validation":"passed","parametric_cases":cases,
         "installed":false,"released":false,"model_modified":false,
         "limitations":["No independent source, rights or applicability approval.",
             "No rendered model, placement, load-bearing or construction acceptance.",
@@ -439,7 +425,8 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
     };
     Ok(json!({
         "kind": kind,
-        "asset_schema": schemars::schema_for!(Asset),
+        "envelope_contract": talos3d_knowledge_protocol::contract_manifest(),
+        "asset_schema": talos3d_knowledge_protocol::asset_schema(),
         "payload_schema": payload,
         "constraints": constraints,
         "next_tool": "check_knowledge_candidate",
@@ -448,6 +435,16 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
 }
 
 pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, String> {
+    admitted
+        .asset
+        .validate_envelope()
+        .map_err(|error| error.to_string())?;
+    install_payload(world, admitted)
+}
+
+// Internal decoder shared by admitted assets and disposable legacy inspection.
+// Never expose this as an admission, publication or model-edit API.
+fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, String> {
     use crate::curation::{RecipeArtifact, RecipeArtifactRegistry, Scope, Trust};
     use crate::plugins::modeling::definition::{
         DefinitionLibrary, DefinitionLibraryRegistry, DefinitionLibraryScope,
@@ -1023,6 +1020,21 @@ mod tests {
     }
 
     #[test]
+    fn candidate_check_rejects_envelope_mismatch_before_payload_admission() {
+        let mut asset = passage("synthetic").asset;
+        asset.path_kind = "recipe_or_executable_asset".into();
+        let error = check_candidate(CandidateCheck {
+            asset,
+            driver_cases: vec![],
+        })
+        .unwrap_err();
+        let detail: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(detail["error"], "invalid_knowledge_envelope");
+        assert_eq!(detail["violations"][0]["pointer"], "/path_kind");
+        assert_eq!(detail["violations"][0]["expected"], "passage");
+    }
+
+    #[test]
     fn candidate_protocol_is_discoverable_without_source() {
         let schema = serde_json::to_value(schemars::schema_for!(CandidateCheck)).unwrap();
         assert_eq!(
@@ -1140,6 +1152,7 @@ mod tests {
         let mut candidate = passage("catalog-r1");
         candidate.asset.id = "test.catalog".into();
         candidate.asset.kind = "catalog.v1".into();
+        candidate.asset.path_kind = "catalog".into();
         candidate.asset.payload = json!({"id":"test.catalog","label":"Synthetic catalog",
         "description":"Synthetic contract fixture","category":{"kind":"Other","value":"fixture"},
         "region":"scope-A","license":{"kind":"Cc0"},"source_version":"one","rows":[{
@@ -1225,6 +1238,7 @@ mod tests {
         let mut candidate = passage("catalog-one");
         candidate.asset.id = "test.catalog".into();
         candidate.asset.kind = "catalog.v1".into();
+        candidate.asset.path_kind = "catalog".into();
         candidate.asset.payload = json!({"id":"test.catalog","label":"Synthetic catalog",
             "description":"Admission unit fixture","category":{"kind":"Other","value":"fixture"},
             "region":null,"license":{"kind":"Cc0"},"source_version":"one","rows":[]});

@@ -1762,8 +1762,13 @@ and payload JSON schemas generated from runtime decoder types. Supported kinds a
 wire contracts, not domain assets. Portable recipes require `authoring_script`
 bodies; native function references cannot be released as executable knowledge.
 Definitions expose the canonical body rather than legacy migration inputs.
-Use `check_knowledge_candidate`
-for actual runtime checks; schema validity grants no rights or publication approval.
+The envelope DTO, kind/path mapping, validator and generated schema are owned by
+`talos3d-knowledge-protocol`, shared with the curator service. The response includes
+`envelope_contract.envelope_schema_sha256` for pre-inference compatibility checks.
+`check_knowledge_candidate` validates that envelope before payload execution checks;
+metadata errors identify JSON pointers and expected protocol values. Candidate
+eligibility remains distinct from legacy payload inspection, source/rights review
+and release authorization.
 
 ### Dynamic catalog query contracts
 
