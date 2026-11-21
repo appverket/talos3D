@@ -8,6 +8,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+pub mod evaluation;
+
 pub const SCHEMA: &str = "talos3d.knowledge-asset.v1";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +47,10 @@ pub struct Index {
     pub epoch: i64,
     pub assets: Vec<IndexEntry>,
     pub withdrawn_asset_ids: Vec<String>,
+    #[serde(default)]
+    pub evaluation_scope: Option<evaluation::Scope>,
+    #[serde(default)]
+    pub released: Option<bool>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
@@ -57,6 +63,7 @@ pub struct AssetRequest {
 pub struct AdmittedAsset {
     asset: Asset,
     revision: String,
+    scope_sha256: Option<String>,
 }
 #[derive(Resource, Default)]
 pub struct InstalledAssets(BTreeMap<String, InstalledAsset>);
@@ -93,6 +100,7 @@ pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
         AdmittedAsset {
             asset: request.asset.clone(),
             revision: revision.clone(),
+            scope_sha256: None,
         },
     )?;
     let mut cases = Vec::new();
@@ -132,6 +140,13 @@ pub async fn index(
     c: &AgentCorpusConnection,
     store: &super::curation::CurationReleaseStore,
 ) -> Result<Index, String> {
+    index_scoped(c, store, None).await
+}
+pub async fn index_scoped(
+    c: &AgentCorpusConnection,
+    store: &super::curation::CurationReleaseStore,
+    scope: Option<&evaluation::Scope>,
+) -> Result<Index, String> {
     let bytes = cloud::request(c, "/assets", None).await?;
     let value = cloud::verify_signed_json(&bytes, &c.trusted_public_keys)?;
     let index: Index = serde_json::from_value(value).map_err(|e| e.to_string())?;
@@ -139,6 +154,7 @@ pub async fn index(
     {
         return Err("Unsupported knowledge index".into());
     }
+    evaluation::validate_index(&index, scope)?;
     store.observe_knowledge_index(c, index.epoch, &index.withdrawn_asset_ids)?;
     Ok(index)
 }
@@ -147,7 +163,15 @@ pub async fn retrieve(
     store: &super::curation::CurationReleaseStore,
     request: &AssetRequest,
 ) -> Result<AdmittedAsset, String> {
-    let before = index(c, store).await?;
+    retrieve_scoped(c, store, request, None).await
+}
+pub async fn retrieve_scoped(
+    c: &AgentCorpusConnection,
+    store: &super::curation::CurationReleaseStore,
+    request: &AssetRequest,
+    scope: Option<&evaluation::Scope>,
+) -> Result<AdmittedAsset, String> {
+    let before = index_scoped(c, store, scope).await?;
     let expected = before
         .assets
         .iter()
@@ -170,7 +194,7 @@ pub async fn retrieve(
     {
         return Err("Knowledge release identity mismatch".into());
     }
-    let latest = index(c, store).await?;
+    let latest = index_scoped(c, store, scope).await?;
     if !latest
         .assets
         .iter()
@@ -181,13 +205,14 @@ pub async fn retrieve(
     Ok(AdmittedAsset {
         asset,
         revision: request.content_hash.clone(),
+        scope_sha256: scope.map(evaluation::Scope::digest),
     })
 }
 pub fn required_tools(admitted: &AdmittedAsset) -> &[String] {
     &admitted.asset.required_tool_ids
 }
 pub fn inspect(admitted: &AdmittedAsset) -> Value {
-    json!({"asset":admitted.asset,"content_hash":admitted.revision,"delivery":"verified_dynamic_corpus","next_tool":"install_knowledge_asset"})
+    json!({"asset":admitted.asset,"content_hash":admitted.revision,"delivery":"verified_dynamic_corpus","released":admitted.scope_sha256.is_none(),"next_tool":"install_knowledge_asset"})
 }
 fn decode<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, String> {
     serde_json::from_value(v).map_err(|e| e.to_string())
@@ -409,6 +434,12 @@ pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, Stri
             )
         }
     };
+    evaluation::record(
+        world,
+        json!({"operation":"install", "asset_id":a.id,
+        "content_hash":admitted.revision,"runtime_id":runtime_id,"kind":a.kind,
+        "scope_sha256":admitted.scope_sha256}),
+    );
     world.init_resource::<InstalledAssets>();
     world.resource_mut::<InstalledAssets>().0.insert(
         a.id.clone(),
@@ -651,6 +682,7 @@ mod tests {
     fn passage(revision: &str) -> AdmittedAsset {
         AdmittedAsset {
             revision: revision.into(),
+            scope_sha256: None,
             asset: Asset {
                 schema: SCHEMA.into(),
                 id: "test.dynamic.passage".into(),
@@ -721,6 +753,8 @@ mod tests {
         let index = Index {
             schema: SCHEMA.into(),
             epoch: 3,
+            evaluation_scope: None,
+            released: None,
             assets: vec![],
             withdrawn_asset_ids: vec!["test.dynamic.passage".into()],
         };
@@ -769,7 +803,26 @@ mod tests {
             "description":"Admission unit fixture","category":{"kind":"Other","value":"fixture"},
             "region":null,"license":{"kind":"Cc0"},"source_version":"one","rows":[]});
         let mut world = World::new();
+        world.init_resource::<evaluation::Observations>();
         install(&mut world, candidate.clone()).unwrap();
+        let rows = crate::plugins::model_api::handle_catalog_query(
+            &world,
+            "test.catalog".into(),
+            json!({}),
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+        let observations = evaluation::snapshot(&world);
+        assert_eq!(observations["records"][0]["event"]["operation"], "install");
+        assert_eq!(
+            observations["records"][1]["event"]["content_hash"],
+            "catalog-one"
+        );
+        assert_eq!(
+            observations["records"][1]["event"]["operation"],
+            "catalog_query"
+        );
+        assert_eq!(observations["records"][1]["event"]["row_count"], 0);
         candidate.asset.payload["source_version"] = json!("two");
         install(&mut world, candidate.clone()).unwrap();
         world.remove_resource::<InstalledAssets>();

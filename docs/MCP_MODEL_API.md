@@ -1706,3 +1706,29 @@ durable. Browser shells report that this local directory facility is unavailable
 `captures` directory and returns both its path and inline pixels. Explicit
 native destinations are checked for write access before GPU capture is queued,
 so a sandbox-denied path fails immediately rather than timing out in file polling.
+
+### Host-scoped evaluation knowledge
+
+Native hosts can opt into private staged catalog evaluation through
+`TALOS3D_EVALUATION_KNOWLEDGE_CONNECTION`, a bounded JSON configuration with
+`base_url`, `bearer_token`, `trusted_public_keys`, and `evaluation_scope`.
+The scope contains `manifest_sha256`, `contract_sha256`, `slot_id`, `nonce`,
+`arm` (`baseline` or `candidate`), and `native_instance_id`. The host must pin
+these from its locked service plan and grant before startup. Only explicit
+loopback `/v1/evaluation-stage/<uuid>` URLs, isolated absolute state directories,
+and disabled private-project auto-connect are accepted. Invalid configuration
+prevents MCP startup. No MCP argument can change this connection.
+
+Typed-knowledge discovery and retrieval use the separate scoped connection;
+agent skills retain the normal corpus connection. Signed index scope must match
+exactly and declare `released:false`. Normal corpus admission rejects staged
+indexes. Scoped delivery initially accepts catalog assets only, and a catalog
+query revalidates the grant before using installed data. These assets remain
+process-local and are not production releases or accepted evaluation outcomes.
+
+`get_knowledge_runtime_observations` reads a bounded native hash chain of
+installation identities and catalog-query request/result hashes. It exposes no
+credentials, arm labels, or raw query payloads. Overflow sets `complete:false`;
+consumers must reject incomplete evidence. A successful query records its exact
+installed revision and returned row count. These observations establish runtime
+consumption, not source rights, model correctness, or publication authority.

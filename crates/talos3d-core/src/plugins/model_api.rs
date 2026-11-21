@@ -167,6 +167,18 @@ impl Plugin for ModelApiPlugin {
                     return;
                 }
             };
+            match crate::plugins::knowledge_cloud::evaluation::from_environment(
+                &runtime_info.instance_id,
+            ) {
+                Ok(Some(connection)) => {
+                    app.insert_resource(connection);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("failed to configure evaluation admission: {error}");
+                    return;
+                }
+            }
             let (sender, receiver) = mpsc::channel();
             let request_sender = ModelApiRequestSender::new(sender);
             configure_model_api_update_mode(app);
@@ -207,6 +219,7 @@ impl Plugin for ModelApiPlugin {
 
 #[cfg(feature = "model-api")]
 fn register_shared_model_api_harness(app: &mut App) {
+    app.init_resource::<crate::plugins::knowledge_cloud::evaluation::Observations>();
     crate::plugins::knowledge_cloud::candidate_runtime::register(app);
     // Ensure the Semantic Procedural Session substrate (ADR-051) is
     // installed so `procedural_session.*` tools have resources to
@@ -18464,7 +18477,7 @@ pub fn handle_catalog_query(
 
     let rows = (descriptor.query_fn)(&filter);
 
-    Ok(rows
+    let result: Vec<CatalogRowInfo> = rows
         .into_iter()
         .map(|row| CatalogRowInfo {
             row_id: row.row_id.0,
@@ -18473,7 +18486,14 @@ pub fn handle_catalog_query(
             license: row.provenance.license.as_str().to_string(),
             source_version: row.provenance.source_version,
         })
-        .collect())
+        .collect();
+    crate::plugins::knowledge_cloud::evaluation::catalog_query(
+        world,
+        &provider_id,
+        &filter,
+        &serde_json::to_value(&result).map_err(|e| e.to_string())?,
+    );
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------

@@ -1001,6 +1001,10 @@ pub(super) enum ModelApiRequest {
         response: oneshot::Sender<Option<GuidanceCardInfo>>,
     },
     AgentCorpusConnection(oneshot::Sender<crate::plugins::agent_skills::AgentCorpusConnection>),
+    EvaluationKnowledgeConnection(
+        oneshot::Sender<Option<crate::plugins::knowledge_cloud::evaluation::Connection>>,
+    ),
+    KnowledgeObservations(oneshot::Sender<serde_json::Value>),
     CurationContext(
         oneshot::Sender<(
             crate::plugins::curation::CurationConnection,
@@ -2612,6 +2616,16 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
                     .cloned()
                     .unwrap_or_default(),
             );
+        }
+        ModelApiRequest::EvaluationKnowledgeConnection(response) => {
+            let _ = response.send(
+                world
+                    .get_resource::<crate::plugins::knowledge_cloud::evaluation::Connection>()
+                    .cloned(),
+            );
+        }
+        ModelApiRequest::KnowledgeObservations(response) => {
+            let _ = response.send(crate::plugins::knowledge_cloud::evaluation::snapshot(world));
         }
         ModelApiRequest::CurationContext(response) => {
             world.init_resource::<crate::plugins::curation::CurationReleaseStore>();

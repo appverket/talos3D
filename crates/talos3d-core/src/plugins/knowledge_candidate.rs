@@ -125,6 +125,7 @@ pub fn evaluate(request: Request, classes: Vec<ElementClassDescriptor>) -> Resul
     knowledge_cloud::install(
         &mut scratch,
         knowledge_cloud::AdmittedAsset {
+            scope_sha256: None,
             asset: request.asset,
             revision: revision.clone(),
         },

@@ -106,6 +106,24 @@ impl ModelApiServer {
             .await
             .unwrap_or_default()
     }
+    async fn knowledge_connection(
+        &self,
+    ) -> Result<
+        (
+            crate::plugins::agent_skills::AgentCorpusConnection,
+            Option<crate::plugins::knowledge_cloud::evaluation::Scope>,
+        ),
+        McpError,
+    > {
+        let connection = self
+            .round_trip(ModelApiRequest::EvaluationKnowledgeConnection)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        Ok(match connection {
+            Some(c) => (c.corpus, Some(c.scope)),
+            None => (self.corpus_connection().await, None),
+        })
+    }
     async fn curation_context(
         &self,
     ) -> (
@@ -9061,15 +9079,28 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     #[tool(
+        name = "get_knowledge_runtime_observations",
+        description = "Read bounded native installation and catalog-query observations. Hashes prove which runtime revision was used, not source rights or semantic acceptance. No credentials or evaluation arm labels are returned."
+    )]
+    pub(super) async fn knowledge_observations_tool(&self) -> Result<CallToolResult, McpError> {
+        let value = self
+            .round_trip(ModelApiRequest::KnowledgeObservations)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
         name = "list_knowledge_assets",
         description = "List signed current dynamic knowledge assets and retire installed revisions that have changed or been withdrawn. This retrieves data independently of app builds; it does not edit the model. Use get_knowledge_asset to inspect applicability and install_knowledge_asset to load a compatible exact revision."
     )]
     pub(super) async fn list_knowledge_assets_tool(&self) -> Result<CallToolResult, McpError> {
-        let connection = self.corpus_connection().await;
+        let (connection, scope) = self.knowledge_connection().await?;
         let (_, store) = self.curation_context().await;
-        let index = crate::plugins::knowledge_cloud::index(&connection, &store)
-            .await
-            .map_err(|e| McpError::internal_error(e, None))?;
+        let index =
+            crate::plugins::knowledge_cloud::index_scoped(&connection, &store, scope.as_ref())
+                .await
+                .map_err(|e| McpError::internal_error(e, None))?;
         let result = self
             .round_trip(|response| ModelApiRequest::ReconcileKnowledgeAssets { index, response })
             .await
@@ -9085,11 +9116,16 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(request): Parameters<crate::plugins::knowledge_cloud::AssetRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let connection = self.corpus_connection().await;
+        let (connection, scope) = self.knowledge_connection().await?;
         let (_, store) = self.curation_context().await;
-        let asset = crate::plugins::knowledge_cloud::retrieve(&connection, &store, &request)
-            .await
-            .map_err(|e| McpError::invalid_params(e, None))?;
+        let asset = crate::plugins::knowledge_cloud::retrieve_scoped(
+            &connection,
+            &store,
+            &request,
+            scope.as_ref(),
+        )
+        .await
+        .map_err(|e| McpError::invalid_params(e, None))?;
         json_tool_result(crate::plugins::knowledge_cloud::inspect(&asset))
     }
 
@@ -9101,12 +9137,17 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(request): Parameters<crate::plugins::knowledge_cloud::AssetRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let connection = self.corpus_connection().await;
+        let (connection, scope) = self.knowledge_connection().await?;
         let (_, store) = self.curation_context().await;
         let admitted = Box::new(
-            crate::plugins::knowledge_cloud::retrieve(&connection, &store, &request)
-                .await
-                .map_err(|e| McpError::invalid_params(e, None))?,
+            crate::plugins::knowledge_cloud::retrieve_scoped(
+                &connection,
+                &store,
+                &request,
+                scope.as_ref(),
+            )
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?,
         );
         let catalog = profile_tool_catalog();
         let available = catalog
@@ -9146,9 +9187,11 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         Parameters(params): Parameters<CuratedPathDiscoveryRequest>,
     ) -> Result<CallToolResult, McpError> {
         let requested = params.clone();
-        let connection = self.corpus_connection().await;
+        let (connection, scope) = self.knowledge_connection().await?;
         let (_, store) = self.curation_context().await;
-        let remote = crate::plugins::knowledge_cloud::index(&connection, &store).await;
+        let remote =
+            crate::plugins::knowledge_cloud::index_scoped(&connection, &store, scope.as_ref())
+                .await;
         if let Ok(index) = &remote {
             self.round_trip(|response| ModelApiRequest::ReconcileKnowledgeAssets {
                 index: index.clone(),
@@ -9354,6 +9397,22 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<CatalogQueryRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let (connection, scope) = self.knowledge_connection().await?;
+        if scope.is_some() {
+            // A grant expiry, withdrawal or consumed receipt must stop use of
+            // already installed staged data, not only future downloads.
+            let (_, store) = self.curation_context().await;
+            let index =
+                crate::plugins::knowledge_cloud::index_scoped(&connection, &store, scope.as_ref())
+                    .await
+                    .map_err(|e| McpError::invalid_params(e, None))?;
+            self.round_trip(|response| ModelApiRequest::ReconcileKnowledgeAssets {
+                index,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        }
         let rows = self
             .request_catalog_query(params.provider_id, params.filter)
             .await
