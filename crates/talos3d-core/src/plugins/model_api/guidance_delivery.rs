@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
-// Limits apply to serialized content, including JSON escaping. Only two fixed
+// Limits apply to serialized content, including JSON escaping. Only three fixed
 // tool slots are retained per connection, never a caller-selected cache key.
 const INLINE_BYTES: usize = 12_000;
 const CHUNK_BYTES: usize = 6_000;
@@ -24,18 +24,21 @@ pub struct GuidanceDeliveryRequest {
 pub(super) enum GuidanceDeliveryKind {
     Authoring,
     Packet,
+    Card,
 }
 impl GuidanceDeliveryKind {
     fn index(self) -> usize {
         match self {
             Self::Authoring => 0,
             Self::Packet => 1,
+            Self::Card => 2,
         }
     }
     fn tool(self) -> &'static str {
         match self {
             Self::Authoring => "get_authoring_guidance",
             Self::Packet => "get_agent_guidance_packet",
+            Self::Card => "get_guidance_card",
         }
     }
 }
@@ -50,7 +53,7 @@ struct Delivery {
     available: bool,
 }
 #[derive(Debug, Clone, Default)]
-pub(super) struct GuidanceDeliveryStore(Arc<Mutex<[Option<Delivery>; 2]>>);
+pub(super) struct GuidanceDeliveryStore(Arc<Mutex<[Option<Delivery>; 3]>>);
 
 pub(super) struct DeliveredGuidance {
     pub value: Value,
@@ -71,8 +74,13 @@ impl GuidanceDeliveryStore {
             return Err("guidance exceeds the 2 MB delivery limit; capability owner must split reference content into guidance cards".into());
         }
         let mut slots = self.0.lock().expect("guidance delivery lock poisoned");
-        // A refresh of either route invalidates old completion cursors.
-        *slots = [None, None];
+        // Bootstrap refresh invalidates all old completion cursors. Fetching
+        // a card replaces only the bounded card slot, not in-flight bootstrap.
+        if matches!(kind, GuidanceDeliveryKind::Card) {
+            slots[kind.index()] = None;
+        } else {
+            *slots = [None, None, None];
+        }
         if content.len() <= INLINE_BYTES {
             return Ok(DeliveredGuidance {
                 value,

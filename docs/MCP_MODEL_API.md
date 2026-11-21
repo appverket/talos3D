@@ -62,6 +62,10 @@ references, but return chapter metadata rather than chapter bodies. Each
 Required cards and skills remain included in the session packet; complete
 all pages before bootstrap is satisfied. This projection does not remove
 content from the registry or relax the session's required-reading gates.
+Large `get_guidance_card` responses use the same bounded JSON-fragment protocol.
+Follow the returned `card_id` and `cursor` until `delivery_complete`; partial
+cards do not satisfy required-reading gates. Cursors bind both the negotiated
+session and the card, and a new card replaces the previous card snapshot.
 
 ## What It Exposes
 

@@ -267,7 +267,10 @@ async fn fetch_detection_card(
     id: &str,
 ) -> Result<CallToolResult, McpError> {
     server
-        .get_guidance_card_tool(Parameters(GetGuidanceCardRequest { card_id: id.into() }))
+        .get_guidance_card_tool(Parameters(GetGuidanceCardRequest {
+            card_id: id.into(),
+            cursor: None,
+        }))
         .await
 }
 

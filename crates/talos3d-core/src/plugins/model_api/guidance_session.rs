@@ -296,6 +296,26 @@ impl GuidanceSessionStore {
         Ok(())
     }
 
+    pub fn record_card_delivery(
+        &self,
+        expected_session: Option<&str>,
+        card_id: &str,
+        complete: bool,
+    ) -> Result<(), String> {
+        let mut guard = self.0.lock().expect("guidance session lock poisoned");
+        if guard.as_ref().map(|session| session.id.as_str()) != expected_session {
+            return Err("guidance session changed during card delivery; restart the card".into());
+        }
+        if let Some(session) = guard.as_mut() {
+            if complete {
+                session.read_cards.insert(card_id.to_owned());
+            } else {
+                session.read_cards.remove(card_id);
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn mark_authoring_guidance(&self, available: bool) {
         if let Some(session) = self

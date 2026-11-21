@@ -457,7 +457,7 @@ impl ModelApiServer {
         let result = REQUEST_ACCESS
             .scope((tool_requires_authored_base(name), !read), call)
             .await?;
-        if result.is_error != Some(true) {
+        if result.is_error != Some(true) && name != "get_guidance_card" {
             self.guidance_state.observe_success(name, observed.as_ref());
         }
         Ok(result)
@@ -5328,6 +5328,8 @@ pub(super) struct ListGuidanceCardsRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct GetGuidanceCardRequest {
     pub(super) card_id: String,
+    #[serde(default)]
+    pub(super) cursor: Option<String>,
 }
 
 #[cfg(feature = "model-api")]
@@ -9647,17 +9649,49 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "get_guidance_card",
         description = "Fetch one progressive guidance card by id, including referenced tool ids \
-            schema-shaped JSON examples, and optional trajectory/success/stop-condition rubric fields."
+            schema-shaped JSON examples, and optional trajectory/success/stop-condition rubric fields. Large cards use bounded JSON fragments; follow next_tool/next_arguments through delivery_complete. No filesystem access is needed."
     )]
     pub(super) async fn get_guidance_card_tool(
         &self,
         Parameters(params): Parameters<GetGuidanceCardRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let card = self
-            .request_get_guidance_card(params.card_id)
-            .await
-            .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(card)
+        let session_id = self
+            .guidance_state
+            .snapshot()
+            .map(|s| s.guidance_session_id);
+        // Binding includes both negotiation and card identity, so a valid cursor
+        // cannot be relabelled to satisfy another required card.
+        let binding = Some(serde_json::json!([session_id, params.card_id]).to_string());
+        let mut page = if let Some(cursor) = params.cursor {
+            self.guidance_delivery
+                .resume(GuidanceDeliveryKind::Card, binding, &cursor)
+                .map_err(|e| McpError::invalid_params(e, None))?
+        } else {
+            let card = self
+                .request_get_guidance_card(params.card_id.clone())
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?;
+            self.guidance_delivery
+                .begin(
+                    GuidanceDeliveryKind::Card,
+                    binding,
+                    serde_json::to_value(card)
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+                    true,
+                )
+                .map_err(|e| McpError::invalid_params(e, None))?
+        };
+        self.guidance_state
+            .record_card_delivery(session_id.as_deref(), &params.card_id, page.complete)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        if let Some(arguments) = page
+            .value
+            .get_mut("next_arguments")
+            .and_then(Value::as_object_mut)
+        {
+            arguments.insert("card_id".into(), serde_json::json!(params.card_id));
+        }
+        json_tool_result(page.value)
     }
 
     #[tool(

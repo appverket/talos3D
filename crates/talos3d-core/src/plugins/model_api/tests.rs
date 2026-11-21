@@ -15454,14 +15454,61 @@ async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegoti
     assert!(index.get("body_markdown").is_none());
     assert_eq!(index["next_tool"], "get_guidance_card");
     assert_eq!(index["next_arguments"]["card_id"], "test.optional.chapter");
-    let card: GuidanceCardInfo = server
+    server.guidance_state.start(
+        "card-session".into(),
+        Some("inspect".into()),
+        vec!["test.optional.chapter".into()],
+        vec![],
+        vec![],
+    );
+    server.guidance_state.mark_authoring_guidance(true);
+    let mut card_page: serde_json::Value = server
         .get_guidance_card_tool(Parameters(GetGuidanceCardRequest {
             card_id: "test.optional.chapter".into(),
+            cursor: None,
         }))
         .await
         .unwrap()
         .into_typed()
         .unwrap();
+    assert_eq!(
+        server.guidance_state.snapshot().unwrap().phase,
+        GuidancePhase::Bootstrap
+    );
+    let card_cursor = card_page["next_arguments"]["cursor"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut card_text = String::new();
+    let wrong = GetGuidanceCardRequest {
+        card_id: "test.required.chapter".into(),
+        cursor: card_page["next_arguments"]["cursor"]
+            .as_str()
+            .map(str::to_owned),
+    };
+    assert!(server
+        .get_guidance_card_tool(Parameters(wrong))
+        .await
+        .is_err());
+    loop {
+        assert!(serde_json::to_string(&card_page).unwrap().len() < 16_000);
+        card_text.push_str(card_page["content"].as_str().unwrap());
+        if card_page["delivery_complete"] == true {
+            break;
+        }
+        assert_eq!(
+            server.guidance_state.snapshot().unwrap().phase,
+            GuidancePhase::Bootstrap
+        );
+        let args = serde_json::from_value(card_page["next_arguments"].clone()).unwrap();
+        card_page = server
+            .get_guidance_card_tool(Parameters(args))
+            .await
+            .unwrap()
+            .into_typed()
+            .unwrap();
+    }
+    let card: GuidanceCardInfo = serde_json::from_str(&card_text).unwrap();
     assert_eq!(
         card.body_markdown.as_deref(),
         Some("ON_DEMAND_ONLY".repeat(20_000).as_str())
@@ -15478,6 +15525,13 @@ async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegoti
     server
         .guidance_state
         .start("new".into(), None, vec![], vec![], vec![]);
+    assert!(server
+        .get_guidance_card_tool(Parameters(GetGuidanceCardRequest {
+            card_id: "test.optional.chapter".into(),
+            cursor: Some(card_cursor),
+        }))
+        .await
+        .is_err());
     assert!(server
         .get_agent_guidance_packet_tool(Parameters(GuidanceDeliveryRequest {
             cursor: Some(old_cursor)
