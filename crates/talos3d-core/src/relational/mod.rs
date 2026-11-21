@@ -15,6 +15,7 @@ pub mod incremental;
 pub mod lock_solver;
 pub mod parallel;
 pub mod param_expr;
+mod placement;
 pub mod registry;
 pub mod service;
 pub mod transform;
