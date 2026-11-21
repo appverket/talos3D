@@ -560,6 +560,53 @@ impl HarnessIncidentStore {
         Ok(record.clone())
     }
 
+    /// Submitted receipts are account-owned on the original service. A renewed
+    /// credential must prove that ownership before any queued feedback is sent.
+    /// Unsubmitted observations never follow a new credential automatically.
+    async fn authorize_feedback(
+        &self,
+        event_id: &str,
+        policy: &HarnessIncidentPolicy,
+        connection: &CurationConnection,
+        corpus: &AgentCorpusConnection,
+    ) -> Result<PendingRecord, String> {
+        if let Ok(record) = self.bound_record(event_id, policy, connection, corpus) {
+            return Ok(record);
+        }
+        if !policy.export_enabled {
+            return Err("Host export policy is disabled".into());
+        }
+        let before = self.record_for_access(event_id, policy, connection, corpus, true)?;
+        if !before.submitted {
+            return Err("Incident has not been submitted".into());
+        }
+        let incident = before
+            .incident_id
+            .as_deref()
+            .ok_or("Incident has not been submitted")?;
+        let status = self
+            .incident_status(event_id, policy, connection, corpus)
+            .await?;
+        if status["incident_id"].as_str() != Some(incident) {
+            return Err("Incident ownership response identity mismatch".into());
+        }
+        let mut state = self.load(policy)?;
+        let mut candidate = state.records.clone();
+        let current = candidate.get_mut(event_id).ok_or("Incident unavailable")?;
+        if !current.submitted
+            || current.source != before.source
+            || current.incident_id != before.incident_id
+            || current.credential_fingerprint != before.credential_fingerprint
+        {
+            return Err("Incident authority changed during feedback authorization".into());
+        }
+        current.credential_fingerprint = fingerprint(corpus.bearer_token.as_deref());
+        let authorized = current.clone();
+        persist(policy, &candidate)?;
+        state.records = candidate;
+        Ok(authorized)
+    }
+
     pub async fn feedback(
         &self,
         request: RetryOutcome,
@@ -574,7 +621,9 @@ impl HarnessIncidentStore {
         if !request.residual_knowledge_gaps.is_empty() && !policy.knowledge_export_enabled {
             return Err("Host knowledge export policy is disabled".into());
         }
-        let record = self.bound_record(&request.event_id, policy, connection, corpus)?;
+        let record = self
+            .authorize_feedback(&request.event_id, policy, connection, corpus)
+            .await?;
         if record.incident_id.is_none() {
             return Err("Incident has not been submitted".into());
         }
@@ -633,12 +682,15 @@ impl HarnessIncidentStore {
         };
         let mut submitted = 0;
         for (event_id, record) in records {
-            if self
-                .bound_record(&event_id, policy, connection, corpus)
-                .is_err()
+            if !record.feedback.iter().any(|f| !f.submitted)
+                || self
+                    .authorize_feedback(&event_id, policy, connection, corpus)
+                    .await
+                    .is_err()
             {
                 continue;
             }
+            let record = self.bound_record(&event_id, policy, connection, corpus)?;
             let Some(ref id) = record.incident_id else {
                 continue;
             };
@@ -1019,6 +1071,164 @@ mod tests {
             .await
             .is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[cfg(feature = "model-api")]
+    #[tokio::test]
+    async fn renewed_feedback_requires_server_ownership_before_any_private_write_or_send() {
+        use axum::{
+            extract::Path as AxumPath,
+            http::{HeaderMap, StatusCode},
+            response::IntoResponse,
+            routing::{get, post},
+            Router,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let posts = Arc::new(AtomicUsize::new(0));
+        let seen_reads = reads.clone();
+        let seen_posts = posts.clone();
+        let app = Router::new()
+            .route(
+                "/v1/curation/incidents/{id}",
+                get(move |AxumPath(id): AxumPath<String>, headers: HeaderMap| {
+                    let reads = seen_reads.clone();
+                    async move {
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        match headers.get("authorization").and_then(|h| h.to_str().ok()) {
+                            Some("Bearer renewed-owner") => {
+                                axum::Json(json!({"incident_id":id,"state":"released"}))
+                                    .into_response()
+                            }
+                            Some("Bearer wrong-receipt") => {
+                                axum::Json(json!({"incident_id":uuid::Uuid::new_v4().to_string()}))
+                                    .into_response()
+                            }
+                            _ => StatusCode::NOT_FOUND.into_response(),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/curation/incidents/{id}/feedback",
+                post(move |headers: HeaderMap| {
+                    let posts = seen_posts.clone();
+                    async move {
+                        posts.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(
+                            headers.get("authorization").unwrap(),
+                            "Bearer renewed-owner"
+                        );
+                        axum::Json(json!({"recorded":true}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let policy = HarnessIncidentPolicy {
+            export_enabled: true,
+            knowledge_export_enabled: true,
+            pending_path: Some(dir.path().join("pending.json")),
+        };
+        let connection = CurationConnection {
+            base_url: format!("http://{address}/v1/curation"),
+            ..Default::default()
+        };
+        let original = AgentCorpusConnection {
+            base_url: format!("http://{address}/v1/corpus"),
+            bearer_token: Some("old-owner".into()),
+            ..Default::default()
+        };
+        let store = HarnessIncidentStore::default();
+        let receipt = store
+            .report_gap(
+                "unit-topic".into(),
+                "unit-question".into(),
+                "passage".into(),
+                &policy,
+                &connection,
+                original.bearer_token.as_deref(),
+            )
+            .unwrap();
+        let event = receipt["event_id"].as_str().unwrap();
+        let renewed = AgentCorpusConnection {
+            bearer_token: Some("renewed-owner".into()),
+            ..original.clone()
+        };
+        // An unsubmitted private observation cannot be rebound or exported.
+        assert!(store
+            .authorize_feedback(event, &policy, &connection, &renewed)
+            .await
+            .is_err());
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        {
+            let mut state = store.load(&policy).unwrap();
+            let row = state.records.get_mut(event).unwrap();
+            row.submitted = true;
+            row.incident_id = Some(uuid::Uuid::new_v4().to_string());
+            persist(&policy, &state.records).unwrap();
+        }
+        let request = RetryOutcome {
+            event_id: event.into(),
+            feedback_id: uuid::Uuid::new_v4().to_string(),
+            artifact_id: "skill:unit".into(),
+            revision: "a".repeat(64),
+            outcome: "succeeded".into(),
+            evidence_codes: vec!["unit.retry".into()],
+            residual_knowledge_gaps: vec![],
+        };
+        for token in ["other-account", "wrong-receipt"] {
+            let unauthorized = AgentCorpusConnection {
+                bearer_token: Some(token.into()),
+                ..original.clone()
+            };
+            assert!(store
+                .feedback(request.clone(), &policy, &connection, &unauthorized)
+                .await
+                .is_err());
+            assert!(store
+                .bound_record(event, &policy, &connection, &original)
+                .unwrap()
+                .feedback
+                .is_empty());
+        }
+        assert_eq!(posts.load(Ordering::SeqCst), 0);
+        let wrong_origin = AgentCorpusConnection {
+            base_url: "http://127.0.0.1:1/v1/corpus".into(),
+            ..renewed.clone()
+        };
+        assert!(store
+            .feedback(request.clone(), &policy, &connection, &wrong_origin)
+            .await
+            .is_err());
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        let result = store
+            .feedback(request.clone(), &policy, &connection, &renewed)
+            .await
+            .unwrap();
+        assert_eq!(result["submitted"], true);
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        let restarted = HarnessIncidentStore::default();
+        let record = restarted
+            .bound_record(event, &policy, &connection, &renewed)
+            .unwrap();
+        assert!(record.feedback[0].submitted);
+        assert!(restarted
+            .bound_record(event, &policy, &connection, &original)
+            .is_err());
+        assert_eq!(
+            restarted
+                .feedback(request, &policy, &connection, &renewed)
+                .await
+                .unwrap()["submitted"],
+            true
+        );
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
         server.abort();
     }
 
