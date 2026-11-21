@@ -1754,3 +1754,9 @@ installation, queries and incident/retry reporting. Signature, compatibility,
 withdrawal, private-project and export checks still apply. It grants no model-edit
 or shared-publication authority, including after a tool-profile switch. A release
 must be discovered and actually used before a successful retry can be reported.
+
+`get_knowledge_payload_schema({"kind":"catalog.v1"})` returns the asset envelope
+and catalog payload JSON schemas generated from the runtime decoder types, including
+row provenance and tagged enums. It contains no catalog records. Other payload
+kinds explicitly report unavailable schema discovery. Use `check_knowledge_candidate`
+for actual runtime checks; schema validity grants no rights or publication approval.

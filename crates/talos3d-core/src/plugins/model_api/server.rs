@@ -9033,6 +9033,20 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     #[tool(
+        name = "get_knowledge_payload_schema",
+        description = "Read the runtime-derived wire schema for a portable knowledge payload kind. Currently catalog.v1; other kinds return explicit unavailability. No domain facts, source access or authoring guidance are needed to inspect the schema."
+    )]
+    pub(super) async fn get_knowledge_payload_schema_tool(
+        &self,
+        Parameters(request): Parameters<crate::plugins::knowledge_cloud::PayloadSchemaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        json_tool_result(
+            crate::plugins::knowledge_cloud::payload_schema(&request.kind)
+                .map_err(|e| McpError::invalid_params(e, None))?,
+        )
+    }
+
+    #[tool(
         name = "check_knowledge_candidate",
         description = "Check a typed candidate through the runtime payload decoder in disposable registries, without installation, publication or model edits. Parametric driver cases return evaluated member geometry. Recipe/Definition checks are structural only. Independent source review and rendered authoring acceptance remain required."
     )]

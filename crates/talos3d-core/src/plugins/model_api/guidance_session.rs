@@ -82,6 +82,7 @@ pub(super) fn knowledge_review_tool(tool: &str) -> bool {
             | "list_knowledge_assets"
             | "get_knowledge_asset"
             | "check_knowledge_candidate"
+            | "get_knowledge_payload_schema"
             | "search_corpus_knowledge"
             | "list_catalog_providers"
             | "catalog_query"

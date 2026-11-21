@@ -260,6 +260,10 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("install_knowledge_asset", ToolCategory::Inspection),
     ("check_knowledge_candidate", ToolCategory::CurationExtended),
     (
+        "get_knowledge_payload_schema",
+        ToolCategory::CurationExtended,
+    ),
+    (
         "evaluate_knowledge_candidate",
         ToolCategory::CurationExtended,
     ),

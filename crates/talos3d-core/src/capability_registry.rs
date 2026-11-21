@@ -755,6 +755,7 @@ pub struct CatalogProviderId(pub String);
 /// Broad category of material or product in a catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum CatalogCategory {
     DimensionalLumber,
     StructuralSheetGoods,
@@ -775,6 +776,7 @@ impl CatalogCategory {
 /// License or provenance tag attached to a catalog row or provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum LicenseTag {
     /// Creative Commons Zero (public domain dedication).
     Cc0,
@@ -806,6 +808,7 @@ impl LicenseTag {
 
 /// Provenance metadata shared by a batch of rows ingested from one source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct CorpusProvenance {
     /// Human-readable source description (e.g. `"generic public knowledge"`).
     pub source: String,
@@ -825,6 +828,7 @@ pub struct CorpusProvenance {
 
 /// A single row returned by a catalog provider query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct CatalogRow {
     /// Stable identifier for this row within the provider's namespace.
     pub row_id: crate::plugins::refinement::CatalogRowId,

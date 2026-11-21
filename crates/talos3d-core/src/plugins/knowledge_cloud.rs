@@ -218,7 +218,7 @@ fn decode<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, String> {
     serde_json::from_value(v).map_err(|e| e.to_string())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct CatalogData {
     id: String,
     label: String,
@@ -228,6 +228,30 @@ struct CatalogData {
     license: crate::capability_registry::LicenseTag,
     source_version: String,
     rows: Vec<crate::capability_registry::CatalogRow>,
+}
+
+/// Runtime wire shapes, not domain facts or publication approval.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PayloadSchemaRequest {
+    pub kind: String,
+}
+
+pub fn payload_schema(kind: &str) -> Result<Value, String> {
+    if kind != "catalog.v1" {
+        return Err(
+            "Payload schema discovery is not yet available for this kind; do not guess a payload"
+                .into(),
+        );
+    }
+    Ok(json!({
+        "kind": kind,
+        "asset_schema": schemars::schema_for!(Asset),
+        "payload_schema": schemars::schema_for!(CatalogData),
+        "constraints": ["payload.id must equal asset.id", "At most 10000 catalog rows", "A release cannot replace an unowned runtime catalog"],
+        "next_tool": "check_knowledge_candidate",
+        "notice": "This is the runtime decoder contract. Supply independently grounded data and rights; schema validity is not evidence or release approval."
+    }))
 }
 
 pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, String> {
@@ -702,6 +726,39 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn catalog_payload_schema_uses_actual_decoder_types() {
+        let response = payload_schema("catalog.v1").unwrap();
+        let schema = &response["payload_schema"];
+        assert_eq!(
+            schema,
+            &serde_json::to_value(schemars::schema_for!(CatalogData)).unwrap()
+        );
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("rows")));
+        assert_eq!(
+            schema["properties"]["rows"]["items"]["$ref"],
+            "#/$defs/CatalogRow"
+        );
+        for name in [
+            "CatalogRow",
+            "CorpusProvenance",
+            "LicenseTag",
+            "CatalogCategory",
+        ] {
+            assert!(schema["$defs"][name].is_object(), "{name}");
+        }
+        assert!(schema["$defs"]["CorpusProvenance"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("supersedes")));
+        assert_eq!(response["next_tool"], "check_knowledge_candidate");
+        assert!(payload_schema("unknown.v1").is_err());
+        assert!(payload_schema("recipe.v1").is_err());
+    }
+
     #[test]
     fn candidate_protocol_is_discoverable_without_source() {
         let schema = serde_json::to_value(schemars::schema_for!(CandidateCheck)).unwrap();
