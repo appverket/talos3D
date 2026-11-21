@@ -1747,3 +1747,10 @@ the complete mandatory authoring bootstrap before edits can proceed. The separat
 curator service still controls leases, candidate submission, independent review and
 release; runtime review scope grants none of those authorities. Completing its
 bootstrap claims no model edit, validation or successful retry.
+
+`guidance_scope: "knowledge_use"` serves compact onboarding for ordinary agents
+consuming shared knowledge. It additionally admits discovery, validated asset
+installation, queries and incident/retry reporting. Signature, compatibility,
+withdrawal, private-project and export checks still apply. It grants no model-edit
+or shared-publication authority, including after a tool-profile switch. A release
+must be discovered and actually used before a successful retry can be reported.

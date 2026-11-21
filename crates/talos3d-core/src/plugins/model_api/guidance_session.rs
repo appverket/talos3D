@@ -29,6 +29,32 @@ pub enum GuidanceScope {
     #[default]
     Authoring,
     KnowledgeReview,
+    KnowledgeUse,
+}
+
+pub(super) fn knowledge_scope_tool(scope: GuidanceScope, tool: &str) -> bool {
+    knowledge_review_tool(tool)
+        || (scope == GuidanceScope::KnowledgeUse
+            && matches!(
+                normalize_hook_tool_name(tool),
+                "install_knowledge_asset"
+                    | "request_corpus_expansion"
+                    | "discover_curated_paths"
+                    | "report_harness_incident"
+                    | "get_harness_incident_status"
+                    | "report_harness_retry_outcome"
+                    | "submit_pending_harness_incidents"
+                    | "get_knowledge_runtime_observations"
+            ))
+}
+
+pub(super) fn knowledge_scope_invariants(scope: GuidanceScope) -> Vec<String> {
+    let mut invariants = knowledge_review_invariants();
+    if scope == GuidanceScope::KnowledgeUse {
+        invariants[0] = "Confirm the instance identity. This knowledge_use scope permits knowledge discovery, validated asset installation, queries and failure/retry reporting, but no model edits or shared publication. Profile changes do not expand this scope. Model authoring requires fresh authoring negotiation and its complete guidance.".into();
+        invariants.push("Discover exact available revisions through MCP. Installation remains subject to the runtime's signature, compatibility, withdrawal and authorization checks; this scope bypasses none of them. Report real gaps and retain their event identifiers. On a compatible release, refresh discovery and re-plan, then report the observed retry outcome against the exact remedy revision; never treat release alone as success.".into());
+    }
+    invariants
 }
 
 pub(super) fn knowledge_review_tool(tool: &str) -> bool {
@@ -523,7 +549,7 @@ impl GuidanceSession {
     }
 
     fn discovery_complete(&self) -> bool {
-        self.scope == GuidanceScope::KnowledgeReview
+        self.scope != GuidanceScope::Authoring
             || self.task.is_none()
             || REQUIRED_DISCOVERY_PATHS
                 .iter()
@@ -539,7 +565,7 @@ impl GuidanceSession {
     fn phase(&self) -> GuidancePhase {
         if !self.bootstrap_complete() {
             GuidancePhase::Bootstrap
-        } else if self.scope == GuidanceScope::KnowledgeReview {
+        } else if self.scope != GuidanceScope::Authoring {
             GuidancePhase::Complete
         } else if !self.discovery_complete() {
             GuidancePhase::Discover
@@ -555,10 +581,10 @@ impl GuidanceSession {
     }
 
     fn preflight(&self, tool: &str) -> Option<GuidanceBlock> {
-        if self.scope == GuidanceScope::KnowledgeReview && !knowledge_review_tool(tool) {
+        if self.scope != GuidanceScope::Authoring && !knowledge_scope_tool(self.scope, tool) {
             return Some(GuidanceBlock {
-                kind: "KnowledgeReviewWriteDenied".into(),
-                reason: format!("Tool '{tool}' is outside read-only knowledge review. A profile switch does not change this scope. Renegotiate authoring and complete its guidance before runtime mutation."),
+                kind: if self.scope == GuidanceScope::KnowledgeUse { "KnowledgeUseModelWriteDenied".into() } else { "KnowledgeReviewWriteDenied".into() },
+                reason: format!("Tool '{tool}' is outside the negotiated knowledge scope. A profile switch does not change this scope. Renegotiate authoring and complete its guidance before runtime mutation."),
                 guidance_state: self.snapshot(),
             });
         }
@@ -583,11 +609,14 @@ impl GuidanceSession {
         let mut next_actions = Vec::new();
 
         if self.guidance_loaded {
-            satisfied.push(if self.scope == GuidanceScope::KnowledgeReview {
-                "knowledge-review-guidance-loaded".to_string()
-            } else {
-                "authoring-guidance-loaded".to_string()
-            });
+            satisfied.push(
+                match self.scope {
+                    GuidanceScope::KnowledgeReview => "knowledge-review-guidance-loaded",
+                    GuidanceScope::KnowledgeUse => "knowledge-use-guidance-loaded",
+                    GuidanceScope::Authoring => "authoring-guidance-loaded",
+                }
+                .to_string(),
+            );
         } else if self.guidance_unavailable {
             blocking.push(GuidanceObligation {
                 id: "authoritative-guidance-unavailable".to_string(),
@@ -597,11 +626,12 @@ impl GuidanceSession {
             });
         } else {
             blocking.push(GuidanceObligation {
-                id: if self.scope == GuidanceScope::KnowledgeReview {
-                    "load-knowledge-review-guidance".to_string()
-                } else {
-                    "load-authoring-guidance".to_string()
-                },
+                id: match self.scope {
+                    GuidanceScope::KnowledgeReview => "load-knowledge-review-guidance",
+                    GuidanceScope::KnowledgeUse => "load-knowledge-use-guidance",
+                    GuidanceScope::Authoring => "load-authoring-guidance",
+                }
+                .to_string(),
                 reason: "Load the authoritative contract served by the running instance."
                     .to_string(),
                 blocking: true,
@@ -882,6 +912,60 @@ mod tests {
             }
         }
         store
+    }
+
+    #[test]
+    fn knowledge_use_allows_consumption_and_retry_without_model_authority() {
+        let store = GuidanceSessionStore::default();
+        store.start_scoped(
+            "use-v1".into(),
+            Some("query shared knowledge".into()),
+            Vec::new(),
+            Vec::new(),
+            knowledge_scope_invariants(GuidanceScope::KnowledgeUse),
+            GuidanceScope::KnowledgeUse,
+        );
+        store.mark_guidance_packet_loaded(true);
+        for tool in [
+            "install_knowledge_asset",
+            "catalog_query",
+            "discover_curated_paths",
+            "report_harness_incident",
+            "get_harness_incident_status",
+            "report_harness_retry_outcome",
+            "get_knowledge_runtime_observations",
+        ] {
+            assert!(store.router_preflight(tool).is_none(), "{tool}");
+        }
+        for tool in [
+            "create_box",
+            "execute_commands",
+            "save_recipe_draft",
+            "review_agent_skill_contribution",
+            "load_project",
+            "evaluate_knowledge_candidate",
+            "unknown_tool",
+        ] {
+            assert_eq!(
+                store.router_preflight(tool).unwrap().kind,
+                "KnowledgeUseModelWriteDenied",
+                "{tool}"
+            );
+        }
+        store.observe_success("install_knowledge_asset", None);
+        let state = store.snapshot().unwrap();
+        assert!(!state.authored_since_negotiation);
+        assert!(state
+            .satisfied_obligations
+            .contains(&"knowledge-use-guidance-loaded".into()));
+        store.start(
+            "authoring".into(),
+            None,
+            vec!["required".into()],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(store.router_preflight("create_box").is_some());
     }
 
     #[test]

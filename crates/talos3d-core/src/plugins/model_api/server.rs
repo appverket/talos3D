@@ -3231,8 +3231,9 @@ pub struct AgentHello {
     /// silently switches profiles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_profile: Option<String>,
-    /// Knowledge review serves a compact metacontract and denies runtime writes,
-    /// including after profile changes. Default authoring keeps the full bootstrap.
+    /// knowledge_review permits inspection; knowledge_use also permits validated
+    /// asset consumption and failure/retry reports. Both deny model edits after
+    /// profile changes. Default authoring keeps the full mandatory bootstrap.
     #[serde(default)]
     pub guidance_scope: super::guidance_session::GuidanceScope,
     /// Approximate context budget available to the agent.
@@ -3399,14 +3400,15 @@ pub(super) fn assemble_agent_welcome(
     security: SessionSecurityInfo,
 ) -> AgentWelcome {
     let knowledge_review =
-        hello.guidance_scope == super::guidance_session::GuidanceScope::KnowledgeReview;
+        hello.guidance_scope != super::guidance_session::GuidanceScope::Authoring;
     if knowledge_review {
         snapshot.must_read_guidance_card_ids.clear();
         snapshot.must_read_agent_skill_ids.clear();
     }
     snapshot.next_tools.retain(|tool| {
         profile_allows(profile, tool)
-            && (!knowledge_review || super::guidance_session::knowledge_review_tool(tool))
+            && (!knowledge_review
+                || super::guidance_session::knowledge_scope_tool(hello.guidance_scope, tool))
     });
     let requested_profile = hello.requested_profile.clone();
     let parsed_requested = requested_profile
@@ -3530,7 +3532,7 @@ pub(super) fn assemble_agent_welcome(
             "discover_curated_paths".to_string(),
         ],
         bootstrap_steps,
-        required_invariants: if knowledge_review { super::guidance_session::knowledge_review_invariants() } else { vec![
+        required_invariants: if knowledge_review { super::guidance_session::knowledge_scope_invariants(hello.guidance_scope) } else { vec![
             "Confirm AgentWelcome.instance.instance_id before acting.".to_string(),
             "Check get_agent_corpus_status at task boundaries, after learning and before authoring; fetch changed skill revisions and their pinned resources. Cloud outage means freshness is unverified.".to_string(),
             "Only the harness curator adds shared knowledge through its authorized Talos3D MCP connection and independent review/release. User agents report CorpusGaps and consume releases. Do not substitute source changes, seed files, direct publication or a component-specific app rebuild. Private project facts remain private project knowledge.".to_string(),
@@ -6077,13 +6079,13 @@ impl ModelApiServer {
             contract: "talos3d.agent-guidance-packet".to_string(),
             contract_version: 1,
             authoritative_guidance_available,
-            guidance: if state.scope == super::guidance_session::GuidanceScope::KnowledgeReview {
+            guidance: if state.scope != super::guidance_session::GuidanceScope::Authoring {
                 serde_json::json!({
-                    "guidance_id": "talos3d.knowledge-review",
+                    "guidance_id": if state.scope == super::guidance_session::GuidanceScope::KnowledgeUse { "talos3d.knowledge-use" } else { "talos3d.knowledge-review" },
                     "version": 1,
-                    "scope": "knowledge_review",
+                    "scope": state.scope,
                     "authoring_guidance_revision": {"id": guidance.guidance_id, "version": guidance.version},
-                    "prompt_text": super::guidance_session::knowledge_review_invariants().join("\n\n"),
+                    "prompt_text": super::guidance_session::knowledge_scope_invariants(state.scope).join("\n\n"),
                     "on_demand_tools": ["list_guidance_cards", "get_guidance_card", "list_agent_skills", "get_agent_skill", "get_agent_corpus_status"],
                 })
             } else {
@@ -8943,16 +8945,19 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         // active profile actually advertises, so a gated session is never
         // steered toward a tool it cannot call.
         let profile = self.profile_state.get();
-        let knowledge_review = self.guidance_state.snapshot().is_some_and(|state| {
-            state.scope == super::guidance_session::GuidanceScope::KnowledgeReview
-        });
+        let scope = self
+            .guidance_state
+            .snapshot()
+            .map(|state| state.scope)
+            .unwrap_or_default();
+        let knowledge_review = scope != super::guidance_session::GuidanceScope::Authoring;
         if knowledge_review {
             snapshot.must_read_guidance_card_ids.clear();
             snapshot.must_read_agent_skill_ids.clear();
         }
         snapshot.next_tools.retain(|tool| {
             profile_allows(profile, tool)
-                && (!knowledge_review || super::guidance_session::knowledge_review_tool(tool))
+                && (!knowledge_review || super::guidance_session::knowledge_scope_tool(scope, tool))
         });
         json_tool_result(snapshot)
     }
