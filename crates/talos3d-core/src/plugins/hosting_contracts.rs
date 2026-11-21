@@ -34,6 +34,7 @@ pub struct HostAffectedRegion(pub String);
 /// meaning of each registered capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum HostedInteractionKind {
     ThroughPenetration,
     PartialPenetration,
@@ -60,6 +61,7 @@ impl HostedInteractionKind {
 /// Axis in a host-local placement frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum HostPlacementAxis {
     U,
     V,
@@ -69,6 +71,7 @@ pub enum HostPlacementAxis {
 /// Cursor/authoring behavior for one placement axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum PlacementAxisBehavior {
     FollowCursor,
     FixedDefault,
@@ -80,6 +83,7 @@ pub enum PlacementAxisBehavior {
 /// Source of a default placement coordinate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum PlacementDefaultSource {
     HostCapability,
     HostedDefinition,
@@ -91,6 +95,7 @@ pub enum PlacementDefaultSource {
 
 /// A default value for one host-local placement axis.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct PlacementDefault {
     pub axis: HostPlacementAxis,
     pub value: Value,
@@ -101,6 +106,7 @@ pub struct PlacementDefault {
 
 /// Axis constraint used by host-constrained placement mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct PlacementAxisLock {
     pub axis: HostPlacementAxis,
     pub behavior: PlacementAxisBehavior,
@@ -108,6 +114,7 @@ pub struct PlacementAxisLock {
 
 /// How a hosted penetration binds to host feature/opening state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct PenetrationBinding {
     /// Domain-owned role id for the generated or updated host feature.
     pub feature_role: String,
@@ -122,6 +129,7 @@ pub struct PenetrationBinding {
 /// Semantic role of a parameter when a hosted occurrence is resized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum SmartResizeRole {
     ProductExtentDriver,
     FixedWorld,
@@ -136,6 +144,7 @@ pub enum SmartResizeRole {
 /// The authored target a resize parameter patch belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum SmartResizeTarget {
     HostedOccurrence,
     HostFeature,
@@ -145,6 +154,7 @@ pub enum SmartResizeTarget {
 
 /// A parameter affected by a resize handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct SmartResizeParameter {
     pub parameter: String,
     pub role: SmartResizeRole,
@@ -153,6 +163,7 @@ pub struct SmartResizeParameter {
 
 /// A semantically meaningful resize handle exposed by a Definition or adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct SmartResizeHandle {
     pub handle_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -163,6 +174,7 @@ pub struct SmartResizeHandle {
 
 /// Capability offered by a host Definition or domain adapter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct HostCapabilityDeclaration {
     pub capability_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,6 +193,7 @@ pub struct HostCapabilityDeclaration {
 
 /// Requirement declared by a hosted Definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct HostedRequirementDeclaration {
     pub requirement_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

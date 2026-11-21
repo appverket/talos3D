@@ -9048,7 +9048,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "get_knowledge_payload_schema",
-        description = "Read the runtime-derived wire schema for a portable knowledge payload kind. Currently catalog.v1; other kinds return explicit unavailability. No domain facts, source access or authoring guidance are needed to inspect the schema."
+        description = "Read the runtime-derived wire schema for a portable knowledge payload kind. Supports catalog.v1, recipe.v1, parametric_type.v1, definition_library.v1 and corpus_passage.v1. No domain facts, source access or authoring guidance are needed to inspect the schema."
     )]
     pub(super) async fn get_knowledge_payload_schema_tool(
         &self,

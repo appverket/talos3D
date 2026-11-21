@@ -53,6 +53,7 @@ fn allocate_stable_id(prefix: &str, counter: &AtomicU64) -> String {
 /// Generated from a millisecond-precision timestamp combined with a
 /// process-global monotonic counter, giving uniqueness across restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct DefinitionId(pub String);
 
 impl DefinitionId {
@@ -85,6 +86,7 @@ impl fmt::Display for DefinitionId {
 
 /// Unique identifier for a reusable definition library.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct DefinitionLibraryId(pub String);
 
 impl DefinitionLibraryId {
@@ -129,6 +131,7 @@ impl GeometryParamsHash {
 
 /// Broad category of what a `Definition` produces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum DefinitionKind {
     /// A volumetric solid element (walls, slabs, columns, …).
     Solid,
@@ -142,6 +145,7 @@ pub enum DefinitionKind {
 
 /// The value type of a definition parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum ParamType {
     /// Floating-point numeric value.
     Numeric,
@@ -159,6 +163,7 @@ pub enum ParamType {
 
 /// Which side of a hosting contract a parameter reference targets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum BindingSide {
     Host,
     Hosted,
@@ -170,6 +175,7 @@ pub enum BindingSide {
 
 /// Governs how an occurrence may modify a parameter's default value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum OverridePolicy {
     /// The occurrence may not change this value.
     Locked,
@@ -185,6 +191,7 @@ pub enum OverridePolicy {
 
 /// Distinguishes direct author inputs from system-computed parameters.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum ParameterMutability {
     #[default]
     Input,
@@ -194,6 +201,7 @@ pub enum ParameterMutability {
 /// How a parameter should respond when an occurrence is resized or scaled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum ParameterScaleBehavior {
     /// The value represents an overall product extent and may be stretched.
     ScaleWithOccurrence,
@@ -216,6 +224,7 @@ pub enum ParameterScaleBehavior {
 
 /// Extended metadata used by agents and UI when authoring parameters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ParameterMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<ParameterUnit>,
@@ -239,6 +248,7 @@ pub struct ParameterMetadata {
 
 /// Declaration of a single typed parameter within a `Definition`'s interface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ParameterDef {
     /// Machine-readable name, used as the key in override maps.
     pub name: String,
@@ -324,6 +334,7 @@ pub enum ParameterUnitFinding {
 
 /// Ordered list of `ParameterDef`s forming the full interface of a `Definition`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ParameterSchema(pub Vec<ParameterDef>);
 
 impl ParameterSchema {
@@ -340,6 +351,7 @@ impl ParameterSchema {
 /// Higher-level semantic purpose of a representation within a
 /// definition. Matches ADR-026 §5 `RepresentationKind`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum RepresentationKind {
     /// The primary geometry used for rendering and analysis.
     PrimaryGeometry,
@@ -354,6 +366,7 @@ pub enum RepresentationKind {
 /// output (`Body` for the IFC `IfcShapeRepresentation` identifier
 /// `"Body"`, etc.).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum RepresentationRole {
     /// Full volumetric body — the primary solid geometry.
     Body,
@@ -379,6 +392,7 @@ pub enum RepresentationRole {
 /// packs map to format-specific LOD scales (LOD100…LOD500 in IFC,
 /// 1:50/1:20/1:10 in dimensioned drawings, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum LevelOfDetail {
     /// Conceptual-stage massing — schematic only.
     Conceptual,
@@ -394,6 +408,7 @@ pub enum LevelOfDetail {
 /// Declares how a representation should be (re-)evaluated when its
 /// inputs change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum UpdatePolicy {
     /// Re-evaluate eagerly on every parameter change. Default — matches
     /// existing behaviour for all representations registered before
@@ -416,6 +431,7 @@ pub enum UpdatePolicy {
 /// `lod` and `update_policy` are `Option`-defaulted so existing call
 /// sites that only set `kind` and `role` continue to compile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct RepresentationDecl {
     pub kind: RepresentationKind,
     pub role: RepresentationRole,
@@ -477,6 +493,7 @@ impl RepresentationDecl {
 /// Each field names the corresponding parameter in the definition's
 /// `ParameterSchema` — the values are resolved at evaluation time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct RectangularExtrusionEvaluator {
     /// Parameter name for the X dimension (width).
     pub width_param: String,
@@ -488,6 +505,7 @@ pub struct RectangularExtrusionEvaluator {
 
 /// Discriminated union of all supported evaluator strategies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum EvaluatorDecl {
     /// Extrude a rectangular `Profile2d` to produce a box-like solid.
     RectangularExtrusion(RectangularExtrusionEvaluator),
@@ -504,6 +522,7 @@ pub enum EvaluatorDecl {
 /// Importers own provenance and loss records; core knows no source vocabulary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct FrozenMeshEvaluator {
     pub coordinate_unit: crate::plugins::units::Unit,
     pub vertices: Vec<[f64; 3]>,
@@ -514,6 +533,7 @@ pub struct FrozenMeshEvaluator {
 /// This does not infer manufacturing or family rules from imported geometry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct DeformableMeshEvaluator {
     pub mesh: FrozenMeshEvaluator,
     pub axes: Vec<MeshAxisDeformation>,
@@ -526,6 +546,7 @@ pub struct DeformableMeshEvaluator {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct MeshVertexField {
     pub parameter: String,
     pub reference_value: f64,
@@ -534,6 +555,7 @@ pub struct MeshVertexField {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct MeshAxisDeformation {
     /// 0=X, 1=Y, 2=Z in the mesh's local frame.
     pub axis: usize,
@@ -547,6 +569,7 @@ pub struct MeshAxisDeformation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct PolygonExtrusionEvaluator {
     /// Explicit coordinate unit for literals and dimensionless expressions.
     /// Dimensional expressions must produce this same length unit.
@@ -562,6 +585,7 @@ pub struct PolygonExtrusionEvaluator {
 /// Minimal expression tree used for derived values, bindings, and constraints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum ExprNode {
     Literal {
         value: Value,
@@ -637,6 +661,7 @@ pub enum ExprNode {
 /// new serialization.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "expr_kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum BodyExpr {
     Scalar {
         expr: ScalarExpr,
@@ -1194,6 +1219,7 @@ fn lookup_body_value(path: &str, values: &HashMap<String, Value>) -> Result<Valu
 
 /// Machine-readable anchor name exposed by a definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct AnchorDef {
     pub id: String,
     pub kind: String,
@@ -1201,6 +1227,7 @@ pub struct AnchorDef {
 
 /// A derived parameter computed from other parameters in the definition graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct DerivedParameterDef {
     pub name: String,
     pub param_type: ParamType,
@@ -1213,6 +1240,7 @@ pub struct DerivedParameterDef {
 
 /// Severity level for machine-checkable definition invariants.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum ConstraintSeverity {
     Warning,
     Error,
@@ -1220,6 +1248,7 @@ pub enum ConstraintSeverity {
 
 /// A named invariant over inputs, derived parameters, or child slots.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ConstraintDef {
     pub id: String,
     pub expr: BodyExpr,
@@ -1231,6 +1260,7 @@ pub struct ConstraintDef {
 
 /// Binding from a parent expression into a child slot parameter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ParameterBinding {
     pub target_param: String,
     pub expr: BodyExpr,
@@ -1238,6 +1268,7 @@ pub struct ParameterBinding {
 
 /// Placement binding for a child slot relative to its parent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct TransformBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translation: Option<Vec<BodyExpr>>,
@@ -1263,12 +1294,14 @@ pub struct TransformBinding {
 /// forcing every layout author to remember the stringly-typed
 /// convention.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct AxisRef(pub String);
 
 /// Reference to a parameter on either the host or hosted side of
 /// a hosting contract. Same lift-out-of-`ParamType` motivation as
 /// `AxisRef`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ParameterRef {
     pub side: BindingSide,
     pub name: String,
@@ -1279,6 +1312,7 @@ pub struct ParameterRef {
 /// occurrence-evaluation time and must yield a non-negative
 /// integer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum SlotCount {
     Fixed(u32),
     DerivedFromExpr(BodyExpr),
@@ -1289,6 +1323,7 @@ pub enum SlotCount {
 /// into N evaluated occurrences with their resolved transforms)
 /// lands in slice 2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum SlotLayout {
     /// N children laid out along an axis with constant spacing.
     Linear {
@@ -1325,6 +1360,7 @@ pub enum SlotLayout {
 /// deterministic collection of N children.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum SlotMultiplicity {
     /// One child. The default; existing slots round-trip as
     /// `Single` after a deserialize-from-old-JSON without the
@@ -1383,6 +1419,7 @@ impl std::error::Error for SlotMultiplicityValidationError {}
 
 /// A reusable child slot within a compound definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ChildSlotDef {
     pub slot_id: String,
     pub role: String,
@@ -1427,6 +1464,7 @@ impl ChildSlotDef {
 
 /// Composition graph attached to a root definition.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct CompoundDefinition {
     #[serde(default)]
     pub child_slots: Vec<ChildSlotDef>,
@@ -1465,6 +1503,7 @@ fn default_definition_body_schema_version() -> u32 {
 /// evaluators remain implementation declarations inside it and do not acquire
 /// ids, stores, or a lifecycle separate from the owning Definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct DefinitionBody {
     #[serde(default = "default_definition_body_schema_version")]
     pub schema_version: u32,
@@ -1540,6 +1579,7 @@ impl DefinitionBody {
 /// requirements harvested from boundary-spanning relations during
 /// SemanticAssembly promotion.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct Interface {
     pub parameters: ParameterSchema,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1663,6 +1703,7 @@ impl DefinitionVisibility {
 /// `Definition`s are immutable once published; the `definition_version` is
 /// bumped on every edit and used to propagate changes to all occurrences.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct Definition {
     /// Globally unique identifier.
     pub id: DefinitionId,
@@ -1693,10 +1734,12 @@ pub struct Definition {
     ///
     /// Defaults to `PublicRoot` so every existing persisted `Definition`
     /// round-trips as a public family — backward compatible.
+    #[cfg_attr(feature = "model-api", schemars(default))]
     pub visibility: DefinitionVisibility,
     /// Domain-specific extension payload owned by higher-level products.
     ///
     /// Core treats this as opaque JSON and round-trips it unchanged.
+    #[cfg_attr(feature = "model-api", schemars(default))]
     pub domain_data: Value,
 }
 
@@ -2407,6 +2450,7 @@ fn hash_canonical_json_value(hasher: &mut blake3::Hasher, value: &Value) {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum DefinitionLibraryScope {
     DocumentLocal,
     /// Reusable definitions resident under a workspace library root
@@ -2464,6 +2508,7 @@ impl DefinitionDraftStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct DefinitionLibrary {
     pub id: DefinitionLibraryId,
     pub name: String,

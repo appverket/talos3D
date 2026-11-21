@@ -52,6 +52,7 @@ use crate::plugins::modeling::definition::DefinitionId;
 /// arbitrary-shape case (custom profile cuts).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum VoidShape {
     /// Rectangular void sized by two parameters on the filling
     /// definition's parameter schema. The schema parameter names
@@ -82,6 +83,7 @@ pub enum VoidShape {
 /// upgrade this field to the full `SlotTransform` once that type
 /// stabilises.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct VoidPlacement {
     /// Translation from the filling element's origin to the void
     /// centre, in metres.
@@ -129,6 +131,7 @@ impl Default for VoidPlacement {
 /// Type-level declaration that placing this Definition cuts a void
 /// in its host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct VoidDeclaration {
     pub shape: VoidShape,
     #[serde(default)]

@@ -1756,9 +1756,13 @@ or shared-publication authority, including after a tool-profile switch. A releas
 must be discovered and actually used before a successful retry can be reported.
 
 `get_knowledge_payload_schema({"kind":"catalog.v1"})` returns the asset envelope
-and catalog payload JSON schemas generated from the runtime decoder types, including
-row provenance and tagged enums. It contains no catalog records. Other payload
-kinds explicitly report unavailable schema discovery. Use `check_knowledge_candidate`
+and payload JSON schemas generated from runtime decoder types. Supported kinds are
+`catalog.v1`, `recipe.v1`, `parametric_type.v1`, `definition_library.v1` and
+`corpus_passage.v1`, including data-driven proactive guidance. These schemas contain
+wire contracts, not domain assets. Portable recipes require `authoring_script`
+bodies; native function references cannot be released as executable knowledge.
+Definitions expose the canonical body rather than legacy migration inputs.
+Use `check_knowledge_candidate`
 for actual runtime checks; schema validity grants no rights or publication approval.
 
 ### Dynamic catalog query contracts
