@@ -150,6 +150,7 @@ pub fn persist_recipe(artifact: &RecipeArtifact) -> Result<PathBuf, String> {
 
 /// Wire format for persisted corpus passages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct PersistedPassage {
     /// Missing legacy metadata is private Project/Draft, never shipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]

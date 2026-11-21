@@ -276,38 +276,49 @@ impl Serialize for ParameterUnit {
     }
 }
 
+#[derive(Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+enum ParameterUnitWire {
+    Legacy(String),
+    Typed {
+        dimension: QuantityDimension,
+        unit: Unit,
+    },
+    UnknownLegacy {
+        status: String,
+        legacy: String,
+    },
+}
+
+#[cfg(feature = "model-api")]
+impl schemars::JsonSchema for ParameterUnit {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ParameterUnit".into()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        ParameterUnitWire::json_schema(generator)
+    }
+}
+
 impl<'de> Deserialize<'de> for ParameterUnit {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Legacy(String),
-            Typed {
-                dimension: QuantityDimension,
-                unit: Unit,
-            },
-            UnknownLegacy {
-                status: String,
-                legacy: String,
-            },
-        }
-
-        match Repr::deserialize(deserializer)? {
-            Repr::Legacy(value) => Ok(Self::from_legacy(value)),
-            Repr::Typed { dimension, unit } if dimension == unit.dimension() => {
+        match ParameterUnitWire::deserialize(deserializer)? {
+            ParameterUnitWire::Legacy(value) => Ok(Self::from_legacy(value)),
+            ParameterUnitWire::Typed { dimension, unit } if dimension == unit.dimension() => {
                 Ok(Self::Typed { dimension, unit })
             }
-            Repr::Typed { dimension, unit } => Err(de::Error::custom(format!(
+            ParameterUnitWire::Typed { dimension, unit } => Err(de::Error::custom(format!(
                 "unit '{unit}' has dimension '{:?}', not '{dimension:?}'",
                 unit.dimension()
             ))),
-            Repr::UnknownLegacy { status, legacy } if status == "unknown_legacy" => {
+            ParameterUnitWire::UnknownLegacy { status, legacy } if status == "unknown_legacy" => {
                 Ok(Self::UnknownLegacy { value: legacy })
             }
-            Repr::UnknownLegacy { status, .. } => Err(de::Error::custom(format!(
+            ParameterUnitWire::UnknownLegacy { status, .. } => Err(de::Error::custom(format!(
                 "unsupported parameter unit status '{status}'"
             ))),
         }

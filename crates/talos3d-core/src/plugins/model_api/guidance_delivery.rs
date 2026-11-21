@@ -74,13 +74,17 @@ impl GuidanceDeliveryStore {
             return Err("guidance exceeds the 2 MB delivery limit; capability owner must split reference content into guidance cards".into());
         }
         let mut slots = self.0.lock().expect("guidance delivery lock poisoned");
-        // Bootstrap refresh invalidates all old completion cursors. Fetching
-        // a card replaces only the bounded card slot, not in-flight bootstrap.
-        if matches!(kind, GuidanceDeliveryKind::Card) {
-            slots[kind.index()] = None;
-        } else {
+        // Each tool owns one bounded immutable snapshot. Reading a packet or
+        // card must not invalidate an unfinished authoring document. A new
+        // negotiation invalidates all snapshots by their session binding.
+        if slots
+            .iter()
+            .flatten()
+            .any(|delivery| delivery.session != session)
+        {
             *slots = [None, None, None];
         }
+        slots[kind.index()] = None;
         if content.len() <= INLINE_BYTES {
             return Ok(DeliveredGuidance {
                 value,
@@ -243,6 +247,71 @@ mod tests {
             .unwrap();
         assert_eq!(first.value, retry.value);
         assert!(!retry.complete);
+    }
+
+    #[test]
+    fn interleaved_tools_keep_their_own_bounded_snapshots() {
+        let store = GuidanceDeliveryStore::default();
+        let kinds = [
+            GuidanceDeliveryKind::Authoring,
+            GuidanceDeliveryKind::Packet,
+            GuidanceDeliveryKind::Card,
+        ];
+        let mut cursors = Vec::new();
+        for kind in kinds {
+            let page = store
+                .begin(
+                    kind,
+                    Some("s".into()),
+                    json!({"text":"x".repeat(30_000)}),
+                    true,
+                )
+                .unwrap();
+            cursors.push(
+                page.value["next_arguments"]["cursor"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        for (kind, cursor) in kinds.into_iter().zip(&cursors) {
+            assert!(store.resume(kind, Some("s".into()), cursor).is_ok());
+        }
+        // Refresh replaces only its own slot, including a small inline refresh.
+        store
+            .begin(
+                GuidanceDeliveryKind::Packet,
+                Some("s".into()),
+                json!({"text":"new"}),
+                true,
+            )
+            .unwrap();
+        assert!(store
+            .resume(GuidanceDeliveryKind::Packet, Some("s".into()), &cursors[1])
+            .is_err());
+        assert!(store
+            .resume(
+                GuidanceDeliveryKind::Authoring,
+                Some("s".into()),
+                &cursors[0]
+            )
+            .is_ok());
+        // A different negotiated session can never complete an old obligation.
+        store
+            .begin(
+                GuidanceDeliveryKind::Packet,
+                Some("new".into()),
+                json!({"text":"new"}),
+                true,
+            )
+            .unwrap();
+        assert!(store
+            .resume(
+                GuidanceDeliveryKind::Authoring,
+                Some("s".into()),
+                &cursors[0]
+            )
+            .is_err());
     }
 
     #[test]

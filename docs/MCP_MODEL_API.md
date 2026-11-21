@@ -1756,10 +1756,19 @@ or shared-publication authority, including after a tool-profile switch. A releas
 must be discovered and actually used before a successful retry can be reported.
 
 `get_knowledge_payload_schema({"kind":"catalog.v1"})` returns the asset envelope
-and catalog payload JSON schemas generated from the runtime decoder types, including
-row provenance and tagged enums. It contains no catalog records. Other payload
-kinds explicitly report unavailable schema discovery. Use `check_knowledge_candidate`
-for actual runtime checks; schema validity grants no rights or publication approval.
+and payload JSON schemas generated from runtime decoder types. Supported kinds are
+`catalog.v1`, `recipe.v1`, `parametric_type.v1`, `definition_library.v1` and
+`corpus_passage.v1`, including data-driven proactive guidance. These schemas contain
+wire contracts, not domain assets. Portable recipes require `authoring_script`
+bodies; native function references cannot be released as executable knowledge.
+Definitions expose the canonical body rather than legacy migration inputs.
+The envelope DTO, kind/path mapping, validator and generated schema are owned by
+`talos3d-knowledge-protocol`, shared with the curator service. The response includes
+`envelope_contract.envelope_schema_sha256` for pre-inference compatibility checks.
+`check_knowledge_candidate` validates that envelope before payload execution checks;
+metadata errors identify JSON pointers and expected protocol values. Candidate
+eligibility remains distinct from legacy payload inspection, source/rights review
+and release authorization.
 
 ### Dynamic catalog query contracts
 
@@ -1776,3 +1785,8 @@ It does not infer geographic equivalence, exclusion, applicability or structural
 suitability. The probe is available in restricted knowledge sessions, reconciles
 staged authorization before use, and records a native observation with request
 and response hashes. All domain declarations continue to come from provider data.
+
+Restricted `knowledge_review` and `knowledge_use` sessions permit
+`lookup_source_passage`, including immutable revisions returned by shared corpus
+search. Reading source evidence does not require model-authoring authority.
+Model writes and publication remain outside those read-only permissions.

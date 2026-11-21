@@ -98,10 +98,15 @@ pub fn evaluate(request: Request, classes: Vec<ElementClassDescriptor>) -> Resul
     if request.edits.len() > 16 || request.drivers.len() > 64 {
         return Err("Candidate execution permits at most 16 edits and 64 driver overrides".into());
     }
-    let checked = knowledge_cloud::check_candidate(knowledge_cloud::CandidateCheck {
+    let check = knowledge_cloud::CandidateCheck {
         asset: request.asset.clone(),
         driver_cases: vec![request.drivers.clone()],
-    })?;
+    };
+    let checked = if request.inspection_snapshot.is_some() {
+        knowledge_cloud::check_payload(check)?
+    } else {
+        knowledge_cloud::check_candidate(check)?
+    };
     let count = checked["parametric_cases"][0]["members"]
         .as_array()
         .map_or(0, Vec::len);
@@ -122,7 +127,9 @@ pub fn evaluate(request: Request, classes: Vec<ElementClassDescriptor>) -> Resul
     scratch.insert_resource(registry);
     scratch.init_resource::<crate::plugins::identity::ElementIdAllocator>();
     scratch.init_resource::<ParametricStore>();
-    knowledge_cloud::install(
+    // Candidate eligibility was checked above; legacy inspection deliberately
+    // establishes no envelope, provenance or release authority.
+    knowledge_cloud::install_payload(
         &mut scratch,
         knowledge_cloud::AdmittedAsset {
             scope_sha256: None,
@@ -490,7 +497,7 @@ mod tests {
             payload: json!({"definition":definition}),
             applicability: "Developer unit test".into(),
             limitations: vec![],
-            evidence: vec![],
+            evidence: vec!["Synthetic runtime test fixture".into()],
             redistribution_rights: "Synthetic unit fixture".into(),
             contains_private_context: false,
         };
@@ -539,6 +546,15 @@ mod tests {
         let inspected = from_legacy(input(), receipt.clone()).unwrap();
         assert!(inspected.asset.evidence.is_empty());
         assert!(inspected.asset.redistribution_rights.is_empty());
+        assert!(
+            knowledge_cloud::check_candidate(knowledge_cloud::CandidateCheck {
+                asset: inspected.asset.clone(),
+                driver_cases: vec![],
+            })
+            .is_err()
+        );
+        let forged = json!({"asset":inspected.asset,"inspection_snapshot":hash});
+        assert!(serde_json::from_value::<Request>(forged).is_err());
         let scene = evaluate(inspected, vec![]).unwrap();
         assert_eq!(scene.report["legacy_inspection"]["rights"], "unresolved");
         assert_eq!(

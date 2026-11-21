@@ -10,30 +10,7 @@ use std::collections::BTreeMap;
 
 pub mod evaluation;
 
-pub const SCHEMA: &str = "talos3d.knowledge-asset.v1";
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[derive(schemars::JsonSchema)]
-pub struct Asset {
-    #[schemars(schema_with = "asset_protocol_schema")]
-    pub schema: String,
-    pub id: String,
-    pub kind: String,
-    pub title: String,
-    pub description: String,
-    pub element_classes: Vec<String>,
-    pub path_kind: String,
-    pub required_tool_ids: Vec<String>,
-    pub payload: Value,
-    pub applicability: String,
-    pub limitations: Vec<String>,
-    pub evidence: Vec<String>,
-    pub redistribution_rights: String,
-    pub contains_private_context: bool,
-}
-fn asset_protocol_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({"type":"string","enum":["talos3d.knowledge-asset.v1"]})
-}
+pub use talos3d_knowledge_protocol::{Asset, SCHEMA};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -87,16 +64,25 @@ pub struct CandidateCheck {
 /// Uses the same decoder/validation as admission, in disposable registries.
 /// No entity, release, trust decision or project state escapes this check.
 pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
+    request
+        .asset
+        .validate_envelope()
+        .map_err(|error| error.to_string())?;
+    let mut checked = check_payload(request)?;
+    checked["envelope_validation"] = json!("passed");
+    Ok(checked)
+}
+
+// Payload inspection is also used for exact server-owned legacy snapshots whose
+// provenance/rights remain unresolved. It never establishes candidate eligibility.
+fn check_payload(request: CandidateCheck) -> Result<Value, String> {
     let bytes = serde_json::to_vec(&request.asset).map_err(|e| e.to_string())?;
-    if bytes.len() > 1_048_576 || request.driver_cases.len() > 16 {
+    if request.driver_cases.len() > 16 {
         return Err("Candidate or case limit exceeded".into());
-    }
-    if request.asset.schema != SCHEMA || request.asset.contains_private_context {
-        return Err(format!("Expected schema {SCHEMA} and contains_private_context=false; this is a computational check, not publication"));
     }
     let revision = hex::encode(Sha256::digest(&bytes));
     let mut scratch = World::new();
-    install(
+    install_payload(
         &mut scratch,
         AdmittedAsset {
             asset: request.asset.clone(),
@@ -128,7 +114,7 @@ pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
         return Err("Driver cases apply only to parametric_type.v1".into());
     }
     Ok(
-        json!({"content_hash":revision,"structural_validation":"passed","parametric_cases":cases,
+        json!({"content_hash":revision,"payload_validation":"passed", "structural_validation":"passed","parametric_cases":cases,
         "installed":false,"released":false,"model_modified":false,
         "limitations":["No independent source, rights or applicability approval.",
             "No rendered model, placement, load-bearing or construction acceptance.",
@@ -375,44 +361,103 @@ pub struct PayloadSchemaRequest {
     pub kind: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ParametricPayload {
+    definition: crate::relational::registry::ParametricTypeDef,
+    #[serde(default)]
+    placement_contract: Option<crate::relational::registry::ParametricPlacementContract>,
+}
+
 pub fn payload_schema(kind: &str) -> Result<Value, String> {
-    if kind != "catalog.v1" {
-        return Err(
-            "Payload schema discovery is not yet available for this kind; do not guess a payload"
-                .into(),
-        );
-    }
+    let (payload, constraints) = match kind {
+        "catalog.v1" => (
+            serde_json::to_value(schemars::schema_for!(CatalogData)).unwrap(),
+            vec![
+                "payload.id must equal asset.id",
+                "At most 10000 catalog rows",
+                "A release cannot replace an unowned runtime catalog",
+            ],
+        ),
+        "parametric_type.v1" => (
+            serde_json::to_value(schemars::schema_for!(ParametricPayload)).unwrap(),
+            vec![
+                "payload.definition.id must equal asset.id",
+                "An executable path requires a valid emitting representation",
+                "A release cannot overwrite a private/internal type",
+            ],
+        ),
+        "recipe.v1" => {
+            let mut schema =
+                serde_json::to_value(schemars::schema_for!(crate::curation::RecipeArtifact))
+                    .unwrap();
+            schema["allOf"] = json!([{"properties":{"body":{"properties":{"kind":{"const":"authoring_script"}}}}}]);
+            (schema,vec!["payload.meta.id must equal asset.id", "Only authoring_script recipe bodies are portable; native function references are not executable releases", "Script structure must pass the native validator"])
+        }
+        "definition_library.v1" => (
+            serde_json::to_value(schemars::schema_for!(
+                super::modeling::definition::DefinitionLibrary
+            ))
+            .unwrap(),
+            vec![
+                "payload.id must equal asset.id",
+                "Between 1 and 1000 definitions, with map keys matching definition ids",
+                "Dependencies must resolve within the library",
+                "Use canonical Definition body; legacy migration fields are not authoring inputs",
+                "Scope and source_path are assigned by signed admission, never candidate authority",
+            ],
+        ),
+        "corpus_passage.v1" => (
+            serde_json::to_value(schemars::schema_for!(
+                super::knowledge_persistence::PersistedPassage
+            ))
+            .unwrap(),
+            vec![
+                "passage_ref must equal asset.id",
+                "Nonempty text, citation and explicit license are required",
+                "Published scope is assigned by signed admission, never candidate metadata",
+            ],
+        ),
+        _ => {
+            return Err(
+                "Unsupported portable knowledge kind; discover a supported kind through MCP".into(),
+            )
+        }
+    };
     Ok(json!({
         "kind": kind,
-        "asset_schema": schemars::schema_for!(Asset),
-        "payload_schema": schemars::schema_for!(CatalogData),
-        "constraints": ["payload.id must equal asset.id", "At most 10000 catalog rows", "A release cannot replace an unowned runtime catalog"],
+        "envelope_contract": talos3d_knowledge_protocol::contract_manifest(),
+        "asset_schema": talos3d_knowledge_protocol::asset_schema(),
+        "payload_schema": payload,
+        "constraints": constraints,
         "next_tool": "check_knowledge_candidate",
         "notice": "This is the runtime decoder contract. Supply independently grounded data and rights; schema validity is not evidence or release approval."
     }))
 }
 
 pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, String> {
+    admitted
+        .asset
+        .validate_envelope()
+        .map_err(|error| error.to_string())?;
+    install_payload(world, admitted)
+}
+
+// Internal decoder shared by admitted assets and disposable legacy inspection.
+// Never expose this as an admission, publication or model-edit API.
+fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, String> {
     use crate::curation::{RecipeArtifact, RecipeArtifactRegistry, Scope, Trust};
     use crate::plugins::modeling::definition::{
         DefinitionLibrary, DefinitionLibraryRegistry, DefinitionLibraryScope,
     };
-    use crate::relational::registry::{
-        ParametricPlacementContract, ParametricRegistry, ParametricTypeDef,
-    };
+    use crate::relational::registry::ParametricRegistry;
     let a = admitted.asset;
     let mut catalog_contract = None;
     // Parse and validate the complete supported payload before any registry mutation.
     let runtime_id = match a.kind.as_str() {
         "parametric_type.v1" => {
-            let definition: ParametricTypeDef = decode(a.payload["definition"].clone())?;
-            let contract: Option<ParametricPlacementContract> = a
-                .payload
-                .get("placement_contract")
-                .cloned()
-                .map(decode)
-                .transpose()?
-                .flatten();
+            let payload: ParametricPayload = decode(a.payload.clone())?;
+            let definition = payload.definition;
+            let contract = payload.placement_contract;
             if definition.id != a.id {
                 return Err("Parametric identity must match asset identity".into());
             }
@@ -901,7 +946,92 @@ mod tests {
             .contains(&json!("supersedes")));
         assert_eq!(response["next_tool"], "check_knowledge_candidate");
         assert!(payload_schema("unknown.v1").is_err());
-        assert!(payload_schema("recipe.v1").is_err());
+        assert!(payload_schema("recipe.v1").is_ok());
+    }
+
+    #[test]
+    fn portable_payload_schemas_resolve_every_reference_and_stay_bounded() {
+        fn check_refs(value: &Value, root: &Value) {
+            match value {
+                Value::Object(fields) => {
+                    if let Some(reference) = fields.get("$ref").and_then(Value::as_str) {
+                        let pointer = reference.strip_prefix('#').expect("local schema reference");
+                        assert!(root.pointer(pointer).is_some(), "unresolved {reference}");
+                    }
+                    for child in fields.values() {
+                        check_refs(child, root);
+                    }
+                }
+                Value::Array(children) => {
+                    for child in children {
+                        check_refs(child, root);
+                    }
+                }
+                _ => (),
+            }
+        }
+        for kind in [
+            "catalog.v1",
+            "parametric_type.v1",
+            "recipe.v1",
+            "definition_library.v1",
+            "corpus_passage.v1",
+        ] {
+            let response = payload_schema(kind).unwrap();
+            for field in ["asset_schema", "payload_schema"] {
+                check_refs(&response[field], &response[field]);
+            }
+            let bytes = serde_json::to_vec(&response).unwrap().len();
+            eprintln!("{kind}: {bytes} schema bytes");
+            assert!(bytes < 200_000, "{kind}: {bytes}");
+            assert_eq!(response["next_tool"], "check_knowledge_candidate");
+        }
+        let recipe = payload_schema("recipe.v1").unwrap();
+        assert_eq!(
+            recipe["payload_schema"]["allOf"][0]["properties"]["body"]["properties"]["kind"]
+                ["const"],
+            "authoring_script"
+        );
+        let parametric = payload_schema("parametric_type.v1").unwrap();
+        assert_eq!(
+            parametric["payload_schema"]["required"],
+            json!(["definition"])
+        );
+        let library = payload_schema("definition_library.v1").unwrap();
+        let properties = &library["payload_schema"]["$defs"]["Definition"]["properties"];
+        assert!(properties["body"].is_object());
+        assert!(properties.get("evaluators").is_none());
+        let unit = &library["payload_schema"]["$defs"]["ParameterUnit"];
+        let variants = unit["anyOf"].as_array().expect("unit decoder is untagged");
+        assert!(variants.iter().any(|v| v["type"] == "string"));
+        assert!(variants.iter().any(
+            |v| v["properties"]["dimension"].is_object() && v["properties"]["unit"].is_object()
+        ));
+        assert!(variants
+            .iter()
+            .all(|v| v["properties"].get("Typed").is_none()));
+        let required = library["payload_schema"]["$defs"]["Definition"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(required.contains(&json!("body")));
+        assert!(!required.contains(&json!("visibility")));
+        let passage = payload_schema("corpus_passage.v1").unwrap();
+        assert!(passage["payload_schema"]["properties"]["proactive_guidance"].is_object());
+    }
+
+    #[test]
+    fn candidate_check_rejects_envelope_mismatch_before_payload_admission() {
+        let mut asset = passage("synthetic").asset;
+        asset.path_kind = "recipe_or_executable_asset".into();
+        let error = check_candidate(CandidateCheck {
+            asset,
+            driver_cases: vec![],
+        })
+        .unwrap_err();
+        let detail: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(detail["error"], "invalid_knowledge_envelope");
+        assert_eq!(detail["violations"][0]["pointer"], "/path_kind");
+        assert_eq!(detail["violations"][0]["expected"], "passage");
     }
 
     #[test]
@@ -1022,6 +1152,7 @@ mod tests {
         let mut candidate = passage("catalog-r1");
         candidate.asset.id = "test.catalog".into();
         candidate.asset.kind = "catalog.v1".into();
+        candidate.asset.path_kind = "catalog".into();
         candidate.asset.payload = json!({"id":"test.catalog","label":"Synthetic catalog",
         "description":"Synthetic contract fixture","category":{"kind":"Other","value":"fixture"},
         "region":"scope-A","license":{"kind":"Cc0"},"source_version":"one","rows":[{
@@ -1107,6 +1238,7 @@ mod tests {
         let mut candidate = passage("catalog-one");
         candidate.asset.id = "test.catalog".into();
         candidate.asset.kind = "catalog.v1".into();
+        candidate.asset.path_kind = "catalog".into();
         candidate.asset.payload = json!({"id":"test.catalog","label":"Synthetic catalog",
             "description":"Admission unit fixture","category":{"kind":"Other","value":"fixture"},
             "region":null,"license":{"kind":"Cc0"},"source_version":"one","rows":[]});

@@ -843,6 +843,7 @@ pub enum DuplicateRoleSlotDecision {
 /// the promoted Definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum RelationEndpoint {
     /// The promoted Definition itself (typically the surviving
     /// SemanticAssembly's wrapper Occurrence).
@@ -857,6 +858,7 @@ pub enum RelationEndpoint {
 /// store accepted templates on the Definition itself and materialize
 /// them as authored `SemanticRelation`s on Occurrence creation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct SemanticRelationTemplate {
     pub subject: RelationEndpoint,
     pub relation_type: String,
@@ -928,6 +930,7 @@ pub enum ExternalRelationClassification {
 /// (and, slice C, on `Definition.interface.external_context_requirements`).
 /// Surfaces both for preview UI and for placement-time validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ExternalContextRequirement {
     /// Relation type the external endpoint is expected to satisfy.
     pub relation_type: String,

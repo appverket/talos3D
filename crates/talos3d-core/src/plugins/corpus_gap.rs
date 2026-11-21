@@ -229,6 +229,7 @@ pub struct PassageEntry {
 /// the capability-snapshot / guidance-card surface. Domain-neutral: core never
 /// inspects which passage it is, only that it asked to be surfaced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ProactivePassageGuidance {
     /// Card title shown in the snapshot's must-read list.
     pub title: String,

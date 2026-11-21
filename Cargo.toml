@@ -6,6 +6,7 @@ members = [
     "crates/cadio-tools",
     "crates/talos3d-capability-api",
     "crates/talos3d-core",
+    "crates/talos3d-knowledge-protocol",
     "crates/talos3d-terrain",
 ]
 resolver = "2"
