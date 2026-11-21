@@ -2066,7 +2066,18 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             let _ = response.send(handle_delete_workspace_definition_draft(world, request));
         }
         ModelApiRequest::InstantiateDefinition { request, response } => {
-            let _ = response.send(handle_instantiate_definition(world, request));
+            let args = request.clone();
+            let result = handle_instantiate_definition(world, request);
+            if let (Some(id), Ok(value)) = (args.get("library_id").and_then(Value::as_str), &result) {
+                // Existing document definitions may differ from the library. Only
+                // newly imported roots prove this call consumed the released asset.
+                if value.imported_definition_ids.contains(&value.definition_id) {
+                    crate::plugins::knowledge_cloud::evaluation::asset_execution(world,
+                        "definition_library.v1", id, "definition.instantiate", &args,
+                        &serde_json::to_value(value).unwrap_or_default());
+                }
+            }
+            let _ = response.send(result);
         }
         ModelApiRequest::InstantiateHostedDefinition { request, response } => {
             let _ = response.send(handle_instantiate_hosted_definition(world, request));
@@ -2446,7 +2457,16 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             let _ = response.send(handle_discover_curated_paths(world, request));
         }
         ModelApiRequest::InstantiateRecipe { request, response } => {
-            let _ = response.send(handle_instantiate_recipe(world, *request));
+            let asset_id = world.get_resource::<crate::curation::RecipeArtifactRegistry>()
+                .and_then(|registry| registry.get_by_family(&crate::capability_registry::RecipeFamilyId(request.family_id.clone())))
+                .map(|recipe| recipe.meta.id.0.clone());
+            let args = serde_json::to_value(&request).unwrap_or_default();
+            let result = handle_instantiate_recipe(world, *request);
+            if let (Some(id), Ok(value)) = (asset_id, &result) {
+                crate::plugins::knowledge_cloud::evaluation::asset_execution(world, "recipe.v1", &id,
+                    "instantiate_recipe", &args, &serde_json::to_value(value).unwrap_or_default());
+            }
+            let _ = response.send(result);
         }
         // --- PP74 ---
         ModelApiRequest::ListConstraints { scope, response } => {
@@ -2719,7 +2739,13 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             ));
         }
         ModelApiRequest::ParametricCreate { request, response } => {
+            let asset_id = request.representation.is_none().then(|| request.type_id.clone());
+            let args = serde_json::to_value(&request).unwrap_or_default();
             let r = crate::plugins::parametric_mcp::world_create(world, request);
+            if let (Some(id), Ok(value)) = (asset_id, &r) {
+                crate::plugins::knowledge_cloud::evaluation::asset_execution(world, "parametric_type.v1", &id,
+                    "parametric.create", &args, &serde_json::to_value(value).unwrap_or_default());
+            }
             let _ = response.send(r);
         }
         ModelApiRequest::ParametricInspect { request, response } => {
