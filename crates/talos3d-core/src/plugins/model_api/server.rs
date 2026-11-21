@@ -6098,7 +6098,12 @@ impl ModelApiServer {
         if let Some(cursor) = params.cursor {
             let page = self
                 .guidance_delivery
-                .resume(GuidanceDeliveryKind::Packet, session_id.clone(), &cursor)
+                .resume(
+                    GuidanceDeliveryKind::Packet,
+                    session_id.clone(),
+                    "",
+                    &cursor,
+                )
                 .map_err(|e| McpError::invalid_params(e, None))?;
             return self.guidance_delivery_result(page, session_id, None);
         }
@@ -6201,6 +6206,7 @@ impl ModelApiServer {
             .begin(
                 GuidanceDeliveryKind::Packet,
                 session_id.clone(),
+                "",
                 header,
                 resources,
                 available,
@@ -9905,12 +9911,16 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         Parameters(params): Parameters<GetGuidanceCardRequest>,
     ) -> Result<CallToolResult, McpError> {
         let session_id = self.active_guidance_session();
-        // Binding includes both negotiation and card identity, so a valid cursor
+        // The cursor is bound to the negotiated session and the card id, so it
         // cannot be relabelled to satisfy another required card.
-        let binding = Some(serde_json::json!([session_id, params.card_id]).to_string());
         let page = if let Some(cursor) = params.cursor {
             self.guidance_delivery
-                .resume(GuidanceDeliveryKind::Card, binding, &cursor)
+                .resume(
+                    GuidanceDeliveryKind::Card,
+                    session_id.clone(),
+                    &params.card_id,
+                    &cursor,
+                )
                 .map_err(|e| McpError::invalid_params(e, None))?
         } else {
             let card = self
@@ -9932,7 +9942,13 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                 )
                 .map_err(|e| McpError::invalid_params(e, None))?;
             self.guidance_delivery
-                .begin_single(GuidanceDeliveryKind::Card, binding, resource, true)
+                .begin_single(
+                    GuidanceDeliveryKind::Card,
+                    session_id.clone(),
+                    &params.card_id,
+                    resource,
+                    true,
+                )
                 .map_err(|e| McpError::invalid_params(e, None))?
         };
         let mut page = page;
@@ -11173,7 +11189,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         if let Some(cursor) = params.cursor {
             let page = self
                 .guidance_delivery
-                .resume(GuidanceDeliveryKind::Authoring, session_id.clone(), &cursor)
+                .resume(
+                    GuidanceDeliveryKind::Authoring,
+                    session_id.clone(),
+                    "",
+                    &cursor,
+                )
                 .map_err(|e| McpError::invalid_params(e, None))?;
             return self.guidance_delivery_result(page, session_id, None);
         }
@@ -11214,6 +11235,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .begin_single(
                 GuidanceDeliveryKind::Authoring,
                 session_id.clone(),
+                "",
                 resource,
                 available,
             )

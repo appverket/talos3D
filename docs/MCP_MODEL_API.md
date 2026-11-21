@@ -406,7 +406,9 @@ objects to merge, or paragraph-bounded `text_segment`s to concatenate per
 recorded as read and need no further fetch. Follow `next_tool` with
 `next_arguments` until `delivery_complete`. Each page is at most 12,000
 serialized bytes; cursors are unit indexes, cannot skip unread units and are
-bound to the negotiated session. `get_guidance_card` and
+bound to the negotiated session and the resource. Snapshots are kept per tool
+(up to four concurrent card snapshots), so parallel card reads and an
+unfinished packet do not invalidate each other. `get_guidance_card` and
 `get_authoring_guidance` keep their plain shape when a resource fits one page
 and use the same page format otherwise. No local file or shell tool is needed.
 Delivery records are not proof of comprehension.

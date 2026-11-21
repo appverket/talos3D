@@ -15997,8 +15997,9 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
                 title: "Active Authoring Guidance".into(),
                 task_tags: vec!["authoring".into(), "guidance".into()],
                 summary: format!(
-                    "Authoring guidance version {} is prompt-text authoritative; call \
-                     get_authoring_guidance for the full COMPONENT_STRUCTURE contract.",
+                    "Authoring guidance version {} is prompt-text authoritative. \
+                     get_agent_guidance_packet already delivers that contract; \
+                     get_authoring_guidance returns its structured detail on demand.",
                     guidance.version
                 ),
                 referenced_tool_ids: vec!["get_authoring_guidance".into()],
@@ -16241,7 +16242,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             phase: Some("requirements".into()),
             required_trajectory_tool_ids: vec![
                 "get_instance_info".into(),
-                "get_authoring_guidance".into(),
+                "get_agent_guidance_packet".into(),
                 "get_capability_snapshot".into(),
             ],
             success_criteria: vec![
@@ -16321,9 +16322,8 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             phase: Some("review".into()),
             required_trajectory_tool_ids: vec![
                 "get_instance_info".into(),
-                "get_authoring_guidance".into(),
+                "get_agent_guidance_packet".into(),
                 "get_capability_snapshot".into(),
-                "get_guidance_card".into(),
                 "discover_curated_paths".into(),
                 "run_validation_v2".into(),
                 "take_screenshot".into(),
@@ -16398,9 +16398,8 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             phase: Some("qa".into()),
             required_trajectory_tool_ids: vec![
                 "get_instance_info".into(),
-                "get_authoring_guidance".into(),
+                "get_agent_guidance_packet".into(),
                 "get_capability_snapshot".into(),
-                "get_guidance_card".into(),
                 "discover_curated_paths".into(),
                 "run_validation_v2".into(),
                 "take_screenshot".into(),

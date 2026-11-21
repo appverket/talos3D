@@ -12,13 +12,15 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
-// Limits apply to serialized content, including JSON escaping. Only three fixed
-// tool slots are retained per connection, never a caller-selected cache key.
+// Limits apply to serialized content, including JSON escaping. Retained
+// snapshots are bounded per tool kind (see `GuidanceDeliveryKind::capacity`).
 pub(super) const PAGE_BYTES: usize = 12_000;
 // Room the server adds after paging (compact live guidance state).
 const LIVE_STATE_RESERVE: usize = 640;
-// Room left in a page for the envelope around units.
-const UNIT_BYTES: usize = 9_000;
+// Upper bound of one delivery unit. Small units let pages pack close to the
+// page budget, so total calls approach total bytes / page budget. Resources
+// at or under this size are always delivered whole.
+const UNIT_BYTES: usize = 3_000;
 const DOCUMENT_BYTES: usize = 2_000_000;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -30,18 +32,19 @@ pub struct GuidanceDeliveryRequest {
     pub cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GuidanceDeliveryKind {
     Authoring,
     Packet,
     Card,
 }
 impl GuidanceDeliveryKind {
-    fn index(self) -> usize {
+    /// Concurrent snapshots retained for this tool. Cards are read in
+    /// parallel by real clients, so a few independent cursors stay valid.
+    fn capacity(self) -> usize {
         match self {
-            Self::Authoring => 0,
-            Self::Packet => 1,
-            Self::Card => 2,
+            Self::Card => 4,
+            Self::Authoring | Self::Packet => 1,
         }
     }
     fn tool(self) -> &'static str {
@@ -227,8 +230,12 @@ pub(super) struct ResourceRead {
 
 #[derive(Debug)]
 struct Delivery {
+    kind: GuidanceDeliveryKind,
     id: String,
+    /// Negotiated guidance session; a different session invalidates all.
     session: Option<String>,
+    /// Resource binding (e.g. the card id); a cursor cannot be relabelled.
+    binding: String,
     header: Map<String, Value>,
     units: Vec<Value>,
     /// Resource completed by the unit at the same index, if it is its last.
@@ -237,7 +244,7 @@ struct Delivery {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct GuidanceDeliveryStore(Arc<Mutex<[Option<Delivery>; 3]>>);
+pub(super) struct GuidanceDeliveryStore(Arc<Mutex<Vec<Delivery>>>);
 
 pub(super) struct DeliveredGuidance {
     pub value: Value,
@@ -251,11 +258,12 @@ impl GuidanceDeliveryStore {
         &self,
         kind: GuidanceDeliveryKind,
         session: Option<String>,
+        binding: &str,
         resource: GuidanceResource,
         available: bool,
     ) -> Result<DeliveredGuidance, String> {
         if resource.bytes <= PAGE_BYTES {
-            drop(self.reset_slot(kind, &session));
+            drop(self.reserve(kind, &session, binding));
             let completed = if available {
                 vec![resource.read()]
             } else {
@@ -267,7 +275,14 @@ impl GuidanceDeliveryStore {
                 completed,
             });
         }
-        self.begin(kind, session, Map::new(), vec![resource], available)
+        self.begin(
+            kind,
+            session,
+            binding,
+            Map::new(),
+            vec![resource],
+            available,
+        )
     }
 
     /// Paged delivery: `header` fields lead the first page, then units.
@@ -275,6 +290,7 @@ impl GuidanceDeliveryStore {
         &self,
         kind: GuidanceDeliveryKind,
         session: Option<String>,
+        binding: &str,
         header: Map<String, Value>,
         resources: Vec<GuidanceResource>,
         available: bool,
@@ -294,36 +310,39 @@ impl GuidanceDeliveryStore {
             }
         }
         let mut delivery = Delivery {
+            kind,
             id: uuid::Uuid::new_v4().simple().to_string(),
             session: session.clone(),
+            binding: binding.to_owned(),
             header,
             units,
             completes,
             delivered_end: 0,
         };
         let result = delivery.page(kind, 0)?;
-        let mut slots = self.reset_slot(kind, &session);
-        slots[kind.index()] = Some(delivery);
+        let mut slots = self.reserve(kind, &session, binding);
+        slots.push(delivery);
         Ok(result)
     }
 
-    // Each tool owns one bounded immutable snapshot. Reading a packet or card
-    // must not invalidate an unfinished authoring document. A new negotiation
-    // invalidates all snapshots by their session binding.
-    fn reset_slot(
+    // Snapshots are immutable and bounded per tool kind. Reading a packet or
+    // card never invalidates another tool's or another card's unfinished
+    // snapshot. A new negotiation invalidates all snapshots. Returns the
+    // locked store with room for one new snapshot of `kind`/`binding`.
+    fn reserve(
         &self,
         kind: GuidanceDeliveryKind,
         session: &Option<String>,
-    ) -> std::sync::MutexGuard<'_, [Option<Delivery>; 3]> {
+        binding: &str,
+    ) -> std::sync::MutexGuard<'_, Vec<Delivery>> {
         let mut slots = self.0.lock().expect("guidance delivery lock poisoned");
-        if slots
-            .iter()
-            .flatten()
-            .any(|delivery| &delivery.session != session)
-        {
-            *slots = [None, None, None];
+        slots.retain(|d| &d.session == session && !(d.kind == kind && d.binding == binding));
+        let same_kind = slots.iter().filter(|d| d.kind == kind).count();
+        if same_kind >= kind.capacity() {
+            if let Some(oldest) = slots.iter().position(|d| d.kind == kind) {
+                slots.remove(oldest);
+            }
         }
-        slots[kind.index()] = None;
         slots
     }
 
@@ -331,14 +350,18 @@ impl GuidanceDeliveryStore {
         &self,
         kind: GuidanceDeliveryKind,
         session: Option<String>,
+        binding: &str,
         cursor: &str,
     ) -> Result<DeliveredGuidance, String> {
         let mut slots = self.0.lock().expect("guidance delivery lock poisoned");
-        let delivery = slots[kind.index()]
-            .as_mut()
-            .ok_or("no guidance snapshot; restart this tool with empty arguments")?;
         let (id, offset) = cursor.split_once(':').ok_or("invalid guidance cursor")?;
-        if id != delivery.id || session != delivery.session {
+        let delivery = slots
+            .iter_mut()
+            .find(|d| d.kind == kind && d.id == id)
+            .ok_or(
+                "no guidance snapshot for this cursor; restart this tool with empty arguments",
+            )?;
+        if session != delivery.session || binding != delivery.binding {
             return Err(
                 "guidance cursor belongs to another snapshot/session; restart with empty arguments"
                     .into(),
@@ -485,7 +508,7 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .to_owned();
-            page = store.resume(kind, Some("s".into()), &cursor).unwrap();
+            page = store.resume(kind, Some("s".into()), "", &cursor).unwrap();
         }
     }
 
@@ -510,6 +533,7 @@ mod tests {
             .begin(
                 GuidanceDeliveryKind::Packet,
                 Some("s".into()),
+                "",
                 Map::new(),
                 resources,
                 true,
@@ -539,6 +563,7 @@ mod tests {
             .begin(
                 GuidanceDeliveryKind::Packet,
                 Some("s".into()),
+                "",
                 Map::new(),
                 vec![resource("a", json!("a".repeat(30_000)))],
                 true,
@@ -552,20 +577,26 @@ mod tests {
             .resume(
                 GuidanceDeliveryKind::Packet,
                 Some("s".into()),
-                &format!("{id}:3")
+                "",
+                &format!("{id}:9")
             )
             .is_err());
         assert!(store
-            .resume(GuidanceDeliveryKind::Authoring, Some("s".into()), cursor)
+            .resume(
+                GuidanceDeliveryKind::Authoring,
+                Some("s".into()),
+                "",
+                cursor
+            )
             .is_err());
         assert!(store
-            .resume(GuidanceDeliveryKind::Packet, Some("new".into()), cursor)
+            .resume(GuidanceDeliveryKind::Packet, Some("new".into()), "", cursor)
             .is_err());
         let first = store
-            .resume(GuidanceDeliveryKind::Packet, Some("s".into()), cursor)
+            .resume(GuidanceDeliveryKind::Packet, Some("s".into()), "", cursor)
             .unwrap();
         let retry = store
-            .resume(GuidanceDeliveryKind::Packet, Some("s".into()), cursor)
+            .resume(GuidanceDeliveryKind::Packet, Some("s".into()), "", cursor)
             .unwrap();
         assert_eq!(first.value, retry.value);
     }
@@ -584,6 +615,7 @@ mod tests {
                 .begin(
                     kind,
                     Some("s".into()),
+                    "",
                     Map::new(),
                     vec![resource("x", json!("x".repeat(30_000)))],
                     true,
@@ -597,24 +629,31 @@ mod tests {
             );
         }
         for (kind, cursor) in kinds.into_iter().zip(&cursors) {
-            assert!(store.resume(kind, Some("s".into()), cursor).is_ok());
+            assert!(store.resume(kind, Some("s".into()), "", cursor).is_ok());
         }
         // Refresh replaces only its own slot, including a small inline refresh.
         store
             .begin_single(
                 GuidanceDeliveryKind::Packet,
                 Some("s".into()),
+                "",
                 resource("n", json!("new")),
                 true,
             )
             .unwrap();
         assert!(store
-            .resume(GuidanceDeliveryKind::Packet, Some("s".into()), &cursors[1])
+            .resume(
+                GuidanceDeliveryKind::Packet,
+                Some("s".into()),
+                "",
+                &cursors[1]
+            )
             .is_err());
         assert!(store
             .resume(
                 GuidanceDeliveryKind::Authoring,
                 Some("s".into()),
+                "",
                 &cursors[0]
             )
             .is_ok());
@@ -623,6 +662,7 @@ mod tests {
             .begin_single(
                 GuidanceDeliveryKind::Packet,
                 Some("new".into()),
+                "",
                 resource("n", json!("new")),
                 true,
             )
@@ -631,6 +671,7 @@ mod tests {
             .resume(
                 GuidanceDeliveryKind::Authoring,
                 Some("s".into()),
+                "",
                 &cursors[0]
             )
             .is_err());
@@ -644,6 +685,7 @@ mod tests {
             .begin_single(
                 GuidanceDeliveryKind::Authoring,
                 None,
+                "",
                 resource("g", value.clone()),
                 true,
             )
@@ -654,6 +696,7 @@ mod tests {
             .begin(
                 GuidanceDeliveryKind::Authoring,
                 None,
+                "",
                 Map::new(),
                 vec![resource("big", json!("a".repeat(DOCUMENT_BYTES)))],
                 true
@@ -668,10 +711,71 @@ mod tests {
             .begin_single(
                 GuidanceDeliveryKind::Authoring,
                 None,
+                "",
                 resource("g", json!({})),
                 false,
             )
             .unwrap();
         assert!(result.completed.is_empty());
+    }
+
+    /// Regression (acceptance trace): parallel card reads must not invalidate
+    /// each other's cursors or an unfinished packet, and a card cursor cannot
+    /// be relabelled to another card.
+    #[test]
+    fn parallel_card_reads_keep_independent_cursors() {
+        let store = GuidanceDeliveryStore::default();
+        let big = |key: &str| resource(key, json!("y".repeat(30_000)));
+        let s = || Some("s".to_string());
+        let packet = store
+            .begin(
+                GuidanceDeliveryKind::Packet,
+                s(),
+                "",
+                Map::new(),
+                vec![big("p")],
+                true,
+            )
+            .unwrap();
+        let cursor = |page: &DeliveredGuidance| {
+            page.value["next_arguments"]["cursor"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let packet_cursor = cursor(&packet);
+        let cards: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|id| {
+                let page = store
+                    .begin_single(GuidanceDeliveryKind::Card, s(), id, big(id), true)
+                    .unwrap();
+                (id.to_string(), cursor(&page))
+            })
+            .collect();
+        for (id, c) in &cards {
+            assert!(
+                store.resume(GuidanceDeliveryKind::Card, s(), id, c).is_ok(),
+                "{id}"
+            );
+        }
+        assert!(store
+            .resume(GuidanceDeliveryKind::Packet, s(), "", &packet_cursor)
+            .is_ok());
+        assert!(store
+            .resume(GuidanceDeliveryKind::Card, s(), "b", &cards[0].1)
+            .is_err());
+        // Bounded: the oldest card snapshot is evicted past capacity.
+        for id in ["d", "e"] {
+            store
+                .begin_single(GuidanceDeliveryKind::Card, s(), id, big(id), true)
+                .unwrap();
+        }
+        assert!(store
+            .resume(GuidanceDeliveryKind::Card, s(), "a", &cards[0].1)
+            .is_err());
+        assert!(store
+            .resume(GuidanceDeliveryKind::Card, s(), "c", &cards[2].1)
+            .is_ok());
     }
 }
