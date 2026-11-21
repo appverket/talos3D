@@ -15384,6 +15384,19 @@ async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegoti
         world.insert_resource(crate::plugins::authoring_guidance::AuthoringGuidance {
             version: 1,
             prompt_text: "Canonical guidance å屋.\n".repeat(2000),
+            guidance_chapters: vec![
+                crate::plugins::authoring_guidance::GuidanceChapterDef {
+                    id: "test.optional.chapter".into(),
+                    title: "Optional chapter".into(),
+                    body_markdown: "ON_DEMAND_ONLY".repeat(20_000),
+                    ..Default::default()
+                },
+                crate::plugins::authoring_guidance::GuidanceChapterDef {
+                    id: "test.required.chapter".into(),
+                    body_markdown: "Required chapter content".into(),
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         });
         while let Ok(request) = receiver.recv() {
@@ -15394,7 +15407,7 @@ async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegoti
     server.guidance_state.start(
         "revision".into(),
         Some("inspect".into()),
-        vec![],
+        vec!["test.required.chapter".into()],
         vec![],
         vec![],
     );
@@ -15432,8 +15445,30 @@ async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegoti
             .unwrap();
     }
     let packet: AgentGuidancePacket = serde_json::from_str(&document).unwrap();
+    assert!(!document.contains("ON_DEMAND_ONLY"));
     assert_eq!(
-        packet.guidance.prompt_text,
+        packet.required_cards[0].body_markdown.as_deref(),
+        Some("Required chapter content")
+    );
+    let index = &packet.guidance["guidance_chapters"][0];
+    assert!(index.get("body_markdown").is_none());
+    assert_eq!(index["next_tool"], "get_guidance_card");
+    assert_eq!(index["next_arguments"]["card_id"], "test.optional.chapter");
+    let card: GuidanceCardInfo = server
+        .get_guidance_card_tool(Parameters(GetGuidanceCardRequest {
+            card_id: "test.optional.chapter".into(),
+        }))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    assert_eq!(
+        card.body_markdown.as_deref(),
+        Some("ON_DEMAND_ONLY".repeat(20_000).as_str())
+    );
+
+    assert_eq!(
+        packet.guidance["prompt_text"],
         "Canonical guidance å屋.\n".repeat(2000)
     );
     assert_eq!(

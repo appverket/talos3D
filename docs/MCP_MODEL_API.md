@@ -52,6 +52,17 @@ captured request support. No new preview renderer is introduced here.
 Compact profiles advertise the canonical `set_property` schema. Its deprecated
 `set_entity_property` alias remains available in `full`.
 
+## Bootstrap and on-demand guidance
+
+`get_authoring_guidance` and the `guidance` member of
+`get_agent_guidance_packet` preserve the authoritative prompt, policy and
+references, but return chapter metadata rather than chapter bodies. Each
+`guidance_chapters` entry has `next_tool: get_guidance_card` and
+`next_arguments: {card_id: ...}`. Fetch relevant chapters through that tool.
+Required cards and skills remain included in the session packet; complete
+all pages before bootstrap is satisfied. This projection does not remove
+content from the registry or relax the session's required-reading gates.
+
 ## What It Exposes
 
 The MCP surface is designed around the authored model rather than render

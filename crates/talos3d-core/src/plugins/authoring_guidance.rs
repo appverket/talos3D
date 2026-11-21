@@ -92,6 +92,26 @@ impl Default for AuthoringGuidance {
 }
 
 impl AuthoringGuidance {
+    /// MCP bootstrap projection: chapter bodies remain available through
+    /// `get_guidance_card`, not duplicated into every session's onboarding.
+    /// Required cards are still delivered separately by the session packet.
+    pub fn bootstrap_value(&self) -> Result<serde_json::Value, serde_json::Error> {
+        let mut value = serde_json::to_value(self)?;
+        if let Some(chapters) = value["guidance_chapters"].as_array_mut() {
+            for chapter in chapters {
+                if let Some(fields) = chapter.as_object_mut() {
+                    fields.remove("body_markdown");
+                    fields.insert("next_tool".into(), serde_json::json!("get_guidance_card"));
+                    fields.insert(
+                        "next_arguments".into(),
+                        serde_json::json!({"card_id": fields["id"]}),
+                    );
+                }
+            }
+        }
+        Ok(value)
+    }
+
     /// Whether any capability has contributed real guidance content.
     pub fn is_empty(&self) -> bool {
         self.version == 0 && self.prompt_text.is_empty()

@@ -3297,7 +3297,7 @@ pub struct AgentGuidancePacket {
     /// False means the running app composition did not install canonical
     /// authoring guidance. The returned state remains blocked from mutation.
     pub authoritative_guidance_available: bool,
-    pub guidance: AuthoringGuidance,
+    pub guidance: serde_json::Value,
     pub required_cards: Vec<GuidanceCardInfo>,
     pub required_skills: Vec<serde_json::Value>,
     pub state: AgentGuidanceState,
@@ -6038,7 +6038,9 @@ impl ModelApiServer {
             contract: "talos3d.agent-guidance-packet".to_string(),
             contract_version: 1,
             authoritative_guidance_available,
-            guidance,
+            guidance: guidance
+                .bootstrap_value()
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
             required_cards,
             required_skills,
             state,
@@ -10864,7 +10866,8 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .begin(
                 GuidanceDeliveryKind::Authoring,
                 session_id.clone(),
-                serde_json::to_value(guidance)
+                guidance
+                    .bootstrap_value()
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?,
                 available,
             )
