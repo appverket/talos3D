@@ -100,12 +100,18 @@ pub fn validate_index(index: &Index, expected: Option<&Scope>) -> Result<(), Str
         Some(scope)
             if index.evaluation_scope.as_ref() == Some(scope)
                 && index.released == Some(false)
-                && index
-                    .assets
-                    .iter()
-                    .all(|e| matches!(e.asset["asset_kind"].as_str(),
-                        Some("catalog.v1" | "recipe.v1" | "parametric_type.v1"
-                            | "definition_library.v1" | "corpus_passage.v1"))) =>
+                && index.assets.iter().all(|e| {
+                    matches!(
+                        e.asset["asset_kind"].as_str(),
+                        Some(
+                            "catalog.v1"
+                                | "recipe.v1"
+                                | "parametric_type.v1"
+                                | "definition_library.v1"
+                                | "corpus_passage.v1"
+                        )
+                    )
+                }) =>
         {
             Ok(())
         }
@@ -154,14 +160,29 @@ pub fn catalog_query(world: &World, provider: &str, filter: &Value, result: &Val
 }
 /// Successful native execution is evidence of use, not a geometric verdict.
 /// An agent cannot supply the installed revision or write this observation.
-pub fn asset_execution(world: &World, kind: &str, runtime_id: &str,
-    operation: &str, request: &Value, result: &Value) {
-    let Some((id, asset)) = world.get_resource::<InstalledAssets>().and_then(|assets|
-        assets.0.iter().find(|(_, a)| a.kind == kind && a.runtime_id == runtime_id)) else { return; };
-    record(world, json!({"operation":operation, "asset_id":id,
+pub fn asset_execution(
+    world: &World,
+    kind: &str,
+    runtime_id: &str,
+    operation: &str,
+    request: &Value,
+    result: &Value,
+) {
+    let Some((id, asset)) = world.get_resource::<InstalledAssets>().and_then(|assets| {
+        assets
+            .0
+            .iter()
+            .find(|(_, a)| a.kind == kind && a.runtime_id == runtime_id)
+    }) else {
+        return;
+    };
+    record(
+        world,
+        json!({"operation":operation, "asset_id":id,
         "asset_kind":kind, "content_hash":asset.revision,
         "request_sha256":digest(request), "response_sha256":digest(result),
-        "execution_succeeded":true}));
+        "execution_succeeded":true}),
+    );
 }
 pub fn catalog_scope_probe(world: &World, provider: &str, requested: &str, result: &Value) {
     record(
@@ -241,11 +262,26 @@ mod tests {
     #[test]
     fn staged_portable_kinds_preserve_scope_and_unknown_kinds_fail() {
         let scope = parse(&config().to_string(), "test-native").unwrap().scope;
-        let mut index = Index { schema: SCHEMA.into(), epoch: 1, assets: vec![],
-            withdrawn_asset_ids: vec![], evaluation_scope: Some(scope.clone()), released: Some(false) };
-        for kind in ["catalog.v1", "recipe.v1", "parametric_type.v1", "definition_library.v1", "corpus_passage.v1"] {
-            index.assets.push(IndexEntry { content_hash: "a".repeat(64),
-                asset: json!({"asset_kind":kind}), sequence: 1 });
+        let mut index = Index {
+            schema: SCHEMA.into(),
+            epoch: 1,
+            assets: vec![],
+            withdrawn_asset_ids: vec![],
+            evaluation_scope: Some(scope.clone()),
+            released: Some(false),
+        };
+        for kind in [
+            "catalog.v1",
+            "recipe.v1",
+            "parametric_type.v1",
+            "definition_library.v1",
+            "corpus_passage.v1",
+        ] {
+            index.assets.push(IndexEntry {
+                content_hash: "a".repeat(64),
+                asset: json!({"asset_kind":kind}),
+                sequence: 1,
+            });
             assert!(validate_index(&index, Some(&scope)).is_ok());
             assert!(validate_index(&index, None).is_err());
         }
@@ -256,14 +292,42 @@ mod tests {
     fn execution_witness_requires_installed_kind_and_binds_native_revision() {
         let mut world = World::new();
         world.init_resource::<Observations>();
-        asset_execution(&world, "recipe.v1", "test", "instantiate_recipe", &json!({}), &json!({}));
+        asset_execution(
+            &world,
+            "recipe.v1",
+            "test",
+            "instantiate_recipe",
+            &json!({}),
+            &json!({}),
+        );
         assert_eq!(snapshot(&world)["records"].as_array().unwrap().len(), 0);
         world.init_resource::<InstalledAssets>();
-        world.resource_mut::<InstalledAssets>().0.insert("asset.test".into(), InstalledAsset {
-            revision: "b".repeat(64), kind: "recipe.v1".into(), runtime_id: "test".into(), catalog_contract: None });
-        asset_execution(&world, "parametric_type.v1", "test", "parametric.create", &json!({}), &json!({}));
+        world.resource_mut::<InstalledAssets>().0.insert(
+            "asset.test".into(),
+            InstalledAsset {
+                revision: "b".repeat(64),
+                kind: "recipe.v1".into(),
+                runtime_id: "test".into(),
+                catalog_contract: None,
+            },
+        );
+        asset_execution(
+            &world,
+            "parametric_type.v1",
+            "test",
+            "parametric.create",
+            &json!({}),
+            &json!({}),
+        );
         assert_eq!(snapshot(&world)["records"].as_array().unwrap().len(), 0);
-        asset_execution(&world, "recipe.v1", "test", "instantiate_recipe", &json!({"input":1}), &json!({"result":2}));
+        asset_execution(
+            &world,
+            "recipe.v1",
+            "test",
+            "instantiate_recipe",
+            &json!({"input":1}),
+            &json!({"result":2}),
+        );
         let value = snapshot(&world);
         let event = &value["records"][0]["event"];
         assert_eq!(event["content_hash"], "b".repeat(64));
