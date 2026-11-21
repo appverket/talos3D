@@ -429,6 +429,12 @@ pub struct SplitResult {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MaterialInfo {
+    /// False for inventory responses: null texture data then means omitted, not absent.
+    #[serde(default = "default_true")]
+    pub texture_payloads_included: bool,
+    /// Present authored texture slots, even when binary payloads are omitted.
+    #[serde(default)]
+    pub texture_slots: Vec<String>,
     pub id: String,
     pub asset_id: String,
     pub name: String,
@@ -483,6 +489,20 @@ pub struct MaterialInfo {
 impl MaterialInfo {
     #[cfg(feature = "model-api")]
     pub(super) fn from_def(def: &MaterialDef, texture_registry: &TextureRegistry) -> Self {
+        Self::project(def, texture_registry, true)
+    }
+
+    #[cfg(feature = "model-api")]
+    pub(super) fn summary(def: &MaterialDef, texture_registry: &TextureRegistry) -> Self {
+        Self::project(def, texture_registry, false)
+    }
+
+    #[cfg(feature = "model-api")]
+    fn project(
+        def: &MaterialDef,
+        texture_registry: &TextureRegistry,
+        include_payloads: bool,
+    ) -> Self {
         fn tex_data(t: &Option<TextureRef>, texture_registry: &TextureRegistry) -> Option<String> {
             match t {
                 Some(TextureRef::TextureAsset { id }) => {
@@ -516,7 +536,25 @@ impl MaterialInfo {
             }
         }
 
+        // Do not clone large embedded strings merely to discard them afterward.
+        let payload = |texture: &Option<TextureRef>| {
+            include_payloads
+                .then(|| tex_data(texture, texture_registry))
+                .flatten()
+        };
+        let texture_slots = [
+            ("base_color", &def.base_color_texture),
+            ("normal_map", &def.normal_map_texture),
+            ("metallic_roughness", &def.metallic_roughness_texture),
+            ("emissive", &def.emissive_texture),
+            ("occlusion", &def.occlusion_texture),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.as_ref().map(|_| name.to_owned()))
+        .collect();
         Self {
+            texture_payloads_included: include_payloads,
+            texture_slots,
             id: def.id.clone(),
             asset_id: def.asset_id().to_string(),
             name: def.name.clone(),
@@ -554,18 +592,18 @@ impl MaterialInfo {
                 .texture_mapping()
                 .renderer_support_note()
                 .map(str::to_string),
-            base_color_texture: tex_data(&def.base_color_texture, texture_registry),
+            base_color_texture: payload(&def.base_color_texture),
             base_color_texture_mime: tex_mime(&def.base_color_texture, texture_registry),
-            normal_map_texture: tex_data(&def.normal_map_texture, texture_registry),
+            normal_map_texture: payload(&def.normal_map_texture),
             normal_map_texture_mime: tex_mime(&def.normal_map_texture, texture_registry),
-            metallic_roughness_texture: tex_data(&def.metallic_roughness_texture, texture_registry),
+            metallic_roughness_texture: payload(&def.metallic_roughness_texture),
             metallic_roughness_texture_mime: tex_mime(
                 &def.metallic_roughness_texture,
                 texture_registry,
             ),
-            emissive_texture: tex_data(&def.emissive_texture, texture_registry),
+            emissive_texture: payload(&def.emissive_texture),
             emissive_texture_mime: tex_mime(&def.emissive_texture, texture_registry),
-            occlusion_texture: tex_data(&def.occlusion_texture, texture_registry),
+            occlusion_texture: payload(&def.occlusion_texture),
             occlusion_texture_mime: tex_mime(&def.occlusion_texture, texture_registry),
         }
     }
@@ -1887,4 +1925,52 @@ pub struct CheckClearanceResult {
     pub actual_m: f64,
     pub min_m: f64,
     pub pass: bool,
+}
+
+#[cfg(all(test, feature = "model-api"))]
+mod material_inventory_tests {
+    use super::*;
+    use crate::plugins::materials::MaterialRegistry;
+    use bevy::prelude::World;
+
+    #[test]
+    fn inventory_does_not_serialize_embedded_textures_and_explicit_read_is_lossless() {
+        let mut world = World::new();
+        world.insert_resource(TextureRegistry::default());
+        world.insert_resource(MaterialRegistry::default());
+        let mut material = MaterialDef::new("Synthetic inventory payload test");
+        material.id = "synthetic-inventory".into();
+        material.base_color_texture = Some(TextureRef::Embedded {
+            data: "X".repeat(1024 * 1024),
+            mime: "image/png".into(),
+        });
+        material.normal_map_texture = Some(TextureRef::AssetPath {
+            path: "synthetic-normal.png".into(),
+        });
+        let original = material.clone();
+        world.resource_mut::<MaterialRegistry>().upsert(material);
+        let inventory = super::super::handle_list_materials(&world);
+        let row = &inventory[0];
+        assert!(!row.texture_payloads_included);
+        assert_eq!(row.texture_slots, ["base_color", "normal_map"]);
+        assert!(row.base_color_texture.is_none());
+        assert!(row.normal_map_texture.is_none());
+        assert_eq!(row.base_color_texture_mime.as_deref(), Some("image/png"));
+        assert_eq!(row.base_color, original.base_color);
+        assert!(serde_json::to_vec(&inventory).unwrap().len() < 4096);
+        let full = super::super::handle_get_material(&world, &original.id).unwrap();
+        assert!(full.texture_payloads_included);
+        assert_eq!(
+            full.base_color_texture.as_deref(),
+            Some("X".repeat(1024 * 1024).as_str())
+        );
+        assert_eq!(
+            full.normal_map_texture.as_deref(),
+            Some("synthetic-normal.png")
+        );
+        assert_eq!(
+            world.resource::<MaterialRegistry>().get(&original.id),
+            Some(&original)
+        );
+    }
 }

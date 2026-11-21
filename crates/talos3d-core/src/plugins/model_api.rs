@@ -1457,7 +1457,7 @@ fn handle_list_materials(world: &World) -> Vec<MaterialInfo> {
     world
         .resource::<MaterialRegistry>()
         .all()
-        .map(|def| MaterialInfo::from_def(def, texture_registry))
+        .map(|def| MaterialInfo::summary(def, texture_registry))
         .collect()
 }
 
