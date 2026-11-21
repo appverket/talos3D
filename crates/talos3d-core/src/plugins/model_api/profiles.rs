@@ -386,6 +386,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("acquire_corpus_passage", ToolCategory::CurationExtended),
     ("lookup_source_passage", ToolCategory::Inspection),
     ("catalog_query", ToolCategory::Discovery),
+    ("probe_catalog_scope", ToolCategory::Discovery),
     ("list_catalog_providers", ToolCategory::Discovery),
     ("save_recipe_draft", ToolCategory::CurationExtended),
     ("set_recipe_draft_status", ToolCategory::CurationExtended),

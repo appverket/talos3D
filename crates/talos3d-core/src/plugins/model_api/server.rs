@@ -4690,6 +4690,9 @@ pub struct CatalogProviderInfo {
     /// `LicenseTag::as_str()` — e.g. `"cc0"`.
     pub license: String,
     pub source_version: String,
+    /// Runtime-owned supported filters and declaration probe.
+    #[serde(default)]
+    pub query_contract: serde_json::Value,
 }
 
 /// A single row returned by `catalog_query`.
@@ -5442,9 +5445,20 @@ pub(super) struct PreviewPromotionRequest {
 pub(super) struct CatalogQueryRequest {
     /// Id of the provider to query (as returned by `list_catalog_providers`).
     pub(super) provider_id: String,
-    /// Arbitrary JSON filter object. PP75: ignored by all providers (all rows returned).
-    #[serde(default)]
+    /// Equality filters from list_catalog_providers.query_contract. Unknown dynamic fields/types are errors. Provider region is metadata; use probe_catalog_scope for a declaration comparison.
+    #[serde(default = "empty_catalog_filter")]
     pub(super) filter: serde_json::Value,
+}
+
+fn empty_catalog_filter() -> serde_json::Value {
+    json!({})
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CatalogScopeProbeRequest {
+    pub provider_id: String,
+    /// Opaque scope identifier to compare literally with provider-authored metadata.
+    pub requested_scope: String,
 }
 
 // --- PP76 request parameter structs ---
@@ -9418,7 +9432,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "list_catalog_providers",
         description = "List all registered catalog providers. Each entry includes the id, label, \
-            description, category, region, license, and source_version."
+            description, category, region, license, source_version and query_contract. Read supported filter fields/types before querying; probe_catalog_scope compares provider scope declarations."
     )]
     pub(super) async fn list_catalog_providers_tool(&self) -> Result<CallToolResult, McpError> {
         let providers = self.request_list_catalog_providers().await;
@@ -9446,14 +9460,24 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "catalog_query",
-        description = "Query a catalog provider by id and return matching rows. Pass an empty \
-            filter object `{}` to retrieve all rows. PP75: filter is accepted but not yet \
-            interpreted — all rows are returned regardless."
+        description = "Query a catalog provider by id. An empty filter object returns all rows. Read \
+            list_catalog_providers.query_contract for supported filters and types. Dynamic catalogs use \
+            exact row-field equality and reject unsupported filters. Provider region is metadata, not \
+            an implicit row filter; use probe_catalog_scope for an explicit declaration comparison."
     )]
     pub(super) async fn catalog_query_tool(
         &self,
         Parameters(params): Parameters<CatalogQueryRequest>,
     ) -> Result<CallToolResult, McpError> {
+        self.reconcile_catalog_scope().await?;
+        let rows = self
+            .request_catalog_query(params.provider_id, params.filter)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(rows)
+    }
+
+    async fn reconcile_catalog_scope(&self) -> Result<(), McpError> {
         let (connection, scope) = self.knowledge_connection().await?;
         if scope.is_some() {
             // A grant expiry, withdrawal or consumed receipt must stop use of
@@ -9470,11 +9494,27 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .await
             .map_err(|e| McpError::internal_error(e, None))?;
         }
-        let rows = self
-            .request_catalog_query(params.provider_id, params.filter)
+        Ok(())
+    }
+
+    #[tool(
+        name = "probe_catalog_scope",
+        description = "Compare a requested opaque scope identifier with the provider-authored region declaration. Returns declared, not_declared or unspecified with exact source revision. This is an observable declaration probe, not geographic equivalence, structural suitability, or permission to use data outside its documented applicability. Use actual provenance as grounding; no aliases are inferred."
+    )]
+    pub(super) async fn probe_catalog_scope_tool(
+        &self,
+        Parameters(params): Parameters<CatalogScopeProbeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.reconcile_catalog_scope().await?;
+        let result = self
+            .round_trip(|response| ModelApiRequest::ProbeCatalogScope {
+                provider_id: params.provider_id,
+                requested_scope: params.requested_scope,
+                response,
+            })
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(rows)
+        json_tool_result(result)
     }
 
     // --- PP78: Corpus operations ---

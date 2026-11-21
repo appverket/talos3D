@@ -1760,3 +1760,19 @@ and catalog payload JSON schemas generated from the runtime decoder types, inclu
 row provenance and tagged enums. It contains no catalog records. Other payload
 kinds explicitly report unavailable schema discovery. Use `check_knowledge_candidate`
 for actual runtime checks; schema validity grants no rights or publication approval.
+
+### Dynamic catalog query contracts
+
+`list_catalog_providers` returns a `query_contract` per provider. For admitted
+dynamic catalogs, its filter schema is derived once from the installed row data;
+queries use exact field equality. Unsupported fields or JSON types return an
+error, not an empty result. An empty object enumerates the rows. The contract is
+replaced with the catalog revision; native providers remain provider-defined.
+
+Provider region metadata is not an implicit row filter. `probe_catalog_scope`
+compares an opaque requested scope literally with that declaration and returns
+`declared`, `not_declared`, or `unspecified`, plus asset and revision provenance.
+It does not infer geographic equivalence, exclusion, applicability or structural
+suitability. The probe is available in restricted knowledge sessions, reconciles
+staged authorization before use, and records a native observation with request
+and response hashes. All domain declarations continue to come from provider data.

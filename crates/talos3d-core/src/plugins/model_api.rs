@@ -18450,14 +18450,15 @@ pub fn handle_list_catalog_providers(world: &World) -> Vec<CatalogProviderInfo> 
             region: d.region.clone(),
             license: d.license.as_str().to_string(),
             source_version: d.source_version.clone(),
+            query_contract: crate::plugins::knowledge_cloud::catalog_query_contract(world, &d.id.0),
         })
         .collect()
 }
 
 /// Query a catalog provider by id, passing the raw JSON filter through.
 ///
-/// PP75: every registered provider's `query_fn` ignores the filter and returns
-/// all rows. Real filtering is a follow-on.
+/// Dynamically installed providers validate their discoverable exact-field contract.
+/// Legacy providers retain their separately advertised provider-defined behavior.
 #[cfg(feature = "model-api")]
 pub fn handle_catalog_query(
     world: &World,
@@ -18475,6 +18476,7 @@ pub fn handle_catalog_query(
         .catalog_provider_descriptor(&pid)
         .ok_or_else(|| format!("Unknown catalog provider '{provider_id}'"))?;
 
+    crate::plugins::knowledge_cloud::validate_catalog_filter(world, &provider_id, &filter)?;
     let rows = (descriptor.query_fn)(&filter);
 
     let result: Vec<CatalogRowInfo> = rows

@@ -150,6 +150,15 @@ pub fn catalog_query(world: &World, provider: &str, filter: &Value, result: &Val
         "request_sha256":digest(filter),"response_sha256":digest(result),"row_count":result.as_array().map(Vec::len)}),
     );
 }
+pub fn catalog_scope_probe(world: &World, provider: &str, requested: &str, result: &Value) {
+    record(
+        world,
+        json!({"operation":"catalog_scope_probe","provider_id":provider,"requested_scope":requested,
+        "declared_scope":result["declared_scope"],"decision":result["decision"],"comparison":result["comparison"],
+        "asset_id":result["asset_id"],"content_hash":result["content_hash"],
+        "request_sha256":digest(&json!({"provider_id":provider,"requested_scope":requested})),"response_sha256":digest(result)}),
+    );
+}
 pub fn snapshot(world: &World) -> Value {
     let Some(log) = world.get_resource::<Observations>() else {
         return json!({"complete":false});

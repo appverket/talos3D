@@ -72,6 +72,7 @@ struct InstalledAsset {
     revision: String,
     kind: String,
     runtime_id: String,
+    catalog_contract: Option<Value>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -230,6 +231,143 @@ struct CatalogData {
     rows: Vec<crate::capability_registry::CatalogRow>,
 }
 
+fn json_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n)
+            if n.is_i64() || n.is_u64() || n.as_f64().is_some_and(|x| x.fract() == 0.0) =>
+        {
+            "integer"
+        }
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+// Compare integer/float encodings without rounding a large integer through f64.
+fn catalog_value_equal(left: &Value, right: &Value) -> bool {
+    fn integer_float(integer: &serde_json::Number, float: f64) -> bool {
+        if !float.is_finite() || float.fract() != 0.0 {
+            return false;
+        }
+        if let Some(value) = integer.as_u64() {
+            return float >= 0.0 && float < 18446744073709551616.0 && float as u64 == value;
+        }
+        integer.as_i64().is_some_and(|value| {
+            float >= -9223372036854775808.0 && float < 0.0 && float as i64 == value
+        })
+    }
+    match (left, right) {
+        (Value::Number(a), Value::Number(b)) => {
+            if a == b {
+                return true;
+            }
+            if a.is_f64() && !b.is_f64() {
+                return integer_float(b, a.as_f64().unwrap());
+            }
+            if b.is_f64() && !a.is_f64() {
+                return integer_float(a, b.as_f64().unwrap());
+            }
+            false
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| catalog_value_equal(x, y))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, v)| b.get(k).is_some_and(|other| catalog_value_equal(v, other)))
+        }
+        _ => left == right,
+    }
+}
+fn build_catalog_query_contract(data: &CatalogData) -> Result<Value, String> {
+    let mut fields: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for row in &data.rows {
+        let object = row
+            .data
+            .as_object()
+            .ok_or("Catalog row data must be an object")?;
+        for (key, value) in object {
+            fields
+                .entry(key.clone())
+                .or_default()
+                .insert(json_type(value).into());
+        }
+    }
+    let properties: serde_json::Map<String, Value> = fields
+        .into_iter()
+        .map(|(key, types)| (key, json!({"type":types})))
+        .collect();
+    Ok(
+        json!({"filter_mode":"exact_row_field_equality","filter_schema":{"type":"object","properties":properties,"additionalProperties":false},
+        "scope_probe_tool":"probe_catalog_scope","scope_semantics":"Compare opaque scope declarations literally; no geographic equivalence or suitability is inferred. Provider region is metadata, not an implicit row field."}),
+    )
+}
+pub fn catalog_query_contract(world: &World, provider: &str) -> Value {
+    world.get_resource::<InstalledAssets>().and_then(|assets|assets.0.values().find(|a|a.kind=="catalog.v1" && a.runtime_id==provider))
+        .and_then(|a|a.catalog_contract.clone()).unwrap_or_else(||json!({"filter_mode":"provider_defined","filter_schema":null,
+            "scope_probe_tool":"probe_catalog_scope","scope_semantics":"Opaque provider declaration only; unknown provider filtering behavior is not scope evidence."}))
+}
+pub fn validate_catalog_filter(
+    world: &World,
+    provider: &str,
+    filter: &Value,
+) -> Result<(), String> {
+    let contract = catalog_query_contract(world, provider);
+    if contract["filter_mode"] != "exact_row_field_equality" {
+        return Ok(());
+    }
+    let object=filter.as_object().ok_or_else(||json!({"code":"InvalidCatalogFilter","expected":"object","next_tool":"list_catalog_providers"}).to_string())?;
+    for (field, value) in object {
+        let types = contract["filter_schema"]["properties"][field]["type"].as_array();
+        if !types.is_some_and(|types| {
+            types.iter().any(|t| {
+                t.as_str() == Some(json_type(value)) || (t == "number" && value.is_number())
+            })
+        }) {
+            return Err(json!({"code":"UnsupportedCatalogFilter","provider_id":provider,"field":field,"value_type":json_type(value),
+                "next_tool":"list_catalog_providers","scope_probe_tool":"probe_catalog_scope","notice":"Unsupported fields/types are not empty query results or scope decisions."}).to_string());
+        }
+    }
+    Ok(())
+}
+pub fn probe_catalog_scope(
+    world: &World,
+    provider: &str,
+    requested: &str,
+) -> Result<Value, String> {
+    use crate::capability_registry::{CapabilityRegistry, CatalogProviderId};
+    if requested.trim().is_empty() || requested.len() > 256 {
+        return Err("Bounded nonempty scope identifier required".into());
+    }
+    let descriptor = world
+        .get_resource::<CapabilityRegistry>()
+        .and_then(|r| r.catalog_provider_descriptor(&CatalogProviderId(provider.into())))
+        .ok_or_else(|| format!("Unknown catalog provider '{provider}'"))?;
+    let installed = world.get_resource::<InstalledAssets>().and_then(|r| {
+        r.0.iter()
+            .find(|(_, a)| a.kind == "catalog.v1" && a.runtime_id == provider)
+    });
+    let declared = descriptor
+        .region
+        .as_deref()
+        .filter(|v| !v.trim().is_empty());
+    let decision = match declared {
+        None => "unspecified",
+        Some(scope) if scope == requested => "declared",
+        Some(_) => "not_declared",
+    };
+    let result = json!({"provider_id":provider,"requested_scope":requested,"declared_scope":declared,"decision":decision,
+        "comparison":"literal_provider_declaration","compatibility_established":false,
+        "notice":"This compares the curator/provider declaration only. Not declared is not a geographic exclusion or a structural, market or regulatory suitability verdict. No scope aliases or equivalences are inferred.",
+        "source_version":descriptor.source_version,"asset_id":installed.map(|(id,_)|id),"content_hash":installed.map(|(_,a)|&a.revision)});
+    evaluation::catalog_scope_probe(world, provider, requested, &result);
+    Ok(result)
+}
+
 /// Runtime wire shapes, not domain facts or publication approval.
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -263,6 +401,7 @@ pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, Stri
         ParametricPlacementContract, ParametricRegistry, ParametricTypeDef,
     };
     let a = admitted.asset;
+    let mut catalog_contract = None;
     // Parse and validate the complete supported payload before any registry mutation.
     let runtime_id = match a.kind.as_str() {
         "parametric_type.v1" => {
@@ -366,6 +505,7 @@ pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, Stri
             if data.id != a.id || data.rows.len() > 10000 {
                 return Err("Catalog identity/size mismatch".into());
             }
+            catalog_contract = Some(build_catalog_query_contract(&data)?);
             let id = CatalogProviderId(data.id);
             // Catalog descriptors have no private/shared scope. Only replace a
             // catalog already admitted by this loader, never infer ownership
@@ -392,9 +532,13 @@ pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, Stri
                     data.rows
                         .iter()
                         .filter(|row| {
-                            filter
-                                .as_object()
-                                .is_none_or(|f| f.iter().all(|(k, v)| row.data.get(k) == Some(v)))
+                            filter.as_object().is_none_or(|f| {
+                                f.iter().all(|(k, v)| {
+                                    row.data
+                                        .get(k)
+                                        .is_some_and(|value| catalog_value_equal(value, v))
+                                })
+                            })
                         })
                         .cloned()
                         .collect()
@@ -471,6 +615,7 @@ pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, Stri
             revision: admitted.revision.clone(),
             kind: a.kind.clone(),
             runtime_id,
+            catalog_contract,
         },
     );
     Ok(
@@ -848,6 +993,112 @@ mod tests {
             .unwrap();
         assert!(install(&mut world, passage("shared")).is_err());
         assert!(world.get_resource::<InstalledAssets>().is_none());
+    }
+
+    #[test]
+    fn catalog_numeric_equality_preserves_large_integer_precision() {
+        assert!(catalog_value_equal(&json!(7), &json!(7.0)));
+        assert!(catalog_value_equal(&json!(-7), &json!(-7.0)));
+        assert!(catalog_value_equal(&json!({"a":[7]}), &json!({"a":[7.0]})));
+        assert!(!catalog_value_equal(
+            &json!(9007199254740993u64),
+            &json!(9007199254740992.0)
+        ));
+        assert!(!catalog_value_equal(
+            &json!(u64::MAX),
+            &json!(18446744073709551616.0)
+        ));
+        assert!(!catalog_value_equal(
+            &json!(i64::MIN),
+            &json!(-9223372036854777856.0)
+        ));
+        assert!(!catalog_value_equal(&json!(7), &json!(7.5)));
+        assert_eq!(json_type(&json!(7.0)), "integer");
+        assert_eq!(json_type(&json!(7.5)), "number");
+    }
+
+    #[test]
+    fn dynamic_catalog_filters_and_scope_are_explicit_and_revision_bound() {
+        let mut candidate = passage("catalog-r1");
+        candidate.asset.id = "test.catalog".into();
+        candidate.asset.kind = "catalog.v1".into();
+        candidate.asset.payload = json!({"id":"test.catalog","label":"Synthetic catalog",
+        "description":"Synthetic contract fixture","category":{"kind":"Other","value":"fixture"},
+        "region":"scope-A","license":{"kind":"Cc0"},"source_version":"one","rows":[{
+            "row_id":"row-one","category":{"kind":"Other","value":"fixture"},
+            "data":{"size":7,"label":"sample"},
+            "provenance":{"source":"Synthetic fixture","source_version":"one","jurisdiction":"scope-A",
+                "ingested_at":0,"license":{"kind":"Cc0"},"backlink":null,"supersedes":[]}
+        }]});
+        let mut world = World::new();
+        world.init_resource::<evaluation::Observations>();
+        install(&mut world, candidate.clone()).unwrap();
+        let contract = catalog_query_contract(&world, "test.catalog");
+        assert_eq!(
+            contract["filter_schema"]["properties"]["size"]["type"],
+            json!(["integer"])
+        );
+        assert!(contract["filter_schema"]["properties"]["region"].is_null());
+        for invalid in [
+            json!({"region":"scope-A"}),
+            json!({"size":"7"}),
+            json!({"typo":7}),
+            Value::Null,
+        ] {
+            assert!(crate::plugins::model_api::handle_catalog_query(
+                &world,
+                "test.catalog".into(),
+                invalid
+            )
+            .is_err());
+        }
+        for (filter, count) in [
+            (json!({}), 1),
+            (json!({"size":7}), 1),
+            (json!({"size":7.0}), 1),
+            (json!({"size":8}), 0),
+        ] {
+            assert_eq!(
+                crate::plugins::model_api::handle_catalog_query(
+                    &world,
+                    "test.catalog".into(),
+                    filter
+                )
+                .unwrap()
+                .len(),
+                count
+            );
+        }
+        for (scope, decision) in [
+            ("scope-A", "declared"),
+            ("scope-B", "not_declared"),
+            ("SCOPE-A", "not_declared"),
+        ] {
+            let response = probe_catalog_scope(&world, "test.catalog", scope).unwrap();
+            assert_eq!(response["decision"], decision);
+            assert_eq!(response["content_hash"], "catalog-r1");
+            assert_eq!(response["asset_id"], "test.catalog");
+            assert_eq!(response["compatibility_established"], false);
+            let snapshot = evaluation::snapshot(&world);
+            let event = &snapshot["records"].as_array().unwrap().last().unwrap()["event"];
+            assert_eq!(event["operation"], "catalog_scope_probe");
+            assert_eq!(event["requested_scope"], scope);
+            assert_eq!(event["decision"], decision);
+            assert!(event["response_sha256"].as_str().unwrap().len() == 64);
+        }
+        assert!(probe_catalog_scope(&world, "missing", "scope-A").is_err());
+        assert!(probe_catalog_scope(&world, "test.catalog", " ").is_err());
+        candidate.revision = "catalog-r2".into();
+        candidate.asset.payload["region"] = Value::Null;
+        candidate.asset.payload["rows"][0]["data"] = json!({"new_field":true});
+        install(&mut world, candidate).unwrap();
+        assert!(validate_catalog_filter(&world, "test.catalog", &json!({"size":7})).is_err());
+        assert!(
+            validate_catalog_filter(&world, "test.catalog", &json!({"new_field":true})).is_ok()
+        );
+        let result = probe_catalog_scope(&world, "test.catalog", "scope-A").unwrap();
+        assert_eq!(result["decision"], "unspecified");
+        assert_eq!(result["content_hash"], "catalog-r2");
     }
 
     #[test]

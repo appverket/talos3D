@@ -913,6 +913,11 @@ pub(super) enum ModelApiRequest {
     },
     // --- PP75: Catalog providers ---
     ListCatalogProviders(oneshot::Sender<Vec<CatalogProviderInfo>>),
+    ProbeCatalogScope {
+        provider_id: String,
+        requested_scope: String,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
     CatalogQuery {
         provider_id: String,
         filter: serde_json::Value,
@@ -2479,6 +2484,17 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         // --- PP75 ---
         ModelApiRequest::ListCatalogProviders(response) => {
             let _ = response.send(handle_list_catalog_providers(world));
+        }
+        ModelApiRequest::ProbeCatalogScope {
+            provider_id,
+            requested_scope,
+            response,
+        } => {
+            let _ = response.send(crate::plugins::knowledge_cloud::probe_catalog_scope(
+                world,
+                &provider_id,
+                &requested_scope,
+            ));
         }
         ModelApiRequest::CatalogQuery {
             provider_id,

@@ -842,8 +842,9 @@ pub struct CatalogRow {
 
 /// A boxed catalog query function.
 ///
-/// Receives a raw JSON filter (PP75: no-op filter accepted) and returns all
-/// matching rows. Real filtering and schema validation are follow-on work.
+/// Receives a JSON filter and returns matching rows. Dynamic catalog admission
+/// derives an exact row-field query contract and validates filters before dispatch;
+/// native providers retain their explicitly provider-defined behavior.
 pub type CatalogQueryFn = Arc<dyn Fn(&serde_json::Value) -> Vec<CatalogRow> + Send + Sync>;
 
 /// A registered catalog provider: metadata + the live query function.
