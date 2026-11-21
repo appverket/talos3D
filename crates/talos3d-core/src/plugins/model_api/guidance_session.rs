@@ -193,6 +193,9 @@ pub struct AgentGuidanceState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     pub compact_context: String,
+    /// Omitted when the enclosing response already states them once (the
+    /// negotiation welcome). `get_agent_guidance_state` always carries them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_invariants: Vec<String>,
     pub satisfied_obligations: Vec<String>,
     pub blocking_obligations: Vec<GuidanceObligation>,
@@ -401,6 +404,26 @@ impl GuidanceSessionStore {
             .as_ref()
             .filter(|session| session.required_cards.iter().any(|id| id == card_id))
             .map(|session| session.id.clone())
+    }
+
+    /// Split advertised required ids into (outstanding, already read) using the
+    /// one digest-keyed read ledger. `key` maps an id to its ledger key, so the
+    /// same projection serves cards, skills and any later resource kind.
+    ///
+    /// Without an active session nothing is read, so every id stays
+    /// outstanding: a snapshot taken before negotiation never under-reports an
+    /// obligation.
+    pub fn partition_reads(
+        &self,
+        ids: Vec<String>,
+        key: impl Fn(&str) -> String,
+    ) -> (Vec<String>, Vec<String>) {
+        let guard = self.0.lock().expect("guidance session lock poisoned");
+        let Some(session) = guard.as_ref() else {
+            return (ids, Vec::new());
+        };
+        ids.into_iter()
+            .partition(|id| !session.ledger.satisfied(&key(id)))
     }
 
     pub fn required_skills(&self) -> Vec<String> {
@@ -716,9 +739,12 @@ impl GuidanceSession {
             if self.ledger.satisfied(&key) {
                 satisfied.push(format!("{label}:{id}"));
             } else {
+                // One shared instruction lives in `next_actions`; repeating it
+                // verbatim per obligation only inflates every response that
+                // carries this state.
                 let reason = match self.ledger.unavailable.get(&key) {
                     Some(error) => format!("The running instance named this resource as required but cannot serve it ({error}). Do not mutate the model; report the gap with report_harness_incident and refresh after a compatible release."),
-                    None => "Read this must-read resource once, inline in get_agent_guidance_packet or through its manifest retrieval tool.".to_string(),
+                    None => "Unread; see next_actions.".to_string(),
                 };
                 blocking.push(GuidanceObligation {
                     id: format!("read-{label}:{id}"),

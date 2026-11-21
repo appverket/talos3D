@@ -292,9 +292,10 @@ fn capability_snapshot_enforces_byte_budget_as_registries_grow() {
     };
     use crate::plugins::refinement::SemanticRole;
 
+    const CLASSES: usize = 64;
     let mut world = World::new();
     let mut registry = CapabilityRegistry::default();
-    for index in 0..8 {
+    for index in 0..CLASSES {
         registry.register_element_class(ElementClassDescriptor {
             id: ElementClassId(format!(
                 "unresolved_architectural_system_{index}_with_a_descriptive_registry_identifier"
@@ -333,8 +334,9 @@ fn capability_snapshot_enforces_byte_budget_as_registries_grow() {
     });
 
     let snapshot = handle_get_capability_snapshot(&world, false);
-    assert_eq!(snapshot.summary.no_curated_path_count, 8);
-    assert!(snapshot.no_curated_paths.len() < 8);
+    // The authoritative total survives; only trailing summaries are trimmed.
+    assert_eq!(snapshot.summary.no_curated_path_count, CLASSES);
+    assert!(snapshot.no_curated_paths.len() < CLASSES);
     assert!(snapshot.estimated_json_bytes <= snapshot.size_budget_bytes);
     assert_eq!(
         serde_json::to_vec(&snapshot)
@@ -342,6 +344,13 @@ fn capability_snapshot_enforces_byte_budget_as_registries_grow() {
             .len(),
         snapshot.estimated_json_bytes
     );
+    // Trimming never leaves a gap list without its shared route, and never
+    // leaves a route behind with nothing to route.
+    assert!(!snapshot.no_curated_paths.is_empty());
+    assert!(snapshot.curated_gap_route.is_some());
+    let empty = handle_get_capability_snapshot(&World::new(), false);
+    assert!(empty.no_curated_paths.is_empty());
+    assert!(empty.curated_gap_route.is_none());
 }
 
 /// An executable public parametric type is a genuine geometry-producing path,
@@ -15954,6 +15963,373 @@ async fn missing_required_card_is_an_explicit_blocking_gap() {
         .guidance_state
         .router_preflight("create_box")
         .is_some());
+    drop(server);
+    worker.await.unwrap();
+}
+
+/// Shared fixture for the onboarding-cost regressions below: a registry with
+/// enough element classes to produce a gap list, several registered guidance
+/// cards, two mandatory skills and a canonical contract.
+#[cfg(feature = "model-api")]
+fn onboarding_cost_world() -> World {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::agent_skills::{AgentSkill, AgentSkillId, AgentSkillTrustLevel};
+    use crate::plugins::authoring_guidance::{
+        AuthoringGuidance, GuidanceCardInfo, GuidanceCardRegistry,
+    };
+    use crate::plugins::refinement::SemanticRole;
+
+    let mut world = init_model_api_test_world();
+    world.insert_resource(ModelApiRuntimeInfo {
+        instance_id: "onboarding-cost".into(),
+        app_name: "test".into(),
+        pid: 1,
+        http_host: "127.0.0.1".into(),
+        http_port: 24844,
+        http_url: "http://127.0.0.1:24844/mcp".into(),
+        registry_path: String::new(),
+        started_at_unix_ms: 1,
+        requested_port: None,
+    });
+    let mut registry = CapabilityRegistry::default();
+    for class in [
+        "wall_assembly",
+        "roof_system",
+        "foundation_system",
+        "window",
+        "door",
+        "floor_system",
+        "rainwater_system",
+        "terrain",
+        "stair_system",
+        "envelope_system",
+    ] {
+        registry.register_element_class(ElementClassDescriptor {
+            id: ElementClassId(class.into()),
+            label: class.into(),
+            description: "test".into(),
+            semantic_roles: vec![SemanticRole("primary_structure".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: json!({}),
+        });
+    }
+    world.insert_resource(registry);
+    let mut cards = GuidanceCardRegistry::default();
+    for index in 0..9 {
+        cards.insert(GuidanceCardInfo {
+            id: format!("domain.card.{index}"),
+            title: format!("Domain card {index}"),
+            summary: "A registered capability guidance card summary.".into(),
+            body_markdown: Some("Body paragraph.\n\n".repeat(40)),
+            ..Default::default()
+        });
+    }
+    world.insert_resource(cards);
+    let mut skills = AgentSkillRegistry::default();
+    for index in 0..2 {
+        skills.insert(AgentSkill {
+            id: AgentSkillId(format!("test.skill.{index}")),
+            title: format!("Skill {index}"),
+            summary: "Mandatory substrate procedure for terrain foundations".into(),
+            task_tags: vec!["terrain".into(), "foundation".into()],
+            must_read_at_bootstrap: true,
+            body_markdown: "Follow the procedure.\n\n".repeat(60),
+            trust_level: AgentSkillTrustLevel::Shipped,
+            source_path: None,
+            referenced_tool_ids: vec!["create_box".into()],
+            required_tool_ids: vec![],
+            forbidden_tool_ids: vec![],
+            validation_tool_ids: vec!["run_validation_v2".into()],
+            success_criteria: vec!["Rendered geometry inspected.".into()],
+            stop_conditions: vec!["No curated path exists.".into()],
+            screenshot_requirements: vec![],
+            common_failure_modes: vec![],
+            regression_prompt_ids: vec![],
+            next_skill_ids: vec![],
+        });
+    }
+    world.insert_resource(skills);
+    world.insert_resource(AuthoringGuidance {
+        guidance_id: "test.guidance".into(),
+        version: 3,
+        prompt_text: "Canonical rule.\n\n".repeat(400),
+        ..Default::default()
+    });
+    world
+}
+
+/// Every string of `min_len` or more bytes that the value repeats, with the
+/// bytes wasted by the repetitions.
+#[cfg(feature = "model-api")]
+fn repeated_long_strings(
+    value: &serde_json::Value,
+    min_len: usize,
+) -> (std::collections::BTreeMap<String, usize>, usize) {
+    fn walk(
+        value: &serde_json::Value,
+        min_len: usize,
+        counts: &mut std::collections::BTreeMap<String, usize>,
+    ) {
+        match value {
+            serde_json::Value::String(text) if text.len() >= min_len => {
+                *counts.entry(text.clone()).or_default() += 1;
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().for_each(|item| walk(item, min_len, counts))
+            }
+            serde_json::Value::Object(fields) => fields
+                .values()
+                .for_each(|field| walk(field, min_len, counts)),
+            _ => {}
+        }
+    }
+    let mut counts = std::collections::BTreeMap::new();
+    walk(value, min_len, &mut counts);
+    counts.retain(|_, count| *count > 1);
+    let wasted = counts
+        .iter()
+        .map(|(text, count)| text.len() * (count - 1))
+        .sum();
+    (counts, wasted)
+}
+
+/// TALOS-cyczbfsk (repair-loop evidence): `get_capability_snapshot` used to
+/// re-advertise every must-read resource with no delivered/read state, so an
+/// agent that had just completed the bootstrap packet fetched the same cards
+/// again through `get_guidance_card`. Read state has one owner, and the
+/// snapshot must project it.
+#[cfg(feature = "model-api")]
+#[tokio::test]
+async fn capability_snapshot_does_not_readvertise_resources_already_read() {
+    use super::guidance_session::{card_key, GuidancePhase};
+    let (sender, receiver) = mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut world = onboarding_cost_world();
+        while let Ok(request) = receiver.recv() {
+            handle_model_api_request(&mut world, request);
+        }
+    });
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
+    async fn snapshot_now(server: &ModelApiServer) -> CapabilitySnapshotInfo {
+        server
+            .get_capability_snapshot_tool(Parameters(CapabilitySnapshotRequest { expanded: false }))
+            .await
+            .unwrap()
+            .into_typed()
+            .unwrap()
+    }
+
+    let welcome: AgentWelcome = server
+        .negotiate_agent_session_tool(Parameters(AgentHello {
+            task: Some("author a small timber cottage with a gable roof".into()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    let required_cards = welcome.required_guidance_card_ids.clone();
+    let required_skills = welcome
+        .capability_snapshot
+        .must_read_agent_skill_ids
+        .clone();
+    assert!(required_cards.len() >= 9, "{required_cards:?}");
+    assert_eq!(required_skills.len(), 2);
+
+    // Before the bootstrap nothing is read, so nothing may be hidden.
+    let before = snapshot_now(&server).await;
+    assert_eq!(before.must_read_guidance_card_ids, required_cards);
+    assert_eq!(before.must_read_agent_skill_ids, required_skills);
+    assert!(before.already_read_guidance_card_ids.is_empty());
+    assert!(before.already_read_agent_skill_ids.is_empty());
+
+    // After the packet every obligation is satisfied, and the snapshot says so
+    // instead of asking for the same bytes again.
+    let (_, resources) = drain_guidance_packet(&server).await;
+    assert_eq!(
+        server.guidance_state.snapshot().unwrap().phase,
+        GuidancePhase::Discover
+    );
+    let after = snapshot_now(&server).await;
+    assert!(
+        after.must_read_guidance_card_ids.is_empty(),
+        "already-delivered cards re-advertised as must-read: {:?}",
+        after.must_read_guidance_card_ids
+    );
+    assert!(after.must_read_agent_skill_ids.is_empty());
+    assert_eq!(after.already_read_guidance_card_ids, required_cards);
+    assert_eq!(after.already_read_agent_skill_ids, required_skills);
+    // Projecting read state transfers no guidance bytes a second time.
+    let metrics = server.guidance_state.snapshot().unwrap().onboarding_metrics;
+    assert_eq!(metrics.duplicate_resource_bytes, 0);
+
+    // A newer revision of one resource re-opens exactly that obligation.
+    let session = server
+        .guidance_state
+        .snapshot()
+        .unwrap()
+        .guidance_session_id;
+    let changed = required_cards[0].clone();
+    server
+        .guidance_state
+        .observe_revisions(
+            Some(&session),
+            [(card_key(&changed).as_str(), "sha256:newer-revision")],
+        )
+        .unwrap();
+    let stale = snapshot_now(&server).await;
+    assert_eq!(stale.must_read_guidance_card_ids, vec![changed.clone()]);
+    assert!(!stale.already_read_guidance_card_ids.contains(&changed));
+    assert_eq!(
+        stale.already_read_guidance_card_ids.len(),
+        required_cards.len() - 1
+    );
+    assert_eq!(
+        server.guidance_state.snapshot().unwrap().phase,
+        GuidancePhase::Bootstrap
+    );
+
+    // Re-reading that one card through its own tool closes it again, and the
+    // snapshot stops advertising it without any caller assertion.
+    let mut page: serde_json::Value = server
+        .get_guidance_card_tool(Parameters(GetGuidanceCardRequest {
+            card_id: changed.clone(),
+            cursor: None,
+        }))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    while page["delivery_complete"] == false {
+        let arguments = serde_json::from_value(page["next_arguments"].clone()).unwrap();
+        page = server
+            .get_guidance_card_tool(Parameters(arguments))
+            .await
+            .unwrap()
+            .into_typed()
+            .unwrap();
+    }
+    let healed = snapshot_now(&server).await;
+    assert!(healed.must_read_guidance_card_ids.is_empty());
+    assert!(healed.already_read_guidance_card_ids.contains(&changed));
+    assert!(resources.contains_key(&card_key(&changed)));
+    drop(server);
+    worker.await.unwrap();
+}
+
+/// TALOS-cyczbfsk (repair-loop evidence): the negotiation hello carried the
+/// same prose many times over — the corpus-gap route once per gap, and the
+/// session invariants and the per-obligation instruction once per item.
+/// Identical knowledge must be stated once per response.
+#[cfg(feature = "model-api")]
+#[tokio::test]
+async fn negotiation_hello_states_shared_metadata_once() {
+    let (sender, receiver) = mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut world = onboarding_cost_world();
+        while let Ok(request) = receiver.recv() {
+            handle_model_api_request(&mut world, request);
+        }
+    });
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
+    let response: serde_json::Value = server
+        .negotiate_agent_session_tool(Parameters(AgentHello {
+            task: Some("author a small timber cottage with a gable roof".into()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    let total = serde_json::to_vec(&response).unwrap().len();
+    let (repeated, wasted) = repeated_long_strings(&response, 60);
+    eprintln!("negotiate hello: {total} bytes, {wasted} duplicated");
+    for (text, count) in &repeated {
+        eprintln!("  x{count} {}", &text[..60.min(text.len())]);
+    }
+    // The one legitimate repeat is the session revision anchor, which both the
+    // refresh contract and the live guidance state pin.
+    assert!(
+        wasted <= 256,
+        "{wasted} bytes of duplicated prose in the hello: {:?}",
+        repeated.keys().collect::<Vec<_>>()
+    );
+    assert!(total <= 20_000, "negotiation hello is {total} bytes");
+
+    // The corpus-gap route is stated once for the whole gap list, and no
+    // routing knowledge was dropped in the process.
+    let snapshot: CapabilitySnapshotInfo =
+        serde_json::from_value(response["capability_snapshot"].clone()).unwrap();
+    assert!(snapshot.no_curated_paths.len() >= 2);
+    let route = snapshot
+        .curated_gap_route
+        .as_ref()
+        .expect("a gap list carries its shared route");
+    assert_eq!(route.applies_to, "no_curated_paths");
+    assert_eq!(route.suggested_next_tool, "request_corpus_expansion");
+    assert!(!route.gap_record_is_terminal);
+    assert!(route
+        .required_next_tools
+        .iter()
+        .any(|tool| tool == "get_harness_incident_status"));
+    assert!(route
+        .completion_criteria
+        .iter()
+        .any(|criterion| criterion.contains("a grounding passage does not close")));
+    assert!(route
+        .guidance_card_id_fields
+        .iter()
+        .any(|field| field == "must_read_guidance_card_ids"));
+    for gap in &snapshot.no_curated_paths {
+        assert!(!gap.element_class.is_empty());
+        assert_eq!(gap.suggested_next_tool, route.suggested_next_tool);
+        assert!(gap.required_next_tools.is_empty(), "{gap:?}");
+        assert!(gap.completion_criteria.is_empty(), "{gap:?}");
+        assert!(gap.guidance_card_ids.is_empty(), "{gap:?}");
+    }
+    // A single gap, served as its own response, still routes inline.
+    let discovery: CuratedPathDiscoveryInfo = server
+        .discover_curated_paths_tool(Parameters(CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("roof_system".into()),
+            query: None,
+            context: json!({"target_state": "Constructible"}),
+        }))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    let gap = discovery
+        .no_curated_path
+        .expect("a missing recipe path is first-class");
+    assert_eq!(gap.required_next_tools, route.required_next_tools);
+    assert_eq!(gap.completion_criteria, route.completion_criteria);
+
+    // The invariants are stated once; the embedded live state omits them.
+    assert!(!response["required_invariants"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(response["guidance_state"]["required_invariants"].is_null());
+    let typed: AgentWelcome = serde_json::from_value(response.clone()).unwrap();
+    assert!(typed
+        .guidance_state
+        .as_ref()
+        .unwrap()
+        .required_invariants
+        .is_empty());
+    // `get_agent_guidance_state` remains self-contained for rehydration.
+    let live: serde_json::Value = server
+        .get_agent_guidance_state_tool(Parameters(GuidanceStateRequest::default()))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    assert_eq!(
+        live["required_invariants"], response["required_invariants"],
+        "the live state must stay usable without the welcome"
+    );
     drop(server);
     worker.await.unwrap();
 }

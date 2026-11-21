@@ -14154,14 +14154,17 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
                     .any(|(id, label)| parametric_class_token_match(&lookup_class.0, id, label))
             });
             if recipe_count == 0 && !has_installed_recipe && !has_executable_public_parametric {
+                // The route is identical for every gap in this list and is
+                // stated once in `curated_gap_route`; repeating it per entry
+                // was the single largest block of the onboarding handshake.
                 no_curated_paths.push(NoCuratedPathInfo {
                     element_class: class.id.0.clone(),
                     missing_artifact_kind: "recipe_or_executable_asset".into(),
                     suggested_next_tool: "request_corpus_expansion".into(),
                     gap_record_is_terminal: false,
-                    required_next_tools: curated_gap_required_next_tools(),
-                    completion_criteria: curated_gap_completion_criteria(),
-                    guidance_card_ids: must_read_guidance_card_ids.clone(),
+                    required_next_tools: Vec::new(),
+                    completion_criteria: Vec::new(),
+                    guidance_card_ids: Vec::new(),
                     related_installed_or_learned_asset_ids: session_recipe_draft_ids
                         .iter()
                         .chain(assembly_pattern_draft_ids.iter())
@@ -14175,6 +14178,17 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     no_curated_paths.sort_by(|a, b| a.element_class.cmp(&b.element_class));
     let no_curated_path_count = no_curated_paths.len();
     no_curated_paths.truncate(gap_limit);
+    let curated_gap_route = (!no_curated_paths.is_empty()).then(|| CuratedGapRoute {
+        applies_to: "no_curated_paths".into(),
+        suggested_next_tool: "request_corpus_expansion".into(),
+        gap_record_is_terminal: false,
+        required_next_tools: curated_gap_required_next_tools(),
+        completion_criteria: curated_gap_completion_criteria(),
+        guidance_card_id_fields: vec![
+            "must_read_guidance_card_ids".into(),
+            "already_read_guidance_card_ids".into(),
+        ],
+    });
 
     let summary = CapabilitySnapshotSummary {
         element_class_count: element_class_ids.len(),
@@ -14225,17 +14239,24 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         evidence_backed: Vec::new(),
         guidance_overrides,
         no_curated_paths,
+        curated_gap_route,
         must_read_guidance_card_ids,
         must_read_agent_skill_ids,
+        // Read state is session state; the serving tool projects it through the
+        // guidance read ledger (see `get_capability_snapshot_tool`).
+        already_read_guidance_card_ids: Vec::new(),
+        already_read_agent_skill_ids: Vec::new(),
         next_tools: capability_snapshot_next_tools(),
     };
     // The default snapshot is an onboarding handshake with a hard byte budget,
-    // not merely an item-count target. Registry growth can make eight otherwise
-    // bounded gap summaries exceed that budget because each summary repeats its
-    // routing/card context. Preserve the authoritative total in `summary` and
-    // deterministically trim only trailing summaries until the encoded response
-    // fits. Expanded diagnostic snapshots intentionally remain complete.
+    // not merely an item-count target. Preserve the authoritative total in
+    // `summary` and deterministically trim only trailing summaries until the
+    // encoded response fits. Expanded diagnostic snapshots stay complete.
     loop {
+        // A shared route with nothing to route is dead weight.
+        if snapshot.no_curated_paths.is_empty() {
+            snapshot.curated_gap_route = None;
+        }
         let previous_estimate = snapshot.estimated_json_bytes;
         snapshot.estimated_json_bytes = serde_json::to_vec(&snapshot)
             .map(|bytes| bytes.len())

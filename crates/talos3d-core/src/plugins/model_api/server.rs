@@ -4396,9 +4396,26 @@ pub struct CapabilitySnapshotInfo {
     pub evidence_backed: Vec<CapabilitySnapshotFact>,
     pub guidance_overrides: Vec<CapabilitySnapshotFact>,
     pub no_curated_paths: Vec<NoCuratedPathInfo>,
+    /// Routing shared by every `no_curated_paths` entry. The route is stated
+    /// once instead of repeated per gap, which is the same knowledge at a
+    /// fraction of the bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curated_gap_route: Option<CuratedGapRoute>,
+    /// Required guidance cards this session has **not** read yet. With an
+    /// active guidance session the list is projected through the one
+    /// digest-keyed read ledger, so a resource already delivered (inline in
+    /// `get_agent_guidance_packet` or through its retrieval tool) is not
+    /// re-advertised as outstanding work.
     pub must_read_guidance_card_ids: Vec<String>,
     #[serde(default)]
     pub must_read_agent_skill_ids: Vec<String>,
+    /// Required cards whose current revision is already read. Fetching one
+    /// again transfers the same bytes twice; a newer revision moves it back to
+    /// `must_read_guidance_card_ids`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub already_read_guidance_card_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub already_read_agent_skill_ids: Vec<String>,
     pub next_tools: Vec<String>,
 }
 
@@ -4414,8 +4431,11 @@ impl CapabilitySnapshotInfo {
             evidence_backed: Vec::new(),
             guidance_overrides: Vec::new(),
             no_curated_paths: Vec::new(),
+            curated_gap_route: None,
             must_read_guidance_card_ids: Vec::new(),
             must_read_agent_skill_ids: Vec::new(),
+            already_read_guidance_card_ids: Vec::new(),
+            already_read_agent_skill_ids: Vec::new(),
             next_tools: vec![
                 "list_element_classes".into(),
                 "select_recipe".into(),
@@ -4487,12 +4507,32 @@ pub struct NoCuratedPathInfo {
     pub suggested_next_tool: String,
     #[serde(default)]
     pub gap_record_is_terminal: bool,
-    #[serde(default)]
+    /// Carried inline when this gap is the response (`discover_curated_paths`).
+    /// A list of gaps states the identical route once in
+    /// [`CapabilitySnapshotInfo::curated_gap_route`] instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_next_tools: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completion_criteria: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guidance_card_ids: Vec<String>,
     pub related_installed_or_learned_asset_ids: Vec<String>,
+}
+
+/// The one corpus-gap route for a whole list of gaps. Identical per-gap
+/// routing, criteria and card ids are stated here once; each entry keeps only
+/// what differs (its class, missing artifact kind and related asset ids).
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CuratedGapRoute {
+    /// Field this route applies to, so the shared block is unambiguous.
+    pub applies_to: String,
+    pub suggested_next_tool: String,
+    pub gap_record_is_terminal: bool,
+    pub required_next_tools: Vec<String>,
+    pub completion_criteria: Vec<String>,
+    /// Where the relevant guidance card ids are listed in this same response.
+    pub guidance_card_id_fields: Vec<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -6058,7 +6098,7 @@ impl ModelApiServer {
             skills,
             security,
         );
-        let guidance_state = self.guidance_state.start_scoped(
+        let mut guidance_state = self.guidance_state.start_scoped(
             welcome.refresh.revision_anchor.clone(),
             welcome.hello.task.clone(),
             welcome.required_guidance_card_ids.clone(),
@@ -6069,6 +6109,9 @@ impl ModelApiServer {
             welcome.required_invariants.clone(),
             welcome.hello.guidance_scope,
         );
+        // The welcome states the invariants once, at top level. The live state
+        // keeps them for `get_agent_guidance_state` and hook rehydration.
+        guidance_state.required_invariants = Vec::new();
         welcome.guidance_state = Some(guidance_state);
         if welcome.hello.supports.lifecycle_hooks {
             welcome.lifecycle_hook_projection = Some(LifecycleHookProjection::codex());
@@ -7380,7 +7423,10 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "list_materials",
-        description = "List all materials in the project registry. Returns id, name, PBR properties, texture paths, and UV tiling."
+        description = "Inventory the project material registry: per material the id, name, PBR \
+            properties, UV tiling and which texture slots are bound. It is metadata only and \
+            carries no inline texture payloads or encoded image data. Call get_material for one \
+            material's full details, including its texture references."
     )]
     pub(super) async fn list_materials_tool(&self) -> Result<CallToolResult, McpError> {
         let materials = self
@@ -9038,8 +9084,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "get_capability_snapshot",
         description = "Return a bounded dynamic-knowledge capability index for progressive MCP discovery. \
-            The default response is compact: counts, short id lists, first-class no-curated-path summaries, \
-            must-read guidance card ids, and agentic run-contract pointers. Pass expanded=true for diagnostics."
+            The default response is compact: counts, short id lists, first-class no-curated-path summaries \
+            with one shared curated_gap_route, outstanding must-read guidance card ids, and agentic \
+            run-contract pointers. must_read_* lists only resources this session has NOT read yet; \
+            resources already delivered (inline in get_agent_guidance_packet or through their retrieval \
+            tool) are reported under already_read_* and need not be fetched again. A changed revision \
+            moves one back to must_read. Pass expanded=true for diagnostics."
     )]
     pub(super) async fn get_capability_snapshot_tool(
         &self,
@@ -9060,6 +9110,19 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             snapshot.must_read_guidance_card_ids.clear();
             snapshot.must_read_agent_skill_ids.clear();
         }
+        // One read state owns every obligation. Advertising a resource the
+        // bootstrap already delivered as still-must-read is what makes an
+        // agent transfer the same guidance bytes a second time.
+        let (cards, read_cards) = self
+            .guidance_state
+            .partition_reads(snapshot.must_read_guidance_card_ids, card_key);
+        snapshot.must_read_guidance_card_ids = cards;
+        snapshot.already_read_guidance_card_ids = read_cards;
+        let (skills, read_skills) = self
+            .guidance_state
+            .partition_reads(snapshot.must_read_agent_skill_ids, skill_key);
+        snapshot.must_read_agent_skill_ids = skills;
+        snapshot.already_read_agent_skill_ids = read_skills;
         snapshot.next_tools.retain(|tool| {
             profile_allows(profile, tool)
                 && (!knowledge_review || super::guidance_session::knowledge_scope_tool(scope, tool))

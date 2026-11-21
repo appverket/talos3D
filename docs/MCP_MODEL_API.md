@@ -413,6 +413,26 @@ unfinished packet do not invalidate each other. `get_guidance_card` and
 and use the same page format otherwise. No local file or shell tool is needed.
 Delivery records are not proof of comprehension.
 
+One read ledger owns these obligations, so later responses report read state
+instead of re-asking for delivered content. `get_capability_snapshot` lists in
+`must_read_guidance_card_ids` / `must_read_agent_skill_ids` only what the
+active session has **not** read yet, and reports delivered resources under
+`already_read_guidance_card_ids` / `already_read_agent_skill_ids`; those need
+not be fetched again, and re-reading one is counted as duplicate bytes rather
+than refused. A newer revision of one resource (a changed `sha256`)
+moves exactly that id back to the must-read list. Without an active negotiated
+session nothing is read, so every required id stays outstanding.
+
+Responses state shared metadata once. A list of corpus gaps carries one
+`curated_gap_route` (`suggested_next_tool`, `required_next_tools`,
+`completion_criteria`, `gap_record_is_terminal`) that applies to every
+`no_curated_paths` entry, and each entry keeps only what differs — its
+`element_class`, `missing_artifact_kind` and related asset ids. A single gap
+served as its own response (`discover_curated_paths`) still carries that
+routing inline. The negotiation welcome likewise states
+`required_invariants` once at top level; its embedded `guidance_state` omits
+them, while `get_agent_guidance_state` always carries them for rehydration.
+
 `live_guidance_state` on every page, and `get_agent_guidance_state`, report
 `onboarding_metrics` measured by the server until the first authorised model
 mutation: `guidance_requests`, `response_bytes`, `unique_resource_bytes` and
