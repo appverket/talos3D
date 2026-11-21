@@ -15659,3 +15659,67 @@ async fn knowledge_scope_packets_are_bounded_and_cannot_unlock_authoring() {
     drop(server);
     worker.await.unwrap();
 }
+
+#[cfg(feature = "model-api")]
+#[test]
+fn ordinary_passage_lookup_preserves_legacy_identity_without_approval() {
+    use crate::capability_registry::PassageRef;
+    use crate::plugins::{
+        corpus_gap::CorpusPassageRegistry, knowledge_cloud, knowledge_persistence,
+    };
+    use sha2::{Digest, Sha256};
+    let mut world = World::new();
+    let private: knowledge_persistence::PersistedPassage =
+        serde_json::from_value(serde_json::json!({
+            "passage_ref":"private", "text":"synthetic private", "citation":"test"
+        }))
+        .unwrap();
+    let provenance = knowledge_persistence::build_provenance_for_passage(&private);
+    let mut registry = CorpusPassageRegistry::default();
+    registry.register(
+        PassageRef("shared".into()),
+        "synthetic shared",
+        provenance.clone(),
+    );
+    registry.register_private(private).unwrap();
+    world.insert_resource(registry);
+    let shared = handle_lookup_source_passage(&world, "shared".into()).unwrap();
+    let snapshot = shared.legacy_snapshot.as_ref().unwrap();
+    let curator = knowledge_cloud::legacy_get(
+        &world,
+        knowledge_cloud::LegacyRequest {
+            kind: "corpus_passage.v1".into(),
+            id: "shared".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(snapshot, &curator);
+    assert_eq!(
+        snapshot["snapshot_sha256"],
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&snapshot["payload"]).unwrap()
+        ))
+    );
+    assert_eq!(snapshot["review_required"], true);
+    assert_eq!(snapshot["publication_authorized"], false);
+    assert_eq!(shared.trust, "legacy_unreviewed");
+    let mut request = server::LookupSourcePassageRequest {
+        passage_ref: "shared".into(),
+        content_hash: None,
+        legacy_snapshot_sha256: Some(snapshot["snapshot_sha256"].as_str().unwrap().into()),
+    };
+    request.verify_local_snapshot(&shared).unwrap();
+    request.content_hash = request.legacy_snapshot_sha256.clone();
+    assert!(request.verify_local_snapshot(&shared).is_err());
+    request.content_hash = None;
+    let private = handle_lookup_source_passage(&world, "private".into()).unwrap();
+    assert!(private.legacy_snapshot.is_none());
+    assert!(request.verify_local_snapshot(&private).is_err());
+    world.resource_mut::<CorpusPassageRegistry>().register(
+        PassageRef("shared".into()),
+        "changed",
+        provenance,
+    );
+    let changed = handle_lookup_source_passage(&world, "shared".into()).unwrap();
+    assert!(request.verify_local_snapshot(&changed).is_err());
+}

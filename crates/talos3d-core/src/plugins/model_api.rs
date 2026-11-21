@@ -18692,9 +18692,23 @@ pub fn handle_lookup_source_passage(
         .get(&pref)
         .ok_or_else(|| format!("passage '{passage_ref}' not found in CorpusPassageRegistry"))?;
 
+    let legacy_snapshot = crate::plugins::knowledge_cloud::legacy_get(
+        world,
+        crate::plugins::knowledge_cloud::LegacyRequest {
+            kind: "corpus_passage.v1".into(),
+            id: passage_ref.clone(),
+        },
+    )
+    .ok();
+    let trust = if legacy_snapshot.is_some() {
+        "legacy_unreviewed".into()
+    } else {
+        format!("{:?}", entry.trust).to_ascii_lowercase()
+    };
     Ok(PassageLookupInfo {
+        legacy_snapshot,
         scope: crate::plugins::knowledge_assets::scope_as_str(entry.scope).into(),
-        trust: format!("{:?}", entry.trust).to_ascii_lowercase(),
+        trust,
         passage_ref,
         text: entry.text.clone(),
         source: entry.provenance.source.clone(),

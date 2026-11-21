@@ -4757,6 +4757,10 @@ pub struct CorpusGapInfo {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PassageLookupInfo {
+    /// Exact shared legacy snapshot, including its payload and hash. This is
+    /// unreviewed migration provenance, never a released cloud revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_snapshot: Option<serde_json::Value>,
     pub scope: String,
     pub trust: String,
     pub passage_ref: String,
@@ -5504,6 +5508,35 @@ pub(super) struct LookupSourcePassageRequest {
     /// Optional immutable cloud revision returned by search_corpus_knowledge.
     #[serde(default)]
     pub(super) content_hash: Option<String>,
+    /// Exact shared legacy snapshot identity from curator inspection or a local
+    /// lookup. Mutually exclusive with the released cloud content_hash.
+    #[serde(default)]
+    pub(super) legacy_snapshot_sha256: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+impl LookupSourcePassageRequest {
+    pub(super) fn verify_local_snapshot(&self, info: &PassageLookupInfo) -> Result<(), String> {
+        if let Some(expected) = &self.legacy_snapshot_sha256 {
+            if self.content_hash.is_some() {
+                return Err(
+                    "Choose released content_hash or legacy_snapshot_sha256, not both".into(),
+                );
+            }
+            if info
+                .legacy_snapshot
+                .as_ref()
+                .and_then(|v| v["snapshot_sha256"].as_str())
+                != Some(expected.as_str())
+            {
+                return Err(
+                    "Shared legacy passage snapshot unavailable or changed; no revision fallback"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -9574,13 +9607,18 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "lookup_source_passage",
-        description = "Look up the text and provenance of a corpus passage by its passage_ref \
-            (e.g. 'BBR_8:22_riser_max'). Returns an error if the passage is not registered."
+        description = "Read passage text and provenance. content_hash pins a released cloud revision. legacy_snapshot_sha256 instead pins a shared legacy snapshot; never use its hash as a cloud revision. Local shared lookup returns the exact legacy snapshot payload/hash with review_required=true and publication_authorized=false. Legacy identity proves unchanged bytes, not independent approval or reuse rights. No fallback on a mismatched pinned identity."
     )]
     pub(super) async fn lookup_source_passage_tool(
         &self,
         Parameters(params): Parameters<LookupSourcePassageRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if params.content_hash.is_some() && params.legacy_snapshot_sha256.is_some() {
+            return Err(McpError::invalid_params(
+                "Choose released content_hash or legacy_snapshot_sha256, not both",
+                None,
+            ));
+        }
         if let Some(hash) = params.content_hash {
             let connection = self.corpus_connection().await;
             let (_, store) = self.curation_context().await;
@@ -9595,9 +9633,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             return json_tool_result(value);
         }
         let info = self
-            .request_lookup_source_passage(params.passage_ref)
+            .request_lookup_source_passage(params.passage_ref.clone())
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
+        params
+            .verify_local_snapshot(&info)
+            .map_err(|e| McpError::invalid_params(e, None))?;
         json_tool_result(info)
     }
 
