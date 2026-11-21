@@ -308,6 +308,15 @@ fn capability_snapshot_enforces_byte_budget_as_registries_grow() {
         });
     }
     world.insert_resource(registry);
+    // Registered capability cards are must-read and grow the snapshot.
+    let mut cards = crate::plugins::authoring_guidance::GuidanceCardRegistry::default();
+    for index in 0..11 {
+        cards.insert(crate::plugins::authoring_guidance::GuidanceCardInfo {
+            id: format!("card_{index}_{}", "descriptive_target_".repeat(14)),
+            ..Default::default()
+        });
+    }
+    world.insert_resource(cards);
     world.insert_resource(AuthoringGuidance {
         guidance_id: "test.large-guidance-registry".into(),
         version: 1,
@@ -454,24 +463,23 @@ fn capability_snapshot_must_read_card_ids_all_resolve() {
 
     let snapshot = handle_get_capability_snapshot(&world, false);
 
-    // The dynamic reference ids must actually be advertised (otherwise this test
-    // would pass vacuously after a future change that drops them).
-    assert!(
-        snapshot
-            .must_read_guidance_card_ids
-            .iter()
-            .any(|id| id == "mcp_tool:select_recipe"),
-        "snapshot should advertise the mcp_tool:select_recipe guidance card, got {:?}",
-        snapshot.must_read_guidance_card_ids
-    );
-    assert!(
-        snapshot
-            .must_read_guidance_card_ids
-            .iter()
-            .any(|id| id == "mcp_tool:request_corpus_expansion"),
-        "snapshot should advertise the mcp_tool:request_corpus_expansion guidance card, got {:?}",
-        snapshot.must_read_guidance_card_ids
-    );
+    // Reference cards only point back at the canonical guidance, which the
+    // bootstrap already requires; they are on-demand, not read obligations,
+    // but must still resolve when an agent follows one.
+    for reference in [
+        "mcp_tool:select_recipe",
+        "mcp_tool:request_corpus_expansion",
+    ] {
+        assert!(
+            !snapshot
+                .must_read_guidance_card_ids
+                .iter()
+                .any(|id| id == reference),
+            "{reference} must not be a must-read obligation"
+        );
+        assert!(handle_get_guidance_card(&world, reference.into()).is_ok());
+    }
+    assert!(!snapshot.must_read_guidance_card_ids.is_empty());
 
     // The core contract: every advertised id resolves through get_guidance_card.
     for id in &snapshot.must_read_guidance_card_ids {
@@ -2710,6 +2718,40 @@ async fn get_authoring_guidance_tool_returns_default_when_unset() {
     worker_handle.await.expect("worker should stop cleanly");
 }
 
+/// Drain a guidance packet the way an MCP client is instructed to and return
+/// pages plus reassembled resources by ledger key.
+#[cfg(feature = "model-api")]
+async fn drain_guidance_packet(
+    server: &ModelApiServer,
+) -> (
+    Vec<serde_json::Value>,
+    std::collections::BTreeMap<String, serde_json::Value>,
+) {
+    let mut pages = Vec::new();
+    let mut request = GuidanceDeliveryRequest::default();
+    loop {
+        let response: serde_json::Value = server
+            .get_agent_guidance_packet_tool(Parameters(request))
+            .await
+            .unwrap()
+            .into_typed()
+            .unwrap();
+        assert!(
+            serde_json::to_vec(&response).unwrap().len() <= super::guidance_delivery::PAGE_BYTES,
+            "page exceeds the response budget"
+        );
+        let done = response["delivery_complete"] == true;
+        let next = response["next_arguments"].clone();
+        pages.push(response);
+        if done {
+            break;
+        }
+        request = serde_json::from_value(next).unwrap();
+    }
+    let resources = super::guidance_delivery::reassemble(&pages);
+    (pages, resources)
+}
+
 #[cfg(feature = "model-api")]
 #[tokio::test]
 async fn negotiate_agent_session_tool_composes_live_world_state() {
@@ -2781,43 +2823,23 @@ async fn negotiate_agent_session_tool_composes_live_world_state() {
         Some("codex-hooks/v1")
     );
 
-    let mut response: serde_json::Value = server
-        .get_agent_guidance_packet_tool(Parameters(GuidanceDeliveryRequest::default()))
-        .await
-        .unwrap()
-        .into_typed()
-        .unwrap();
-    let packet: AgentGuidancePacket = if response.get("delivery").is_some() {
-        let mut document = String::new();
-        loop {
-            document.push_str(response["content"].as_str().unwrap());
-            if response["delivery_complete"] == true {
-                break;
-            }
-            assert_eq!(
-                server.guidance_state.snapshot().unwrap().phase,
-                GuidancePhase::Bootstrap
-            );
-            let request = serde_json::from_value(response["next_arguments"].clone()).unwrap();
-            response = server
-                .get_agent_guidance_packet_tool(Parameters(request))
-                .await
-                .unwrap()
-                .into_typed()
-                .unwrap();
-        }
-        serde_json::from_str(&document).unwrap()
-    } else {
-        serde_json::from_value(response).unwrap()
-    };
+    let (pages, resources) = drain_guidance_packet(&server).await;
+    let packet: AgentGuidancePacket = serde_json::from_value(pages[0].clone()).unwrap();
+    assert_eq!(packet.contract_version, 2);
     assert_eq!(
-        packet.required_cards.len(),
-        welcome.required_guidance_card_ids.len()
+        resources.len(),
+        1 + welcome.required_guidance_card_ids.len()
+            + welcome.capability_snapshot.must_read_agent_skill_ids.len()
     );
-    assert_eq!(
-        packet.required_skills.len(),
-        welcome.capability_snapshot.must_read_agent_skill_ids.len()
-    );
+    assert_eq!(packet.manifest.len(), resources.len());
+    for entry in &packet.manifest {
+        let key = entry["key"].as_str().unwrap();
+        assert_eq!(
+            entry["sha256"],
+            super::guidance_delivery::resource_digest(&resources[key]),
+            "{key}"
+        );
+    }
     assert!(packet.authoritative_guidance_available);
     assert_eq!(
         server.guidance_state.snapshot().unwrap().phase,
@@ -15411,49 +15433,32 @@ async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegoti
         vec![],
         vec![],
     );
-    let mut page: serde_json::Value = server
+    let first: serde_json::Value = server
         .get_agent_guidance_packet_tool(Parameters(GuidanceDeliveryRequest::default()))
         .await
         .unwrap()
         .into_typed()
         .unwrap();
-    let old_cursor = page["next_arguments"]["cursor"]
+    let old_cursor = first["next_arguments"]["cursor"]
         .as_str()
         .unwrap()
         .to_string();
-    let mut document = String::new();
-    loop {
-        assert!(serde_json::to_string(&page).unwrap().len() < 16_000);
-        document.push_str(page["content"].as_str().unwrap());
-        if page["delivery_complete"] == true {
-            break;
-        }
-        assert_eq!(
-            server.guidance_state.snapshot().unwrap().phase,
-            GuidancePhase::Bootstrap
-        );
-        assert!(server
-            .guidance_state
-            .router_preflight("create_box")
-            .is_some());
-        let args = serde_json::from_value(page["next_arguments"].clone()).unwrap();
-        page = server
-            .get_agent_guidance_packet_tool(Parameters(args))
-            .await
-            .unwrap()
-            .into_typed()
-            .unwrap();
-    }
-    let packet: AgentGuidancePacket = serde_json::from_str(&document).unwrap();
+    // Mutation stays blocked while the packet is unfinished.
+    assert!(server
+        .guidance_state
+        .router_preflight("create_box")
+        .is_some());
+    let (pages, resources) = drain_guidance_packet(&server).await;
+    let document = serde_json::to_string(&pages).unwrap();
     assert!(!document.contains("ON_DEMAND_ONLY"));
     assert_eq!(
-        packet.required_cards[0].body_markdown.as_deref(),
-        Some("Required chapter content")
+        resources["card:test.required.chapter"]["body_markdown"],
+        "Required chapter content"
     );
-    let index = &packet.guidance["guidance_chapters"][0];
-    assert!(index.get("body_markdown").is_none());
-    assert_eq!(index["next_tool"], "get_guidance_card");
-    assert_eq!(index["next_arguments"]["card_id"], "test.optional.chapter");
+    // The canonical contract is identity plus prompt text; the chapter index
+    // and structured detail are not repeated in the bootstrap.
+    assert!(resources["guidance"].get("guidance_chapters").is_none());
+    assert!(!document.contains("\"next_tool\":\"get_guidance_card\""));
     server.guidance_state.start(
         "card-session".into(),
         Some("inspect".into()),
@@ -15479,7 +15484,7 @@ async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegoti
         .as_str()
         .unwrap()
         .to_owned();
-    let mut card_text = String::new();
+    let mut card_pages = Vec::new();
     let wrong = GetGuidanceCardRequest {
         card_id: "test.required.chapter".into(),
         cursor: card_page["next_arguments"]["cursor"]
@@ -15491,8 +15496,8 @@ async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegoti
         .await
         .is_err());
     loop {
-        assert!(serde_json::to_string(&card_page).unwrap().len() < 16_000);
-        card_text.push_str(card_page["content"].as_str().unwrap());
+        assert!(serde_json::to_string(&card_page).unwrap().len() <= 12_000);
+        card_pages.push(card_page.clone());
         if card_page["delivery_complete"] == true {
             break;
         }
@@ -15508,14 +15513,17 @@ async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegoti
             .into_typed()
             .unwrap();
     }
-    let card: GuidanceCardInfo = serde_json::from_str(&card_text).unwrap();
+    let card: GuidanceCardInfo = serde_json::from_value(
+        super::guidance_delivery::reassemble(&card_pages)["card:test.optional.chapter"].clone(),
+    )
+    .unwrap();
     assert_eq!(
         card.body_markdown.as_deref(),
         Some("ON_DEMAND_ONLY".repeat(20_000).as_str())
     );
 
     assert_eq!(
-        packet.guidance["prompt_text"],
+        resources["guidance"]["prompt_text"],
         "Canonical guidance å屋.\n".repeat(2000)
     );
     assert_eq!(
@@ -15597,30 +15605,9 @@ async fn knowledge_scope_packets_are_bounded_and_cannot_unlock_authoring() {
             .bootstrap_steps
             .iter()
             .any(|s| s.action == "discover_curated_paths"));
-        let mut response: serde_json::Value = server
-            .get_agent_guidance_packet_tool(Parameters(GuidanceDeliveryRequest::default()))
-            .await
-            .unwrap()
-            .into_typed()
-            .unwrap();
-        let mut content = String::new();
-        loop {
-            if response.get("delivery").is_none() {
-                content = serde_json::to_string(&response).unwrap();
-                break;
-            }
-            content.push_str(response["content"].as_str().unwrap());
-            if response["delivery_complete"] == true {
-                break;
-            }
-            let next = serde_json::from_value(response["next_arguments"].clone()).unwrap();
-            response = server
-                .get_agent_guidance_packet_tool(Parameters(next))
-                .await
-                .unwrap()
-                .into_typed()
-                .unwrap();
-        }
+        let (pages, _) = drain_guidance_packet(&server).await;
+        assert_eq!(pages.len(), 1);
+        let content = serde_json::to_string(&pages).unwrap();
         assert!(content.len() < 12000, "{} bytes", content.len());
         assert!(!content.contains("DOMAIN_AUTHORING_SENTINEL"));
         assert!(content.contains(if scope == GuidanceScope::KnowledgeUse {
@@ -15722,4 +15709,251 @@ fn ordinary_passage_lookup_preserves_legacy_identity_without_approval() {
     );
     let changed = handle_lookup_source_passage(&world, "shared".into()).unwrap();
     assert!(request.verify_local_snapshot(&changed).is_err());
+}
+
+/// TALOS-cyczbfsk: the bootstrap is one compact canonical packet, every
+/// obligation has one read state, and follow-up reads neither duplicate the
+/// bootstrap silently nor regress it.
+#[cfg(feature = "model-api")]
+#[tokio::test]
+async fn compact_bootstrap_has_one_canonical_read_state() {
+    use super::guidance_delivery::{resource_digest, PAGE_BYTES};
+    use super::guidance_session::GuidancePhase;
+    use crate::plugins::agent_skills::{
+        AgentSkill, AgentSkillId, AgentSkillRegistry, AgentSkillTrustLevel,
+    };
+    use crate::plugins::authoring_guidance::{
+        AuthoringGuidance, GuidanceCardInfo, GuidanceCardRegistry, GuidanceChapterDef,
+        GuidanceReference,
+    };
+    let (sender, receiver) = mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut world = init_model_api_test_world();
+        world.insert_resource(ModelApiRuntimeInfo {
+            instance_id: "compact-bootstrap".into(),
+            app_name: "test".into(),
+            pid: 1,
+            http_host: "127.0.0.1".into(),
+            http_port: 24843,
+            http_url: "http://127.0.0.1:24843/mcp".into(),
+            registry_path: String::new(),
+            started_at_unix_ms: 1,
+            requested_port: None,
+        });
+        let mut skills = AgentSkillRegistry::default();
+        skills.insert(AgentSkill {
+            id: AgentSkillId("test.skill.substrate".into()),
+            title: "Substrate".into(),
+            summary: "Mandatory substrate procedure".into(),
+            task_tags: vec!["substrate".into()],
+            must_read_at_bootstrap: true,
+            body_markdown: "Follow the substrate procedure.".into(),
+            trust_level: AgentSkillTrustLevel::Shipped,
+            source_path: Some("/Users/dev/checkout/assets/skill.json".into()),
+            referenced_tool_ids: vec![],
+            required_tool_ids: vec![],
+            forbidden_tool_ids: vec![],
+            validation_tool_ids: vec![],
+            success_criteria: vec![],
+            stop_conditions: vec![],
+            screenshot_requirements: vec![],
+            common_failure_modes: vec![],
+            regression_prompt_ids: vec![],
+            next_skill_ids: vec![],
+        });
+        world.insert_resource(skills);
+        let mut cards = GuidanceCardRegistry::default();
+        cards.insert(GuidanceCardInfo {
+            id: "test.large.required".into(),
+            title: "Large required".into(),
+            summary: "Large registered card".into(),
+            body_markdown: Some("Required paragraph.\n\n".repeat(1500)),
+            ..Default::default()
+        });
+        // A capability-registered pointer to the guidance itself.
+        cards.insert(GuidanceCardInfo {
+            id: "authoring_guidance:test.guidance".into(),
+            summary: "Read get_authoring_guidance.".into(),
+            ..Default::default()
+        });
+        world.insert_resource(cards);
+        world.insert_resource(AuthoringGuidance {
+            guidance_id: "test.guidance".into(),
+            version: 3,
+            prompt_text: "Canonical rule.\n\n".repeat(200),
+            references: vec![GuidanceReference {
+                kind: "doc".into(),
+                target: "ref.one".into(),
+                note: Some("REFERENCE_NOTE_SENTINEL".into()),
+            }],
+            guidance_chapters: vec![GuidanceChapterDef {
+                id: "test.chapter".into(),
+                title: "Chapter".into(),
+                summary: "CHAPTER_SUMMARY_SENTINEL".into(),
+                body_markdown: "CHAPTER_BODY_SENTINEL".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        while let Ok(request) = receiver.recv() {
+            handle_model_api_request(&mut world, request);
+        }
+    });
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
+    let welcome: AgentWelcome = server
+        .negotiate_agent_session_tool(Parameters(AgentHello {
+            task: Some("inspect the substrate".into()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    // Pointer cards are not obligations; the canonical contract is.
+    for pointer in ["authoring_guidance:test.guidance", "doc:ref.one"] {
+        assert!(
+            !welcome
+                .required_guidance_card_ids
+                .iter()
+                .any(|id| id == pointer),
+            "{pointer} must not be a read obligation"
+        );
+    }
+    assert!(welcome
+        .required_guidance_card_ids
+        .iter()
+        .any(|id| id == "test.large.required"));
+
+    let (pages, resources) = drain_guidance_packet(&server).await;
+    let first = serde_json::to_vec(&pages[0]).unwrap().len();
+    assert!(first <= PAGE_BYTES, "initial bootstrap {first} bytes");
+    let document = serde_json::to_string(&pages).unwrap();
+    // One canonical representation: no structured duplicate of the prompt,
+    // no reference/chapter metadata, no development paths.
+    assert_eq!(
+        resources["guidance"],
+        serde_json::json!({"guidance_id": "test.guidance", "version": 3,
+            "prompt_text": "Canonical rule.\n\n".repeat(200)})
+    );
+    for sentinel in [
+        "REFERENCE_NOTE_SENTINEL",
+        "CHAPTER_SUMMARY_SENTINEL",
+        "CHAPTER_BODY_SENTINEL",
+        "component_structure",
+        "/Users/dev/checkout",
+    ] {
+        assert!(
+            !document.contains(sentinel),
+            "{sentinel} leaked into bootstrap"
+        );
+    }
+    // Each resource is delivered exactly once across the bootstrap pages.
+    let mut seen = std::collections::HashMap::<(String, u64), usize>::new();
+    for unit in pages
+        .iter()
+        .flat_map(|p| p["units"].as_array().unwrap().clone())
+    {
+        let key = (
+            unit["key"].as_str().unwrap().to_owned(),
+            unit["part"].as_u64().unwrap_or(1),
+        );
+        *seen.entry(key).or_default() += 1;
+    }
+    assert!(seen.values().all(|count| *count == 1), "{seen:?}");
+    let state = server.guidance_state.snapshot().unwrap();
+    assert_eq!(state.phase, GuidancePhase::Discover);
+    assert_eq!(
+        state.onboarding_metrics.guidance_requests as usize,
+        pages.len()
+    );
+    assert_eq!(state.onboarding_metrics.duplicate_resource_bytes, 0);
+
+    // Re-reading an inline card through its tool is measured as duplication
+    // and cannot revoke the obligation, even when abandoned mid-way.
+    let card_page: serde_json::Value = server
+        .get_guidance_card_tool(Parameters(GetGuidanceCardRequest {
+            card_id: "test.large.required".into(),
+            cursor: None,
+        }))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    assert_eq!(card_page["delivery_complete"], false);
+    assert_eq!(
+        server.guidance_state.snapshot().unwrap().phase,
+        GuidancePhase::Discover
+    );
+    // The detail document satisfies the same contract obligation and does not
+    // reset the bootstrap.
+    server
+        .get_authoring_guidance_tool(Parameters(GuidanceDeliveryRequest::default()))
+        .await
+        .unwrap();
+    let state = server.guidance_state.snapshot().unwrap();
+    assert_eq!(state.phase, GuidancePhase::Discover);
+    assert!(state.onboarding_metrics.duplicate_resource_bytes > 0);
+
+    // Manifest identities are exact and resolvable through their tools.
+    let packet: AgentGuidancePacket = serde_json::from_value(pages[0].clone()).unwrap();
+    for entry in &packet.manifest {
+        let key = entry["key"].as_str().unwrap();
+        assert_eq!(entry["sha256"], resource_digest(&resources[key]), "{key}");
+        assert!(entry["retrieval"]["tool"].is_string(), "{key}");
+    }
+    drop(server);
+    worker.await.unwrap();
+}
+
+/// A required resource the instance cannot serve is an explicit, actionable
+/// blocking gap, not a failed bootstrap or a silently dropped obligation.
+#[cfg(feature = "model-api")]
+#[tokio::test]
+async fn missing_required_card_is_an_explicit_blocking_gap() {
+    use super::guidance_session::GuidancePhase;
+    let (sender, receiver) = mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut world = init_model_api_test_world();
+        world.insert_resource(crate::plugins::authoring_guidance::AuthoringGuidance {
+            guidance_id: "g".into(),
+            version: 1,
+            prompt_text: "Rule.".into(),
+            ..Default::default()
+        });
+        while let Ok(request) = receiver.recv() {
+            handle_model_api_request(&mut world, request);
+        }
+    });
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
+    server.guidance_state.start(
+        "rev".into(),
+        None,
+        vec!["missing.card".into()],
+        vec![],
+        vec![],
+    );
+    let (pages, resources) = drain_guidance_packet(&server).await;
+    assert!(resources.contains_key("guidance"));
+    let packet: AgentGuidancePacket = serde_json::from_value(pages[0].clone()).unwrap();
+    let gap = packet
+        .manifest
+        .iter()
+        .find(|entry| entry["key"] == "card:missing.card")
+        .expect("missing card stays in the manifest");
+    assert_eq!(gap["available"], false);
+    assert_eq!(gap["next_tool"], "report_harness_incident");
+    let state = server.guidance_state.snapshot().unwrap();
+    assert_eq!(state.phase, GuidancePhase::Bootstrap);
+    let obligation = state
+        .blocking_obligations
+        .iter()
+        .find(|o| o.id == "read-guidance-card:missing.card")
+        .unwrap();
+    assert!(obligation.reason.contains("report_harness_incident"));
+    assert!(server
+        .guidance_state
+        .router_preflight("create_box")
+        .is_some());
+    drop(server);
+    worker.await.unwrap();
 }

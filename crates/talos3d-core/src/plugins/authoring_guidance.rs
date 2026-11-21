@@ -113,6 +113,18 @@ impl AuthoringGuidance {
     }
 
     /// Whether any capability has contributed real guidance content.
+    /// The single canonical bootstrap representation: identity plus the
+    /// authoritative prompt text. Structured policy, references and chapter
+    /// metadata are supplementary detail served by `get_authoring_guidance`;
+    /// they are not repeated in the bootstrap packet.
+    pub fn canonical_contract(&self) -> serde_json::Value {
+        serde_json::json!({
+            "guidance_id": self.guidance_id,
+            "version": self.version,
+            "prompt_text": self.prompt_text,
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.version == 0 && self.prompt_text.is_empty()
     }

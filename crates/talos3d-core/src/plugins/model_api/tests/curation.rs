@@ -317,12 +317,21 @@ async fn negotiated_guidance_loss_is_private_deduplicated_and_never_exports() {
         .unwrap_err()
         .message
         .contains(event_id));
-    assert!(server
+    // The packet keeps the missing card as an explicit blocking gap that
+    // names the same private incident event instead of failing bootstrap.
+    let packet: Value = server
         .get_agent_guidance_packet_tool(Parameters(GuidanceDeliveryRequest::default()))
         .await
-        .unwrap_err()
-        .message
-        .contains(event_id));
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    let gap = packet["manifest"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["available"] == false)
+        .expect("missing required card is an explicit gap");
+    assert!(gap["error"].as_str().unwrap().contains(event_id));
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     let submitted: Value = server
         .submit_pending_harness_incidents_tool()

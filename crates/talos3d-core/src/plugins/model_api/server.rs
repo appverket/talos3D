@@ -69,17 +69,22 @@ impl ModelApiTransportSecurity {
 
 #[cfg(feature = "model-api")]
 impl ModelApiServer {
+    /// Record what a guidance response delivered in the session ledger and
+    /// attach the compact live state to paged responses.
     fn guidance_delivery_result(
         &self,
         mut page: DeliveredGuidance,
         session_id: Option<String>,
-        packet: bool,
+        guidance_available: Option<bool>,
     ) -> Result<CallToolResult, McpError> {
-        if page.complete {
-            self.guidance_state
-                .mark_delivery_loaded(session_id.as_deref(), packet, page.available)
-                .map_err(|e| McpError::invalid_params(e, None))?;
-        }
+        self.guidance_state
+            .record_delivery(
+                session_id.as_deref(),
+                &page.completed,
+                page.response_bytes,
+                guidance_available,
+            )
+            .map_err(|e| McpError::invalid_params(e, None))?;
         if page.value.get("delivery").is_some() {
             page.value["live_guidance_state"] = self
                 .guidance_state
@@ -88,17 +93,22 @@ impl ModelApiServer {
                     serde_json::json!({
                         "guidance_session_id": state.guidance_session_id,
                         "phase": state.phase,
+                        "blocking_obligations": state.blocking_obligations.len(),
+                        "onboarding_metrics": state.onboarding_metrics,
                         "refresh_tool": "get_agent_guidance_state"
                     })
                 })
                 .unwrap_or(serde_json::Value::Null);
-        } else if packet {
-            page.value["state"] = serde_json::to_value(self.guidance_state.snapshot())
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         }
         // One content block: duplicating structuredContent and text can itself
         // exceed a provider's inline response limit.
         json_tool_result(page.value)
+    }
+
+    fn active_guidance_session(&self) -> Option<String> {
+        self.guidance_state
+            .snapshot()
+            .map(|state| state.guidance_session_id)
     }
 
     async fn corpus_connection(&self) -> crate::plugins::agent_skills::AgentCorpusConnection {
@@ -3320,10 +3330,12 @@ pub struct AgentGuidancePacket {
     /// False means the running app composition did not install canonical
     /// authoring guidance. The returned state remains blocked from mutation.
     pub authoritative_guidance_available: bool,
-    pub guidance: serde_json::Value,
-    pub required_cards: Vec<GuidanceCardInfo>,
-    pub required_skills: Vec<serde_json::Value>,
-    pub state: AgentGuidanceState,
+    /// Every resource the bootstrap requires, by immutable identity (key and
+    /// sha256) and MCP retrieval tool. Units delivered inline by the packet
+    /// satisfy exactly the same read obligations as the retrieval tool.
+    pub manifest: Vec<serde_json::Value>,
+    /// Served-size accounting for this packet snapshot.
+    pub composition: serde_json::Value,
 }
 
 #[cfg(feature = "model-api")]
@@ -6070,63 +6082,49 @@ impl ModelApiServer {
 
     #[tool(
         name = "get_agent_guidance_packet",
-        description = "Load canonical guidance and all required cards/skills after negotiate_agent_session. Large documents are delivered as bounded revision-pinned JSON fragments: read content and follow next_tool/next_arguments until delivery_complete. Only complete delivery satisfies bootstrap. No filesystem tools are needed."
+        description = "Load the canonical guidance and every required card/skill once, after negotiate_agent_session. The first page has a manifest of required resources (key, sha256, retrieval tool); pages carry whole resources or ordered semantic parts. Resources in completed_resource_keys are read; do not fetch them again. Follow next_tool/next_arguments until delivery_complete. No filesystem tools are needed."
     )]
     pub(super) async fn get_agent_guidance_packet_tool(
         &self,
         Parameters(params): Parameters<GuidanceDeliveryRequest>,
     ) -> Result<CallToolResult, McpError> {
-        if self.guidance_state.snapshot().is_none() {
+        let Some(state) = self.guidance_state.snapshot() else {
             return Err(McpError::invalid_params(
                 "no active guidance session; call negotiate_agent_session first",
                 None,
             ));
-        }
-        let session_id = self
-            .guidance_state
-            .snapshot()
-            .map(|state| state.guidance_session_id);
+        };
+        let session_id = Some(state.guidance_session_id.clone());
         if let Some(cursor) = params.cursor {
             let page = self
                 .guidance_delivery
                 .resume(GuidanceDeliveryKind::Packet, session_id.clone(), &cursor)
                 .map_err(|e| McpError::invalid_params(e, None))?;
-            return self.guidance_delivery_result(page, session_id, true);
+            return self.guidance_delivery_result(page, session_id, None);
         }
         self.guidance_state
-            .begin_delivery(session_id.as_deref())
+            .check_session(session_id.as_deref())
             .map_err(|e| McpError::invalid_params(e, None))?;
         let guidance = self
             .request_get_authoring_guidance()
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
-        let mut required_cards = Vec::new();
-        for card_id in self.guidance_state.required_cards() {
-            let card = self
-                .request_get_guidance_card(card_id)
-                .await
-                .map_err(|error| McpError::internal_error(error, None))?;
-            required_cards.push(card);
-        }
-        let mut required_skills = Vec::new();
-        for skill_id in self.guidance_state.required_skills() {
-            let skill = self
-                .get_agent_skill_tool(Parameters(GetAgentSkillRequest { skill_id }))
-                .await?
-                .into_typed::<serde_json::Value>()
-                .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-            required_skills.push(skill);
-        }
-        let authoritative_guidance_available = !guidance.is_empty();
-        let state = self
-            .guidance_state
-            .snapshot()
-            .expect("active guidance session");
-        let packet = AgentGuidancePacket {
-            contract: "talos3d.agent-guidance-packet".to_string(),
-            contract_version: 1,
-            authoritative_guidance_available,
-            guidance: if state.scope != super::guidance_session::GuidanceScope::Authoring {
+        let available = !guidance.is_empty();
+        let authoring = state.scope == super::guidance_session::GuidanceScope::Authoring;
+        let mut resources = vec![if authoring {
+            GuidanceResource::new(
+                GUIDANCE_KEY.into(),
+                "authoring_guidance",
+                guidance.guidance_id.clone(),
+                serde_json::json!({"tool": "get_authoring_guidance"}),
+                guidance.canonical_contract(),
+            )
+        } else {
+            GuidanceResource::new(
+                GUIDANCE_KEY.into(),
+                "knowledge_contract",
+                format!("{:?}", state.scope).to_ascii_lowercase(),
+                serde_json::json!({"tool": "get_agent_guidance_packet"}),
                 serde_json::json!({
                     "guidance_id": if state.scope == super::guidance_session::GuidanceScope::KnowledgeUse { "talos3d.knowledge-use" } else { "talos3d.knowledge-review" },
                     "version": 1,
@@ -6134,27 +6132,81 @@ impl ModelApiServer {
                     "authoring_guidance_revision": {"id": guidance.guidance_id, "version": guidance.version},
                     "prompt_text": super::guidance_session::knowledge_scope_invariants(state.scope).join("\n\n"),
                     "on_demand_tools": ["list_guidance_cards", "get_guidance_card", "list_agent_skills", "get_agent_skill", "get_agent_corpus_status"],
-                })
-            } else {
-                guidance
-                    .bootstrap_value()
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            },
-            required_cards,
-            required_skills,
-            state,
+                }),
+            )
+        }];
+        let mut unavailable = Vec::new();
+        for card_id in self.guidance_state.required_cards() {
+            match self.request_get_guidance_card(card_id.clone()).await {
+                Ok(card) => resources.push(GuidanceResource::new(
+                    card_key(&card_id),
+                    "guidance_card",
+                    card_id.clone(),
+                    serde_json::json!({"tool": "get_guidance_card", "arguments": {"card_id": card_id}}),
+                    serde_json::to_value(card)
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+                )),
+                Err(error) => unavailable.push((card_key(&card_id), card_id, error)),
+            }
+        }
+        for skill_id in self.guidance_state.required_skills() {
+            match self.agent_skill_value(skill_id.clone()).await {
+                Ok(skill) => resources.push(GuidanceResource::new(
+                    skill_key(&skill_id),
+                    "agent_skill",
+                    skill_id.clone(),
+                    serde_json::json!({"tool": "get_agent_skill", "arguments": {"skill_id": skill_id}}),
+                    skill,
+                )),
+                Err(error) => unavailable.push((skill_key(&skill_id), skill_id, error.message.to_string())),
+            }
+        }
+        self.guidance_state
+            .observe_revisions(
+                session_id.as_deref(),
+                resources
+                    .iter()
+                    .map(|r| (r.key.as_str(), r.digest.as_str())),
+            )
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let mut manifest = resources
+            .iter()
+            .map(|resource| resource.manifest_entry(true))
+            .collect::<Vec<_>>();
+        for (key, id, error) in unavailable {
+            self.guidance_state
+                .mark_unavailable(session_id.as_deref(), &key, error.clone())
+                .map_err(|e| McpError::invalid_params(e, None))?;
+            manifest.push(serde_json::json!({
+                "key": key, "id": id, "required": true, "available": false,
+                "error": error, "next_tool": "report_harness_incident",
+            }));
+        }
+        let header = serde_json::to_value(AgentGuidancePacket {
+            contract: "talos3d.agent-guidance-packet".to_string(),
+            contract_version: 2,
+            authoritative_guidance_available: available,
+            manifest,
+            composition: serde_json::json!({
+                "resources": resources.len(),
+                "resource_bytes": resources.iter().map(|r| r.bytes).sum::<usize>(),
+            }),
+        })
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let serde_json::Value::Object(header) = header else {
+            unreachable!("packet header serializes as an object")
         };
         let page = self
             .guidance_delivery
             .begin(
                 GuidanceDeliveryKind::Packet,
                 session_id.clone(),
-                serde_json::to_value(packet)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
-                authoritative_guidance_available,
+                header,
+                resources,
+                available,
             )
             .map_err(|e| McpError::internal_error(e, None))?;
-        self.guidance_delivery_result(page, session_id, true)
+        self.guidance_delivery_result(page, session_id, Some(available))
     }
 
     #[tool(
@@ -9846,20 +9898,17 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "get_guidance_card",
         description = "Fetch one progressive guidance card by id, including referenced tool ids \
-            schema-shaped JSON examples, and optional trajectory/success/stop-condition rubric fields. Large cards use bounded JSON fragments; follow next_tool/next_arguments through delivery_complete. No filesystem access is needed."
+            schema-shaped JSON examples, and optional trajectory/success/stop-condition rubric fields. A card larger than one page arrives as ordered semantic parts; follow next_tool/next_arguments through delivery_complete. A complete read satisfies the same obligation as inline packet delivery. No filesystem access is needed."
     )]
     pub(super) async fn get_guidance_card_tool(
         &self,
         Parameters(params): Parameters<GetGuidanceCardRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let session_id = self
-            .guidance_state
-            .snapshot()
-            .map(|s| s.guidance_session_id);
+        let session_id = self.active_guidance_session();
         // Binding includes both negotiation and card identity, so a valid cursor
         // cannot be relabelled to satisfy another required card.
         let binding = Some(serde_json::json!([session_id, params.card_id]).to_string());
-        let mut page = if let Some(cursor) = params.cursor {
+        let page = if let Some(cursor) = params.cursor {
             self.guidance_delivery
                 .resume(GuidanceDeliveryKind::Card, binding, &cursor)
                 .map_err(|e| McpError::invalid_params(e, None))?
@@ -9868,19 +9917,25 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                 .request_get_guidance_card(params.card_id.clone())
                 .await
                 .map_err(|e| McpError::invalid_params(e, None))?;
-            self.guidance_delivery
-                .begin(
-                    GuidanceDeliveryKind::Card,
-                    binding,
-                    serde_json::to_value(card)
-                        .map_err(|e| McpError::internal_error(e.to_string(), None))?,
-                    true,
+            let resource = GuidanceResource::new(
+                card_key(&params.card_id),
+                "guidance_card",
+                params.card_id.clone(),
+                serde_json::json!({"tool": "get_guidance_card", "arguments": {"card_id": params.card_id}}),
+                serde_json::to_value(card)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            );
+            self.guidance_state
+                .observe_revisions(
+                    session_id.as_deref(),
+                    [(resource.key.as_str(), resource.digest.as_str())],
                 )
+                .map_err(|e| McpError::invalid_params(e, None))?;
+            self.guidance_delivery
+                .begin_single(GuidanceDeliveryKind::Card, binding, resource, true)
                 .map_err(|e| McpError::invalid_params(e, None))?
         };
-        self.guidance_state
-            .record_card_delivery(session_id.as_deref(), &params.card_id, page.complete)
-            .map_err(|e| McpError::invalid_params(e, None))?;
+        let mut page = page;
         if let Some(arguments) = page
             .value
             .get_mut("next_arguments")
@@ -9888,7 +9943,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         {
             arguments.insert("card_id".into(), serde_json::json!(params.card_id));
         }
-        json_tool_result(page.value)
+        self.guidance_delivery_result(page, session_id, None)
     }
 
     #[tool(
@@ -9936,6 +9991,46 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<GetAgentSkillRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let value = self.agent_skill_value(params.skill_id.clone()).await?;
+        let session_id = self.active_guidance_session();
+        let resource = GuidanceResource::new(
+            skill_key(&params.skill_id),
+            "agent_skill",
+            params.skill_id.clone(),
+            serde_json::json!({"tool": "get_agent_skill", "arguments": {"skill_id": params.skill_id}}),
+            value.clone(),
+        );
+        // A concurrent renegotiation only means this read is not recorded.
+        let _ = self.guidance_state.record_delivery(
+            session_id.as_deref(),
+            &[resource.read()],
+            resource.bytes,
+            None,
+        );
+        json_tool_result(value)
+    }
+
+    /// Skill record served over MCP. Identity is the corpus revision; local
+    /// development paths never substitute for an MCP retrieval route.
+    async fn agent_skill_value(&self, skill_id: String) -> Result<Value, McpError> {
+        let params = GetAgentSkillRequest { skill_id };
+        let mut value = self.agent_skill_value_unsanitized(params).await?;
+        if let Some(fields) = value.as_object_mut() {
+            if fields
+                .get("source_path")
+                .and_then(Value::as_str)
+                .is_some_and(|path| !path.starts_with("cloud:"))
+            {
+                fields.remove("source_path");
+            }
+        }
+        Ok(value)
+    }
+
+    async fn agent_skill_value_unsanitized(
+        &self,
+        params: GetAgentSkillRequest,
+    ) -> Result<Value, McpError> {
         use crate::plugins::agent_skill_cloud as cloud;
         let connection = self.corpus_connection().await;
         let (_, store) = self.curation_context().await;
@@ -9996,7 +10091,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                     .collect::<Vec<_>>();
                 value["runtime_compatibility"] = json!({"required_tools_available":missing.is_empty(),"missing_required_tool_ids":missing,"note":"A corpus update does not add runtime tools. Treat missing tools as a capability gap; profile filters may require an explicit switch."});
                 value["resource_tool"] = json!("get_agent_skill_resource");
-                return json_tool_result(value);
+                return Ok(value);
             }
         }
         if store.skill_fallback_blocked(&params.skill_id) {
@@ -10013,7 +10108,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         value["cloud_corpus"] = cloud::status(&index);
         value["delivery"] = json!("bundled_or_private_fallback");
-        json_tool_result(value)
+        Ok(value)
     }
 
     #[tool(
@@ -11067,43 +11162,66 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "get_authoring_guidance",
-        description = "Return the canonical Talos3D-owned authoring guidance (COMPONENT_STRUCTURE). Call this immediately after connecting so you know how to structure reusable Definitions, derived variants, and singletons, and how they compose with progressive refinement. The `prompt_text` markdown is authoritative; `component_structure` is supplementary. Large responses use bounded JSON fragments: read content and follow next_tool/next_arguments until delivery_complete, without filesystem access."
+        description = "Return the canonical Talos3D-owned authoring guidance (COMPONENT_STRUCTURE). Call this immediately after connecting so you know how to structure reusable Definitions, derived variants, and singletons, and how they compose with progressive refinement. After get_agent_guidance_packet this is supplementary detail: its `prompt_text` is the same canonical contract the packet already delivered; `component_structure`, references and the chapter index are detail. Large responses arrive as ordered semantic parts; follow next_tool/next_arguments until delivery_complete, without filesystem access."
     )]
     pub(super) async fn get_authoring_guidance_tool(
         &self,
         Parameters(params): Parameters<GuidanceDeliveryRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let session_id = self
-            .guidance_state
-            .snapshot()
-            .map(|state| state.guidance_session_id);
+        let state = self.guidance_state.snapshot();
+        let session_id = state.as_ref().map(|s| s.guidance_session_id.clone());
         if let Some(cursor) = params.cursor {
             let page = self
                 .guidance_delivery
                 .resume(GuidanceDeliveryKind::Authoring, session_id.clone(), &cursor)
                 .map_err(|e| McpError::invalid_params(e, None))?;
-            return self.guidance_delivery_result(page, session_id, false);
+            return self.guidance_delivery_result(page, session_id, None);
         }
         self.guidance_state
-            .begin_delivery(session_id.as_deref())
+            .check_session(session_id.as_deref())
             .map_err(|e| McpError::invalid_params(e, None))?;
         let guidance = self
             .request_get_authoring_guidance()
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         let available = !guidance.is_empty();
-        let page = self
+        // The detail view satisfies the canonical contract obligation, but
+        // only for an authoring session: it is not a knowledge-scope contract.
+        let authoring = state
+            .as_ref()
+            .is_none_or(|s| s.scope == super::guidance_session::GuidanceScope::Authoring);
+        let canonical_digest = resource_digest(&guidance.canonical_contract());
+        if authoring {
+            self.guidance_state
+                .observe_revisions(
+                    session_id.as_deref(),
+                    [(GUIDANCE_KEY, canonical_digest.as_str())],
+                )
+                .map_err(|e| McpError::invalid_params(e, None))?;
+        }
+        let resource = GuidanceResource::with_digest(
+            GUIDANCE_KEY.into(),
+            "authoring_guidance",
+            guidance.guidance_id.clone(),
+            serde_json::json!({"tool": "get_authoring_guidance"}),
+            guidance
+                .bootstrap_value()
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            canonical_digest,
+        );
+        let mut page = self
             .guidance_delivery
-            .begin(
+            .begin_single(
                 GuidanceDeliveryKind::Authoring,
                 session_id.clone(),
-                guidance
-                    .bootstrap_value()
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+                resource,
                 available,
             )
             .map_err(|e| McpError::internal_error(e, None))?;
-        self.guidance_delivery_result(page, session_id, false)
+        if !authoring {
+            page.completed.clear();
+        }
+        self.guidance_delivery_result(page, session_id, authoring.then_some(available))
     }
 
     // --- Semantic Procedural Session (ADR-051, PP-SPS-3) ---

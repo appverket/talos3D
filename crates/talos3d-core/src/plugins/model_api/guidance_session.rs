@@ -4,12 +4,13 @@
 //! guidance state. Client lifecycle hooks are optional projections over this
 //! store; they are never the semantic enforcement boundary.
 
+use super::guidance_delivery::ResourceRead;
 use super::profiles::{tool_category, ToolCategory};
 use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -21,6 +22,59 @@ const REQUIRED_VERIFICATION_TOOLS: [&str; 5] = [
     "check_clearance",
     "run_validation_v2",
 ];
+
+/// Ledger key of the canonical authoring/knowledge contract.
+pub(super) const GUIDANCE_KEY: &str = "guidance";
+pub(super) fn card_key(id: &str) -> String {
+    format!("card:{id}")
+}
+pub(super) fn skill_key(id: &str) -> String {
+    format!("skill:{id}")
+}
+
+/// The single owner of read obligations, keyed by resource key and content
+/// digest. Inline packet delivery and per-resource tools write the same
+/// entries, so one complete read satisfies an obligation however it arrived.
+/// Partial, repeated or unrelated deliveries never revoke a read; only a newer
+/// observed revision of the same key does, and only for that key.
+#[derive(Debug, Clone, Default)]
+struct ReadLedger {
+    current: HashMap<String, String>,
+    read: HashMap<String, String>,
+    unavailable: HashMap<String, String>,
+}
+
+impl ReadLedger {
+    fn observe(&mut self, key: &str, digest: &str) {
+        self.current.insert(key.to_owned(), digest.to_owned());
+        self.unavailable.remove(key);
+    }
+    /// Returns true when this exact revision had already been read.
+    fn record(&mut self, key: &str, digest: &str) -> bool {
+        self.observe(key, digest);
+        self.read
+            .insert(key.to_owned(), digest.to_owned())
+            .as_deref()
+            == Some(digest)
+    }
+    fn satisfied(&self, key: &str) -> bool {
+        self.read
+            .get(key)
+            .is_some_and(|read| self.current.get(key) == Some(read))
+    }
+}
+
+/// Server-measured onboarding cost up to the first authorised model mutation.
+/// Client-side token usage is not observable here; repeated large context is
+/// measured as duplicate resource bytes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct OnboardingMetrics {
+    pub guidance_requests: u32,
+    pub response_bytes: u64,
+    pub unique_resource_bytes: u64,
+    pub duplicate_resource_bytes: u64,
+    pub frozen_at_first_mutation: bool,
+}
 
 /// A knowledge reviewer loads metadata on demand but cannot mutate this runtime.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -146,6 +200,8 @@ pub struct AgentGuidanceState {
     pub authored_since_negotiation: bool,
     pub verification_tools_observed: Vec<String>,
     pub rendered_output_observed: bool,
+    #[serde(default)]
+    pub onboarding_metrics: OnboardingMetrics,
 }
 
 /// Machine-readable description of the optional Codex lifecycle projection.
@@ -253,10 +309,9 @@ struct GuidanceSession {
     task: Option<String>,
     required_invariants: Vec<String>,
     required_cards: Vec<String>,
-    read_cards: HashSet<String>,
     required_skills: Vec<String>,
-    read_skills: HashSet<String>,
-    guidance_loaded: bool,
+    ledger: ReadLedger,
+    metrics: OnboardingMetrics,
     guidance_unavailable: bool,
     discovery_paths: HashSet<String>,
     authored: bool,
@@ -306,10 +361,9 @@ impl GuidanceSessionStore {
             task: task.filter(|task| !task.trim().is_empty()),
             required_invariants,
             required_cards,
-            read_cards: HashSet::new(),
             required_skills,
-            read_skills: HashSet::new(),
-            guidance_loaded: false,
+            ledger: ReadLedger::default(),
+            metrics: OnboardingMetrics::default(),
             guidance_unavailable: false,
             discovery_paths: HashSet::new(),
             authored: false,
@@ -358,63 +412,80 @@ impl GuidanceSessionStore {
             .unwrap_or_default()
     }
 
-    pub fn begin_delivery(&self, expected_session: Option<&str>) -> Result<(), String> {
+    fn with_session<T>(
+        &self,
+        expected_session: Option<&str>,
+        update: impl FnOnce(&mut GuidanceSession) -> T,
+    ) -> Result<Option<T>, String> {
         let mut guard = self.0.lock().expect("guidance session lock poisoned");
         if guard.as_ref().map(|session| session.id.as_str()) != expected_session {
             return Err("guidance session changed; restart guidance loading".into());
         }
-        if let Some(session) = guard.as_mut() {
-            session.guidance_loaded = false;
-            session.guidance_unavailable = false;
-        }
-        Ok(())
+        Ok(guard.as_mut().map(update))
     }
 
-    pub fn mark_delivery_loaded(
-        &self,
-        expected_session: Option<&str>,
-        packet: bool,
-        available: bool,
-    ) -> Result<(), String> {
-        let mut guard = self.0.lock().expect("guidance session lock poisoned");
-        if guard.as_ref().map(|session| session.id.as_str()) != expected_session {
-            return Err(
-                "guidance session changed during delivery; restart guidance loading".into(),
-            );
-        }
-        if let Some(session) = guard.as_mut() {
-            session.guidance_loaded = available;
-            session.guidance_unavailable = !available;
-            if packet {
-                session
-                    .read_cards
-                    .extend(session.required_cards.iter().cloned());
-                session
-                    .read_skills
-                    .extend(session.required_skills.iter().cloned());
-            }
-        }
-        Ok(())
+    /// Fence a delivery against concurrent renegotiation. Starting a delivery
+    /// never revokes obligations satisfied by an earlier one.
+    pub fn check_session(&self, expected_session: Option<&str>) -> Result<(), String> {
+        self.with_session(expected_session, |_| ()).map(|_| ())
     }
 
-    pub fn record_card_delivery(
+    /// Pin the current revision of resources about to be delivered. A changed
+    /// digest invalidates only that key's earlier read.
+    pub fn observe_revisions<'a>(
         &self,
         expected_session: Option<&str>,
-        card_id: &str,
-        complete: bool,
+        revisions: impl IntoIterator<Item = (&'a str, &'a str)>,
     ) -> Result<(), String> {
-        let mut guard = self.0.lock().expect("guidance session lock poisoned");
-        if guard.as_ref().map(|session| session.id.as_str()) != expected_session {
-            return Err("guidance session changed during card delivery; restart the card".into());
-        }
-        if let Some(session) = guard.as_mut() {
-            if complete {
-                session.read_cards.insert(card_id.to_owned());
-            } else {
-                session.read_cards.remove(card_id);
+        self.with_session(expected_session, |session| {
+            for (key, digest) in revisions {
+                session.ledger.observe(key, digest);
             }
-        }
-        Ok(())
+        })
+        .map(|_| ())
+    }
+
+    /// A required resource the running instance cannot serve stays blocking
+    /// with an explicit, actionable reason instead of failing the bootstrap.
+    pub fn mark_unavailable(
+        &self,
+        expected_session: Option<&str>,
+        key: &str,
+        reason: String,
+    ) -> Result<(), String> {
+        self.with_session(expected_session, |session| {
+            session.ledger.unavailable.insert(key.to_owned(), reason);
+        })
+        .map(|_| ())
+    }
+
+    /// Record one served guidance response and the resources it completed.
+    pub fn record_delivery(
+        &self,
+        expected_session: Option<&str>,
+        reads: &[ResourceRead],
+        response_bytes: usize,
+        guidance_available: Option<bool>,
+    ) -> Result<(), String> {
+        self.with_session(expected_session, |session| {
+            if let Some(available) = guidance_available {
+                session.guidance_unavailable = !available;
+            }
+            let count = !session.metrics.frozen_at_first_mutation;
+            if count {
+                session.metrics.guidance_requests += 1;
+                session.metrics.response_bytes += response_bytes as u64;
+            }
+            for read in reads {
+                let duplicate = session.ledger.record(&read.key, &read.digest);
+                if count && duplicate {
+                    session.metrics.duplicate_resource_bytes += read.bytes as u64;
+                } else if count {
+                    session.metrics.unique_resource_bytes += read.bytes as u64;
+                }
+            }
+        })
+        .map(|_| ())
     }
 
     #[cfg(test)]
@@ -425,25 +496,29 @@ impl GuidanceSessionStore {
             .expect("guidance session lock poisoned")
             .as_mut()
         {
-            session.guidance_loaded = available;
             session.guidance_unavailable = !available;
+            if available {
+                session.ledger.record(GUIDANCE_KEY, "test");
+            }
         }
     }
 
     #[cfg(test)]
     pub fn mark_guidance_packet_loaded(&self, authoritative_guidance_available: bool) {
+        self.mark_authoring_guidance(authoritative_guidance_available);
         let mut guard = self.0.lock().expect("guidance session lock poisoned");
         let Some(session) = guard.as_mut() else {
             return;
         };
-        session.guidance_loaded = authoritative_guidance_available;
-        session.guidance_unavailable = !authoritative_guidance_available;
-        session
-            .read_cards
-            .extend(session.required_cards.iter().cloned());
-        session
-            .read_skills
-            .extend(session.required_skills.iter().cloned());
+        let keys = session
+            .required_cards
+            .iter()
+            .map(|id| card_key(id))
+            .chain(session.required_skills.iter().map(|id| skill_key(id)))
+            .collect::<Vec<_>>();
+        for key in keys {
+            session.ledger.record(&key, "test");
+        }
     }
 
     /// Server-side admission. Legacy clients that never negotiate remain
@@ -481,14 +556,6 @@ impl GuidanceSessionStore {
         };
 
         match tool {
-            "get_guidance_card" => {
-                if let Some(card_id) = arguments
-                    .and_then(|arguments| arguments.get("card_id"))
-                    .and_then(Value::as_str)
-                {
-                    session.read_cards.insert(card_id.to_string());
-                }
-            }
             "discover_curated_paths" => {
                 if let Some(path_kind) = arguments
                     .and_then(|arguments| arguments.get("path_kind"))
@@ -497,20 +564,13 @@ impl GuidanceSessionStore {
                     session.discovery_paths.insert(path_kind.to_string());
                 }
             }
-            "get_agent_skill" => {
-                if let Some(skill_id) = arguments
-                    .and_then(|arguments| arguments.get("skill_id"))
-                    .and_then(Value::as_str)
-                {
-                    session.read_skills.insert(skill_id.to_string());
-                }
-            }
             "take_screenshot" if session.authored => session.rendered_output = true,
             tool if REQUIRED_VERIFICATION_TOOLS.contains(&tool) && session.authored => {
                 session.verification_tools.insert(tool.to_string());
             }
             tool if changes_authored_model(tool) => {
                 session.authored = true;
+                session.metrics.frozen_at_first_mutation = true;
                 // Evidence must describe the latest authored state, not a
                 // snapshot captured before the most recent mutation.
                 session.verification_tools.clear();
@@ -539,16 +599,26 @@ impl GuidanceSessionStore {
 }
 
 impl GuidanceSession {
+    fn guidance_loaded(&self) -> bool {
+        !self.guidance_unavailable && self.ledger.satisfied(GUIDANCE_KEY)
+    }
+
+    fn required_keys(&self) -> impl Iterator<Item = (String, &'static str)> + '_ {
+        self.required_cards
+            .iter()
+            .map(|id| (card_key(id), "guidance-card"))
+            .chain(
+                self.required_skills
+                    .iter()
+                    .map(|id| (skill_key(id), "agent-skill")),
+            )
+    }
+
     fn bootstrap_complete(&self) -> bool {
-        self.guidance_loaded
+        self.guidance_loaded()
             && self
-                .required_cards
-                .iter()
-                .all(|card| self.read_cards.contains(card))
-            && self
-                .required_skills
-                .iter()
-                .all(|skill| self.read_skills.contains(skill))
+                .required_keys()
+                .all(|(key, _)| self.ledger.satisfied(&key))
     }
 
     fn discovery_complete(&self) -> bool {
@@ -611,7 +681,7 @@ impl GuidanceSession {
         let mut blocking = Vec::new();
         let mut next_actions = Vec::new();
 
-        if self.guidance_loaded {
+        if self.guidance_loaded() {
             satisfied.push(
                 match self.scope {
                     GuidanceScope::KnowledgeReview => "knowledge-review-guidance-loaded",
@@ -641,27 +711,18 @@ impl GuidanceSession {
             });
         }
 
-        for card in &self.required_cards {
-            if self.read_cards.contains(card) {
-                satisfied.push(format!("guidance-card:{card}"));
+        for (key, label) in self.required_keys() {
+            let id = key.split_once(':').map_or(key.as_str(), |(_, id)| id);
+            if self.ledger.satisfied(&key) {
+                satisfied.push(format!("{label}:{id}"));
             } else {
+                let reason = match self.ledger.unavailable.get(&key) {
+                    Some(error) => format!("The running instance named this resource as required but cannot serve it ({error}). Do not mutate the model; report the gap with report_harness_incident and refresh after a compatible release."),
+                    None => "Read this must-read resource once, inline in get_agent_guidance_packet or through its manifest retrieval tool.".to_string(),
+                };
                 blocking.push(GuidanceObligation {
-                    id: format!("read-guidance-card:{card}"),
-                    reason: "Resolve a must-read card named by the live capability snapshot."
-                        .to_string(),
-                    blocking: true,
-                });
-            }
-        }
-
-        for skill in &self.required_skills {
-            if self.read_skills.contains(skill) {
-                satisfied.push(format!("agent-skill:{skill}"));
-            } else {
-                blocking.push(GuidanceObligation {
-                    id: format!("read-agent-skill:{skill}"),
-                    reason: "Resolve a must-read operating procedure named by the live capability snapshot."
-                        .to_string(),
+                    id: format!("read-{label}:{id}"),
+                    reason,
                     blocking: true,
                 });
             }
@@ -783,6 +844,7 @@ impl GuidanceSession {
                 .map(|tool| (*tool).to_string())
                 .collect(),
             rendered_output_observed: self.rendered_output,
+            onboarding_metrics: self.metrics.clone(),
         }
     }
 }
@@ -882,6 +944,7 @@ fn inactive_guidance_state() -> AgentGuidanceState {
         authored_since_negotiation: false,
         verification_tools_observed: Vec::new(),
         rendered_output_observed: false,
+        onboarding_metrics: OnboardingMetrics::default(),
     }
 }
 
@@ -898,14 +961,7 @@ mod tests {
             Vec::new(),
             vec!["Use semantic edits.".to_string()],
         );
-        store.mark_authoring_guidance(true);
-        store.observe_success(
-            "get_guidance_card",
-            Some(&Map::from_iter([(
-                "card_id".to_string(),
-                json!("card.required"),
-            )])),
-        );
+        store.mark_guidance_packet_loaded(true);
         if task.is_some() {
             for path in REQUIRED_DISCOVERY_PATHS {
                 store.observe_success(
@@ -1077,13 +1133,18 @@ mod tests {
         assert!(store.router_preflight("create_box").is_some());
 
         store.mark_authoring_guidance(true);
-        store.observe_success(
-            "get_guidance_card",
-            Some(&Map::from_iter([(
-                "card_id".to_string(),
-                json!("card.required"),
-            )])),
-        );
+        store
+            .record_delivery(
+                Some(&initial.guidance_session_id),
+                &[ResourceRead {
+                    key: card_key("card.required"),
+                    digest: "d".into(),
+                    bytes: 1,
+                }],
+                1,
+                None,
+            )
+            .unwrap();
         assert_eq!(store.snapshot().unwrap().phase, GuidancePhase::Discover);
         assert!(store.router_preflight("create_box").is_some());
 
@@ -1122,5 +1183,79 @@ mod tests {
         assert!(store
             .hook_preflight("mcp__talos3d__negotiate_agent_session")
             .is_none());
+    }
+
+    #[test]
+    fn read_ledger_is_digest_keyed_and_revision_invalidation_is_local() {
+        let store = GuidanceSessionStore::default();
+        let state = store.start(
+            "rev".into(),
+            None,
+            vec!["a".into(), "b".into()],
+            vec!["s".into()],
+            vec![],
+        );
+        let session = Some(state.guidance_session_id.as_str());
+        let read = |key: &str, digest: &str| ResourceRead {
+            key: key.into(),
+            digest: digest.into(),
+            bytes: 10,
+        };
+        store
+            .record_delivery(
+                session,
+                &[
+                    read(GUIDANCE_KEY, "g1"),
+                    read(&card_key("a"), "a1"),
+                    read(&card_key("b"), "b1"),
+                    read(&skill_key("s"), "s1"),
+                ],
+                100,
+                Some(true),
+            )
+            .unwrap();
+        assert_ne!(store.snapshot().unwrap().phase, GuidancePhase::Bootstrap);
+        // Same revision again: satisfied, measured as duplicate.
+        store
+            .record_delivery(session, &[read(&card_key("a"), "a1")], 10, None)
+            .unwrap();
+        let metrics = store.snapshot().unwrap().onboarding_metrics;
+        assert_eq!(metrics.duplicate_resource_bytes, 10);
+        assert_eq!(metrics.guidance_requests, 2);
+        // A newer revision of `b` invalidates only `b`.
+        store
+            .observe_revisions(session, [(card_key("b").as_str(), "b2")])
+            .unwrap();
+        let state = store.snapshot().unwrap();
+        assert_eq!(state.phase, GuidancePhase::Bootstrap);
+        let blocking: Vec<_> = state
+            .blocking_obligations
+            .iter()
+            .map(|o| o.id.as_str())
+            .collect();
+        assert_eq!(blocking, vec!["read-guidance-card:b"]);
+        // Reading the new revision once restores it; no caller assertion can.
+        store
+            .record_delivery(session, &[read(&card_key("b"), "b2")], 10, None)
+            .unwrap();
+        assert_ne!(store.snapshot().unwrap().phase, GuidancePhase::Bootstrap);
+        // Renegotiation fences stale deliveries.
+        store.start("rev2".into(), None, vec![], vec![], vec![]);
+        assert!(store
+            .record_delivery(session, &[read(GUIDANCE_KEY, "g1")], 1, None)
+            .is_err());
+    }
+
+    #[test]
+    fn metrics_freeze_at_first_authorised_mutation() {
+        let store = ready_store(None);
+        store.observe_success("create_box", None);
+        let session = store.snapshot().unwrap().guidance_session_id;
+        store
+            .record_delivery(Some(&session), &[], 500, None)
+            .unwrap();
+        let metrics = store.snapshot().unwrap().onboarding_metrics;
+        assert!(metrics.frozen_at_first_mutation);
+        assert_eq!(metrics.response_bytes, 0);
     }
 }

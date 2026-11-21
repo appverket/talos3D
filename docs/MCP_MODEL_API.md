@@ -54,18 +54,26 @@ Compact profiles advertise the canonical `set_property` schema. Its deprecated
 
 ## Bootstrap and on-demand guidance
 
-`get_authoring_guidance` and the `guidance` member of
-`get_agent_guidance_packet` preserve the authoritative prompt, policy and
-references, but return chapter metadata rather than chapter bodies. Each
-`guidance_chapters` entry has `next_tool: get_guidance_card` and
-`next_arguments: {card_id: ...}`. Fetch relevant chapters through that tool.
-Required cards and skills remain included in the session packet; complete
-all pages before bootstrap is satisfied. This projection does not remove
-content from the registry or relax the session's required-reading gates.
-Large `get_guidance_card` responses use the same bounded JSON-fragment protocol.
-Follow the returned `card_id` and `cursor` until `delivery_complete`; partial
-cards do not satisfy required-reading gates. Cursors bind both the negotiated
-session and the card, and a new card replaces the previous card snapshot.
+The bootstrap packet carries one canonical representation of the contract:
+`{guidance_id, version, prompt_text}` under the ledger key `guidance`. The
+structured `component_structure`, `references` and chapter metadata are
+supplementary detail served by `get_authoring_guidance`; they are not repeated
+in the packet. In that detail view each `guidance_chapters` entry has
+`next_tool: get_guidance_card` and `next_arguments: {card_id: ...}`.
+
+Cards synthesized from the active guidance itself (its
+`authoring_guidance:<id>` pointer card and one card per reference) only point
+back at the canonical contract. They resolve through `get_guidance_card` but
+are not must-read obligations.
+
+Every read obligation has one owner: a session ledger keyed by resource key
+(`guidance`, `card:<id>`, `skill:<id>`) and content `sha256`. A resource that
+is completely delivered once, inline in the packet or through its own tool,
+satisfies the obligation. Partial, repeated or unrelated reads never revoke
+it; only a newer observed revision of the same key does, and only for that
+key. There is no caller-supplied completion assertion. A required resource the
+instance cannot serve stays in the manifest with `available: false`, its error
+and `next_tool: report_harness_incident`, and remains a blocking obligation.
 
 ## What It Exposes
 
@@ -209,8 +217,9 @@ Agents should treat MCP as a semantic model contract, not as a geometry macro
 recorder. The expected loop is:
 
 1. Start with `negotiate_agent_session`. Confirm the returned instance id, then
-   call `get_agent_guidance_packet` once to receive the authoritative guidance,
-   all must-read cards, and all must-read agent skills. Follow the returned
+   call `get_agent_guidance_packet` and follow its pages to receive the
+   canonical guidance, all must-read cards and all must-read agent skills
+   once, by identity; fetch only manifest entries it did not deliver. Follow the returned
    `guidance_state.next_actions`; `get_agent_guidance_state` restores a compact
    current phase after compaction, task/profile changes, or a blocked call.
 2. Inspect the loaded capability surface with `list_vocabulary`,
@@ -386,17 +395,27 @@ The handshake is safe to repeat after reconnect, task/profile change,
 composes the same runtime registries as the normal tools; it is not a second
 knowledge store.
 
-`get_agent_guidance_packet` collapses the old guidance-plus-one-call-per-card
-and must-read-skill bootstrap into one MCP route. Both this tool and
-`get_authoring_guidance` retain their existing shape for small responses. Larger
-responses return `talos3d.guidance-page.v1`: read the `content` fragments as one
-JSON document and follow `next_tool` with `next_arguments` until
-`delivery_complete`. The snapshot SHA-256 remains constant, offsets are UTF-8
-byte offsets, and the server rejects skipped content or cursors from another
-session. No local file or shell tool is needed. Bootstrap stays blocked until
-all pages have been served; delivery records are not proof of comprehension.
-Renegotiating invalidates old cursors. The outer `live_guidance_state` is current;
-any state embedded in the frozen document describes the start of delivery.
+`get_agent_guidance_packet` (contract version 2) collapses the bootstrap into
+one MCP route. The first page leads with a `manifest`: one entry per required
+resource with `key`, `kind`, `id`, `sha256`, `bytes` and its `retrieval` tool
+and arguments. Pages (`talos3d.guidance-page.v2`) then carry `units`: a whole
+resource (`content`), or ordered parts of one oversize resource (`fields`
+objects to merge, or paragraph-bounded `text_segment`s to concatenate per
+`field`). Content is never cut into fragments of a serialized JSON document.
+`completed_resource_keys` names the resources a page finished; those are
+recorded as read and need no further fetch. Follow `next_tool` with
+`next_arguments` until `delivery_complete`. Each page is at most 12,000
+serialized bytes; cursors are unit indexes, cannot skip unread units and are
+bound to the negotiated session. `get_guidance_card` and
+`get_authoring_guidance` keep their plain shape when a resource fits one page
+and use the same page format otherwise. No local file or shell tool is needed.
+Delivery records are not proof of comprehension.
+
+`live_guidance_state` on every page, and `get_agent_guidance_state`, report
+`onboarding_metrics` measured by the server until the first authorised model
+mutation: `guidance_requests`, `response_bytes`, `unique_resource_bytes` and
+`duplicate_resource_bytes` (resources served again at an already read
+revision). Client token usage is not observable by the server.
 
 The server serializes each snapshot once, retains at most two snapshots of
 2 MB each per MCP connection, and slices bounded fragments on subsequent calls.

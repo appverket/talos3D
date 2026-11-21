@@ -1,14 +1,24 @@
-//! Bounded MCP-only delivery of canonical guidance. No provider filesystem fallback.
+//! Bounded MCP-only delivery of canonical guidance resources. No provider
+//! filesystem fallback.
+//!
+//! Guidance is delivered as identified resources (`key` + content digest),
+//! never as byte fragments of one serialized document. A page carries whole
+//! resources, or semantic parts of one oversize resource (object fields or
+//! paragraph-bounded text segments). Every resource whose last part a page
+//! carries is reported in `completed`, which is what the read ledger records.
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 // Limits apply to serialized content, including JSON escaping. Only three fixed
 // tool slots are retained per connection, never a caller-selected cache key.
-const INLINE_BYTES: usize = 12_000;
-const CHUNK_BYTES: usize = 6_000;
+pub(super) const PAGE_BYTES: usize = 12_000;
+// Room the server adds after paging (compact live guidance state).
+const LIVE_STATE_RESERVE: usize = 640;
+// Room left in a page for the envelope around units.
+const UNIT_BYTES: usize = 9_000;
 const DOCUMENT_BYTES: usize = 2_000_000;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -43,66 +53,278 @@ impl GuidanceDeliveryKind {
     }
 }
 
+/// Content identity used by the read ledger: sha256 of compact JSON.
+pub(super) fn resource_digest(value: &Value) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    format!("sha256:{:x}", Sha256::digest(&bytes))
+}
+
+fn encoded_len(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX)
+}
+
+/// One identified guidance resource. `digest` is the ledger identity of the
+/// obligation it satisfies; it normally equals the digest of `body`, but a
+/// detail view of a canonical resource may carry the canonical digest.
+#[derive(Debug, Clone)]
+pub(super) struct GuidanceResource {
+    pub key: String,
+    pub kind: &'static str,
+    pub id: String,
+    pub retrieval: Value,
+    pub body: Value,
+    pub digest: String,
+    pub bytes: usize,
+}
+
+impl GuidanceResource {
+    pub fn new(key: String, kind: &'static str, id: String, retrieval: Value, body: Value) -> Self {
+        let digest = resource_digest(&body);
+        Self::with_digest(key, kind, id, retrieval, body, digest)
+    }
+
+    pub fn with_digest(
+        key: String,
+        kind: &'static str,
+        id: String,
+        retrieval: Value,
+        body: Value,
+        digest: String,
+    ) -> Self {
+        let bytes = encoded_len(&body);
+        Self {
+            key,
+            kind,
+            id,
+            retrieval,
+            body,
+            digest,
+            bytes,
+        }
+    }
+
+    pub fn manifest_entry(&self, required: bool) -> Value {
+        json!({
+            "key": self.key,
+            "kind": self.kind,
+            "id": self.id,
+            "sha256": self.digest,
+            "bytes": self.bytes,
+            "required": required,
+            "retrieval": self.retrieval,
+        })
+    }
+
+    pub fn read(&self) -> ResourceRead {
+        ResourceRead {
+            key: self.key.clone(),
+            digest: self.digest.clone(),
+            bytes: self.bytes,
+        }
+    }
+
+    /// Semantic delivery units, each within the unit budget.
+    fn units(&self) -> Vec<Value> {
+        let mut units = Vec::new();
+        if encoded_len(&self.body) <= UNIT_BYTES {
+            units.push(json!({"content": self.body}));
+        } else if let Value::Object(fields) = &self.body {
+            let mut current = Map::new();
+            let flush = |current: &mut Map<String, Value>, units: &mut Vec<Value>| {
+                if !current.is_empty() {
+                    units.push(json!({"fields": std::mem::take(current)}));
+                }
+            };
+            for (name, value) in fields {
+                let size = encoded_len(value) + name.len() + 4;
+                if size > UNIT_BYTES {
+                    flush(&mut current, &mut units);
+                    for segment in text_segments(value) {
+                        units.push(json!({"field": name, "text_segment": segment}));
+                    }
+                    continue;
+                }
+                if encoded_len(&Value::Object(current.clone())) + size > UNIT_BYTES {
+                    flush(&mut current, &mut units);
+                }
+                current.insert(name.clone(), value.clone());
+            }
+            flush(&mut current, &mut units);
+        } else {
+            for segment in text_segments(&self.body) {
+                units.push(json!({"text_segment": segment}));
+            }
+        }
+        let parts = units.len();
+        for (part, unit) in units.iter_mut().enumerate() {
+            unit["key"] = json!(self.key);
+            unit["sha256"] = json!(self.digest);
+            if parts > 1 {
+                unit["part"] = json!(part + 1);
+                unit["parts"] = json!(parts);
+            }
+        }
+        units
+    }
+}
+
+/// Paragraph-bounded text segments. Non-string values are segmented as their
+/// pretty JSON text; that only happens for an oversize non-text field, which a
+/// capability owner should split into separate resources.
+fn text_segments(value: &Value) -> Vec<String> {
+    let text = match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+    };
+    let fits = |s: &str| encoded_len(&Value::String(s.to_owned())) <= UNIT_BYTES;
+    let mut pieces = Vec::new();
+    for paragraph in text.split_inclusive("\n\n") {
+        if fits(paragraph) {
+            pieces.push(paragraph.to_owned());
+            continue;
+        }
+        for line in paragraph.split_inclusive('\n') {
+            if fits(line) {
+                pieces.push(line.to_owned());
+                continue;
+            }
+            let mut rest = line;
+            while !rest.is_empty() {
+                let mut end = rest.len().min(UNIT_BYTES / 2);
+                while !rest.is_char_boundary(end) {
+                    end -= 1;
+                }
+                while !fits(&rest[..end]) {
+                    end -= 1;
+                    while !rest.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                }
+                pieces.push(rest[..end].to_owned());
+                rest = &rest[end..];
+            }
+        }
+    }
+    let mut segments: Vec<String> = Vec::new();
+    for piece in pieces {
+        match segments.last_mut() {
+            Some(last) if fits(&format!("{last}{piece}")) => last.push_str(&piece),
+            _ => segments.push(piece),
+        }
+    }
+    segments
+}
+
+/// A resource whose complete content was delivered by a response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResourceRead {
+    pub key: String,
+    pub digest: String,
+    pub bytes: usize,
+}
+
 #[derive(Debug)]
 struct Delivery {
     id: String,
     session: Option<String>,
-    content: String,
-    sha256: String,
+    header: Map<String, Value>,
+    units: Vec<Value>,
+    /// Resource completed by the unit at the same index, if it is its last.
+    completes: Vec<Option<ResourceRead>>,
     delivered_end: usize,
-    available: bool,
 }
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct GuidanceDeliveryStore(Arc<Mutex<[Option<Delivery>; 3]>>);
 
 pub(super) struct DeliveredGuidance {
     pub value: Value,
-    pub complete: bool,
-    pub available: bool,
+    pub completed: Vec<ResourceRead>,
+    pub response_bytes: usize,
 }
 
 impl GuidanceDeliveryStore {
+    /// Single-resource tools keep the plain resource shape when it fits.
+    pub fn begin_single(
+        &self,
+        kind: GuidanceDeliveryKind,
+        session: Option<String>,
+        resource: GuidanceResource,
+        available: bool,
+    ) -> Result<DeliveredGuidance, String> {
+        if resource.bytes <= PAGE_BYTES {
+            drop(self.reset_slot(kind, &session));
+            let completed = if available {
+                vec![resource.read()]
+            } else {
+                Vec::new()
+            };
+            return Ok(DeliveredGuidance {
+                response_bytes: resource.bytes,
+                value: resource.body,
+                completed,
+            });
+        }
+        self.begin(kind, session, Map::new(), vec![resource], available)
+    }
+
+    /// Paged delivery: `header` fields lead the first page, then units.
     pub fn begin(
         &self,
         kind: GuidanceDeliveryKind,
         session: Option<String>,
-        value: Value,
+        header: Map<String, Value>,
+        resources: Vec<GuidanceResource>,
         available: bool,
     ) -> Result<DeliveredGuidance, String> {
-        let content = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-        if content.len() > DOCUMENT_BYTES {
+        let total: usize = resources.iter().map(|r| r.bytes).sum();
+        if total > DOCUMENT_BYTES {
             return Err("guidance exceeds the 2 MB delivery limit; capability owner must split reference content into guidance cards".into());
         }
+        let mut units = Vec::new();
+        let mut completes = Vec::new();
+        for resource in &resources {
+            let resource_units = resource.units();
+            let last = resource_units.len().saturating_sub(1);
+            for (index, unit) in resource_units.into_iter().enumerate() {
+                units.push(unit);
+                completes.push((index == last && available).then(|| resource.read()));
+            }
+        }
+        let mut delivery = Delivery {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            session: session.clone(),
+            header,
+            units,
+            completes,
+            delivered_end: 0,
+        };
+        let result = delivery.page(kind, 0)?;
+        let mut slots = self.reset_slot(kind, &session);
+        slots[kind.index()] = Some(delivery);
+        Ok(result)
+    }
+
+    // Each tool owns one bounded immutable snapshot. Reading a packet or card
+    // must not invalidate an unfinished authoring document. A new negotiation
+    // invalidates all snapshots by their session binding.
+    fn reset_slot(
+        &self,
+        kind: GuidanceDeliveryKind,
+        session: &Option<String>,
+    ) -> std::sync::MutexGuard<'_, [Option<Delivery>; 3]> {
         let mut slots = self.0.lock().expect("guidance delivery lock poisoned");
-        // Each tool owns one bounded immutable snapshot. Reading a packet or
-        // card must not invalidate an unfinished authoring document. A new
-        // negotiation invalidates all snapshots by their session binding.
         if slots
             .iter()
             .flatten()
-            .any(|delivery| delivery.session != session)
+            .any(|delivery| &delivery.session != session)
         {
             *slots = [None, None, None];
         }
         slots[kind.index()] = None;
-        if content.len() <= INLINE_BYTES {
-            return Ok(DeliveredGuidance {
-                value,
-                complete: true,
-                available,
-            });
-        }
-        let mut delivery = Delivery {
-            id: uuid::Uuid::new_v4().simple().to_string(),
-            session,
-            sha256: format!("{:x}", Sha256::digest(content.as_bytes())),
-            content,
-            delivered_end: 0,
-            available,
-        };
-        let result = delivery.page(kind, 0)?;
-        slots[kind.index()] = Some(delivery);
-        Ok(result)
+        slots
     }
 
     pub fn resume(
@@ -125,12 +347,9 @@ impl GuidanceDeliveryStore {
         let offset = offset
             .parse::<usize>()
             .map_err(|_| "invalid guidance cursor offset")?;
-        // Re-reading delivered pages is harmless; skipping text cannot complete
-        // the guidance obligation. No caller-provided completion assertion.
-        if offset > delivery.delivered_end
-            || offset >= delivery.content.len()
-            || !delivery.content.is_char_boundary(offset)
-        {
+        // Re-reading delivered pages is harmless; skipping units cannot
+        // complete an obligation. No caller-provided completion assertion.
+        if offset > delivery.delivered_end || offset >= delivery.units.len() {
             return Err("guidance cursor skips unread content or is out of range".into());
         }
         delivery.page(kind, offset)
@@ -143,73 +362,174 @@ impl Delivery {
         kind: GuidanceDeliveryKind,
         offset: usize,
     ) -> Result<DeliveredGuidance, String> {
-        let mut end = (offset + CHUNK_BYTES).min(self.content.len());
-        while !self.content.is_char_boundary(end) {
-            end -= 1;
-        }
-        // JSON escaping can enlarge a fragment. Bound the actual encoded field,
-        // rather than assuming character count is the wire payload size.
-        while serde_json::to_string(&self.content[offset..end])
-            .map_err(|e| e.to_string())?
-            .len()
-            > INLINE_BYTES
-        {
-            end -= 1;
-            while !self.content.is_char_boundary(end) {
-                end -= 1;
+        let mut value = Value::Object(if offset == 0 {
+            self.header.clone()
+        } else {
+            Map::new()
+        });
+        value["delivery"] = json!("talos3d.guidance-page.v2");
+        value["instruction"] = json!("Units are whole resources (content) or ordered parts of one resource: merge `fields` objects and concatenate `text_segment`s per `field` in part order. Resources listed in completed_resource_keys are recorded as read; do not fetch them again. Follow next_tool with next_arguments until delivery_complete. No filesystem access is required.");
+        let mut units = Vec::new();
+        let mut completed = Vec::new();
+        let mut end = offset;
+        while end < self.units.len() {
+            units.push(self.units[end].clone());
+            value["units"] = json!(units);
+            // Always make progress; otherwise stop before exceeding the page.
+            if encoded_len(&value) > PAGE_BYTES - LIVE_STATE_RESERVE && units.len() > 1 {
+                units.pop();
+                break;
             }
+            if let Some(read) = &self.completes[end] {
+                completed.push(read.clone());
+            }
+            end += 1;
         }
         self.delivered_end = self.delivered_end.max(end);
-        let complete = self.delivered_end == self.content.len();
+        let complete = self.delivered_end == self.units.len();
+        let more = end < self.units.len();
+        value["units"] = json!(units);
+        value["completed_resource_keys"] =
+            json!(completed.iter().map(|r| &r.key).collect::<Vec<_>>());
+        value["unit_range"] = json!([offset, end, self.units.len()]);
+        value["delivery_complete"] = json!(complete && !more);
+        value["next_tool"] = json!(more.then(|| kind.tool()));
+        value["next_arguments"] =
+            json!(more.then(|| json!({"cursor": format!("{}:{end}", self.id)})));
         Ok(DeliveredGuidance {
-            complete,
-            available: self.available,
-            value: json!({
-                "delivery": "talos3d.guidance-page.v1",
-                "content_format": "application/json",
-                "instruction": "Read content in order as fragments of one canonical JSON document. Follow next_tool with next_arguments until delivery_complete. The outer live_guidance_state supersedes any state embedded in the frozen document. No filesystem access is required.",
-                "snapshot_sha256": self.sha256,
-                "offset_bytes": offset, "end_bytes": end, "total_bytes": self.content.len(),
-                "content": &self.content[offset..end],
-                "delivery_complete": complete,
-                "next_tool": (end < self.content.len()).then(|| kind.tool()),
-                "next_arguments": (end < self.content.len()).then(|| json!({"cursor": format!("{}:{end}", self.id)})),
-            }),
+            response_bytes: encoded_len(&value),
+            completed,
+            value,
         })
     }
+}
+
+/// Reassemble resources from pages the way an MCP client is instructed to.
+#[cfg(test)]
+pub(super) fn reassemble(pages: &[Value]) -> std::collections::BTreeMap<String, Value> {
+    let mut out: std::collections::BTreeMap<String, Value> = Default::default();
+    for unit in pages
+        .iter()
+        .flat_map(|p| p["units"].as_array().cloned().unwrap_or_default())
+    {
+        let key = unit["key"].as_str().unwrap().to_owned();
+        if let Some(content) = unit.get("content") {
+            out.insert(key, content.clone());
+            continue;
+        }
+        let entry = out.entry(key).or_insert(Value::Null);
+        if let Some(fields) = unit.get("fields").and_then(Value::as_object) {
+            if !entry.is_object() {
+                *entry = json!({});
+            }
+            entry.as_object_mut().unwrap().extend(fields.clone());
+        } else if let Some(segment) = unit["text_segment"].as_str() {
+            let target = match unit.get("field").and_then(Value::as_str) {
+                Some(field) => {
+                    if !entry.is_object() {
+                        *entry = json!({});
+                    }
+                    entry
+                        .as_object_mut()
+                        .unwrap()
+                        .entry(field.to_owned())
+                        .or_insert(json!(""))
+                }
+                None => {
+                    if !entry.is_string() {
+                        *entry = json!("");
+                    }
+                    entry
+                }
+            };
+            let joined = format!("{}{segment}", target.as_str().unwrap_or_default());
+            *target = json!(joined);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn resource(key: &str, body: Value) -> GuidanceResource {
+        GuidanceResource::new(
+            key.into(),
+            "test",
+            key.into(),
+            json!({"tool": "get_guidance_card"}),
+            body,
+        )
+    }
+
+    fn drain(
+        store: &GuidanceDeliveryStore,
+        kind: GuidanceDeliveryKind,
+        mut page: DeliveredGuidance,
+    ) -> (Vec<Value>, Vec<ResourceRead>) {
+        let mut pages = Vec::new();
+        let mut reads = Vec::new();
+        loop {
+            assert!(
+                page.response_bytes <= PAGE_BYTES,
+                "{} bytes",
+                page.response_bytes
+            );
+            reads.extend(page.completed.clone());
+            pages.push(page.value.clone());
+            if page.value["delivery_complete"] != false {
+                return (pages, reads);
+            }
+            let cursor = page.value["next_arguments"]["cursor"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            page = store.resume(kind, Some("s".into()), &cursor).unwrap();
+        }
+    }
+
     #[test]
-    fn bounded_pages_reconstruct_exact_unicode_escaped_snapshot() {
+    fn oversize_resources_split_on_semantic_boundaries_and_reassemble_exactly() {
         let store = GuidanceDeliveryStore::default();
-        let source = json!({"prompt_text": "å屋\n\"\\".repeat(20_000)});
-        let mut page = store
+        let prose = "Paragraph å屋 \"quoted\" \\ text.\n\n".repeat(900);
+        let resources = vec![
+            resource(
+                "guidance",
+                json!({"guidance_id": "g", "version": 3, "prompt_text": prose}),
+            ),
+            resource("card:a", json!({"id": "a", "summary": "small"})),
+            resource("skill:b", json!("x".repeat(30_000))),
+        ];
+        let expected: Vec<_> = resources
+            .iter()
+            .map(|r| (r.key.clone(), r.body.clone()))
+            .collect();
+        let reads_expected: Vec<_> = resources.iter().map(GuidanceResource::read).collect();
+        let first = store
             .begin(
-                GuidanceDeliveryKind::Authoring,
+                GuidanceDeliveryKind::Packet,
                 Some("s".into()),
-                source.clone(),
+                Map::new(),
+                resources,
                 true,
             )
             .unwrap();
-        let mut text = String::new();
-        let digest = page.value["snapshot_sha256"].clone();
-        loop {
-            assert!(serde_json::to_string(&page.value).unwrap().len() < 14_000);
-            assert_eq!(page.value["snapshot_sha256"], digest);
-            text.push_str(page.value["content"].as_str().unwrap());
-            if page.complete {
-                break;
-            }
-            let cursor = page.value["next_arguments"]["cursor"].as_str().unwrap();
-            page = store
-                .resume(GuidanceDeliveryKind::Authoring, Some("s".into()), cursor)
-                .unwrap();
+        let (pages, reads) = drain(&store, GuidanceDeliveryKind::Packet, first);
+        let rebuilt = reassemble(&pages);
+        for (key, body) in expected {
+            assert_eq!(rebuilt[&key], body, "{key}");
         }
-        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), source);
+        assert_eq!(reads, reads_expected);
+        // Paragraph-bounded: prose segments never cut a paragraph.
+        for unit in pages
+            .iter()
+            .flat_map(|p| p["units"].as_array().unwrap().clone())
+        {
+            if unit["field"] == "prompt_text" {
+                assert!(unit["text_segment"].as_str().unwrap().ends_with("\n\n"));
+            }
+        }
     }
 
     #[test]
@@ -219,18 +539,20 @@ mod tests {
             .begin(
                 GuidanceDeliveryKind::Packet,
                 Some("s".into()),
-                json!({"text": "a".repeat(30_000)}),
+                Map::new(),
+                vec![resource("a", json!("a".repeat(30_000)))],
                 true,
             )
             .unwrap();
-        assert!(!page.complete);
+        assert_eq!(page.value["delivery_complete"], false);
+        assert!(page.completed.is_empty());
         let cursor = page.value["next_arguments"]["cursor"].as_str().unwrap();
         let id = cursor.split(':').next().unwrap();
         assert!(store
             .resume(
                 GuidanceDeliveryKind::Packet,
                 Some("s".into()),
-                &format!("{id}:30000")
+                &format!("{id}:3")
             )
             .is_err());
         assert!(store
@@ -246,7 +568,6 @@ mod tests {
             .resume(GuidanceDeliveryKind::Packet, Some("s".into()), cursor)
             .unwrap();
         assert_eq!(first.value, retry.value);
-        assert!(!retry.complete);
     }
 
     #[test]
@@ -263,7 +584,8 @@ mod tests {
                 .begin(
                     kind,
                     Some("s".into()),
-                    json!({"text":"x".repeat(30_000)}),
+                    Map::new(),
+                    vec![resource("x", json!("x".repeat(30_000)))],
                     true,
                 )
                 .unwrap();
@@ -279,10 +601,10 @@ mod tests {
         }
         // Refresh replaces only its own slot, including a small inline refresh.
         store
-            .begin(
+            .begin_single(
                 GuidanceDeliveryKind::Packet,
                 Some("s".into()),
-                json!({"text":"new"}),
+                resource("n", json!("new")),
                 true,
             )
             .unwrap();
@@ -298,10 +620,10 @@ mod tests {
             .is_ok());
         // A different negotiated session can never complete an old obligation.
         store
-            .begin(
+            .begin_single(
                 GuidanceDeliveryKind::Packet,
                 Some("new".into()),
-                json!({"text":"new"}),
+                resource("n", json!("new")),
                 true,
             )
             .unwrap();
@@ -315,21 +637,41 @@ mod tests {
     }
 
     #[test]
-    fn small_documents_keep_existing_shape_and_cache_is_bounded() {
+    fn small_resources_keep_existing_shape_and_cache_is_bounded() {
         let store = GuidanceDeliveryStore::default();
         let value = json!({"prompt_text": "canonical"});
         let result = store
-            .begin(GuidanceDeliveryKind::Authoring, None, value.clone(), true)
+            .begin_single(
+                GuidanceDeliveryKind::Authoring,
+                None,
+                resource("g", value.clone()),
+                true,
+            )
             .unwrap();
-        assert!(result.complete);
         assert_eq!(result.value, value);
+        assert_eq!(result.completed.len(), 1);
         assert!(store
             .begin(
                 GuidanceDeliveryKind::Authoring,
                 None,
-                json!({"text": "a".repeat(DOCUMENT_BYTES)}),
+                Map::new(),
+                vec![resource("big", json!("a".repeat(DOCUMENT_BYTES)))],
                 true
             )
             .is_err());
+    }
+
+    #[test]
+    fn unavailable_content_never_completes_an_obligation() {
+        let store = GuidanceDeliveryStore::default();
+        let result = store
+            .begin_single(
+                GuidanceDeliveryKind::Authoring,
+                None,
+                resource("g", json!({})),
+                false,
+            )
+            .unwrap();
+        assert!(result.completed.is_empty());
     }
 }

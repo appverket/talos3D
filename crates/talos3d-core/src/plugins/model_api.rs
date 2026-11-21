@@ -819,12 +819,13 @@ mod guidance_delivery;
 mod guidance_session;
 #[cfg(feature = "model-api")]
 use guidance_delivery::{
-    DeliveredGuidance, GuidanceDeliveryKind, GuidanceDeliveryRequest, GuidanceDeliveryStore,
+    resource_digest, DeliveredGuidance, GuidanceDeliveryKind, GuidanceDeliveryRequest,
+    GuidanceDeliveryStore, GuidanceResource,
 };
 #[cfg(feature = "model-api")]
 use guidance_session::{
-    hook_tool_name, GuidanceCompletionRequest, GuidancePreflightRequest, GuidanceSessionStore,
-    GuidanceStateRequest,
+    card_key, hook_tool_name, skill_key, GuidanceCompletionRequest, GuidancePreflightRequest,
+    GuidanceSessionStore, GuidanceStateRequest, GUIDANCE_KEY,
 };
 #[cfg(feature = "model-api")]
 pub use guidance_session::{
@@ -14084,15 +14085,17 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         })
         .unwrap_or_default();
     must_read_guidance_card_ids.extend(proactive_passage_card_ids.iter().cloned());
-    if let Some(registry) =
-        world.get_resource::<crate::plugins::authoring_guidance::GuidanceCardRegistry>()
-    {
-        must_read_guidance_card_ids.extend(registry.cards().map(|card| card.id.clone()));
-    }
+    // Cards synthesized from the active guidance (its pointer card and one
+    // card per reference) only point back at the canonical contract, which
+    // the bootstrap already requires as one resource. They stay retrievable
+    // on demand but are not separate read obligations.
+    let mut guidance_pointer_card_ids = std::collections::HashSet::new();
     if let Some(guidance) = world.get_resource::<AuthoringGuidance>() {
         if !guidance.is_empty() {
             let id = authoring_guidance_card_id(&guidance.guidance_id);
-            must_read_guidance_card_ids.push(id.clone());
+            guidance_pointer_card_ids.insert(id.clone());
+            guidance_pointer_card_ids
+                .extend(guidance.references.iter().map(guidance_reference_card_id));
             guidance_overrides.push(CapabilitySnapshotFact {
                 classification: "guidance_override".into(),
                 id,
@@ -14101,14 +14104,17 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
                     guidance.version
                 ),
             });
-            for reference in guidance
-                .references
-                .iter()
-                .take(guidance_limit.saturating_sub(1))
-            {
-                must_read_guidance_card_ids.push(guidance_reference_card_id(reference));
-            }
         }
+    }
+    if let Some(registry) =
+        world.get_resource::<crate::plugins::authoring_guidance::GuidanceCardRegistry>()
+    {
+        must_read_guidance_card_ids.extend(
+            registry
+                .cards()
+                .map(|card| card.id.clone())
+                .filter(|id| !guidance_pointer_card_ids.contains(id)),
+        );
     }
     // Proactive skill cards are decisive must-reads and must not be truncated
     // away by the base guidance budget; extend the budget by their count.
