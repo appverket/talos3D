@@ -1732,3 +1732,18 @@ credentials, arm labels, or raw query payloads. Overflow sets `complete:false`;
 consumers must reject incomplete evidence. A successful query records its exact
 installed revision and returned row count. These observations establish runtime
 consumption, not source rights, model correctness, or publication authority.
+
+## Read-only shared knowledge review
+
+Curators and independent reviewers can negotiate `guidance_scope: "knowledge_review"`
+with their usual capability profile. This serves a bounded platform metacontract;
+knowledge cards, skills, source passages and candidate schemas remain discoverable
+through MCP on demand. It does not preload the model-authoring handbook.
+
+The server admits only explicit knowledge-inspection and candidate-check tools in
+this scope. It rejects model edits, knowledge installation, draft mutation and
+unknown tools, even after a profile change. A fresh `authoring` negotiation restores
+the complete mandatory authoring bootstrap before edits can proceed. The separate
+curator service still controls leases, candidate submission, independent review and
+release; runtime review scope grants none of those authorities. Completing its
+bootstrap claims no model edit, validation or successful retry.

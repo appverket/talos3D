@@ -15545,3 +15545,107 @@ async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegoti
     drop(server);
     worker.await.unwrap();
 }
+
+#[cfg(feature = "model-api")]
+#[tokio::test]
+async fn knowledge_review_packet_is_bounded_and_cannot_unlock_authoring() {
+    use super::guidance_session::{GuidancePhase, GuidanceScope};
+    let (sender, receiver) = mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut world = init_model_api_test_world();
+        world.insert_resource(ModelApiRuntimeInfo {
+            instance_id: "knowledge-review-test".into(),
+            app_name: "test".into(),
+            pid: 1,
+            http_host: "127.0.0.1".into(),
+            http_port: 24842,
+            http_url: "http://127.0.0.1:24842/mcp".into(),
+            registry_path: String::new(),
+            started_at_unix_ms: 1,
+            requested_port: None,
+        });
+        world.insert_resource(AgentSkillRegistry::default());
+        world.insert_resource(crate::plugins::authoring_guidance::AuthoringGuidance {
+            guidance_id: "test.large-authoring".into(),
+            version: 2,
+            prompt_text: "DOMAIN_AUTHORING_SENTINEL ".repeat(4000),
+            ..Default::default()
+        });
+        while let Ok(request) = receiver.recv() {
+            handle_model_api_request(&mut world, request);
+        }
+    });
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
+    let welcome: AgentWelcome = server
+        .negotiate_agent_session_tool(Parameters(AgentHello {
+            requested_profile: Some("curation".into()),
+            guidance_scope: GuidanceScope::KnowledgeReview,
+            task: Some("inspect shared knowledge schemas".into()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    assert!(welcome.required_guidance_card_ids.is_empty());
+    assert!(welcome
+        .capability_snapshot
+        .must_read_agent_skill_ids
+        .is_empty());
+    assert!(!welcome
+        .bootstrap_steps
+        .iter()
+        .any(|s| s.action == "discover_curated_paths"));
+    let mut response: serde_json::Value = server
+        .get_agent_guidance_packet_tool(Parameters(GuidanceDeliveryRequest::default()))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    let mut content = String::new();
+    loop {
+        if response.get("delivery").is_none() {
+            content = serde_json::to_string(&response).unwrap();
+            break;
+        }
+        content.push_str(response["content"].as_str().unwrap());
+        if response["delivery_complete"] == true {
+            break;
+        }
+        let next = serde_json::from_value(response["next_arguments"].clone()).unwrap();
+        response = server
+            .get_agent_guidance_packet_tool(Parameters(next))
+            .await
+            .unwrap()
+            .into_typed()
+            .unwrap();
+    }
+    assert!(content.len() < 12000, "{} bytes", content.len());
+    assert!(!content.contains("DOMAIN_AUTHORING_SENTINEL"));
+    assert!(content.contains("knowledge_review"));
+    let state = server.guidance_state.snapshot().unwrap();
+    assert_eq!(state.phase, GuidancePhase::Complete);
+    server.profile_state.set(CapabilityProfile::Full);
+    assert_eq!(
+        server
+            .guidance_state
+            .router_preflight("install_knowledge_asset")
+            .unwrap()
+            .kind,
+        "KnowledgeReviewWriteDenied"
+    );
+    server
+        .negotiate_agent_session_tool(Parameters(AgentHello::default()))
+        .await
+        .unwrap();
+    assert_eq!(
+        server.guidance_state.snapshot().unwrap().scope,
+        GuidanceScope::Authoring
+    );
+    assert!(server
+        .guidance_state
+        .router_preflight("create_box")
+        .is_some());
+    drop(server);
+    worker.await.unwrap();
+}
