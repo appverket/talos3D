@@ -54,6 +54,25 @@ impl GuidanceDeliveryKind {
             Self::Card => "get_guidance_card",
         }
     }
+    /// Arguments that restart this tool's delivery from its first page.
+    /// Rejecting a cursor invalidates the cursor only: a selector that names
+    /// the requested resource is required by the tool's schema, so recovery
+    /// must retain it. Advising "no arguments" for a selector-bearing tool
+    /// cannot validate and leaves the agent with no executable next call.
+    fn restart_arguments(self, binding: &str) -> Value {
+        match self {
+            Self::Card => json!({ "card_id": binding }),
+            Self::Authoring | Self::Packet => json!({}),
+        }
+    }
+    /// Recovery an agent can execute verbatim after a cursor is rejected.
+    fn restart_advice(self, binding: &str) -> String {
+        format!(
+            "call {} again with arguments {} and no cursor",
+            self.tool(),
+            self.restart_arguments(binding)
+        )
+    }
 }
 
 /// Content identity used by the read ledger: sha256 of compact JSON.
@@ -246,6 +265,7 @@ struct Delivery {
 #[derive(Debug, Clone, Default)]
 pub(super) struct GuidanceDeliveryStore(Arc<Mutex<Vec<Delivery>>>);
 
+#[derive(Debug)]
 pub(super) struct DeliveredGuidance {
     pub value: Value,
     pub completed: Vec<ResourceRead>,
@@ -354,26 +374,32 @@ impl GuidanceDeliveryStore {
         cursor: &str,
     ) -> Result<DeliveredGuidance, String> {
         let mut slots = self.0.lock().expect("guidance delivery lock poisoned");
-        let (id, offset) = cursor.split_once(':').ok_or("invalid guidance cursor")?;
+        // Every rejection names an executable restart that keeps the caller's
+        // own selector, so a cursor loss stays finitely recoverable.
+        let restart = || kind.restart_advice(binding);
+        let (id, offset) = cursor
+            .split_once(':')
+            .ok_or_else(|| format!("invalid guidance cursor; {}", restart()))?;
         let delivery = slots
             .iter_mut()
             .find(|d| d.kind == kind && d.id == id)
-            .ok_or(
-                "no guidance snapshot for this cursor; restart this tool with empty arguments",
-            )?;
+            .ok_or_else(|| format!("no guidance snapshot for this cursor; {}", restart()))?;
         if session != delivery.session || binding != delivery.binding {
-            return Err(
-                "guidance cursor belongs to another snapshot/session; restart with empty arguments"
-                    .into(),
-            );
+            return Err(format!(
+                "guidance cursor belongs to another snapshot/session; {}",
+                restart()
+            ));
         }
         let offset = offset
             .parse::<usize>()
-            .map_err(|_| "invalid guidance cursor offset")?;
+            .map_err(|_| format!("invalid guidance cursor offset; {}", restart()))?;
         // Re-reading delivered pages is harmless; skipping units cannot
         // complete an obligation. No caller-provided completion assertion.
         if offset > delivery.delivered_end || offset >= delivery.units.len() {
-            return Err("guidance cursor skips unread content or is out of range".into());
+            return Err(format!(
+                "guidance cursor skips unread content or is out of range; {}",
+                restart()
+            ));
         }
         delivery.page(kind, offset)
     }
@@ -489,6 +515,16 @@ mod tests {
     fn drain(
         store: &GuidanceDeliveryStore,
         kind: GuidanceDeliveryKind,
+        page: DeliveredGuidance,
+    ) -> (Vec<Value>, Vec<ResourceRead>) {
+        drain_with(store, kind, Some("s".into()), "", page)
+    }
+
+    fn drain_with(
+        store: &GuidanceDeliveryStore,
+        kind: GuidanceDeliveryKind,
+        session: Option<String>,
+        binding: &str,
         mut page: DeliveredGuidance,
     ) -> (Vec<Value>, Vec<ResourceRead>) {
         let mut pages = Vec::new();
@@ -508,7 +544,9 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .to_owned();
-            page = store.resume(kind, Some("s".into()), "", &cursor).unwrap();
+            page = store
+                .resume(kind, session.clone(), binding, &cursor)
+                .unwrap();
         }
     }
 
@@ -777,5 +815,122 @@ mod tests {
         assert!(store
             .resume(GuidanceDeliveryKind::Card, s(), "c", &cards[2].1)
             .is_ok());
+    }
+
+    /// Regression (restricted acceptance trace): a rejected cursor must advise
+    /// a call that actually validates. The advice used to be "restart with
+    /// empty arguments", which `get_guidance_card` rejects because `card_id`
+    /// is required, so an obedient client looped on invalid parameters instead
+    /// of recovering.
+    #[test]
+    fn rejected_cursors_advise_a_valid_restart_that_keeps_required_selectors() {
+        let store = GuidanceDeliveryStore::default();
+        let big = |key: &str| resource(key, json!("z".repeat(30_000)));
+        let s = || Some("s".to_string());
+        let cursor_of = |page: &DeliveredGuidance| {
+            page.value["next_arguments"]["cursor"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        // The advised arguments must deserialize into the tool's real request
+        // type, with the selector retained and the cursor cleared.
+        let advised = |kind: GuidanceDeliveryKind, binding: &str| {
+            let arguments = kind.restart_arguments(binding);
+            match kind {
+                GuidanceDeliveryKind::Card => {
+                    let request: super::super::server::GetGuidanceCardRequest =
+                        serde_json::from_value(arguments.clone()).unwrap();
+                    assert_eq!(request.card_id, binding);
+                    assert!(request.cursor.is_none());
+                }
+                _ => {
+                    let request: GuidanceDeliveryRequest =
+                        serde_json::from_value(arguments.clone()).unwrap();
+                    assert!(request.cursor.is_none());
+                }
+            }
+            arguments.to_string()
+        };
+        let check = |message: String, kind: GuidanceDeliveryKind, binding: &str| {
+            assert!(!message.contains("empty arguments"), "{message}");
+            assert!(message.contains(kind.tool()), "{message}");
+            assert!(message.contains(&advised(kind, binding)), "{message}");
+        };
+
+        let kinds = [
+            (GuidanceDeliveryKind::Card, "card.a"),
+            (GuidanceDeliveryKind::Packet, ""),
+            (GuidanceDeliveryKind::Authoring, ""),
+        ];
+        let live: Vec<_> = kinds
+            .iter()
+            .map(|(kind, binding)| {
+                let page = store
+                    .begin(*kind, s(), binding, Map::new(), vec![big("body")], true)
+                    .unwrap();
+                cursor_of(&page)
+            })
+            .collect();
+
+        for ((kind, binding), cursor) in kinds.iter().zip(&live) {
+            // Unknown snapshot id, and a malformed and an out-of-range cursor.
+            for bad in [
+                "00000000000000000000000000000000:0".to_owned(),
+                "no-separator".to_owned(),
+                format!("{}:99", cursor.split(':').next().unwrap()),
+            ] {
+                check(
+                    store.resume(*kind, s(), binding, &bad).unwrap_err(),
+                    *kind,
+                    binding,
+                );
+            }
+            // Binding mismatch advises the selector the caller asked for, not
+            // the one the live snapshot holds.
+            check(
+                store.resume(*kind, s(), "card.other", cursor).unwrap_err(),
+                *kind,
+                "card.other",
+            );
+        }
+
+        // Expiration: a new negotiated session drops every earlier snapshot.
+        store
+            .begin_single(
+                GuidanceDeliveryKind::Authoring,
+                Some("new".into()),
+                "",
+                resource("g", json!("fresh")),
+                true,
+            )
+            .unwrap();
+        for ((kind, binding), cursor) in kinds.iter().zip(&live) {
+            check(
+                store.resume(*kind, s(), binding, cursor).unwrap_err(),
+                *kind,
+                binding,
+            );
+        }
+
+        // The advised restart is executable: the obligation can still be met.
+        let restarted = store
+            .begin_single(
+                GuidanceDeliveryKind::Card,
+                Some("new".into()),
+                "card.a",
+                big("card:a"),
+                true,
+            )
+            .unwrap();
+        let (_, reads) = drain_with(
+            &store,
+            GuidanceDeliveryKind::Card,
+            Some("new".into()),
+            "card.a",
+            restarted,
+        );
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].key, "card:a");
     }
 }
