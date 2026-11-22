@@ -9448,7 +9448,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "evaluate_knowledge_candidate",
-        description = "Execute a bounded parametric candidate in a disposable scene using ordinary create/driver handlers, report AABB checks and return an isolated GPU image. An isolated self-test: never installs, submits, reviews or publishes candidate knowledge, and never edits the user document. Supports parametric_type.v1 only, at most128 members and16 edits. Neutral render materials; no rights, structural, hosting, undo or saved-file qualification. Unsupported asset kinds are capability gaps."
+        description = "Execute a bounded parametric candidate in a disposable scene using ordinary create/driver handlers, report AABB checks and return an isolated GPU image. An isolated self-test: never installs, submits, reviews or publishes candidate knowledge, and never edits the user document. Supports parametric_type.v1 only, at most128 members and16 driver edits. Optional scenario uses up to32 flat AuthoringScript calls in an empty native document to observe create/edit/assembly/delete, undo/redo and an in-memory native save/reopen. Read the scenario schema for supported tools. Neutral render materials; no rights, structural or independent qualification. Unsupported operations remain capability gaps."
     )]
     pub(super) async fn evaluate_knowledge_candidate_tool(
         &self,
@@ -9472,7 +9472,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .map_err(|e| McpError::internal_error(e, None))?;
         let (scene, _permit) = tokio::task::spawn_blocking(move || {
             (
-                crate::plugins::knowledge_cloud::candidate_runtime::evaluate(request, classes),
+                crate::plugins::knowledge_cloud::candidate_runtime::evaluate_in(request, classes),
                 permit,
             )
         })

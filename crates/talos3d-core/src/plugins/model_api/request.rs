@@ -869,7 +869,7 @@ pub(super) enum ModelApiRequest {
         response: oneshot::Sender<ApiResult<serde_json::Value>>,
     },
     CandidateRuntimeClasses {
-        response: oneshot::Sender<Vec<crate::capability_registry::ElementClassDescriptor>>,
+        response: oneshot::Sender<crate::plugins::knowledge_cloud::candidate_runtime::Context>,
     },
     EvaluateKnowledgeCandidate {
         scene: Box<crate::plugins::knowledge_cloud::candidate_runtime::Scene>,
@@ -2453,7 +2453,13 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         ModelApiRequest::CandidateRuntimeClasses { response } => {
             let classes = world
                 .get_resource::<crate::capability_registry::CapabilityRegistry>()
-                .map(|r| r.element_class_descriptors().to_vec())
+                .map(
+                    |r| crate::plugins::knowledge_cloud::candidate_runtime::Context {
+                        classes: r.element_class_descriptors().to_vec(),
+                        assembly_types: r.assembly_type_descriptors().to_vec(),
+                        relation_types: r.relation_type_descriptors().to_vec(),
+                    },
+                )
                 .unwrap_or_default();
             let _ = response.send(classes);
         }

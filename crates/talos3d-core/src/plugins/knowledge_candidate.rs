@@ -17,6 +17,9 @@ use std::collections::BTreeMap;
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    /// Optional bounded native integration scenario in an empty disposable document.
+    #[serde(default)]
+    pub scenario: Option<scenario::Scenario>,
     pub asset: knowledge_cloud::Asset,
     #[serde(default)]
     pub drivers: BTreeMap<String, Value>,
@@ -59,6 +62,7 @@ pub fn from_legacy(input: LegacyEvaluation, receipt: Value) -> Result<Request, S
         return Err("Legacy snapshot changed or identity mismatched; retrieve it again".into());
     }
     Ok(Request {
+        scenario: None,
         asset: knowledge_cloud::Asset {
             schema: knowledge_cloud::SCHEMA.into(),
             id: input.id,
@@ -90,7 +94,37 @@ pub struct Scene {
 
 /// Deliberately limited to a portable parametric representation. Unsupported
 /// asset kinds fail rather than substituting synthetic geometry.
+#[path = "knowledge_candidate_scenario.rs"]
+pub mod scenario;
+
+#[derive(Default)]
+pub struct Context {
+    pub classes: Vec<ElementClassDescriptor>,
+    pub assembly_types: Vec<crate::capability_registry::AssemblyTypeDescriptor>,
+    pub relation_types: Vec<crate::capability_registry::RelationTypeDescriptor>,
+}
+
 pub fn evaluate(request: Request, classes: Vec<ElementClassDescriptor>) -> Result<Scene, String> {
+    evaluate_in(
+        request,
+        Context {
+            classes,
+            ..Default::default()
+        },
+    )
+}
+
+pub fn evaluate_in(mut request: Request, context: Context) -> Result<Scene, String> {
+    if let Some(scenario) = request.scenario.take() {
+        if !request.edits.is_empty() {
+            return Err(
+                "Use scenario steps instead of combining a scenario with legacy driver edits"
+                    .into(),
+            );
+        }
+        return scenario::evaluate(request, scenario, context);
+    }
+    let classes = context.classes;
     let started = std::time::Instant::now();
     if request.asset.kind != "parametric_type.v1" {
         return Err("Isolated execution currently supports parametric_type.v1 only; other candidate runtimes are CapabilityGaps".into());
@@ -504,6 +538,7 @@ mod tests {
             contains_private_context: false,
         };
         Request {
+            scenario: None,
             asset,
             drivers: default(),
             placement: default(),
@@ -514,6 +549,89 @@ mod tests {
             }],
         }
     }
+    #[test]
+    fn native_scenario_retires_placeholder_and_preserves_assembly_through_codec_and_history() {
+        let mut req = request();
+        req.edits.clear();
+        let call = |id: &str, tool: &str, args: Value| {
+            json!({
+                "id":id,"tool":tool,"args":args.as_object().unwrap().iter().map(|(k,v)| (k.clone(),json!({"expr":"literal","value":v}))).collect::<serde_json::Map<String,Value>>()
+            })
+        };
+        req.scenario = Some(serde_json::from_value(json!({"script":{
+            "parameter_schema":{"type":"object"},"allowed_tools":["create_box","parametric.create","create_assembly","delete_entities"],"mutation_scope":{"kind":"project_root"},
+            "steps":[
+                call("placeholder","create_box",json!({"centre":[10.,0.,0.],"half_extents":[0.1,0.1,0.1]})),
+                call("candidate","parametric.create",json!({"type_id":req.asset.id})),
+                call("assembly","create_assembly",json!({"assembly_type":"fixture","label":"fixture","members":[{"target":1,"role":"part"}],"metadata":{"unresolved":"deliberately retained"}})),
+                call("retire","delete_entities",json!({"element_ids":[0]}))
+            ]},"round_trip":true,"undo_redo":true})).unwrap());
+        let context=Context {assembly_types:vec![serde_json::from_value(json!({"assembly_type":"fixture","label":"Fixture","description":"Synthetic regression","expected_member_types":[],"expected_member_roles":["part"],"expected_relation_types":[],"parameter_schema":{}})).unwrap()],..Default::default()};
+        let scene = evaluate_in(req, context).unwrap();
+        assert!(!scene.parts.is_empty());
+        assert_eq!(
+            scene.report["final_state"],
+            scene.report["round_trip"]["after_reopen"]
+        );
+        assert_eq!(
+            scene.report["before_persistence"],
+            scene.report["history"]["after_redo"]
+        );
+        assert!(scene.report["history"]["after_undo"]["element_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(0)));
+        assert!(!scene.report["final_state"]["element_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(0)));
+        assert!(scene.report["final_state"]
+            .to_string()
+            .contains("deliberately retained"));
+        assert_eq!(scene.report["model_modified"], false);
+    }
+
+    #[test]
+    fn native_scenario_denies_host_routes_and_claimed_acceptance() {
+        for tool in [
+            "load_project",
+            "save_project",
+            "invoke_command",
+            "install_knowledge_asset",
+        ] {
+            let mut req = request();
+            req.edits.clear();
+            req.scenario=Some(serde_json::from_value(json!({"script":{"parameter_schema":{"type":"object"},"allowed_tools":[tool],"mutation_scope":{"kind":"project_root"},"steps":[{"id":"deny","tool":tool,"args":{}}]}})).unwrap());
+            assert!(evaluate(req, vec![]).err().unwrap().contains("unsupported"));
+        }
+    }
+
+    #[test]
+    fn native_scenario_rejects_unbounded_programs_and_false_postconditions() {
+        let call = json!({"id":"step","tool":"model_summary","args":{}});
+        for (steps, postconditions) in [
+            (vec![call.clone(); 33], json!([])),
+            (
+                vec![
+                    json!({"kind":"repeat","id":"loop","var":"i","count":{"expr":"literal","value":1000000},"body":[call.clone()]}),
+                ],
+                json!([]),
+            ),
+        ] {
+            let mut req = request();
+            req.edits.clear();
+            req.scenario=Some(serde_json::from_value(json!({"script":{"parameter_schema":{"type":"object"},"allowed_tools":["model_summary"],"mutation_scope":{"kind":"project_root"},"steps":steps,"postconditions":postconditions}})).unwrap());
+            assert!(evaluate(req, vec![])
+                .err()
+                .unwrap()
+                .contains("1..32 flat calls"));
+        }
+        let mut req = request();
+        req.edits.clear();
+        req.scenario=Some(serde_json::from_value(json!({"script":{"parameter_schema":{"type":"object"},"allowed_tools":["create_box"],"mutation_scope":{"kind":"none"},"steps":[{"id":"mutate","tool":"create_box","args":{}}]}})).unwrap());
+        assert!(evaluate(req, vec![]).err().unwrap().contains("no-mutation"));
+    }
+
     #[test]
     fn legacy_inspection_binds_snapshot_without_inventing_rights() {
         use crate::relational::registry::{ParametricRegistry, ParametricTypeDef};

@@ -1869,3 +1869,27 @@ Restricted `knowledge_review` and `knowledge_use` sessions permit
 `lookup_source_passage`, including immutable revisions returned by shared corpus
 search. Reading source evidence does not require model-authoring authority.
 Model writes and publication remain outside those read-only permissions.
+
+
+### Isolated candidate integration scenarios
+
+`evaluate_knowledge_candidate` accepts an optional `scenario` for a staged
+`parametric_type.v1` candidate. The scenario runs in a new empty document, never
+in the current project. It uses the existing AuthoringScript argument/binding
+schema and native handlers, with 1–32 flat calls and no asserted postconditions.
+The schema lists supported tools; unsupported factories and operations fail.
+`create_entity` is limited to core box/profile-extrusion geometry and
+`parametric.create` uses the staged type, never an inline replacement.
+
+`scenario.undo_redo` observes undo and redo of the final command.
+`scenario.round_trip` encodes and reopens native project bytes in memory and
+returns the actual restored entity/semantic state. Neither option grants host
+file access. The result includes step outputs, geometry checks and a GPU view.
+The top-level `drivers` supplies a valid payload-check case; scenario steps
+supply their own invocation inputs. Do not combine scenario steps with the older
+`edits` list. Scenarios are bounded to 128 authored entities, 100,000 rendered
+vertices, 1 MiB each for candidate/scenario input and 4 MiB native snapshots.
+
+Self-testing does not establish source rights, structural adequacy, independent
+qualification or applicability to a private model. No candidate, project or
+release is installed outside the disposable document.
