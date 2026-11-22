@@ -1718,8 +1718,15 @@ impl ModelApiServer {
             .await?
     }
 
-    async fn request_list_vocabulary(&self) -> Result<VocabularyInfo, String> {
-        self.round_trip(ModelApiRequest::ListVocabulary).await
+    async fn request_list_vocabulary(
+        &self,
+        include_project_drafts: bool,
+    ) -> Result<VocabularyInfo, String> {
+        self.round_trip(|response| ModelApiRequest::ListVocabulary {
+            include_project_drafts,
+            response,
+        })
+        .await
     }
 
     async fn request_create_assembly(
@@ -8866,11 +8873,17 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "list_vocabulary",
-        description = "List all registered assembly types, reusable assembly patterns, and relation types. This is how AI discovers what domain concepts are available."
+        description = "List registered assembly types, member-role and parameter contracts, and relation types with endpoint restrictions. Knowledge-review/use scopes exclude project pattern drafts. Read this before choosing assembly or relation type names; element classes are a different registry."
     )]
     pub(super) async fn list_vocabulary_tool(&self) -> Result<CallToolResult, McpError> {
         let vocab = self
-            .request_list_vocabulary()
+            .request_list_vocabulary(
+                self.guidance_state
+                    .snapshot()
+                    .map(|s| s.scope)
+                    .unwrap_or_default()
+                    == super::guidance_session::GuidanceScope::Authoring,
+            )
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(vocab)
@@ -8878,7 +8891,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "create_assembly",
-        description = "Create a semantic assembly with typed members and optionally create relations. Also creates and selects a physical group for the same members so the aggregate can be selected and transformed as one unit. The entire operation is one undoable unit. It returns TWO ids and they are not interchangeable: `assembly_id` is the semantic assembly (what validators evaluate and what `declare_elevation_intent` expects), while `group_element_id` is the physical group (what you transform or plant). `assembly_type` must be one of the registered assembly types - call `list_element_classes` / the capability snapshot to see them; element-class names are NOT assembly types. Prefer real leaf geometry as members: a recipe's `created_element_ids`, not its `root_element_id` marker."
+        description = "Create a semantic assembly with typed members and optionally create relations. Also creates and selects a physical group for the same members so the aggregate can be selected and transformed as one unit. The entire operation is one undoable unit. It returns TWO ids and they are not interchangeable: `assembly_id` is the semantic assembly (what validators evaluate and what `declare_elevation_intent` expects), while `group_element_id` is the physical group (what you transform or plant). `assembly_type` must be one of the registered assembly types - call `list_vocabulary` for valid assembly types, member roles and relation endpoint restrictions; element-class names are NOT assembly types. Prefer real leaf geometry as members: a recipe's `created_element_ids`, not its `root_element_id` marker."
     )]
     pub(super) async fn create_assembly_tool(
         &self,

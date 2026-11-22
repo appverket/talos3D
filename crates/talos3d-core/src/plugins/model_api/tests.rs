@@ -10273,6 +10273,8 @@ fn installed_assembly_pattern_drafts_are_consultable_from_vocabulary() {
         Some("drafted"),
     );
 
+    let shared = handle_vocabulary(&world, false);
+    assert!(shared.assembly_patterns.is_empty());
     let vocabulary = handle_list_vocabulary(&world);
     assert_eq!(vocabulary.assembly_patterns.len(), 1);
     assert_eq!(vocabulary.assembly_patterns[0].id, installed.id);
@@ -15759,6 +15761,12 @@ async fn knowledge_scope_packets_are_bounded_and_cannot_unlock_authoring() {
     let (sender, receiver) = mpsc::channel();
     let worker = tokio::task::spawn_blocking(move || {
         let mut world = init_model_api_test_world();
+        seed_recipe_draft_corpus(&mut world);
+        save_assembly_pattern_draft_fixture(
+            &mut world,
+            Some("private-pattern".into()),
+            Some("installed"),
+        );
         world.insert_resource(ModelApiRuntimeInfo {
             instance_id: "knowledge-review-test".into(),
             app_name: "test".into(),
@@ -15815,6 +15823,20 @@ async fn knowledge_scope_packets_are_bounded_and_cannot_unlock_authoring() {
         }));
         let state = server.guidance_state.snapshot().unwrap();
         assert_eq!(state.phase, GuidancePhase::Complete);
+        assert!(server
+            .guidance_state
+            .router_preflight("list_vocabulary")
+            .is_none());
+        let vocabulary: VocabularyInfo = server
+            .list_vocabulary_tool()
+            .await
+            .unwrap()
+            .into_typed()
+            .unwrap();
+        assert!(
+            vocabulary.assembly_patterns.is_empty(),
+            "Knowledge scopes must exclude project drafts"
+        );
         server.profile_state.set(CapabilityProfile::Full);
         assert_eq!(
             server
@@ -15840,6 +15862,17 @@ async fn knowledge_scope_packets_are_bounded_and_cannot_unlock_authoring() {
             .guidance_state
             .router_preflight("create_box")
             .is_some());
+        let vocabulary: VocabularyInfo = server
+            .list_vocabulary_tool()
+            .await
+            .unwrap()
+            .into_typed()
+            .unwrap();
+        assert_eq!(
+            vocabulary.assembly_patterns.len(),
+            1,
+            "Authoring retains its project draft"
+        );
     }
     drop(server);
     worker.await.unwrap();

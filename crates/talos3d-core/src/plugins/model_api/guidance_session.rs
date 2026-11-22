@@ -127,6 +127,7 @@ pub(super) fn knowledge_review_tool(tool: &str) -> bool {
             | "agent_guidance_after_compact"
             | "agent_guidance_completion_check"
             | "get_capability_snapshot"
+            | "list_vocabulary"
             | "get_authoring_guidance"
             | "list_guidance_cards"
             | "get_guidance_card"

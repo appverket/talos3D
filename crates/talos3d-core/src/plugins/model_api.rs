@@ -5144,6 +5144,11 @@ pub fn handle_terrain_elevation_at(
 
 #[cfg(feature = "model-api")]
 fn handle_list_vocabulary(world: &World) -> VocabularyInfo {
+    handle_vocabulary(world, true)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_vocabulary(world: &World, include_project_drafts: bool) -> VocabularyInfo {
     let registry = world.resource::<CapabilityRegistry>();
     let mut assembly_patterns = registry
         .assembly_pattern_descriptors()
@@ -5152,6 +5157,7 @@ fn handle_list_vocabulary(world: &World) -> VocabularyInfo {
         .collect::<Vec<_>>();
     if let Some(drafts) = world
         .get_resource::<crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftRegistry>()
+        .filter(|_| include_project_drafts)
     {
         assembly_patterns.extend(
             drafts

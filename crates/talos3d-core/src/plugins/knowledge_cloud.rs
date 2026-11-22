@@ -374,6 +374,7 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
             "request_schema":schemars::schema_for!(candidate_runtime::Request),
             "execution":super::model_api::document_dispatch::contract(),
             "candidate_kinds":["parametric_type.v1","recipe.v1"],
+            "vocabulary_tool":"list_vocabulary",
             "post_reopen_observations":{"read_only":true,"maximum_calls":32,"result_path":"round_trip.observations","state_path":"round_trip.after_reopen"},
             "observation_contract":{"schema":"talos3d.candidate-scenario-observation.v2","states":"Each state_ref resolves in observed_states in the same response; identical complete native snapshots are transmitted once.","empty_rejection":"An actual failed operation may yield an empty rendered scene, with explicit execution_error and no geometry checks."},
             "geometry_types":["box","profile_extrusion"],
