@@ -15407,6 +15407,9 @@ fn mcp_material_batch_is_atomic_and_undoable() {
 mod curation;
 
 #[cfg(feature = "model-api")]
+mod guidance_relevance;
+
+#[cfg(feature = "model-api")]
 #[tokio::test]
 async fn guidance_pages_keep_mutations_blocked_until_complete_and_fence_renegotiation() {
     let (sender, receiver) = mpsc::channel();
@@ -16032,7 +16035,9 @@ fn onboarding_cost_world() -> World {
             id: AgentSkillId(format!("test.skill.{index}")),
             title: format!("Skill {index}"),
             summary: "Mandatory substrate procedure for terrain foundations".into(),
-            task_tags: vec!["terrain".into(), "foundation".into()],
+            // Untagged: these cost fixtures measure delivery of an always-
+            // required set; task selection is covered in `guidance_relevance`.
+            task_tags: vec![],
             must_read_at_bootstrap: true,
             body_markdown: "Follow the procedure.\n\n".repeat(60),
             trust_level: AgentSkillTrustLevel::Shipped,

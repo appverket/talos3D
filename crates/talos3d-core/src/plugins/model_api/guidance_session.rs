@@ -335,6 +335,10 @@ struct GuidanceSession {
     required_invariants: Vec<String>,
     required_cards: Vec<String>,
     required_skills: Vec<String>,
+    /// What selected the required set, and every installed resource it left
+    /// out. Optional resources are never obligations.
+    element_classes: Vec<String>,
+    optional_guidance: Vec<super::OptionalGuidanceRef>,
     ledger: ReadLedger,
     metrics: OnboardingMetrics,
     guidance_unavailable: bool,
@@ -387,6 +391,8 @@ impl GuidanceSessionStore {
             required_invariants,
             required_cards,
             required_skills,
+            element_classes: Vec::new(),
+            optional_guidance: Vec::new(),
             ledger: ReadLedger::default(),
             metrics: OnboardingMetrics::default(),
             guidance_unavailable: false,
@@ -446,6 +452,44 @@ impl GuidanceSessionStore {
         };
         ids.into_iter()
             .partition(|id| !session.ledger.satisfied(&key(id)))
+    }
+
+    /// Record the task context that selected this session's required set and
+    /// the resources it made optional.
+    pub fn set_task_selection(
+        &self,
+        context: super::GuidanceTaskContext,
+        optional_guidance: Vec<super::OptionalGuidanceRef>,
+    ) {
+        if let Some(session) = self
+            .0
+            .lock()
+            .expect("guidance session lock poisoned")
+            .as_mut()
+        {
+            session.element_classes = context.element_classes;
+            session.optional_guidance = optional_guidance;
+        }
+    }
+
+    pub fn task_context(&self) -> Option<super::GuidanceTaskContext> {
+        self.0
+            .lock()
+            .expect("guidance session lock poisoned")
+            .as_ref()
+            .map(|session| super::GuidanceTaskContext {
+                task: session.task.clone(),
+                element_classes: session.element_classes.clone(),
+            })
+    }
+
+    pub fn optional_guidance(&self) -> Vec<super::OptionalGuidanceRef> {
+        self.0
+            .lock()
+            .expect("guidance session lock poisoned")
+            .as_ref()
+            .map(|session| session.optional_guidance.clone())
+            .unwrap_or_default()
     }
 
     pub fn required_skills(&self) -> Vec<String> {

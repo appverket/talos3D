@@ -816,12 +816,16 @@ use profiles::{
 #[cfg(feature = "model-api")]
 mod guidance_delivery;
 #[cfg(feature = "model-api")]
+mod guidance_relevance;
+#[cfg(feature = "model-api")]
 mod guidance_session;
 #[cfg(feature = "model-api")]
 use guidance_delivery::{
     resource_digest, DeliveredGuidance, GuidanceDeliveryKind, GuidanceDeliveryRequest,
     GuidanceDeliveryStore, GuidanceResource,
 };
+#[cfg(feature = "model-api")]
+pub use guidance_relevance::{GuidanceTaskContext, OptionalReason};
 #[cfg(feature = "model-api")]
 use guidance_session::{
     card_key, hook_tool_name, skill_key, GuidanceCompletionRequest, GuidancePreflightRequest,
@@ -13848,6 +13852,21 @@ pub fn handle_list_element_classes(world: &World) -> Vec<ElementClassInfo> {
 
 #[cfg(feature = "model-api")]
 pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> CapabilitySnapshotInfo {
+    handle_get_capability_snapshot_for_task(world, expanded, &GuidanceTaskContext::default())
+}
+
+/// Capability snapshot whose must-read set is selected for `context`.
+///
+/// Substrate cards and proactive passages are always required. Registry cards
+/// and bootstrap-mandatory skills are ranked by declared relevance to the task
+/// (see `guidance_relevance`); untagged items and task-less sessions keep every
+/// item required. Whatever is not required is listed in `optional_guidance`.
+#[cfg(feature = "model-api")]
+pub fn handle_get_capability_snapshot_for_task(
+    world: &World,
+    expanded: bool,
+    context: &GuidanceTaskContext,
+) -> CapabilitySnapshotInfo {
     use crate::capability_registry::CapabilityRegistry;
     use crate::curation::{CuratedManifestRegistry, MaterialSpecRegistry, SourceRegistry};
     use crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftRegistry;
@@ -14049,15 +14068,40 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     // the installing app/domain. Preserve that distinction in the snapshot so
     // evolving knowledge can become mandatory without bloating the stable
     // onboarding handshake or forcing every installed skill into every session.
+    // The active guidance's namespace (`<domain>.<name>`) is the composition's
+    // own domain: a tag naming it declares "every task served here".
+    let guidance_namespace = world
+        .get_resource::<AuthoringGuidance>()
+        .filter(|guidance| !guidance.is_empty())
+        .and_then(|guidance| guidance.guidance_id.split('.').next().map(str::to_string));
+    let relevance = guidance_relevance::TaskRelevance::new(
+        context,
+        world.get_resource::<crate::plugins::authoring_guidance::DiscoveryAliases>(),
+        guidance_namespace.as_deref(),
+    );
+    let mut optional_guidance = Vec::new();
     let must_read_agent_skill_ids = world
         .get_resource::<AgentSkillRegistry>()
         .map(|registry| {
-            registry
+            let mandatory = registry
                 .list()
                 .into_iter()
                 .filter(|skill| skill.must_read_at_bootstrap)
-                .map(|skill| skill.id.0.clone())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let selection = guidance_relevance::select_required(
+                relevance.as_ref(),
+                mandatory
+                    .iter()
+                    .map(|skill| (skill.id.0.as_str(), skill.task_tags.as_slice())),
+                usize::MAX,
+            );
+            optional_guidance.extend(
+                selection
+                    .optional
+                    .into_iter()
+                    .map(|entry| OptionalGuidanceRef::new(OptionalGuidanceRef::SKILL, entry)),
+            );
+            selection.required
         })
         .unwrap_or_default();
 
@@ -14106,21 +14150,34 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
             });
         }
     }
+    // Substrate cards and proactive passages are decisive must-reads and are
+    // never subject to task selection or the budget; registry cards get what
+    // remains of the base budget, most relevant first.
+    let mut seen_cards = std::collections::HashSet::new();
+    must_read_guidance_card_ids.retain(|id| seen_cards.insert(id.clone()));
     if let Some(registry) =
         world.get_resource::<crate::plugins::authoring_guidance::GuidanceCardRegistry>()
     {
-        must_read_guidance_card_ids.extend(
+        let budget = (guidance_limit + proactive_passage_card_ids.len())
+            .saturating_sub(must_read_guidance_card_ids.len());
+        let selection = guidance_relevance::select_required(
+            relevance.as_ref(),
             registry
                 .cards()
-                .map(|card| card.id.clone())
-                .filter(|id| !guidance_pointer_card_ids.contains(id)),
+                .filter(|card| {
+                    !guidance_pointer_card_ids.contains(&card.id) && !seen_cards.contains(&card.id)
+                })
+                .map(|card| (card.id.as_str(), card.task_tags.as_slice())),
+            budget,
+        );
+        must_read_guidance_card_ids.extend(selection.required);
+        optional_guidance.extend(
+            selection
+                .optional
+                .into_iter()
+                .map(|entry| OptionalGuidanceRef::new(OptionalGuidanceRef::CARD, entry)),
         );
     }
-    // Proactive skill cards are decisive must-reads and must not be truncated
-    // away by the base guidance budget; extend the budget by their count.
-    let mut seen_cards = std::collections::HashSet::new();
-    must_read_guidance_card_ids.retain(|id| seen_cards.insert(id.clone()));
-    must_read_guidance_card_ids.truncate(guidance_limit + proactive_passage_card_ids.len());
 
     // Session-contract guarantee: the snapshot must never advertise a guidance
     // card id that `get_guidance_card` cannot resolve. The dynamic
@@ -14133,6 +14190,9 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         .map(|card| card.id)
         .collect();
     must_read_guidance_card_ids.retain(|id| registered_card_ids.contains(id));
+    optional_guidance.retain(|entry| {
+        entry.kind != OptionalGuidanceRef::CARD || registered_card_ids.contains(&entry.id)
+    });
 
     let mut no_curated_paths = Vec::new();
     if let Some(registry) = world.get_resource::<CapabilityRegistry>() {
@@ -14246,6 +14306,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         // guidance read ledger (see `get_capability_snapshot_tool`).
         already_read_guidance_card_ids: Vec::new(),
         already_read_agent_skill_ids: Vec::new(),
+        optional_guidance,
         next_tools: capability_snapshot_next_tools(),
     };
     // The default snapshot is an onboarding handshake with a hard byte budget,

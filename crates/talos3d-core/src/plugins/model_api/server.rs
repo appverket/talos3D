@@ -2008,10 +2008,18 @@ impl ModelApiServer {
             .unwrap_or_default()
     }
 
-    async fn request_get_capability_snapshot(&self, expanded: bool) -> CapabilitySnapshotInfo {
-        self.round_trip(|response| ModelApiRequest::GetCapabilitySnapshot { expanded, response })
-            .await
-            .unwrap_or_else(|_| CapabilitySnapshotInfo::empty(expanded))
+    async fn request_get_capability_snapshot(
+        &self,
+        expanded: bool,
+        context: GuidanceTaskContext,
+    ) -> CapabilitySnapshotInfo {
+        self.round_trip(|response| ModelApiRequest::GetCapabilitySnapshot {
+            expanded,
+            context,
+            response,
+        })
+        .await
+        .unwrap_or_else(|_| CapabilitySnapshotInfo::empty(expanded))
     }
 
     async fn request_list_recipe_families(
@@ -3234,9 +3242,15 @@ pub struct AgentHello {
     /// Protocol projection used by the client, normally `mcp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
-    /// The user's current task or intent. Used only for bounded recommendations.
+    /// The user's current task or intent. It selects the task-relevant
+    /// required guidance (by declared tags) and bounded skill recommendations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    /// Element classes the task targets, when the client already knows them
+    /// (for example from `list_element_classes`). They select class-tagged
+    /// guidance in addition to the task text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub element_classes: Vec<String>,
     /// Desired capability profile. Negotiation reports the change; it never
     /// silently switches profiles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3416,6 +3430,7 @@ pub(super) fn assemble_agent_welcome(
     if knowledge_review {
         snapshot.must_read_guidance_card_ids.clear();
         snapshot.must_read_agent_skill_ids.clear();
+        snapshot.optional_guidance.clear();
     }
     snapshot.next_tools.retain(|tool| {
         profile_allows(profile, tool)
@@ -4416,7 +4431,53 @@ pub struct CapabilitySnapshotInfo {
     pub already_read_guidance_card_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub already_read_agent_skill_ids: Vec<String>,
+    /// Installed cards and skills that are not in the required set for the
+    /// negotiated task, each with the reason and its retrieval tool. Nothing
+    /// leaves the required set without appearing here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional_guidance: Vec<OptionalGuidanceRef>,
     pub next_tools: Vec<String>,
+}
+
+/// A guidance resource that exists but is not a read obligation for this task.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OptionalGuidanceRef {
+    /// `guidance_card` or `agent_skill`.
+    pub kind: String,
+    pub id: String,
+    pub reason: OptionalReason,
+}
+
+impl OptionalGuidanceRef {
+    pub const CARD: &'static str = "guidance_card";
+    pub const SKILL: &'static str = "agent_skill";
+
+    pub(super) fn new(kind: &str, (id, reason): (String, OptionalReason)) -> Self {
+        Self {
+            kind: kind.to_string(),
+            id,
+            reason,
+        }
+    }
+
+    /// Packet manifest entry: same key and retrieval shape as a required
+    /// resource of the same kind, marked `required: false`.
+    pub(super) fn manifest_entry(&self) -> serde_json::Value {
+        let (key, tool, argument) = if self.kind == Self::SKILL {
+            (skill_key(&self.id), "get_agent_skill", "skill_id")
+        } else {
+            (card_key(&self.id), "get_guidance_card", "card_id")
+        };
+        serde_json::json!({
+            "key": key,
+            "kind": self.kind,
+            "id": self.id,
+            "required": false,
+            "reason": self.reason,
+            "retrieval": {"tool": tool, "arguments": {argument: self.id}},
+        })
+    }
 }
 
 impl CapabilitySnapshotInfo {
@@ -4436,6 +4497,7 @@ impl CapabilitySnapshotInfo {
             must_read_agent_skill_ids: Vec::new(),
             already_read_guidance_card_ids: Vec::new(),
             already_read_agent_skill_ids: Vec::new(),
+            optional_guidance: Vec::new(),
             next_tools: vec![
                 "list_element_classes".into(),
                 "select_recipe".into(),
@@ -6081,7 +6143,13 @@ impl ModelApiServer {
             .request_get_instance_info()
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
-        let snapshot = self.request_get_capability_snapshot(false).await;
+        let context = GuidanceTaskContext {
+            task: hello.task.clone(),
+            element_classes: hello.element_classes.clone(),
+        };
+        let snapshot = self
+            .request_get_capability_snapshot(false, context.clone())
+            .await;
         let (skills, cloud_status) = self
             .cloud_skill_list(crate::plugins::agent_skills::AgentSkillSearch::default())
             .await;
@@ -6108,6 +6176,10 @@ impl ModelApiServer {
                 .clone(),
             welcome.required_invariants.clone(),
             welcome.hello.guidance_scope,
+        );
+        self.guidance_state.set_task_selection(
+            context,
+            welcome.capability_snapshot.optional_guidance.clone(),
         );
         // The welcome states the invariants once, at top level. The live state
         // keeps them for `get_agent_guidance_state` and hook rehydration.
@@ -6229,6 +6301,14 @@ impl ModelApiServer {
                 "key": key, "id": id, "required": true, "available": false,
                 "error": error, "next_tool": "report_harness_incident",
             }));
+        }
+        if authoring {
+            manifest.extend(
+                self.guidance_state
+                    .optional_guidance()
+                    .iter()
+                    .map(OptionalGuidanceRef::manifest_entry),
+            );
         }
         let header = serde_json::to_value(AgentGuidancePacket {
             contract: "talos3d.agent-guidance-packet".to_string(),
@@ -9095,7 +9175,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<CapabilitySnapshotRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let mut snapshot = self.request_get_capability_snapshot(params.expanded).await;
+        // The negotiated task selects the same required set the session
+        // bootstrapped with; before negotiation nothing is task-scoped.
+        let context = self.guidance_state.task_context().unwrap_or_default();
+        let mut snapshot = self
+            .request_get_capability_snapshot(params.expanded, context)
+            .await;
         // Session-contract invariant: next_tools must only name tools the
         // active profile actually advertises, so a gated session is never
         // steered toward a tool it cannot call.
@@ -9109,6 +9194,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         if knowledge_review {
             snapshot.must_read_guidance_card_ids.clear();
             snapshot.must_read_agent_skill_ids.clear();
+            snapshot.optional_guidance.clear();
         }
         // One read state owns every obligation. Advertising a resource the
         // bootstrap already delivered as still-must-read is what makes an

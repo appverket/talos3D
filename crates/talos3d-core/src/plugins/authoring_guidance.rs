@@ -323,9 +323,19 @@ impl DiscoveryAliases {
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
+
+    /// Every registered term with its aliases, normalized. Consumers treat each
+    /// entry as one equivalence group (for example task-relevance selection).
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.0
+            .iter()
+            .map(|(term, aliases)| (term.as_str(), aliases.as_slice()))
+    }
 }
 
-fn normalize_discovery_term(term: &str) -> String {
+/// Normalization shared by every consumer of discovery terms: ASCII
+/// alphanumerics only, lowercased.
+pub fn normalize_discovery_term(term: &str) -> String {
     term.chars()
         .filter(char::is_ascii_alphanumeric)
         .flat_map(char::to_lowercase)

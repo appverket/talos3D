@@ -848,6 +848,7 @@ pub(super) enum ModelApiRequest {
     ListElementClasses(oneshot::Sender<Vec<ElementClassInfo>>),
     GetCapabilitySnapshot {
         expanded: bool,
+        context: GuidanceTaskContext,
         response: oneshot::Sender<CapabilitySnapshotInfo>,
     },
     ListRecipeFamilies {
@@ -2416,8 +2417,14 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         ModelApiRequest::ListElementClasses(response) => {
             let _ = response.send(handle_list_element_classes(world));
         }
-        ModelApiRequest::GetCapabilitySnapshot { expanded, response } => {
-            let _ = response.send(handle_get_capability_snapshot(world, expanded));
+        ModelApiRequest::GetCapabilitySnapshot {
+            expanded,
+            context,
+            response,
+        } => {
+            let _ = response.send(handle_get_capability_snapshot_for_task(
+                world, expanded, &context,
+            ));
         }
         ModelApiRequest::ListRecipeFamilies {
             element_class,
