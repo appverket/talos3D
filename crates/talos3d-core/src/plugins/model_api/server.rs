@@ -9258,7 +9258,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "evaluate_knowledge_candidate",
-        description = "Execute a bounded parametric candidate in a disposable scene using ordinary create/driver handlers, report AABB checks and return an isolated GPU image. Never installs candidate knowledge or edits the user document. Supports parametric_type.v1 only, at most128 members and16 edits. Neutral render materials; no rights, structural, hosting, undo or saved-file qualification. Unsupported asset kinds are capability gaps."
+        description = "Execute a bounded parametric candidate in a disposable scene using ordinary create/driver handlers, report AABB checks and return an isolated GPU image. An isolated self-test: never installs, submits, reviews or publishes candidate knowledge, and never edits the user document. Supports parametric_type.v1 only, at most128 members and16 edits. Neutral render materials; no rights, structural, hosting, undo or saved-file qualification. Unsupported asset kinds are capability gaps."
     )]
     pub(super) async fn evaluate_knowledge_candidate_tool(
         &self,

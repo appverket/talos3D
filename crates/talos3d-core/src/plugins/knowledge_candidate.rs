@@ -374,7 +374,9 @@ pub fn start(
     report["rendered"] = json!(true);
     report["presentation"] = json!({"kind":"isolated_gpu_candidate","width":768,"height":768,"materials":"neutral inspection material, not candidate material qualification"});
     let screenshot = world
-        .spawn(Screenshot::image(target.clone()))
+        // Marked like the rest of the candidate scene so a single
+        // `Without<PreviewOnly>` filter excludes everything this path spawns.
+        .spawn((Screenshot::image(target.clone()), PreviewOnly))
         .observe(move |event: On<ScreenshotCaptured>| {
             use base64::Engine;
             let result = (|| {
@@ -617,6 +619,45 @@ mod tests {
             .collect();
         assert!(evaluate(r, vec![]).err().unwrap().contains("at most 16"));
     }
+    /// The isolation this scope's authorization rests on: a self-test runs in a
+    /// scratch `World`, and the only entities it adds to the live one are
+    /// derived render entities that no document query can reach.
+    #[test]
+    fn candidate_scene_cannot_enter_the_user_document() {
+        use crate::plugins::definition_preview_scene::PreviewOnly;
+        use crate::plugins::identity::ElementId;
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let authored = world.spawn(ElementId(77)).id();
+        let (sender, _receiver) = tokio::sync::oneshot::channel();
+
+        let scene = evaluate(request(), vec![]).unwrap();
+        // Evaluation alone spawns nothing: the geometry arrives as plain meshes.
+        assert!(!scene.parts.is_empty());
+        start(&mut world, scene, sender);
+
+        let spawned = world.resource::<PendingRender>().entities.clone();
+        assert!(spawned.len() >= 3, "expected the candidate scene entities");
+        for entity in &spawned {
+            assert!(
+                world.get::<PreviewOnly>(*entity).is_some(),
+                "{entity} is not marked PreviewOnly"
+            );
+            assert!(
+                world.get::<ElementId>(*entity).is_none(),
+                "{entity} carries a document identity"
+            );
+        }
+
+        // Mirrors the single gate in `persistence::build_project_file`; the
+        // authored entity is all a save, export or selection may see.
+        let mut document =
+            world.query_filtered::<Entity, (With<ElementId>, Without<PreviewOnly>)>();
+        assert_eq!(document.iter(&world).collect::<Vec<_>>(), vec![authored]);
+    }
+
     #[test]
     fn gpu_timeout_reclaims_only_candidate_resources() {
         let mut world = World::new();

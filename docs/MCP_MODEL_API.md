@@ -1782,12 +1782,19 @@ knowledge cards, skills, source passages and candidate schemas remain discoverab
 through MCP on demand. It does not preload the model-authoring handbook.
 
 The server admits only explicit knowledge-inspection and candidate-check tools in
-this scope. It rejects model edits, knowledge installation, draft mutation and
-unknown tools, even after a profile change. A fresh `authoring` negotiation restores
-the complete mandatory authoring bootstrap before edits can proceed. The separate
-curator service still controls leases, candidate submission, independent review and
-release; runtime review scope grants none of those authorities. Completing its
-bootstrap claims no model edit, validation or successful retry.
+this scope, plus the two isolated self-tests `evaluate_knowledge_candidate` and
+`evaluate_legacy_knowledge_asset`. Those execute in a disposable scratch world and
+render on an isolated layer, so a reviewer can see the geometry it is judging
+rather than only its numeric expressions; the entities they spawn carry no
+`ElementId` and are `PreviewOnly`, so no save, export or selection can reach them.
+Running one is a self-test, not independent evaluation, review or release, and it
+is not admitted in `knowledge_use`. It rejects model edits, knowledge installation,
+draft mutation and unknown tools, even after a profile change. A fresh `authoring`
+negotiation restores the complete mandatory authoring bootstrap before edits can
+proceed. The separate curator service still controls leases, candidate submission,
+independent review and release; runtime review scope grants none of those
+authorities. Completing its bootstrap claims no model edit, validation or
+successful retry.
 
 `guidance_scope: "knowledge_use"` serves compact onboarding for ordinary agents
 consuming shared knowledge. It additionally admits discovery, validated asset
