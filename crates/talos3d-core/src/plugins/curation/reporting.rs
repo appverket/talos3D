@@ -157,9 +157,6 @@ fn retain_followup(
             return Err("Continuation conflicts with an existing private record".into());
         }
     } else {
-        if records.len() >= MAX_PENDING {
-            return Err("Private incident capacity reached".into());
-        }
         records.insert(report.feedback_id.clone(), child);
     }
     Ok(())
@@ -397,9 +394,22 @@ impl HarnessIncidentStore {
                     && record.credential_fingerprint == credential_fingerprint
             }) {
                 observation.event_id = old.observation.event_id.clone();
+            } else if let Some(old) = read_archived_detector(
+                policy,
+                &observation,
+                &source,
+                &credential_fingerprint,
+                detector.unwrap(),
+            )? {
+                observation.event_id = old.observation.event_id;
             }
         }
-        if let Some(old) = state.records.get(&observation.event_id) {
+        let archived = read_archived(policy, &observation.event_id)?;
+        if let Some(old) = state
+            .records
+            .get(&observation.event_id)
+            .or(archived.as_ref())
+        {
             if old.observation != observation
                 || old.source != source
                 || old.credential_fingerprint != credential_fingerprint
@@ -413,9 +423,6 @@ impl HarnessIncidentStore {
                 json!({"event_id":observation.event_id,"recorded_locally":true,"duplicate":true,"submitted":old.submitted,"export_enabled":policy.export_enabled,"durability":if policy.pending_path.is_some(){"private_host_file"}else{"application_lifetime"}}),
             );
         }
-        if state.records.len() >= MAX_PENDING {
-            return Err("Private pending incident capacity reached; host review is required before retaining more reports".into());
-        }
         let record = PendingRecord {
             observation: observation.clone(),
             source,
@@ -427,7 +434,7 @@ impl HarnessIncidentStore {
         };
         let mut candidate = state.records.clone();
         candidate.insert(observation.event_id.clone(), record);
-        persist(policy, &candidate)?;
+        persist_active(policy, &mut candidate)?;
         state.records = candidate;
         Ok(
             json!({"event_id":observation.event_id,"recorded_locally":true,"duplicate":false,"submitted":false,"export_enabled":policy.export_enabled,"durability":if policy.pending_path.is_some(){"private_host_file"}else{"application_lifetime"},"note":"Recording is local. Export requires explicit host policy and the original service/credential; no investigation or provider execution is started."}),
@@ -521,10 +528,11 @@ impl HarnessIncidentStore {
     ) -> Result<PendingRecord, String> {
         uuid::Uuid::parse_str(event_id).map_err(|_| "Invalid event identity")?;
         let state = self.load(policy)?;
-        let record = state
-            .records
-            .get(event_id)
-            .ok_or("Incident unavailable for this host identity")?;
+        let record = match state.records.get(event_id) {
+            Some(record) => record.clone(),
+            None => read_archived(policy, event_id)?
+                .ok_or("Incident unavailable for this host identity")?,
+        };
         // A short-lived credential is not a stable account identity. For an
         // already submitted receipt only, the read must reach the original
         // service, which authorizes the incident against the current account.
@@ -592,7 +600,7 @@ impl HarnessIncidentStore {
         }
         let mut state = self.load(policy)?;
         let mut candidate = state.records.clone();
-        let current = candidate.get_mut(event_id).ok_or("Incident unavailable")?;
+        let current = active_record(&mut candidate, policy, event_id)?;
         if !current.submitted
             || current.source != before.source
             || current.incident_id != before.incident_id
@@ -602,7 +610,7 @@ impl HarnessIncidentStore {
         }
         current.credential_fingerprint = fingerprint(corpus.bearer_token.as_deref());
         let authorized = current.clone();
-        persist(policy, &candidate)?;
+        persist_active(policy, &mut candidate)?;
         state.records = candidate;
         Ok(authorized)
     }
@@ -630,9 +638,13 @@ impl HarnessIncidentStore {
         {
             let mut state = self.load(policy)?;
             let mut candidate = state.records.clone();
-            let current = candidate
-                .get_mut(&request.event_id)
-                .ok_or("Incident unavailable")?;
+            let current = active_record(&mut candidate, policy, &request.event_id)?;
+            if current.source != record.source
+                || current.incident_id != record.incident_id
+                || current.credential_fingerprint != fingerprint(corpus.bearer_token.as_deref())
+            {
+                return Err("Incident authority changed during feedback recording".into());
+            }
             if let Some(old) = current
                 .feedback
                 .iter()
@@ -649,7 +661,7 @@ impl HarnessIncidentStore {
                     report: request.clone(),
                     submitted: false,
                 });
-                persist(policy, &candidate)?;
+                persist_active(policy, &mut candidate)?;
                 state.records = candidate;
             }
         }
@@ -734,7 +746,7 @@ impl HarnessIncidentStore {
                 }) {
                     current.submitted = true;
                 }
-                persist(policy, &candidate)?;
+                persist_active(policy, &mut candidate)?;
                 state.records = candidate;
                 submitted += 1;
             }
@@ -847,7 +859,7 @@ impl HarnessIncidentStore {
                 current.submitted = true;
                 current.incident_id = receipt["incident_id"].as_str().map(str::to_owned);
             }
-            persist(policy, &candidate)?;
+            persist_active(policy, &mut candidate)?;
             state.records = candidate;
             submitted += 1;
         }
@@ -900,6 +912,208 @@ fn read_pending(path: &Path) -> Result<BTreeMap<String, PendingRecord>, String> 
 fn read_pending(_: &Path) -> Result<BTreeMap<String, PendingRecord>, String> {
     Err("Persistent private incident storage needs a host adapter on this target".into())
 }
+// Acknowledged history is not pending delivery. Keep it on disk, addressable
+// by event id, without loading an unbounded history into the active outbox.
+fn detector_archive_key(
+    observation: &Observation,
+    source: &str,
+    credential: &Option<String>,
+    detector: &str,
+) -> String {
+    let bytes = serde_json::to_vec(&(
+        detector,
+        &observation.kind,
+        &observation.applicability,
+        &observation.failure_code,
+        &observation.app_revision,
+        &observation.knowledge_request,
+        source,
+        credential,
+    ))
+    .expect("typed detector identity");
+    format!("detector-{}", hex::encode(Sha256::digest(bytes)))
+}
+
+fn archive_path(policy: &HarnessIncidentPolicy, key: &str) -> Result<Option<PathBuf>, String> {
+    if !(uuid::Uuid::parse_str(key).is_ok()
+        || key
+            .strip_prefix("detector-")
+            .is_some_and(|v| v.len() == 64 && v.bytes().all(|c| c.is_ascii_hexdigit())))
+    {
+        return Err("Invalid private receipt identity".into());
+    }
+    Ok(policy.pending_path.as_ref().map(|path| {
+        let mut directory = path.as_os_str().to_os_string();
+        directory.push(".receipts");
+        PathBuf::from(directory).join(format!("{key}.json"))
+    }))
+}
+
+fn read_archive_key(
+    policy: &HarnessIncidentPolicy,
+    key: &str,
+) -> Result<Option<PendingRecord>, String> {
+    let Some(path) = archive_path(policy, key)? else {
+        return Ok(None);
+    };
+    let records = read_pending(&path)?;
+    if records.is_empty() {
+        return Ok(None);
+    }
+    if records.len() != 1 {
+        return Err("Invalid private receipt archive".into());
+    }
+    let (_, record) = records.into_iter().next().unwrap();
+    if !record.submitted
+        || record
+            .incident_id
+            .as_deref()
+            .is_none_or(|id| uuid::Uuid::parse_str(id).is_err())
+        || record.feedback.iter().any(|f| !f.submitted)
+    {
+        return Err("Unacknowledged record in receipt archive".into());
+    }
+    Ok(Some(record))
+}
+
+fn read_archived(
+    policy: &HarnessIncidentPolicy,
+    event_id: &str,
+) -> Result<Option<PendingRecord>, String> {
+    let record = read_archive_key(policy, event_id)?;
+    if record
+        .as_ref()
+        .is_some_and(|r| r.observation.event_id != event_id)
+    {
+        return Err("Private receipt identity mismatch".into());
+    }
+    Ok(record)
+}
+
+fn read_archived_detector(
+    policy: &HarnessIncidentPolicy,
+    observation: &Observation,
+    source: &str,
+    credential: &Option<String>,
+    detector: &str,
+) -> Result<Option<PendingRecord>, String> {
+    let key = detector_archive_key(observation, source, credential, detector);
+    let record = read_archive_key(policy, &key)?;
+    if record.as_ref().is_some_and(|r| {
+        r.detector.as_deref() != Some(detector)
+            || detector_archive_key(
+                &r.observation,
+                &r.source,
+                &r.credential_fingerprint,
+                detector,
+            ) != key
+    }) {
+        return Err("Private detector receipt identity mismatch".into());
+    }
+    Ok(record)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn archive_record(policy: &HarnessIncidentPolicy, record: &PendingRecord) -> Result<(), String> {
+    let path = archive_path(policy, &record.observation.event_id)?
+        .ok_or("Persistent receipt storage required")?;
+    let directory = path.parent().ok_or("Private receipt directory required")?;
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(directory) {
+        Ok(()) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !std::fs::symlink_metadata(directory)
+                .map_err(|_| "Private receipt directory unavailable")?
+                .is_dir()
+            {
+                return Err("Invalid private receipt directory".into());
+            }
+        }
+        Err(_) => return Err("Private receipt directory unavailable".into()),
+    }
+    let records = BTreeMap::from([(record.observation.event_id.clone(), record.clone())]);
+    let bytes = serde_json::to_vec(&PendingFile {
+        schema: PENDING_SCHEMA.into(),
+        records,
+    })
+    .map_err(|_| "Private receipt serialization failed")?;
+    write_pending(&path, &bytes)?;
+    if let Some(detector) = &record.detector {
+        let key = detector_archive_key(
+            &record.observation,
+            &record.source,
+            &record.credential_fingerprint,
+            detector,
+        );
+        write_pending(&archive_path(policy, &key)?.unwrap(), &bytes)?;
+    }
+    Ok(())
+}
+#[cfg(target_arch = "wasm32")]
+fn archive_record(_: &HarnessIncidentPolicy, _: &PendingRecord) -> Result<(), String> {
+    Err("Persistent private receipt storage needs a host adapter".into())
+}
+
+fn active_record<'a>(
+    records: &'a mut BTreeMap<String, PendingRecord>,
+    policy: &HarnessIncidentPolicy,
+    event_id: &str,
+) -> Result<&'a mut PendingRecord, String> {
+    if !records.contains_key(event_id) {
+        // Read current durable state after any await, never restore a stale
+        // pre-authorization snapshot over more recent feedback.
+        let current = read_archived(policy, event_id)?.ok_or("Incident unavailable")?;
+        records.insert(event_id.to_owned(), current);
+    }
+    records
+        .get_mut(event_id)
+        .ok_or_else(|| "Incident unavailable".into())
+}
+
+fn persist_active(
+    policy: &HarnessIncidentPolicy,
+    records: &mut BTreeMap<String, PendingRecord>,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec(&PendingFile {
+        schema: PENDING_SCHEMA.into(),
+        records: records.clone(),
+    })
+    .map_err(|_| "Private incident serialization failed")?;
+    if records.len() > MAX_PENDING || bytes.len() > MAX_BYTES {
+        if policy.pending_path.is_some() {
+            let acknowledged: Vec<_> = records
+                .values()
+                .filter(|r| {
+                    r.submitted
+                        && r.incident_id
+                            .as_deref()
+                            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+                        && r.feedback.iter().all(|f| f.submitted)
+                })
+                .cloned()
+                .collect();
+            for record in acknowledged {
+                // Archive and fsync first. A failed active-file replace leaves
+                // harmless duplicate history, never erased pending delivery.
+                archive_record(policy, &record)?;
+                records.remove(&record.observation.event_id);
+            }
+        }
+        if records.len() > MAX_PENDING {
+            return Err(
+                "Private pending incident capacity reached; undelivered reports remain retained"
+                    .into(),
+            );
+        }
+    }
+    persist(policy, records)
+}
+
 fn persist(
     policy: &HarnessIncidentPolicy,
     records: &BTreeMap<String, PendingRecord>,
@@ -1003,7 +1217,11 @@ mod tests {
             bearer_token: Some("original".into()),
             ..Default::default()
         };
-        let policy = HarnessIncidentPolicy::default();
+        let dir = tempfile::tempdir().unwrap();
+        let policy = HarnessIncidentPolicy {
+            pending_path: Some(dir.path().join("pending.json")),
+            ..Default::default()
+        };
         let store = HarnessIncidentStore::default();
         let receipt = store
             .report_gap(
@@ -1031,6 +1249,9 @@ mod tests {
             let record = state.records.get_mut(event).unwrap();
             record.submitted = true;
             record.incident_id = Some(uuid::Uuid::new_v4().to_string());
+            archive_record(&policy, record).unwrap();
+            state.records.remove(event);
+            persist(&policy, &state.records).unwrap();
         }
         let status = store
             .incident_status(event, &policy, &connection, &renewed)
@@ -1171,6 +1392,8 @@ mod tests {
             let row = state.records.get_mut(event).unwrap();
             row.submitted = true;
             row.incident_id = Some(uuid::Uuid::new_v4().to_string());
+            archive_record(&policy, row).unwrap();
+            state.records.remove(event);
             persist(&policy, &state.records).unwrap();
         }
         let request = RetryOutcome {
@@ -1496,6 +1719,159 @@ mod tests {
         let submit = store.submit(&policy, &connection, &corpus).await.unwrap();
         assert_eq!(submit["status"], "no_eligible_pending_reports");
         assert_eq!(store.load(&policy).unwrap().records.len(), 2);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn acknowledged_receipts_leave_active_capacity_without_losing_identity_or_feedback() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = HarnessIncidentPolicy {
+            pending_path: Some(dir.path().join("pending.json")),
+            export_enabled: true,
+            ..Default::default()
+        };
+        let store = HarnessIncidentStore::default();
+        let connection = connection();
+        let corpus = AgentCorpusConnection {
+            base_url: "http://127.0.0.1:1/v1/corpus".into(),
+            bearer_token: Some("original".into()),
+            ..Default::default()
+        };
+        let automatic = store
+            .report_missing_required_guidance(&policy, &connection, Some("original"))
+            .unwrap();
+        let automatic_id = automatic["event_id"].as_str().unwrap().to_owned();
+        let mut acknowledged = Vec::new();
+        let mut pending = Vec::new();
+        {
+            let mut state = store.load(&policy).unwrap();
+            for n in 0..MAX_PENDING {
+                let id = if n == 0 {
+                    automatic_id.clone()
+                } else {
+                    uuid::Uuid::new_v4().to_string()
+                };
+                let mut record = state.records[&automatic_id].clone();
+                record.observation.event_id = id.clone();
+                if n != 0 {
+                    record.detector = None;
+                    record.observation.failure_code = "no_curated_path".into();
+                }
+                record.submitted = n < MAX_PENDING - 2;
+                record.incident_id = record.submitted.then(|| uuid::Uuid::new_v4().to_string());
+                if record.submitted {
+                    acknowledged.push(id.clone());
+                } else {
+                    pending.push(id.clone());
+                }
+                state.records.insert(id, record);
+            }
+            persist(&policy, &state.records).unwrap();
+        }
+        let fresh = store
+            .report(request(None), &policy, &connection, Some("original"))
+            .unwrap();
+        assert_eq!(store.load(&policy).unwrap().records.len(), 3);
+        let restarted = HarnessIncidentStore::default();
+        for id in &pending {
+            assert!(
+                !restarted
+                    .bound_record(id, &policy, &connection, &corpus)
+                    .unwrap()
+                    .submitted
+            );
+        }
+        for id in &acknowledged {
+            assert!(
+                restarted
+                    .bound_record(id, &policy, &connection, &corpus)
+                    .unwrap()
+                    .submitted
+            );
+        }
+        assert_eq!(
+            restarted
+                .report_missing_required_guidance(&policy, &connection, Some("original"))
+                .unwrap()["event_id"],
+            automatic["event_id"]
+        );
+        assert_eq!(restarted.load(&policy).unwrap().records.len(), 3);
+        let mut changed = corpus.clone();
+        changed.bearer_token = Some("other".into());
+        assert!(restarted
+            .bound_record(&automatic_id, &policy, &connection, &changed)
+            .is_err());
+        // Rehydrated pending feedback may not be archived, even though the
+        // original observation has already been acknowledged by the server.
+        let mut record = restarted
+            .bound_record(&acknowledged[1], &policy, &connection, &corpus)
+            .unwrap();
+        record.feedback.push(PendingFeedback {
+            submitted: false,
+            report: RetryOutcome {
+                event_id: acknowledged[1].clone(),
+                feedback_id: uuid::Uuid::new_v4().to_string(),
+                artifact_id: "synthetic".into(),
+                revision: "a".repeat(64),
+                outcome: "failed".into(),
+                evidence_codes: vec!["synthetic".into()],
+                residual_knowledge_gaps: vec![],
+            },
+        });
+        let mut records = restarted.load(&policy).unwrap().records.clone();
+        records.insert(acknowledged[1].clone(), record);
+        for n in 0..MAX_PENDING {
+            let mut old = restarted
+                .bound_record(&automatic_id, &policy, &connection, &corpus)
+                .unwrap();
+            old.observation.event_id = uuid::Uuid::new_v4().to_string();
+            old.detector = None;
+            old.observation.failure_code = format!("synthetic_{n}");
+            records.insert(old.observation.event_id.clone(), old);
+        }
+        persist_active(&policy, &mut records).unwrap();
+        assert_eq!(records.len(), 4);
+        assert!(!records[&acknowledged[1]].feedback[0].submitted);
+        assert!(records.contains_key(fresh["event_id"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn archival_failure_preserves_original_active_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = HarnessIncidentPolicy {
+            pending_path: Some(dir.path().join("pending.json")),
+            ..Default::default()
+        };
+        let store = HarnessIncidentStore::default();
+        let event = store
+            .report(request(None), &policy, &connection(), Some("original"))
+            .unwrap();
+        let mut records = store.load(&policy).unwrap().records.clone();
+        let mut acknowledged = records[event["event_id"].as_str().unwrap()].clone();
+        acknowledged.submitted = true;
+        acknowledged.incident_id = Some(uuid::Uuid::new_v4().to_string());
+        for _ in 0..MAX_PENDING {
+            acknowledged.observation.event_id = uuid::Uuid::new_v4().to_string();
+            records.insert(
+                acknowledged.observation.event_id.clone(),
+                acknowledged.clone(),
+            );
+        }
+        let before = std::fs::read(policy.pending_path.as_ref().unwrap()).unwrap();
+        std::fs::write(
+            policy
+                .pending_path
+                .as_ref()
+                .unwrap()
+                .with_file_name("pending.json.receipts"),
+            b"not a directory",
+        )
+        .unwrap();
+        assert!(persist_active(&policy, &mut records).is_err());
+        assert_eq!(
+            std::fs::read(policy.pending_path.as_ref().unwrap()).unwrap(),
+            before
+        );
     }
 
     fn request(id: Option<String>) -> ReportHarnessIncident {
