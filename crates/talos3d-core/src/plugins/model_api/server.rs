@@ -4692,11 +4692,11 @@ pub struct RecipeRankingInfo {
     /// accepted parameters up front instead of probing by trial-and-error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parameters: Vec<RecipeParameterInfo>,
-    /// Set when a bounded response (`discover_curated_paths`) left the
-    /// parameter schema out of this lower-ranked entry. The route returns
-    /// exactly this family's parameters; call it before `instantiate_recipe`.
+    /// Set when a bounded response (`discover_curated_paths`) shortened this
+    /// lower-ranked entry. The route returns this family's full detail; call it
+    /// before `instantiate_recipe` when `fields` includes `parameters`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub omitted_parameters: Option<OmittedRecipeParameters>,
+    pub omitted_detail: Option<OmittedRecipeDetail>,
     /// One-line hint for how to instantiate or materialise this path.
     pub how_to_instantiate: String,
 }
@@ -4711,9 +4711,11 @@ pub struct DetailRoute {
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct OmittedRecipeParameters {
+pub struct OmittedRecipeDetail {
+    /// Fields left out (`parameters`) or shortened (`label`).
+    pub fields: Vec<String>,
     /// Number of declared parameters left out.
-    pub count: usize,
+    pub parameter_count: usize,
     pub retrieve: DetailRoute,
 }
 
@@ -5267,7 +5269,7 @@ pub(super) struct ListRecipeFamiliesRequest {
     /// Filter to this element class id, or omit for all families.
     pub(super) element_class: Option<String>,
     /// Return only the family with this id (for example one named by
-    /// `discover_curated_paths` `omitted_parameters.retrieve`).
+    /// `discover_curated_paths` `omitted_detail.retrieve`).
     #[serde(default)]
     pub(super) family_id: Option<String>,
     /// Include session-installed recipe drafts in the response.
@@ -9595,7 +9597,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             and include_session_drafts. Scoped learned assets are filtered to the requested region \
             so discovery stays progressive instead of flooding the agent with every jurisdiction pack. \
             Responses are bounded: only the top-ranked recipes inline their parameter schema, the \
-            rest carry omitted_parameters.retrieve; a section owned by another path kind is listed \
+            rest carry omitted_detail.retrieve; a section owned by another path kind is listed \
             compactly under compact_sections with the call that returns its full entries."
     )]
     pub(super) async fn discover_curated_paths_tool(

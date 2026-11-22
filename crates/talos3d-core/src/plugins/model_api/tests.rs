@@ -16606,7 +16606,7 @@ fn discovery_bounds_recipe_parameter_detail_with_exact_routes() {
             .register_recipe_family(RecipeFamilyDescriptor {
                 id: RecipeFamilyId(format!("bounded_recipe_{index:02}")),
                 target_class: ElementClassId("building".into()),
-                label: format!("Bounded recipe {index}"),
+                label: format!("Bounded recipe {index} {}", "with a long label ".repeat(12)),
                 description: "size fixture".into(),
                 parameters: (0..12)
                     .map(|parameter| RecipeParameter {
@@ -16653,14 +16653,20 @@ fn discovery_bounds_recipe_parameter_detail_with_exact_routes() {
         let mut full = ranking.clone();
         if rank < DISCOVERY_RECIPE_PARAMETER_DETAIL_LIMIT {
             assert_eq!(ranking.parameters.len(), 12, "top paths keep the schema");
-            assert!(ranking.omitted_parameters.is_none());
+            assert!(ranking.omitted_detail.is_none());
+            assert!(ranking.label.chars().count() > DISCOVERY_COMPACT_LABEL_CHARS);
         } else {
             assert!(ranking.parameters.is_empty(), "{ranking:?}");
             let omitted = ranking
-                .omitted_parameters
+                .omitted_detail
                 .as_ref()
                 .expect("an omitted schema names its route");
-            assert_eq!(omitted.count, 12);
+            assert_eq!(omitted.parameter_count, 12);
+            assert_eq!(omitted.fields, vec!["parameters", "label"]);
+            assert_eq!(
+                ranking.label.chars().count(),
+                DISCOVERY_COMPACT_LABEL_CHARS + 1
+            );
             assert_eq!(omitted.retrieve.tool, "list_recipe_families");
             assert_eq!(
                 omitted.retrieve.arguments,
@@ -16668,7 +16674,7 @@ fn discovery_bounds_recipe_parameter_detail_with_exact_routes() {
             );
             assert!(ranking
                 .how_to_instantiate
-                .contains("omitted_parameters.retrieve"));
+                .contains("omitted_detail.retrieve"));
             assert!(!ranking.how_to_instantiate.contains("driver_00_mm"));
             // The route, as the list_recipe_families tool filters it, returns
             // exactly one family with the omitted parameters.
@@ -16677,16 +16683,20 @@ fn discovery_bounds_recipe_parameter_detail_with_exact_routes() {
                 .filter(|family| family.id == ranking.id && !family.is_session_draft)
                 .collect();
             assert_eq!(routed.len(), 1);
-            assert_eq!(routed[0].parameters.len(), omitted.count);
+            assert_eq!(routed[0].parameters.len(), omitted.parameter_count);
+            assert!(routed[0]
+                .label
+                .starts_with(ranking.label.trim_end_matches('…')));
             full.parameters = routed[0].parameters.clone();
-            full.omitted_parameters = None;
+            full.label = routed[0].label.clone();
+            full.omitted_detail = None;
         }
         reconstructed.push(full);
     }
     let bounded_bytes = serde_json::to_vec(&discovery).unwrap().len();
     let full_rankings_bytes = serde_json::to_vec(&reconstructed).unwrap().len();
     assert!(
-        bounded_bytes < 13_000,
+        bounded_bytes < 15_000,
         "bounded recipe discovery must stay under budget: {bounded_bytes} bytes"
     );
     assert!(

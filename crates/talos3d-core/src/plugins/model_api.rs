@@ -14702,7 +14702,7 @@ const INSTANTIATE_HINT_PARAMETERS_PLACEHOLDER: &str = "parameters: {...}";
 const INSTANTIATE_HINT_DEFAULTS_NOTE: &str = " (omitted params fall back to the defaults shown)";
 #[cfg(feature = "model-api")]
 const INSTANTIATE_HINT_OMITTED_NOTE: &str =
-    " (parameters omitted here: read them through omitted_parameters.retrieve first)";
+    " (parameters omitted here: read them through omitted_detail.retrieve first)";
 
 #[cfg(feature = "model-api")]
 fn instantiate_hint_parameters(parameters: &[RecipeParameterInfo]) -> String {
@@ -14721,12 +14721,17 @@ fn instantiate_hint_parameters(parameters: &[RecipeParameterInfo]) -> String {
 #[cfg(feature = "model-api")]
 pub(crate) const DISCOVERY_RECIPE_PARAMETER_DETAIL_LIMIT: usize = 3;
 
-/// Bound a discovery response: below the top-ranked entries, replace each
-/// parameter schema with a `list_recipe_families { family_id }` route, but only
-/// when that route returns exactly the omitted parameters. Anything the route
-/// cannot reproduce (for example a region-scoped artifact) stays inline.
+/// Longest label kept on a lower-ranked discovery entry whose route returns it.
 #[cfg(feature = "model-api")]
-fn bound_recipe_parameter_detail(world: &World, rankings: &mut [RecipeRankingInfo]) {
+pub(crate) const DISCOVERY_COMPACT_LABEL_CHARS: usize = 120;
+
+/// Bound a discovery response: below the top-ranked entries, replace each
+/// parameter schema (and shorten an overlong label) behind a
+/// `list_recipe_families { family_id }` route, but only when that route returns
+/// exactly the omitted detail. Anything the route cannot reproduce (for example
+/// a region-scoped artifact) stays inline.
+#[cfg(feature = "model-api")]
+fn bound_recipe_ranking_detail(world: &World, rankings: &mut [RecipeRankingInfo]) {
     if rankings.len() <= DISCOVERY_RECIPE_PARAMETER_DETAIL_LIMIT {
         return;
     }
@@ -14735,40 +14740,54 @@ fn bound_recipe_parameter_detail(world: &World, rankings: &mut [RecipeRankingInf
         .iter_mut()
         .skip(DISCOVERY_RECIPE_PARAMETER_DETAIL_LIMIT)
     {
-        if ranking.parameters.is_empty() {
-            continue;
-        }
         let mut routed = families.iter().filter(|family| {
             family.id == ranking.id && (ranking.is_session_draft || !family.is_session_draft)
         });
         let (Some(family), None) = (routed.next(), routed.next()) else {
             continue;
         };
-        if family.parameters != ranking.parameters {
+        let mut fields = Vec::new();
+        let mut parameter_count = 0;
+        if !ranking.parameters.is_empty() && family.parameters == ranking.parameters {
+            let inline = instantiate_hint_parameters(&ranking.parameters);
+            if ranking.how_to_instantiate.contains(&inline) {
+                ranking.how_to_instantiate = ranking
+                    .how_to_instantiate
+                    .replace(&inline, INSTANTIATE_HINT_PARAMETERS_PLACEHOLDER)
+                    .replace(
+                        INSTANTIATE_HINT_DEFAULTS_NOTE,
+                        INSTANTIATE_HINT_OMITTED_NOTE,
+                    );
+            }
+            parameter_count = std::mem::take(&mut ranking.parameters).len();
+            fields.push("parameters".to_string());
+        }
+        if family.label == ranking.label
+            && ranking.label.chars().count() > DISCOVERY_COMPACT_LABEL_CHARS
+        {
+            ranking.label = ranking
+                .label
+                .chars()
+                .take(DISCOVERY_COMPACT_LABEL_CHARS)
+                .chain(std::iter::once('…'))
+                .collect();
+            fields.push("label".to_string());
+        }
+        if fields.is_empty() {
             continue;
         }
         let mut arguments = serde_json::json!({ "family_id": ranking.id });
         if ranking.is_session_draft {
             arguments["include_session_drafts"] = serde_json::Value::Bool(true);
         }
-        let inline = instantiate_hint_parameters(&ranking.parameters);
-        if ranking.how_to_instantiate.contains(&inline) {
-            ranking.how_to_instantiate = ranking
-                .how_to_instantiate
-                .replace(&inline, INSTANTIATE_HINT_PARAMETERS_PLACEHOLDER)
-                .replace(
-                    INSTANTIATE_HINT_DEFAULTS_NOTE,
-                    INSTANTIATE_HINT_OMITTED_NOTE,
-                );
-        }
-        ranking.omitted_parameters = Some(OmittedRecipeParameters {
-            count: ranking.parameters.len(),
+        ranking.omitted_detail = Some(OmittedRecipeDetail {
+            fields,
+            parameter_count,
             retrieve: DetailRoute {
                 tool: "list_recipe_families".into(),
                 arguments,
             },
         });
-        ranking.parameters.clear();
     }
 }
 
@@ -15001,7 +15020,7 @@ pub fn handle_select_recipe(
                     let hint_target_state =
                         instantiate_hint_target_state(target_state, &d.supported_refinement_levels);
                     Some(RecipeRankingInfo {
-                        omitted_parameters: None,
+                        omitted_detail: None,
                         how_to_instantiate: instantiate_hint(
                             &d.id.0,
                             &d.target_class.0,
@@ -15071,7 +15090,7 @@ pub fn handle_select_recipe(
                             weight *= 0.45;
                         }
                         RecipeRankingInfo {
-                            omitted_parameters: None,
+                            omitted_detail: None,
                             how_to_instantiate,
                             id: draft.id,
                             target_class: draft.target_class,
@@ -15193,7 +15212,7 @@ pub fn handle_select_recipe(
                 );
 
                 viable.push(RecipeRankingInfo {
-                    omitted_parameters: None,
+                    omitted_detail: None,
                     how_to_instantiate: instantiate_hint(
                         &family_id,
                         &artifact.target_class,
@@ -15695,7 +15714,7 @@ pub fn handle_discover_curated_paths(
     let suggested_next_tool = suggested_next_tool.to_string();
     // Bound the response only after every routing decision above has used
     // the full entries.
-    bound_recipe_parameter_detail(world, &mut recipe_rankings);
+    bound_recipe_ranking_detail(world, &mut recipe_rankings);
     let compact_sections = [
         compact_shared_section(
             &request,
@@ -15716,8 +15735,8 @@ pub fn handle_discover_curated_paths(
             "parametric_types",
             PARAMETRIC_TYPES_OWNER_PATH_KIND,
             &mut parametric_types,
-            &["placement_contract"],
-            "Identity, executability and use are kept; placement contracts are served by the owner.",
+            &["placement_contract", "how_to_use"],
+            "Identity and executability are kept: call an executable type through its execution_path with its id; derivation-only types keep their warning. Placement contracts and use notes are served by the owner.",
             crate::plugins::parametric_mcp::ParametricTypeInfo::compact,
         ),
     ]

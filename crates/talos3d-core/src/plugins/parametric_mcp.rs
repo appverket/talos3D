@@ -48,7 +48,9 @@ pub struct ParametricTypeInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_path: Option<String>,
     /// Explicit use guidance prevents derivation-only definitions from being
-    /// mistaken for geometry-producing authoring paths.
+    /// mistaken for geometry-producing authoring paths. Empty only for an
+    /// executable type in a compact cross-reference (see `compact`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub how_to_use: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement_contract: Option<ParametricPlacementContract>,
@@ -120,10 +122,15 @@ fn how_to_use(
 
 impl ParametricTypeInfo {
     /// Cross-reference form for a response that does not own this type's full
-    /// entry. Identity, executability and the derivation-only warning remain;
-    /// the placement contract is served by the owning response.
+    /// entry. Identity, executability (`execution_path`) and the derivation-only
+    /// warning remain; use notes and the placement contract are served by the
+    /// owning response.
     pub fn compact(&mut self) {
-        self.how_to_use = how_to_use(&self.id, self.executable, None);
+        self.how_to_use = if self.executable {
+            String::new()
+        } else {
+            how_to_use(&self.id, false, None)
+        };
         self.placement_contract = None;
     }
 }
