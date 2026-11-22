@@ -16586,3 +16586,312 @@ async fn reference_passage_records_do_not_crowd_skill_discovery() {
     drop(server);
     worker.await.unwrap();
 }
+
+/// TALOS-cyczbfsk: twelve recipe paths with large parameter schemas must not
+/// make the discovery response unbounded. The top-ranked paths keep their
+/// schema inline; every other one carries a route that returns exactly the
+/// omitted parameters, and executable/next-tool semantics are unchanged.
+#[cfg(feature = "model-api")]
+#[test]
+fn discovery_bounds_recipe_parameter_detail_with_exact_routes() {
+    use crate::capability_registry::{
+        ElementClassId, GenerateOutput, RecipeFamilyDescriptor, RecipeFamilyId, RecipeParameter,
+    };
+    use crate::plugins::refinement::RefinementState;
+
+    let mut world = init_model_api_test_world();
+    for index in 0..12 {
+        world
+            .resource_mut::<CapabilityRegistry>()
+            .register_recipe_family(RecipeFamilyDescriptor {
+                id: RecipeFamilyId(format!("bounded_recipe_{index:02}")),
+                target_class: ElementClassId("building".into()),
+                label: format!("Bounded recipe {index}"),
+                description: "size fixture".into(),
+                parameters: (0..12)
+                    .map(|parameter| RecipeParameter {
+                        name: format!("driver_{parameter:02}_mm"),
+                        value_schema: json!({
+                            "type": "number",
+                            "minimum": 0,
+                            "description": "a driver with a realistic description length",
+                        }),
+                        default: Some(json!(1000 + parameter)),
+                    })
+                    .collect(),
+                supported_refinement_levels: vec![RefinementState::Schematic],
+                obligation_specializations: Default::default(),
+                promotion_critical_path_specializations: Default::default(),
+                generate: std::sync::Arc::new(|_, _| Ok(GenerateOutput::default())),
+            });
+    }
+    let discovery = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: None,
+            query: Some("author a bounded recipe".into()),
+            context: json!({ "target_state": "Schematic" }),
+        },
+    )
+    .expect("discovery succeeds");
+    let rankings = &discovery.recipe_rankings;
+    assert_eq!(rankings.len(), 12);
+    assert_eq!(discovery.suggested_next_tool, "instantiate_recipe");
+    assert!(discovery.no_curated_path.is_none());
+
+    let families = handle_list_recipe_families_with_options(&world, None, true);
+    let mut reconstructed = Vec::new();
+    for (rank, ranking) in rankings.iter().enumerate() {
+        assert!(ranking.executable, "{ranking:?}");
+        assert_eq!(
+            ranking.execution_path.as_deref(),
+            Some("instantiate_recipe")
+        );
+        assert!(ranking.how_to_instantiate.contains("instantiate_recipe"));
+        assert!(ranking.how_to_instantiate.contains(&ranking.id));
+        let mut full = ranking.clone();
+        if rank < DISCOVERY_RECIPE_PARAMETER_DETAIL_LIMIT {
+            assert_eq!(ranking.parameters.len(), 12, "top paths keep the schema");
+            assert!(ranking.omitted_parameters.is_none());
+        } else {
+            assert!(ranking.parameters.is_empty(), "{ranking:?}");
+            let omitted = ranking
+                .omitted_parameters
+                .as_ref()
+                .expect("an omitted schema names its route");
+            assert_eq!(omitted.count, 12);
+            assert_eq!(omitted.retrieve.tool, "list_recipe_families");
+            assert_eq!(
+                omitted.retrieve.arguments,
+                json!({ "family_id": ranking.id })
+            );
+            assert!(ranking
+                .how_to_instantiate
+                .contains("omitted_parameters.retrieve"));
+            assert!(!ranking.how_to_instantiate.contains("driver_00_mm"));
+            // The route, as the list_recipe_families tool filters it, returns
+            // exactly one family with the omitted parameters.
+            let routed: Vec<_> = families
+                .iter()
+                .filter(|family| family.id == ranking.id && !family.is_session_draft)
+                .collect();
+            assert_eq!(routed.len(), 1);
+            assert_eq!(routed[0].parameters.len(), omitted.count);
+            full.parameters = routed[0].parameters.clone();
+            full.omitted_parameters = None;
+        }
+        reconstructed.push(full);
+    }
+    let bounded_bytes = serde_json::to_vec(&discovery).unwrap().len();
+    let full_rankings_bytes = serde_json::to_vec(&reconstructed).unwrap().len();
+    assert!(
+        bounded_bytes < 13_000,
+        "bounded recipe discovery must stay under budget: {bounded_bytes} bytes"
+    );
+    assert!(
+        full_rankings_bytes > 2 * serde_json::to_vec(rankings).unwrap().len(),
+        "the bound must remove most per-entry schema bytes ({full_rankings_bytes} full)"
+    );
+}
+
+/// TALOS-cyczbfsk: `list_recipe_families { family_id }` is the exact retrieval
+/// route for an omitted parameter schema.
+#[cfg(feature = "model-api")]
+#[tokio::test]
+async fn list_recipe_families_filters_by_family_id() {
+    use crate::capability_registry::{
+        ElementClassId, GenerateOutput, RecipeFamilyDescriptor, RecipeFamilyId,
+    };
+    use crate::plugins::refinement::RefinementState;
+    let (sender, receiver) = mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut world = init_model_api_test_world();
+        for id in ["first_family", "second_family"] {
+            world
+                .resource_mut::<CapabilityRegistry>()
+                .register_recipe_family(RecipeFamilyDescriptor {
+                    id: RecipeFamilyId(id.into()),
+                    target_class: ElementClassId("building".into()),
+                    label: id.into(),
+                    description: "filter fixture".into(),
+                    parameters: Vec::new(),
+                    supported_refinement_levels: vec![RefinementState::Schematic],
+                    obligation_specializations: Default::default(),
+                    promotion_critical_path_specializations: Default::default(),
+                    generate: std::sync::Arc::new(|_, _| Ok(GenerateOutput::default())),
+                });
+        }
+        while let Ok(request) = receiver.recv() {
+            handle_model_api_request(&mut world, request);
+        }
+    });
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
+    let list = |family_id: Option<&str>| {
+        server.list_recipe_families_tool(Parameters(ListRecipeFamiliesRequest {
+            element_class: None,
+            family_id: family_id.map(str::to_string),
+            include_session_drafts: false,
+        }))
+    };
+    let one: Vec<RecipeFamilyInfo> = list(Some("second_family"))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].id, "second_family");
+    let all: Vec<RecipeFamilyInfo> = list(None).await.unwrap().into_typed().unwrap();
+    assert!(all.iter().any(|family| family.id == "first_family"));
+    let none: Vec<RecipeFamilyInfo> = list(Some("missing")).await.unwrap().into_typed().unwrap();
+    assert!(none.is_empty());
+    drop(server);
+    worker.await.unwrap();
+}
+
+/// TALOS-cyczbfsk: sections repeated across path kinds are full only in their
+/// owning kind and explicitly compact elsewhere. No kind silently drops an
+/// entry, non-executable entries still say so, and gap routing is unchanged.
+#[cfg(feature = "model-api")]
+#[test]
+fn discovery_repeats_shared_sections_compactly_with_owner_routes() {
+    use crate::curation::provenance::{Confidence, Lineage, Provenance};
+    use crate::curation::{
+        CuratedManifest, CuratedManifestRegistry, CurationMeta, ManifestKindId, Scope, Trust,
+    };
+    use crate::plugins::refinement::AgentId;
+    use crate::relational::{
+        component::ComponentParams,
+        registry::{ParametricPlacementContract, ParametricRegistry, ParametricTypeDef},
+        transform::TransformBindings,
+    };
+
+    let mut world = init_model_api_test_world();
+    let mut parametrics = ParametricRegistry::default();
+    parametrics.register(ParametricTypeDef {
+        id: "test.roof.system.derived".into(),
+        label: "Derived Roof System".into(),
+        params: ComponentParams::default(),
+        driver_units: Default::default(),
+        defaults: Default::default(),
+        derivations: Default::default(),
+        transform: TransformBindings::default(),
+        public: true,
+        representation: None,
+    });
+    parametrics.register_placement_contract(
+        "test.roof.system.derived",
+        ParametricPlacementContract {
+            driver_anchored_translation_axes: Default::default(),
+            guidance: "anchor at the eave line".into(),
+        },
+    );
+    world.insert_resource(parametrics);
+    let mut manifests = CuratedManifestRegistry::default();
+    for name in ["roof_pattern_a", "roof_pattern_b"] {
+        let kind = ManifestKindId::new("assembly_pattern.v2");
+        manifests.insert(CuratedManifest {
+            meta: CurationMeta::new(
+                CuratedManifest::asset_id_for(&kind, name),
+                CuratedManifest::asset_kind(),
+                Provenance {
+                    author: AgentId("test".into()),
+                    confidence: Confidence::High,
+                    lineage: Lineage::Freeform,
+                    rationale: None,
+                    jurisdiction: None,
+                    catalog_dependencies: Vec::new(),
+                    evidence: Vec::new(),
+                },
+            )
+            .with_scope(Scope::Project)
+            .with_trust(Trust::Draft),
+            manifest_kind: kind,
+            body: json!({ "label": name, "target_classes": ["roof_system"], "slots": [] }),
+        });
+    }
+    world.insert_resource(manifests);
+
+    let discover = |kind: &str| {
+        handle_discover_curated_paths(
+            &world,
+            CuratedPathDiscoveryRequest {
+                path_kind: Some(kind.into()),
+                element_class: Some("roof_system".into()),
+                query: Some("gable roof".into()),
+                context: json!({ "target_state": "Constructible" }),
+            },
+        )
+        .expect("discovery succeeds")
+    };
+    let recipe = discover("recipe");
+    let parametric = discover("parametric");
+    let section = |info: &CuratedPathDiscoveryInfo, name: &str| {
+        info.compact_sections
+            .iter()
+            .find(|section| section.section == name)
+            .cloned()
+    };
+
+    // Owners serve full entries and no section reference for themselves.
+    assert!(section(&recipe, "curated_assets").is_none());
+    assert_eq!(recipe.curated_assets.len(), 2);
+    assert!(recipe
+        .curated_assets
+        .iter()
+        .all(|asset| !asset.how_to_use.is_empty() && !asset.target_types.is_empty()));
+    assert!(section(&parametric, "parametric_types").is_none());
+    let full_type = &parametric.parametric_types[0];
+    assert!(full_type.placement_contract.is_some());
+
+    // The recipe probe repeats parametric types compactly, keeping identity,
+    // executability and the derivation-only warning.
+    let compact_type = &recipe.parametric_types[0];
+    assert_eq!(compact_type.id, full_type.id);
+    assert_eq!(compact_type.executable, full_type.executable);
+    assert!(compact_type.placement_contract.is_none());
+    assert!(compact_type.how_to_use.contains("cannot emit geometry"));
+    let types_ref = section(&recipe, "parametric_types").expect("explicit compact section");
+    assert_eq!(types_ref.owner_path_kind, "parametric");
+    assert_eq!(types_ref.entries, 1);
+    assert_eq!(types_ref.retrieve.tool, "discover_curated_paths");
+    assert_eq!(
+        types_ref.retrieve.arguments,
+        json!({
+            "path_kind": "parametric",
+            "element_class": "roof_system",
+            "query": "gable roof",
+            "context": { "target_state": "Constructible" },
+        })
+    );
+
+    let owner_ids: Vec<_> = recipe.curated_assets.iter().map(|a| &a.asset_id).collect();
+    // The parametric kind keeps its own stricter applicability filter, so its
+    // compact entries are a subset of the owner's; with none left there is no
+    // section to reference.
+    assert!(discover("parametric")
+        .curated_assets
+        .iter()
+        .all(|asset| owner_ids.contains(&&asset.asset_id)));
+    for kind in ["definition", "prior"] {
+        let info = discover(kind);
+        let assets_ref = section(&info, "curated_assets").expect("explicit compact section");
+        assert_eq!(assets_ref.owner_path_kind, "recipe");
+        assert_eq!(assets_ref.entries, info.curated_assets.len());
+        assert_eq!(assets_ref.retrieve.arguments["path_kind"], "recipe");
+        assert!(assets_ref.note.contains("not executable"));
+        let ids: Vec<_> = info.curated_assets.iter().map(|a| &a.asset_id).collect();
+        assert_eq!(ids, owner_ids, "{kind} must not silently drop entries");
+        for asset in &info.curated_assets {
+            assert!(!asset.executable);
+            assert!(asset.how_to_use.is_empty() && asset.target_types.is_empty());
+            let encoded = serde_json::to_value(asset).unwrap();
+            assert!(encoded.get("how_to_use").is_none(), "{encoded}");
+        }
+    }
+
+    // Gap routing still comes from the full entries.
+    assert!(recipe.no_curated_path.is_some());
+    assert!(parametric.no_curated_path.is_some());
+    assert_eq!(recipe.suggested_next_tool, "request_corpus_expansion");
+}

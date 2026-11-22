@@ -84,7 +84,7 @@ pub fn world_get_type(world: &World, request: GetParametricTypeRequest) -> Resul
     Ok(value)
 }
 
-fn type_info(
+pub(crate) fn type_info(
     definition: &ParametricTypeDef,
     placement_contract: Option<&ParametricPlacementContract>,
 ) -> ParametricTypeInfo {
@@ -94,21 +94,37 @@ fn type_info(
         label: definition.label.clone(),
         executable,
         execution_path: executable.then(|| "parametric.create".to_string()),
-        how_to_use: if executable {
-            format!(
-                "Call parametric.create with type_id {:?}; inspect its drivers first when overrides are required.{}",
-                definition.id,
-                placement_contract
-                    .map(|contract| format!(" Placement contract: {}", contract.guidance))
-                    .unwrap_or_default()
-            )
-        } else {
-            format!(
-                "Curated derivation-only type {:?}: it cannot emit geometry. Record a CorpusGap and curate an emitting representation or executable recipe; do not call parametric.create.",
-                definition.id
-            )
-        },
+        how_to_use: how_to_use(&definition.id, executable, placement_contract),
         placement_contract: placement_contract.cloned(),
+    }
+}
+
+fn how_to_use(
+    type_id: &str,
+    executable: bool,
+    placement_contract: Option<&ParametricPlacementContract>,
+) -> String {
+    if executable {
+        format!(
+            "Call parametric.create with type_id {type_id:?}; inspect its drivers first when overrides are required.{}",
+            placement_contract
+                .map(|contract| format!(" Placement contract: {}", contract.guidance))
+                .unwrap_or_default()
+        )
+    } else {
+        format!(
+            "Curated derivation-only type {type_id:?}: it cannot emit geometry. Record a CorpusGap and curate an emitting representation or executable recipe; do not call parametric.create."
+        )
+    }
+}
+
+impl ParametricTypeInfo {
+    /// Cross-reference form for a response that does not own this type's full
+    /// entry. Identity, executability and the derivation-only warning remain;
+    /// the placement contract is served by the owning response.
+    pub fn compact(&mut self) {
+        self.how_to_use = how_to_use(&self.id, self.executable, None);
+        self.placement_contract = None;
     }
 }
 

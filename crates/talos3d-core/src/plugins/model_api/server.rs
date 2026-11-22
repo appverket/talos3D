@@ -4692,8 +4692,29 @@ pub struct RecipeRankingInfo {
     /// accepted parameters up front instead of probing by trial-and-error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parameters: Vec<RecipeParameterInfo>,
+    /// Set when a bounded response (`discover_curated_paths`) left the
+    /// parameter schema out of this lower-ranked entry. The route returns
+    /// exactly this family's parameters; call it before `instantiate_recipe`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_parameters: Option<OmittedRecipeParameters>,
     /// One-line hint for how to instantiate or materialise this path.
     pub how_to_instantiate: String,
+}
+
+/// A tool call that returns detail a bounded response left out.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DetailRoute {
+    pub tool: String,
+    pub arguments: serde_json::Value,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OmittedRecipeParameters {
+    /// Number of declared parameters left out.
+    pub count: usize,
+    pub retrieve: DetailRoute,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -5245,6 +5266,10 @@ pub(super) struct ExplainFindingRequest {
 pub(super) struct ListRecipeFamiliesRequest {
     /// Filter to this element class id, or omit for all families.
     pub(super) element_class: Option<String>,
+    /// Return only the family with this id (for example one named by
+    /// `discover_curated_paths` `omitted_parameters.retrieve`).
+    #[serde(default)]
+    pub(super) family_id: Option<String>,
     /// Include session-installed recipe drafts in the response.
     #[serde(default)]
     pub(super) include_session_drafts: bool,
@@ -5386,6 +5411,24 @@ pub struct CuratedPathDiscoveryInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_profile: Option<String>,
     pub guidance_card_ids: Vec<String>,
+    /// Sections this path kind repeats from another kind in compact form.
+    /// Each names the kind that serves the full entries and the exact call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compact_sections: Vec<CompactSectionRef>,
+}
+
+/// A discovery section shown in compact form because another path kind owns
+/// its full entries. Entry identities and executability are kept here; only
+/// the listed fields are left out.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompactSectionRef {
+    pub section: String,
+    pub owner_path_kind: String,
+    pub entries: usize,
+    pub omitted_fields: Vec<String>,
+    pub note: String,
+    pub retrieve: DetailRoute,
 }
 
 impl CuratedPathDiscoveryInfo {
@@ -5464,6 +5507,8 @@ pub struct CuratedAssetPathInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_types: Vec<String>,
     pub executable: bool,
+    /// Empty in a compact section (see `compact_sections`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub how_to_use: String,
 }
 
@@ -9273,17 +9318,20 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "list_recipe_families",
         description = "List registered recipe families. Pass element_class to filter to a specific \
-            class (e.g. 'wall_assembly'). Each entry includes the id, label, parameters, and \
-            supported refinement levels. Set include_session_drafts=true to append installed \
-            session drafts."
+            class (e.g. 'wall_assembly'), or family_id to read one family. Each entry includes the id, \
+            label, parameters, and supported refinement levels. Set include_session_drafts=true to \
+            append installed session drafts."
     )]
     pub(super) async fn list_recipe_families_tool(
         &self,
         Parameters(params): Parameters<ListRecipeFamiliesRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let families = self
+        let mut families = self
             .request_list_recipe_families(params.element_class, params.include_session_drafts)
             .await;
+        if let Some(family_id) = params.family_id.as_deref() {
+            families.retain(|family| family.id == family_id);
+        }
         json_tool_result(families)
     }
 
@@ -9545,7 +9593,10 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             paths plus an explicit NoCuratedPath gap candidate when recipe, parametric, or prior \
             coverage is missing. Put task scope in context: target_state, jurisdiction/region/locale, \
             and include_session_drafts. Scoped learned assets are filtered to the requested region \
-            so discovery stays progressive instead of flooding the agent with every jurisdiction pack."
+            so discovery stays progressive instead of flooding the agent with every jurisdiction pack. \
+            Responses are bounded: only the top-ranked recipes inline their parameter schema, the \
+            rest carry omitted_parameters.retrieve; a section owned by another path kind is listed \
+            compactly under compact_sections with the call that returns its full entries."
     )]
     pub(super) async fn discover_curated_paths_tool(
         &self,

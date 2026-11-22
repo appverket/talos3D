@@ -14681,12 +14681,31 @@ fn instantiate_hint(
     target_state: crate::plugins::refinement::RefinementState,
     parameters: &[RecipeParameterInfo],
 ) -> String {
-    if parameters.is_empty() {
-        return format!(
-            "Call instantiate_recipe {{ family_id: {family_id:?}, target_class: {target_class:?}, target_state: {:?}, parameters: {{...}} }}",
+    let call = |parameters: &str| {
+        format!(
+            "Call instantiate_recipe {{ family_id: {family_id:?}, target_class: {target_class:?}, target_state: {:?}, {parameters} }}",
             target_state.as_str()
-        );
+        )
+    };
+    if parameters.is_empty() {
+        return call(INSTANTIATE_HINT_PARAMETERS_PLACEHOLDER);
     }
+    format!(
+        "{}{INSTANTIATE_HINT_DEFAULTS_NOTE}",
+        call(&instantiate_hint_parameters(parameters))
+    )
+}
+
+#[cfg(feature = "model-api")]
+const INSTANTIATE_HINT_PARAMETERS_PLACEHOLDER: &str = "parameters: {...}";
+#[cfg(feature = "model-api")]
+const INSTANTIATE_HINT_DEFAULTS_NOTE: &str = " (omitted params fall back to the defaults shown)";
+#[cfg(feature = "model-api")]
+const INSTANTIATE_HINT_OMITTED_NOTE: &str =
+    " (parameters omitted here: read them through omitted_parameters.retrieve first)";
+
+#[cfg(feature = "model-api")]
+fn instantiate_hint_parameters(parameters: &[RecipeParameterInfo]) -> String {
     let rendered: Vec<String> = parameters
         .iter()
         .map(|p| match &p.default {
@@ -14694,11 +14713,113 @@ fn instantiate_hint(
             None => format!("{}=<required>", p.name),
         })
         .collect();
-    format!(
-        "Call instantiate_recipe {{ family_id: {family_id:?}, target_class: {target_class:?}, target_state: {:?}, parameters: {{ {} }} }} (omitted params fall back to the defaults shown)",
-        target_state.as_str(),
-        rendered.join(", ")
-    )
+    format!("parameters: {{ {} }}", rendered.join(", "))
+}
+
+/// Recipe paths whose full parameter schema stays inline in
+/// `discover_curated_paths`; lower-ranked entries carry an exact route.
+#[cfg(feature = "model-api")]
+pub(crate) const DISCOVERY_RECIPE_PARAMETER_DETAIL_LIMIT: usize = 3;
+
+/// Bound a discovery response: below the top-ranked entries, replace each
+/// parameter schema with a `list_recipe_families { family_id }` route, but only
+/// when that route returns exactly the omitted parameters. Anything the route
+/// cannot reproduce (for example a region-scoped artifact) stays inline.
+#[cfg(feature = "model-api")]
+fn bound_recipe_parameter_detail(world: &World, rankings: &mut [RecipeRankingInfo]) {
+    if rankings.len() <= DISCOVERY_RECIPE_PARAMETER_DETAIL_LIMIT {
+        return;
+    }
+    let families = handle_list_recipe_families_with_options(world, None, true);
+    for ranking in rankings
+        .iter_mut()
+        .skip(DISCOVERY_RECIPE_PARAMETER_DETAIL_LIMIT)
+    {
+        if ranking.parameters.is_empty() {
+            continue;
+        }
+        let mut routed = families.iter().filter(|family| {
+            family.id == ranking.id && (ranking.is_session_draft || !family.is_session_draft)
+        });
+        let (Some(family), None) = (routed.next(), routed.next()) else {
+            continue;
+        };
+        if family.parameters != ranking.parameters {
+            continue;
+        }
+        let mut arguments = serde_json::json!({ "family_id": ranking.id });
+        if ranking.is_session_draft {
+            arguments["include_session_drafts"] = serde_json::Value::Bool(true);
+        }
+        let inline = instantiate_hint_parameters(&ranking.parameters);
+        if ranking.how_to_instantiate.contains(&inline) {
+            ranking.how_to_instantiate = ranking
+                .how_to_instantiate
+                .replace(&inline, INSTANTIATE_HINT_PARAMETERS_PLACEHOLDER)
+                .replace(
+                    INSTANTIATE_HINT_DEFAULTS_NOTE,
+                    INSTANTIATE_HINT_OMITTED_NOTE,
+                );
+        }
+        ranking.omitted_parameters = Some(OmittedRecipeParameters {
+            count: ranking.parameters.len(),
+            retrieve: DetailRoute {
+                tool: "list_recipe_families".into(),
+                arguments,
+            },
+        });
+        ranking.parameters.clear();
+    }
+}
+
+/// Path kind that serves full `curated_assets` entries; others repeat them compactly.
+#[cfg(feature = "model-api")]
+pub(crate) const CURATED_ASSETS_OWNER_PATH_KIND: &str = "recipe";
+/// Path kind that serves full `parametric_types` entries; others repeat them compactly.
+#[cfg(feature = "model-api")]
+pub(crate) const PARAMETRIC_TYPES_OWNER_PATH_KIND: &str = "parametric";
+
+/// Compact a section this path kind does not own, and say so explicitly with
+/// the exact call that returns its full entries.
+#[cfg(feature = "model-api")]
+fn compact_shared_section<T>(
+    request: &CuratedPathDiscoveryRequest,
+    path_kind: &str,
+    section: &str,
+    owner_path_kind: &str,
+    entries: &mut [T],
+    omitted_fields: &[&str],
+    note: &str,
+    compact: impl FnMut(&mut T),
+) -> Option<CompactSectionRef> {
+    if path_kind == owner_path_kind || entries.is_empty() {
+        return None;
+    }
+    entries.iter_mut().for_each(compact);
+    let mut arguments = serde_json::json!({ "path_kind": owner_path_kind });
+    if let Some(element_class) = &request.element_class {
+        arguments["element_class"] = element_class.as_str().into();
+    }
+    if let Some(query) = &request.query {
+        arguments["query"] = query.as_str().into();
+    }
+    if !request.context.is_null() {
+        arguments["context"] = request.context.clone();
+    }
+    Some(CompactSectionRef {
+        section: section.into(),
+        owner_path_kind: owner_path_kind.into(),
+        entries: entries.len(),
+        omitted_fields: omitted_fields
+            .iter()
+            .map(|field| field.to_string())
+            .collect(),
+        note: note.into(),
+        retrieve: DetailRoute {
+            tool: "discover_curated_paths".into(),
+            arguments,
+        },
+    })
 }
 
 #[cfg(feature = "model-api")]
@@ -14880,6 +15001,7 @@ pub fn handle_select_recipe(
                     let hint_target_state =
                         instantiate_hint_target_state(target_state, &d.supported_refinement_levels);
                     Some(RecipeRankingInfo {
+                        omitted_parameters: None,
                         how_to_instantiate: instantiate_hint(
                             &d.id.0,
                             &d.target_class.0,
@@ -14949,6 +15071,7 @@ pub fn handle_select_recipe(
                             weight *= 0.45;
                         }
                         RecipeRankingInfo {
+                            omitted_parameters: None,
                             how_to_instantiate,
                             id: draft.id,
                             target_class: draft.target_class,
@@ -15070,6 +15193,7 @@ pub fn handle_select_recipe(
                 );
 
                 viable.push(RecipeRankingInfo {
+                    omitted_parameters: None,
                     how_to_instantiate: instantiate_hint(
                         &family_id,
                         &artifact.target_class,
@@ -15252,32 +15376,10 @@ pub fn handle_discover_curated_paths(
                         Some(class) => parametric_class_token_match(class, id, label),
                     })
                     .filter_map(|(id, _)| {
-                        let definition = registry.get(&id)?;
-                        let executable = definition.representation.is_some();
-                        let placement_contract = registry.placement_contract(&id).cloned();
-                        Some(crate::plugins::parametric_mcp::ParametricTypeInfo {
-                            id: definition.id.clone(),
-                            label: definition.label.clone(),
-                            executable,
-                            execution_path: executable
-                                .then(|| "parametric.create".to_string()),
-                            how_to_use: if executable {
-                                format!(
-                                    "Call parametric.create with type_id {:?}; inspect its drivers first when overrides are required.{}",
-                                    definition.id,
-                                    placement_contract
-                                        .as_ref()
-                                        .map(|contract| format!(" Placement contract: {}", contract.guidance))
-                                        .unwrap_or_default()
-                                )
-                            } else {
-                                format!(
-                                    "Curated derivation-only type {:?}: it cannot emit geometry. Record a CorpusGap and curate an emitting representation or executable recipe; do not call parametric.create.",
-                                    definition.id
-                                )
-                            },
-                            placement_contract,
-                        })
+                        Some(crate::plugins::parametric_mcp::type_info(
+                            registry.get(&id)?,
+                            registry.placement_contract(&id),
+                        ))
                     })
                     .collect()
             })
@@ -15591,6 +15693,37 @@ pub fn handle_discover_curated_paths(
     };
 
     let suggested_next_tool = suggested_next_tool.to_string();
+    // Bound the response only after every routing decision above has used
+    // the full entries.
+    bound_recipe_parameter_detail(world, &mut recipe_rankings);
+    let compact_sections = [
+        compact_shared_section(
+            &request,
+            &path_kind,
+            "curated_assets",
+            CURATED_ASSETS_OWNER_PATH_KIND,
+            &mut curated_assets,
+            &["target_types", "how_to_use"],
+            "Curated knowledge assets are grounding only and not executable: none is an instantiate_recipe input.",
+            |asset| {
+                asset.target_types.clear();
+                asset.how_to_use.clear();
+            },
+        ),
+        compact_shared_section(
+            &request,
+            &path_kind,
+            "parametric_types",
+            PARAMETRIC_TYPES_OWNER_PATH_KIND,
+            &mut parametric_types,
+            &["placement_contract"],
+            "Identity, executability and use are kept; placement contracts are served by the owner.",
+            crate::plugins::parametric_mcp::ParametricTypeInfo::compact,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     Ok(CuratedPathDiscoveryInfo {
         path_kind,
         element_class: request.element_class,
@@ -15605,6 +15738,7 @@ pub fn handle_discover_curated_paths(
         suggested_next_tool,
         required_profile: None,
         guidance_card_ids,
+        compact_sections,
     })
 }
 
