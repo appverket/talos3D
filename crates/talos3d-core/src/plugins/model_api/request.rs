@@ -887,6 +887,10 @@ pub(super) enum ModelApiRequest {
         response:
             oneshot::Sender<crate::plugins::knowledge_cloud::candidate_runtime::RuntimeResult>,
     },
+    InspectKnowledgeAsset {
+        admitted: Box<crate::plugins::knowledge_cloud::AdmittedAsset>,
+        response: oneshot::Sender<serde_json::Value>,
+    },
     InstallKnowledgeAsset {
         admitted: Box<crate::plugins::knowledge_cloud::AdmittedAsset>,
         response: oneshot::Sender<ApiResult<serde_json::Value>>,
@@ -2496,6 +2500,11 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::EvaluateKnowledgeCandidate { scene, response } => {
             crate::plugins::knowledge_cloud::candidate_runtime::start(world, *scene, response);
+        }
+        ModelApiRequest::InspectKnowledgeAsset { admitted, response } => {
+            let _ = response.send(crate::plugins::knowledge_cloud::inspect_observed(
+                world, *admitted,
+            ));
         }
         ModelApiRequest::InstallKnowledgeAsset { admitted, response } => {
             let _ = response.send(crate::plugins::knowledge_cloud::install(world, *admitted));

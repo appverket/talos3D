@@ -227,6 +227,20 @@ pub fn required_tools(admitted: &AdmittedAsset) -> &[String] {
 pub fn inspect(admitted: &AdmittedAsset) -> Value {
     json!({"asset":admitted.asset,"content_hash":admitted.revision,"delivery":"verified_dynamic_corpus","released":admitted.scope_sha256.is_none(),"next_tool":"install_knowledge_asset"})
 }
+/// Record the exact admitted read response without installing the asset.
+pub fn inspect_observed(world: &mut World, admitted: AdmittedAsset) -> Value {
+    world.init_resource::<evaluation::Observations>();
+    let value = inspect(&admitted);
+    evaluation::record(
+        world,
+        json!({"operation":"get_knowledge_asset","asset_id":admitted.asset.id,
+        "asset_kind":admitted.asset.kind,"content_hash":admitted.revision,
+        "response_sha256":hex::encode(Sha256::digest(serde_json::to_vec(&value).unwrap())),
+        "released":admitted.scope_sha256.is_none(),"installed":false}),
+    );
+    value
+}
+
 /// Resolve only an admitted, currently installed typed passage revision.
 /// A metadata read is reference use, never executable or geometric acceptance.
 pub fn read_installed_passage(world: &World, admitted: AdmittedAsset) -> Result<Value, String> {
@@ -435,7 +449,7 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
             "post_reopen_observations":{"read_only":true,"maximum_calls":32,"result_path":"round_trip.observations","state_path":"round_trip.after_reopen"},
             "observation_contract":{"schema":"talos3d.candidate-scenario-observation.v2","states":"Each state_ref resolves in observed_states in the same response; identical complete native snapshots are transmitted once.","empty_rejection":"An actual failed operation may yield an empty rendered scene, with explicit execution_error and no geometry checks."},
             "geometry_types":["box","profile_extrusion"],
-            "candidate_checks":candidate_checks(),"next_tool":"evaluate_knowledge_candidate"}));
+            "knowledge_observation_operations":evaluation::LIFECYCLE_OPERATIONS,"candidate_checks":candidate_checks(),"next_tool":"evaluate_knowledge_candidate"}));
     }
     let (payload, constraints) = match kind {
         "catalog.v1" => (
@@ -845,7 +859,17 @@ pub fn reconcile(world: &mut World, index: &Index) -> Value {
         }
         world.resource_mut::<InstalledAssets>().0.remove(id);
     }
-    json!({"epoch":index.epoch,"removed":removed.iter().map(|(id,_)|id).collect::<Vec<_>>(),"assets":index.assets,"model_modified":false})
+    let result = json!({"epoch":index.epoch,"removed":removed.iter().map(|(id,_)|id).collect::<Vec<_>>(),
+        "assets":index.assets,"model_modified":false,"delivery":"verified_dynamic_corpus",
+        "released":index.evaluation_scope.is_none(),"complete":true});
+    world.init_resource::<evaluation::Observations>();
+    evaluation::record(
+        world,
+        json!({"operation":"list_knowledge_assets","epoch":index.epoch,
+        "asset_count":index.assets.len(),"complete":true,"released":index.evaluation_scope.is_none(),
+        "response_sha256":hex::encode(Sha256::digest(serde_json::to_vec(&result).unwrap()))}),
+    );
+    result
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1242,6 +1266,59 @@ mod tests {
             driver_cases: vec![]
         })
         .is_err());
+    }
+
+    #[test]
+    fn discovery_and_exact_reads_have_native_evidence_even_when_empty() {
+        let mut world = World::new();
+        let mut index = Index {
+            schema: SCHEMA.into(),
+            epoch: 1,
+            assets: vec![],
+            withdrawn_asset_ids: vec![],
+            evaluation_scope: None,
+            released: Some(true),
+        };
+        let empty = reconcile(&mut world, &index);
+        assert_eq!(empty["assets"], json!([]));
+        assert_eq!(empty["complete"], true);
+        let log = evaluation::snapshot(&world);
+        assert_eq!(
+            log["records"][0]["event"]["operation"],
+            "list_knowledge_assets"
+        );
+        assert_eq!(log["records"][0]["event"]["asset_count"], 0);
+        assert_eq!(
+            log["records"][0]["event"]["response_sha256"],
+            hex::encode(Sha256::digest(serde_json::to_vec(&empty).unwrap()))
+        );
+        let admitted = passage("revision-read");
+        index.assets.push(IndexEntry {
+            content_hash: admitted.revision.clone(),
+            asset: json!({"id":admitted.asset.id,"kind":admitted.asset.kind}),
+            sequence: 1,
+        });
+        let discovered = reconcile(&mut world, &index);
+        let inspected = inspect_observed(&mut world, admitted.clone());
+        assert_eq!(inspected, inspect(&admitted));
+        assert!(world.get_resource::<InstalledAssets>().is_none());
+        let log = evaluation::snapshot(&world);
+        assert_eq!(log["records"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            log["records"][1]["event"]["response_sha256"],
+            hex::encode(Sha256::digest(serde_json::to_vec(&discovered).unwrap()))
+        );
+        let event = &log["records"][2]["event"];
+        assert_eq!(event["operation"], "get_knowledge_asset");
+        assert_eq!(event["content_hash"], "revision-read");
+        assert_eq!(
+            event["response_sha256"],
+            hex::encode(Sha256::digest(serde_json::to_vec(&inspected).unwrap()))
+        );
+        assert_eq!(
+            payload_schema("candidate_runtime.v1").unwrap()["knowledge_observation_operations"],
+            json!(evaluation::LIFECYCLE_OPERATIONS)
+        );
     }
 
     #[test]

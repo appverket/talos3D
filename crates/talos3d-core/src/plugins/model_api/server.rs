@@ -9560,7 +9560,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "get_knowledge_runtime_observations",
-        description = "Read bounded native installation and catalog-query observations. Hashes prove which runtime revision was used, not source rights or semantic acceptance. No credentials or evaluation arm labels are returned."
+        description = "Read the bounded native knowledge lifecycle chain: signed list_knowledge_assets discovery (including empty results), exact get_knowledge_asset reads, installation, catalog queries and supported asset use. Discovery/read response hashes bind actual MCP results. Hashes prove which runtime revision was used, not source rights or semantic acceptance. No credentials or evaluation arm labels are returned."
     )]
     pub(super) async fn knowledge_observations_tool(&self) -> Result<CallToolResult, McpError> {
         let value = self
@@ -9606,7 +9606,14 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         )
         .await
         .map_err(|e| McpError::invalid_params(e, None))?;
-        json_tool_result(crate::plugins::knowledge_cloud::inspect(&asset))
+        let value = self
+            .round_trip(|response| ModelApiRequest::InspectKnowledgeAsset {
+                admitted: Box::new(asset),
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        json_tool_result(value)
     }
 
     #[tool(

@@ -131,6 +131,13 @@ struct Log {
 fn digest(v: &Value) -> String {
     hex::encode(Sha256::digest(serde_json::to_vec(v).unwrap()))
 }
+pub const LIFECYCLE_OPERATIONS: [&str; 4] = [
+    "list_knowledge_assets",
+    "get_knowledge_asset",
+    "install",
+    "catalog_query",
+];
+
 pub fn record(world: &World, event: Value) {
     let Some(log) = world.get_resource::<Observations>() else {
         return;
