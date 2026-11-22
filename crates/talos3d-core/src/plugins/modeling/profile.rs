@@ -143,7 +143,13 @@ impl Profile2d {
             }
         }
 
-        // The contour is implicitly closed — caller handles closing.
+        // Every consumer closes this ring. An authored closing segment is valid,
+        // but retaining its repeated start vertex creates a zero-length edge and
+        // can prevent cap triangulation. Use exact equality: a short real closing
+        // edge must survive, including submillimetre profiles.
+        while points.len() > 1 && points.last() == points.first() {
+            points.pop();
+        }
         points
     }
 
@@ -1787,6 +1793,29 @@ fn extract_indices(mesh: &Mesh) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_closing_segment_matches_implicit_render_and_evaluated_body() {
+        let implicit = Profile2d::rectangle(2.0, 3.0);
+        let mut explicit = implicit.clone();
+        explicit
+            .segments
+            .push(ProfileSegment::LineTo { to: explicit.start });
+        let shape = |profile| ProfileExtrusion {
+            centre: Vec3::ZERO,
+            profile,
+            height: 1.5,
+        };
+        let expected = build_extrusion_bevy_mesh(&shape(implicit.clone()));
+        let actual = build_extrusion_bevy_mesh(&shape(explicit.clone()));
+        assert_eq!(extract_indices(&actual), extract_indices(&expected));
+        assert_eq!(explicit.tessellate(32), implicit.tessellate(32));
+        let editable = build_extrusion_editable_mesh(&shape(explicit), Quat::IDENTITY);
+        let triangles = super::super::bsp_csg::triangles_from_editable_mesh(&editable);
+        let summary = super::super::semantics::body_summary_from_triangles(&triangles);
+        assert!(summary.is_closed_manifold);
+        assert!((summary.volume.unwrap() - 9.0).abs() < 1e-5);
+    }
 
     #[test]
     fn submillimetre_closing_edge_survives_winding_and_native_meshes() {
