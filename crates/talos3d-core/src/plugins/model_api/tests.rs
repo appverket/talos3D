@@ -963,6 +963,44 @@ fn create_box_semantic_annotation_is_inspectable_and_survives_transform() {
     )
     .expect("semantic conceptual block should be creatable");
 
+    let original = get_entity_snapshot(&world, ElementId(element_id)).unwrap();
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    assert!(get_entity_snapshot(&world, ElementId(element_id)).is_none());
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(element_id)).unwrap(),
+        original,
+        "creation redo must restore semantic authorities with geometry"
+    );
+    handle_delete_entities(&mut world, vec![element_id]).unwrap();
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(element_id)).unwrap(),
+        original,
+        "deletion undo must restore semantic authorities with geometry"
+    );
+    let factory = world
+        .resource::<CapabilityRegistry>()
+        .factory_for("box")
+        .unwrap();
+    let entity =
+        crate::plugins::commands::find_entity_by_element_id(&mut world, ElementId(element_id))
+            .unwrap();
+    let captured = world
+        .resource::<CapabilityRegistry>()
+        .capture_snapshot(&world.entity(entity), &world)
+        .unwrap();
+    let restored = factory
+        .from_persisted_json(&captured.to_persisted_json())
+        .unwrap();
+    assert_eq!(
+        restored, captured,
+        "persisted envelope must preserve semantic authorities"
+    );
+
     let details = get_entity_details(&world, ElementId(element_id))
         .expect("created conceptual block should be inspectable");
     let semantic = details
@@ -13090,6 +13128,107 @@ fn instantiate_recipe_hard_failure_rolls_back_root_and_completed_steps() {
     )
     .expect_err("hard replay failure must abort the complete instantiation");
 
+    assert!(error.contains("rolled back"), "unexpected error: {error}");
+    assert_eq!(
+        collect_element_ids(&mut world),
+        ids_before,
+        "neither the root nor the first successful script step may persist"
+    );
+    assert_eq!(
+        world
+            .resource::<crate::plugins::history::History>()
+            .undo_stack_len(),
+        history_depth_before,
+        "failed transaction must not remain in undo history"
+    );
+    assert_eq!(world.resource::<ElementIdAllocator>().next_value(), next_id);
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    flush_model_api_write_pipeline(&mut world);
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(control)).unwrap(),
+        control_snapshot,
+        "failed recipe must preserve the human's prior redo branch"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn instantiate_recipe_unmet_postcondition_rolls_back_root_and_steps() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::curation::{AssetId, RecipeArtifactRegistry, RecipeBody};
+    use crate::plugins::refinement::{RefinementState, SemanticRole};
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("conceptual_building_block".into()),
+            label: "Conceptual Building Block".into(),
+            description: "Test class for atomic recipe rollback.".into(),
+            semantic_roles: vec![SemanticRole("conceptual_massing".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+    world.insert_resource(RecipeArtifactRegistry::default());
+    install_two_box_recipe_with_states(
+        &mut world,
+        "failing_conceptual_massing",
+        "conceptual_building_block",
+        vec![RefinementState::Conceptual],
+    );
+    {
+        let mut recipe_registry = world.resource_mut::<RecipeArtifactRegistry>();
+        let artifact = recipe_registry
+            .entries
+            .get_mut(&AssetId(
+                "installed_recipe/failing_conceptual_massing".into(),
+            ))
+            .expect("installed test recipe");
+        let RecipeBody::AuthoringScript { script } = &mut artifact.body else {
+            panic!("test recipe must be an AuthoringScript");
+        };
+        script
+            .postconditions
+            .push(crate::curation::Postcondition::Relation {
+                relation_kind: "contains".into(),
+                from: crate::curation::ArgExpr::Literal {
+                    value: json!(999998),
+                },
+                to: crate::curation::ArgExpr::Literal {
+                    value: json!(999999),
+                },
+            });
+    }
+
+    let control = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box", "centre": [20.0, 0.0, 0.0], "half_extents": [0.5, 0.5, 0.5]
+        }),
+    )
+    .unwrap();
+    let control_snapshot = get_entity_snapshot(&world, ElementId(control)).unwrap();
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    let next_id = world.resource::<ElementIdAllocator>().next_value();
+    let ids_before = collect_element_ids(&mut world);
+    let history_depth_before = world
+        .resource::<crate::plugins::history::History>()
+        .undo_stack_len();
+    let error = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "failing_conceptual_massing".into(),
+            target_class: "conceptual_building_block".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: Some("Conceptual".into()),
+        },
+    )
+    .expect_err("hard replay failure must abort the complete instantiation");
+
+    assert!(error.contains("postcondition"), "{error}");
     assert!(error.contains("rolled back"), "unexpected error: {error}");
     assert_eq!(
         collect_element_ids(&mut world),

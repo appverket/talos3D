@@ -1,4 +1,4 @@
-//! Core-owned material metadata for capability snapshots that do not carry it.
+//! Core-owned material and refinement metadata for capability snapshots.
 //! Registered factories provide the envelope on capture and restore. Native
 //! material-aware snapshots (especially occurrence inheritance) keep their contract.
 use crate::authored_entity::*;
@@ -9,48 +9,98 @@ use bevy::prelude::*;
 use serde_json::Value;
 use std::any::Any;
 
+const REFINEMENT_KEY: &str = "core.refinement_metadata.v1";
+use crate::plugins::refinement::RefinementMetadataSnapshot;
+
 const MATERIAL_KEY: &str = "core.material_assignment.v1";
 
 #[derive(Clone)]
-struct MaterialSnapshot {
+struct AuthoredMetadataSnapshot {
     inner: BoxedEntity,
     assignment: Option<MaterialAssignment>,
+    material_owned: bool,
+    refinement: Option<RefinementMetadataSnapshot>,
+    overlay: bool,
 }
 
 pub(crate) fn with_material(
     inner: BoxedEntity,
     assignment: Option<MaterialAssignment>,
 ) -> BoxedEntity {
-    BoxedEntity(Box::new(MaterialSnapshot { inner, assignment }))
+    BoxedEntity(Box::new(AuthoredMetadataSnapshot {
+        inner,
+        assignment,
+        material_owned: true,
+        refinement: None,
+        overlay: false,
+    }))
 }
 
-impl MaterialSnapshot {
-    fn carry(&self, inner: BoxedEntity) -> BoxedEntity {
-        with_material(inner, self.assignment.clone())
+/// The same envelope carries non-geometric authorities through deletion, undo,
+/// copy and persistence. Creation overlays preserve factory-owned native defaults.
+pub(crate) fn with_refinement(
+    inner: BoxedEntity,
+    metadata: RefinementMetadataSnapshot,
+    overlay: bool,
+) -> BoxedEntity {
+    if metadata.is_empty() {
+        return inner;
     }
-    fn json(&self, mut data: Value) -> Value {
-        data.as_object_mut()
-            .expect("authored snapshot object")
-            .insert(
+    BoxedEntity(Box::new(AuthoredMetadataSnapshot {
+        inner,
+        assignment: None,
+        material_owned: false,
+        refinement: Some(metadata),
+        overlay,
+    }))
+}
+
+impl AuthoredMetadataSnapshot {
+    fn carry(&self, inner: BoxedEntity) -> BoxedEntity {
+        BoxedEntity(Box::new(Self {
+            inner,
+            ..self.clone()
+        }))
+    }
+    fn json(&self, mut data: Value, persisted: bool) -> Value {
+        let fields = data.as_object_mut().expect("authored snapshot object");
+        if self.material_owned {
+            fields.insert(
                 MATERIAL_KEY.into(),
                 serde_json::to_value(&self.assignment).expect("material assignment"),
             );
+        }
+        if let Some(refinement) = self.refinement.as_ref().filter(|_| persisted) {
+            fields.insert(
+                REFINEMENT_KEY.into(),
+                serde_json::json!({"metadata":refinement,"overlay":self.overlay}),
+            );
+        }
         data
     }
-    fn apply_material(&self, world: &mut World) {
+    fn apply_metadata(&self, world: &mut World) {
         if let Some(entity) =
             crate::plugins::commands::find_entity_by_element_id(world, self.element_id())
         {
-            crate::plugins::materials::set_authored_material_assignment(
-                world,
-                entity,
-                self.assignment.clone(),
-            );
+            if self.material_owned {
+                crate::plugins::materials::set_authored_material_assignment(
+                    world,
+                    entity,
+                    self.assignment.clone(),
+                );
+            }
+            if let Some(metadata) = &self.refinement {
+                if self.overlay {
+                    metadata.apply_overlay(world, entity);
+                } else {
+                    metadata.apply(world, entity);
+                }
+            }
         }
     }
 }
 
-impl AuthoredEntity for MaterialSnapshot {
+impl AuthoredEntity for AuthoredMetadataSnapshot {
     fn snapshot_body(&self) -> Option<&dyn AuthoredEntity> {
         Some(self.inner.0.as_ref())
     }
@@ -77,7 +127,16 @@ impl AuthoredEntity for MaterialSnapshot {
         &self,
         _ids: &std::collections::HashMap<ElementId, ElementId>,
     ) -> Option<BoxedEntity> {
-        self.inner.0.copy_with_ids(_ids).map(|s| self.carry(s))
+        self.inner.0.copy_with_ids(_ids).map(|inner| {
+            let mut copied = Self {
+                inner,
+                ..self.clone()
+            };
+            if let Some(metadata) = &mut copied.refinement {
+                metadata.remap_ids(_ids);
+            }
+            BoxedEntity(Box::new(copied))
+        })
     }
     fn dependency_order(&self) -> u8 {
         self.inner.0.dependency_order()
@@ -160,14 +219,27 @@ impl AuthoredEntity for MaterialSnapshot {
             .set_property_json(property_name, value)
             .map(|s| self.carry(s))
     }
+    fn refinement_metadata(&self) -> Option<&RefinementMetadataSnapshot> {
+        self.refinement
+            .as_ref()
+            .or_else(|| self.inner.0.refinement_metadata())
+    }
     fn material_assignment(&self) -> Option<MaterialAssignment> {
-        self.assignment.clone()
+        if self.material_owned {
+            self.assignment.clone()
+        } else {
+            self.inner.material_assignment()
+        }
     }
     fn set_material_assignment(
         &self,
         assignment: Option<MaterialAssignment>,
     ) -> Result<BoxedEntity, String> {
-        Ok(with_material(self.inner.clone(), assignment))
+        Ok(BoxedEntity(Box::new(Self {
+            assignment,
+            material_owned: true,
+            ..self.clone()
+        })))
     }
     fn subobject_display_overrides(&self) -> Option<SubobjectDisplayOverrides> {
         self.inner.0.subobject_display_overrides()
@@ -194,11 +266,16 @@ impl AuthoredEntity for MaterialSnapshot {
         self.inner.0.snap_segments()
     }
     fn to_json(&self) -> Value {
-        self.json(self.inner.to_json())
+        self.json(self.inner.to_json(), false)
     }
     fn plan_fingerprint(&self) -> Result<(blake3::Hash, usize), String> {
         let (geometry, bytes) = self.inner.0.plan_fingerprint()?;
-        let (material, material_bytes) = snapshot_fingerprint(&self.assignment)?;
+        let (material, material_bytes) = snapshot_fingerprint(&(
+            &self.assignment,
+            &self.refinement,
+            self.material_owned,
+            self.overlay,
+        ))?;
         let mut hash = blake3::Hasher::new();
         hash.update(geometry.as_bytes());
         hash.update(material.as_bytes());
@@ -212,23 +289,27 @@ impl AuthoredEntity for MaterialSnapshot {
         _entity: &bevy::ecs::world::EntityRef,
         _world: &World,
     ) -> Option<bool> {
-        self.inner
-            .0
-            .matches_entity(_entity, _world)
-            .map(|same| same && _entity.get::<MaterialAssignment>() == self.assignment.as_ref())
+        self.inner.0.matches_entity(_entity, _world).map(|same| {
+            same && (!self.material_owned
+                || _entity.get::<MaterialAssignment>() == self.assignment.as_ref())
+                && self
+                    .refinement
+                    .as_ref()
+                    .is_none_or(|m| m == &RefinementMetadataSnapshot::capture_entity(_entity))
+        })
     }
     fn to_persisted_json(&self) -> Value {
-        self.json(self.inner.to_persisted_json())
+        self.json(self.inner.to_persisted_json(), true)
     }
     fn apply_to(&self, world: &mut World) {
         self.inner.apply_to(world);
-        self.apply_material(world);
+        self.apply_metadata(world);
     }
     fn apply_with_previous(&self, world: &mut World, _previous: Option<&dyn AuthoredEntity>) {
         self.inner
             .0
             .apply_with_previous(world, _previous.map(|s| s.snapshot_body().unwrap_or(s)));
-        self.apply_material(world);
+        self.apply_metadata(world);
     }
     fn remove_from(&self, world: &mut World) {
         self.inner.0.remove_from(world)
@@ -264,7 +345,8 @@ impl AuthoredEntity for MaterialSnapshot {
         self.carry(self.inner.clone())
     }
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        self.assignment == other.material_assignment()
+        self.material_assignment() == other.material_assignment()
+            && self.refinement_metadata() == other.refinement_metadata()
             && self
                 .inner
                 .0
@@ -281,18 +363,27 @@ impl<F: AuthoredEntityFactory> AuthoredEntityFactory for MaterialFactory<F> {
         self.0.creation_schema()
     }
     fn capture_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity> {
-        self.0.capture_snapshot(entity_ref, world).map(|snapshot| {
-            // Occurrences resolve inherited display material separately from overrides.
-            if entity_ref.contains::<crate::plugins::modeling::occurrence::OccurrenceIdentity>()
-                || snapshot.material_assignment().is_some()
-            {
-                return snapshot;
-            }
-            match entity_ref.get::<MaterialAssignment>() {
-                Some(assignment) => with_material(snapshot, Some(assignment.clone())),
-                None => snapshot,
-            }
-        })
+        self.0
+            .capture_snapshot(entity_ref, world)
+            .map(|snapshot| {
+                // Occurrences resolve inherited display material separately from overrides.
+                if entity_ref.contains::<crate::plugins::modeling::occurrence::OccurrenceIdentity>()
+                    || snapshot.material_assignment().is_some()
+                {
+                    return snapshot;
+                }
+                match entity_ref.get::<MaterialAssignment>() {
+                    Some(assignment) => with_material(snapshot, Some(assignment.clone())),
+                    None => snapshot,
+                }
+            })
+            .map(|snapshot| {
+                with_refinement(
+                    snapshot,
+                    RefinementMetadataSnapshot::capture_entity(entity_ref),
+                    false,
+                )
+            })
     }
     fn capture_edit_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity> {
         self.0
@@ -309,6 +400,13 @@ impl<F: AuthoredEntityFactory> AuthoredEntityFactory for MaterialFactory<F> {
                     None => snapshot,
                 }
             })
+            .map(|snapshot| {
+                with_refinement(
+                    snapshot,
+                    RefinementMetadataSnapshot::capture_entity(entity_ref),
+                    false,
+                )
+            })
     }
     fn display_label(&self, entity_ref: &EntityRef, world: &World) -> Option<String> {
         self.0.display_label(entity_ref, world)
@@ -320,22 +418,29 @@ impl<F: AuthoredEntityFactory> AuthoredEntityFactory for MaterialFactory<F> {
         self.0.capture_role(_entity_ref, _world)
     }
     fn from_persisted_json(&self, data: &Value) -> Result<BoxedEntity, String> {
+        // Strip core envelopes before a factory decodes its own representation;
+        // externally tagged enum bodies must still have exactly one variant key.
+        let mut geometry = data.clone();
+        if let Some(fields) = geometry.as_object_mut() {
+            fields.remove(MATERIAL_KEY);
+            fields.remove(REFINEMENT_KEY);
+        }
+        let mut snapshot = self.0.from_persisted_json(&geometry)?;
         if let Some(assignment) = data.get(MATERIAL_KEY) {
             let assignment =
                 serde_json::from_value::<Option<MaterialAssignment>>(assignment.clone())
                     .map_err(|e| e.to_string())?;
-            let mut geometry = data.clone();
-            geometry
-                .as_object_mut()
-                .expect("material envelope object")
-                .remove(MATERIAL_KEY);
-            Ok(with_material(
-                self.0.from_persisted_json(&geometry)?,
-                assignment,
-            ))
-        } else {
-            self.0.from_persisted_json(data)
+            snapshot = with_material(snapshot, assignment);
         }
+        if let Some(value) = data.get(REFINEMENT_KEY) {
+            let metadata = serde_json::from_value(value["metadata"].clone())
+                .map_err(|e| format!("Invalid refinement metadata: {e}"))?;
+            let overlay = value["overlay"]
+                .as_bool()
+                .ok_or("Invalid refinement overlay flag")?;
+            snapshot = with_refinement(snapshot, metadata, overlay);
+        }
+        Ok(snapshot)
     }
     fn from_create_request(&self, world: &World, request: &Value) -> Result<BoxedEntity, String> {
         self.0.from_create_request(world, request)

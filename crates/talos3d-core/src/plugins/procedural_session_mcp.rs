@@ -22,6 +22,7 @@
 //! transport-neutral substrate it depends on.
 
 mod live_commit;
+pub(crate) use live_commit::replay_recipe;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};

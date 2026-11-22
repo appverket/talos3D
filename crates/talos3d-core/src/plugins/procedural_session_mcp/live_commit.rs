@@ -146,6 +146,43 @@ impl PostconditionOracle for LiveOracle<'_, '_, '_> {
     }
 }
 
+/// Execute ordinary recipes against the same live postcondition oracle used by
+/// procedural commits. The caller owns transaction rollback. Never substitute
+/// the preview-only always-pass oracle for a live mutation.
+pub(crate) fn replay_recipe(
+    world: &mut World,
+    executor: &mut dyn SessionStepExecutor,
+    script: &crate::curation::AuthoringScript,
+    params: Map<String, Value>,
+    target: u64,
+) -> Result<crate::curation::InvocationReport, crate::curation::InvocationError> {
+    let inner = RefCell::new(CommandQueueDispatcher {
+        world,
+        session_id: SessionId("recipe_replay".into()),
+        step_order: std::collections::VecDeque::new(),
+        executor: Some(executor),
+    });
+    // Recipe mutation scope is checked by replay. Unlike ProjectRoot procedural
+    // sessions, a recipe may intentionally update explicit existing inputs.
+    let original_ids = BTreeSet::new();
+    let mut dispatcher = SharedDispatcher {
+        inner: &inner,
+        original_ids: &original_ids,
+    };
+    let oracle = LiveOracle {
+        inner: &inner,
+        target: Some(target),
+    };
+    crate::curation::replay::replay_with_lookup(
+        script,
+        params,
+        &mut dispatcher,
+        &oracle,
+        &crate::curation::replay::NoRecipeLookup,
+        0,
+    )
+}
+
 fn live_validation(world: &mut World) -> (Vec<SessionFinding>, Vec<SessionObligation>) {
     // Presentation budgets must not hide findings from an acceptance policy.
     world.init_resource::<DiscoveryFindingsBudget>();

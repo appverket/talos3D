@@ -403,6 +403,13 @@ pub trait AuthoredEntity: Send + Sync + 'static {
 
     fn property_fields(&self) -> Vec<PropertyFieldDef>;
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String>;
+    /// Core semantic metadata carried with authored geometry for history and storage.
+    fn refinement_metadata(
+        &self,
+    ) -> Option<&crate::plugins::refinement::RefinementMetadataSnapshot> {
+        None
+    }
+
     fn material_assignment(&self) -> Option<MaterialAssignment> {
         None
     }

@@ -2489,31 +2489,79 @@ struct RefinementStateSnapshot {
 
 /// Existing refinement authorities captured together; no persisted parallel graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct RefinementMetadataSnapshot {
-    state: Option<RefinementStateComponent>,
-    class: Option<crate::capability_registry::ElementClassAssignment>,
-    obligations: Option<ObligationSet>,
-    grounding: Option<ClaimGrounding>,
-    provenance: Option<AuthoringProvenance>,
-    intent: Option<SemanticIntent>,
-    setting_out: Option<SettingOutContract>,
+pub struct RefinementMetadataSnapshot {
+    pub(crate) state: Option<RefinementStateComponent>,
+    pub(crate) class: Option<crate::capability_registry::ElementClassAssignment>,
+    pub(crate) obligations: Option<ObligationSet>,
+    pub(crate) grounding: Option<ClaimGrounding>,
+    pub(crate) provenance: Option<AuthoringProvenance>,
+    pub(crate) intent: Option<SemanticIntent>,
+    pub(crate) setting_out: Option<SettingOutContract>,
 }
 impl RefinementMetadataSnapshot {
     fn capture(world: &World, id: ElementId) -> Option<Self> {
         let entity = find_entity_by_element_id_readonly(world, id)?;
-        Some(Self {
-            state: world.get::<RefinementStateComponent>(entity).cloned(),
-            class: world
-                .get::<crate::capability_registry::ElementClassAssignment>(entity)
-                .cloned(),
-            obligations: world.get::<ObligationSet>(entity).cloned(),
-            grounding: world.get::<ClaimGrounding>(entity).cloned(),
-            provenance: world.get::<AuthoringProvenance>(entity).cloned(),
-            intent: world.get::<SemanticIntent>(entity).cloned(),
-            setting_out: world.get::<SettingOutContract>(entity).cloned(),
-        })
+        Some(Self::capture_entity(&world.entity(entity)))
     }
-    fn apply(&self, world: &mut World, entity: Entity) {
+    pub(crate) fn capture_entity(entity: &EntityRef) -> Self {
+        Self {
+            state: entity.get::<RefinementStateComponent>().cloned(),
+            class: entity
+                .get::<crate::capability_registry::ElementClassAssignment>()
+                .cloned(),
+            obligations: entity.get::<ObligationSet>().cloned(),
+            grounding: entity.get::<ClaimGrounding>().cloned(),
+            provenance: entity.get::<AuthoringProvenance>().cloned(),
+            intent: entity.get::<SemanticIntent>().cloned(),
+            setting_out: entity.get::<SettingOutContract>().cloned(),
+        }
+    }
+    pub(crate) fn remap_ids(&mut self, ids: &std::collections::HashMap<ElementId, ElementId>) {
+        let remap = |id: &mut u64| {
+            if let Some(mapped) = ids.get(&ElementId(*id)) {
+                *id = mapped.0;
+            }
+        };
+        if let Some(set) = &mut self.obligations {
+            for entry in &mut set.entries {
+                if let ObligationStatus::SatisfiedBy(id) = &mut entry.status {
+                    remap(id);
+                }
+            }
+        }
+        if let Some(AuthoringProvenance {
+            mode: AuthoringMode::Refined(id),
+            ..
+        }) = &mut self.provenance
+        {
+            remap(id);
+        }
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.state.is_none()
+            && self.class.is_none()
+            && self.obligations.is_none()
+            && self.grounding.is_none()
+            && self.provenance.is_none()
+            && self.intent.is_none()
+            && self.setting_out.is_none()
+    }
+    pub(crate) fn apply_overlay(&self, world: &mut World, id: Entity) {
+        let mut entity = world.entity_mut(id);
+        macro_rules! restore { ($($field:ident),+ $(,)?) => { $(
+            if let Some(value) = &self.$field { entity.insert(value.clone()); }
+        )+ }; }
+        restore!(
+            state,
+            class,
+            obligations,
+            grounding,
+            provenance,
+            intent,
+            setting_out
+        );
+    }
+    pub(crate) fn apply(&self, world: &mut World, entity: Entity) {
         let mut entity = world.entity_mut(entity);
         entity.remove::<(
             RefinementStateComponent,

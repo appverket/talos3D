@@ -10719,6 +10719,14 @@ pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, Strin
         )
     })?;
     let snapshot = factory.from_create_request(world, &request_json)?;
+    let snapshot = match (semantic_annotation, validated_semantic) {
+        (Some(annotation), Some(validated)) => crate::authored_material::with_refinement(
+            snapshot,
+            semantic_annotation_metadata(annotation, validated),
+            true,
+        ),
+        _ => snapshot,
+    };
     let element_id = snapshot.element_id();
     send_event(
         world,
@@ -10726,9 +10734,6 @@ pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, Strin
     );
 
     flush_model_api_write_pipeline(world);
-    if let (Some(annotation), Some(validated)) = (semantic_annotation, validated_semantic) {
-        apply_semantic_annotation(world, element_id, annotation, validated)?;
-    }
 
     get_entity_snapshot(world, element_id)
         .map(|_| element_id.0)
@@ -10945,53 +10950,53 @@ pub(crate) fn apply_semantic_annotation(
     annotation: SemanticEntityAnnotationRequest,
     validated: ValidatedSemanticAnnotation,
 ) -> Result<(), String> {
-    use crate::capability_registry::ElementClassAssignment;
-    use crate::plugins::refinement::{
-        AuthoringMode, AuthoringProvenance, RefinementState, RefinementStateComponent,
-        SemanticIntent,
-    };
-
     let mut q = world.try_query::<(Entity, &ElementId)>().unwrap();
     let entity = q
         .iter(world)
         .find_map(|(entity, id)| (*id == element_id).then_some(entity))
         .ok_or_else(|| format!("Entity {} not found after creation", element_id.0))?;
 
-    let ValidatedSemanticAnnotation {
-        element_class,
-        refinement_state,
-    } = validated;
-
-    let mut entity_mut = world.entity_mut(entity);
-    if let Some(element_class) = element_class {
-        entity_mut.insert(ElementClassAssignment {
-            element_class,
-            active_recipe: None,
-        });
-    }
-    if annotation.refinement_state.is_some() || annotation.element_class.is_some() {
-        entity_mut.insert(RefinementStateComponent {
-            state: refinement_state.unwrap_or(RefinementState::Conceptual),
-        });
-    }
-    if !annotation.parameters.is_null()
-        || !annotation.unresolved_decisions.is_empty()
-        || !annotation.source_refs.is_empty()
-    {
-        entity_mut.insert(SemanticIntent {
-            parameters: annotation.parameters,
-            unresolved_decisions: annotation.unresolved_decisions,
-            source_refs: annotation.source_refs,
-        });
-    }
-    if annotation.rationale.is_some() {
-        entity_mut.insert(AuthoringProvenance {
-            mode: AuthoringMode::Freeform,
-            rationale: annotation.rationale,
-        });
-    }
-
+    semantic_annotation_metadata(annotation, validated).apply_overlay(world, entity);
     Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn semantic_annotation_metadata(
+    annotation: SemanticEntityAnnotationRequest,
+    validated: ValidatedSemanticAnnotation,
+) -> crate::plugins::refinement::RefinementMetadataSnapshot {
+    use crate::plugins::refinement::*;
+    let state = (annotation.refinement_state.is_some() || annotation.element_class.is_some())
+        .then_some(RefinementStateComponent {
+            state: validated
+                .refinement_state
+                .unwrap_or(RefinementState::Conceptual),
+        });
+    let intent = (!annotation.parameters.is_null()
+        || !annotation.unresolved_decisions.is_empty()
+        || !annotation.source_refs.is_empty())
+    .then_some(SemanticIntent {
+        parameters: annotation.parameters,
+        unresolved_decisions: annotation.unresolved_decisions,
+        source_refs: annotation.source_refs,
+    });
+    crate::plugins::refinement::RefinementMetadataSnapshot {
+        state,
+        class: validated.element_class.map(|element_class| {
+            crate::capability_registry::ElementClassAssignment {
+                element_class,
+                active_recipe: None,
+            }
+        }),
+        obligations: None,
+        grounding: None,
+        setting_out: None,
+        provenance: annotation.rationale.map(|rationale| AuthoringProvenance {
+            mode: AuthoringMode::Freeform,
+            rationale: Some(rationale),
+        }),
+        intent,
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -12843,25 +12848,15 @@ fn promote_refinement_in_transaction(
                         let params: serde_json::Map<String, serde_json::Value> =
                             overrides.as_object().cloned().unwrap_or_default();
                         let mut executor = ModelApiStepExecutor;
-                        let mut dispatcher =
-                            crate::plugins::procedural_session_mcp::CommandQueueDispatcher {
-                                world,
-                                session_id: crate::curation::SessionId("recipe_replay".into()),
-                                step_order: std::collections::VecDeque::new(),
-                                executor: Some(&mut executor),
-                            };
-                        let oracle = crate::curation::procedural_session::AlwaysPassOracle;
-                        let report = match crate::curation::replay::replay_with_lookup(
+                        let report = match crate::plugins::procedural_session_mcp::replay_recipe(
+                            world,
+                            &mut executor,
                             &script,
                             params,
-                            &mut dispatcher,
-                            &oracle,
-                            &crate::curation::replay::NoRecipeLookup,
-                            0,
+                            element_id,
                         ) {
                             Ok(report) => report,
                             Err(error) => {
-                                drop(dispatcher);
                                 crate::plugins::history::rollback_to_undo_depth(
                                     world,
                                     transaction_history_depth,
