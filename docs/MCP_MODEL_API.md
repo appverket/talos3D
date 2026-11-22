@@ -451,6 +451,19 @@ routing inline. The negotiation welcome likewise states
 `required_invariants` once at top level; its embedded `guidance_state` omits
 them, while `get_agent_guidance_state` always carries them for rehydration.
 
+`discover_curated_paths` responses are bounded the same way. Only the top three
+`recipe_rankings` inline their `parameters` schema; a lower-ranked entry whose
+detail was left out or shortened carries `omitted_detail { fields,
+parameter_count, retrieve }`, where `retrieve` is the exact
+`list_recipe_families { family_id }` call that returns that family in full.
+Detail is omitted only when that call reproduces it exactly. `curated_assets`
+are served in full by the `recipe` kind and `parametric_types` by the
+`parametric` kind; other kinds repeat every entry's identity and executability
+in compact form and name the section under `compact_sections` with its
+`owner_path_kind` and the exact `discover_curated_paths` call that returns the
+full entries. Gap routing and `suggested_next_tool` are decided from the full
+entries before the response is bounded.
+
 `live_guidance_state` on every page, and `get_agent_guidance_state`, report
 `onboarding_metrics` measured by the server until the first authorised model
 mutation: `guidance_requests`, `response_bytes`, `unique_resource_bytes` and
