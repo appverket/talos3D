@@ -31,6 +31,11 @@ pub struct Scenario {
     /// Native encode/decode, entirely in memory, after the scenario.
     #[serde(default)]
     pub round_trip: bool,
+    /// Optional 1..32 flat native read-only calls after native reopening. Requires
+    /// round_trip=true and mutation_scope=none. Uses the same parameter values;
+    /// step-result bindings are local to this observation script.
+    #[serde(default)]
+    pub after_reopen: Option<AuthoringScript>,
     /// Undo then redo the final command and report both actual states.
     #[serde(default)]
     pub undo_redo: bool,
@@ -214,6 +219,24 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
     {
         return Err("Scenario requires 1..32 flat calls and no claimed postconditions; observations are not acceptance".into());
     }
+    if let Some(observation) = &scenario.after_reopen {
+        if !scenario.round_trip
+            || !matches!(observation.mutation_scope, MutationScope::None)
+            || observation.steps.is_empty()
+            || observation.steps.len() > 32
+            || observation
+                .steps
+                .iter()
+                .any(|s| !matches!(s, ScriptInstruction::Call(_)))
+            || !observation.postconditions.is_empty()
+            || observation
+                .allowed_tools
+                .iter()
+                .any(|t| !model_api::document_dispatch::read_only(t.as_str()))
+        {
+            return Err("Post-reopen observations require round_trip, scope none, 1..32 flat native read-only calls and no claimed postconditions".into());
+        }
+    }
     if serde_json::to_vec(&request.asset)
         .map_err(|e| e.to_string())?
         .len()
@@ -261,7 +284,7 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
     };
     let replay = crate::curation::replay::replay(
         &scenario.script,
-        scenario.parameters,
+        scenario.parameters.clone(),
         &mut dispatcher,
         &crate::curation::procedural_session::AlwaysPassOracle,
     );
@@ -293,6 +316,25 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
         }
         persistence::open_project_bytes(&mut w, &bytes)?;
         roundtrip = json!({"bytes":bytes.len(),"after_reopen":state(&mut w)?});
+        if let Some(observation) = &scenario.after_reopen {
+            let mut dispatcher = Dispatcher {
+                world: &mut w,
+                calls: vec![],
+            };
+            crate::curation::replay::replay(
+                observation,
+                scenario.parameters,
+                &mut dispatcher,
+                &crate::curation::procedural_session::AlwaysPassOracle,
+            )
+            .map_err(|e| format!("Post-reopen observation failed: {e}"))?;
+            roundtrip["observations"] = json!(dispatcher.calls);
+            // This phase may inspect native geometry but must preserve authored
+            // state. Bind its actual results to the reopened snapshot.
+            if state(&mut w)? != roundtrip["after_reopen"] {
+                return Err("Post-reopen read-only observations changed authored state".into());
+            }
+        }
     }
     let final_state = state(&mut w)?;
     let mut parts = vec![];

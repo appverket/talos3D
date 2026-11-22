@@ -7088,21 +7088,21 @@ fn recipe_draft_rejects_unknown_passage_ref() {
 
 #[cfg(feature = "model-api")]
 #[test]
-fn draft_rule_pack_scaffold_has_no_user_facing_todo_placeholders() {
+fn draft_rule_pack_reports_dynamic_gap_without_source_code_workflow() {
     let mut world = init_model_api_test_world();
     seed_recipe_draft_corpus(&mut world);
-
     let draft = handle_draft_rule_pack(&world, "SE/mono_truss".into(), "roof_system".into())
-        .expect("draft_rule_pack should generate a scaffold");
-
-    assert!(!draft.rust_skeleton.contains("TODO"));
-    assert!(!draft.notes.iter().any(|note| note.contains("TODO")));
-    assert!(draft
-        .rust_skeleton
-        .contains("Draft roof_system rule from SE/mono_truss"));
-    assert!(draft
-        .rust_skeleton
-        .contains("Complete the validator body before registering"));
+        .expect("existing passage should resolve to an explicit dynamic capability gap");
+    assert_eq!(draft.status, "CorpusGap");
+    assert!(!draft.executable);
+    assert_eq!(draft.backlink, "SE/mono_truss");
+    assert_eq!(draft.suggested_next_tool, "request_corpus_expansion");
+    assert_eq!(draft.suggested_arguments["kind"], "rule_pack");
+    assert_eq!(draft.suggested_arguments["element_class"], "roof_system");
+    let wire = serde_json::to_value(draft).unwrap();
+    assert!(wire.get("rust_skeleton").is_none());
+    assert!(!wire.to_string().contains("Plugin::build"));
+    assert!(handle_draft_rule_pack(&world, "unknown".into(), "roof_system".into()).is_err());
 }
 
 #[cfg(feature = "model-api")]

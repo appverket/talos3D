@@ -4934,16 +4934,15 @@ pub struct PassageLookupInfo {
     pub recorded_metadata: Option<serde_json::Value>,
 }
 
-/// Scaffolded rule-pack draft, returned by `draft_rule_pack`.
+/// Explicit unavailable dynamic-rule-pack result from the legacy drafting entry point.
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DraftRulePackInfo {
-    /// Rust source skeleton (not compilable as-is — human must fill in the
-    /// validator body).
-    pub rust_skeleton: String,
-    /// The passage ref used as the backlink in the skeleton.
+    pub status: String,
+    pub executable: bool,
     pub backlink: String,
-    /// Human-readable notes for the author.
+    pub suggested_next_tool: String,
+    pub suggested_arguments: serde_json::Value,
     pub notes: Vec<String>,
 }
 
@@ -10011,11 +10010,10 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "draft_rule_pack",
-        description = "Scaffold a Rust validator skeleton anchored to a corpus passage. \
-            chunk_id must match a passage registered in CorpusPassageRegistry; \
-            element_class names the ECS element class the validator will target. \
-            Returns a rust_skeleton string (template — human must fill in the body), \
-            a backlink ref, and editorial notes."
+        description = "Check the legacy rule-pack drafting entry point for a registered source passage. \
+            Governed dynamic validator authoring and delivery are unavailable: returns an explicit \
+            CorpusGap and request_corpus_expansion arguments, not executable code or a validation result. \
+            chunk_id identifies the registered passage; element_class identifies the unresolved target."
     )]
     pub(super) async fn draft_rule_pack_tool(
         &self,

@@ -18862,7 +18862,9 @@ pub fn handle_lookup_source_passage(
     })
 }
 
-/// Produce a Rust validator skeleton anchored to a corpus passage.
+/// Resolve the legacy drafting entry point without directing agents to source code.
+/// Governed dynamic validator publication is not yet supported; reference coverage
+/// alone cannot make a rule executable.
 #[cfg(feature = "model-api")]
 pub fn handle_draft_rule_pack(
     world: &World,
@@ -18875,57 +18877,23 @@ pub fn handle_draft_rule_pack(
     let registry = world
         .get_resource::<CorpusPassageRegistry>()
         .ok_or_else(|| "CorpusPassageRegistry not found in world".to_string())?;
-
-    let pref = PassageRef(chunk_id.clone());
-    let entry = registry
-        .get(&pref)
+    registry
+        .get(&PassageRef(chunk_id.clone()))
         .ok_or_else(|| format!("chunk_id '{chunk_id}' not found in CorpusPassageRegistry"))?;
 
-    // Sanitise the passage ref into a valid Rust identifier fragment.
-    let ident = chunk_id.replace([':', '-', '/'], "_").to_lowercase();
-    let class_ident = element_class.replace(['-', '/'], "_").to_lowercase();
-
-    let passage_preview: String = entry.text.chars().take(120).collect();
-
-    let rust_skeleton = format!(
-        r#"// Auto-scaffolded by draft_rule_pack (PP78). Complete the validator body before registering.
-// Source passage: {chunk_id}
-// "{passage_preview}..."
-
-use std::sync::Arc;
-use talos3d_core::capability_registry::{{
-    Applicability, ConstraintDescriptor, ConstraintId, ElementClassId, Finding, FindingId,
-    PassageRef, Severity,
-}};
-
-pub fn {ident}_constraint() -> ConstraintDescriptor {{
-    ConstraintDescriptor {{
-        id: ConstraintId("{ident}".into()),
-        label: "Draft {element_class} rule from {chunk_id}".into(),
-        description: "Draft validator scaffold generated from source passage {chunk_id}.".into(),
-        applicability: Applicability {{
-            element_classes: vec![ElementClassId("{class_ident}".into())],
-            required_state: None,
-        }},
-        default_severity: Severity::Error,
-        rationale: "Source-backed draft rule generated from passage {chunk_id}; author must encode the final validation criteria before registration.".into(),
-        source_backlink: Some(PassageRef("{chunk_id}".into())),
-        validator: Arc::new(|entity, world| {{
-            // Read parameters from entity components and return findings here.
-            vec![]
-        }}),
-    }}
-}}
-"#
-    );
-
     Ok(DraftRulePackInfo {
-        rust_skeleton,
-        backlink: chunk_id,
+        status: "CorpusGap".into(),
+        executable: false,
+        backlink: chunk_id.clone(),
+        suggested_next_tool: "request_corpus_expansion".into(),
+        suggested_arguments: serde_json::json!({
+            "element_class": element_class,
+            "kind": "rule_pack",
+            "rationale": format!("Governed dynamic validator authoring and delivery are unavailable for source passage {chunk_id}. Reference coverage is not executable validation.")
+        }),
         notes: vec![
-            "Complete the validator body before registering; the skeleton returns no findings as-is.".into(),
-            "Review the generated label, description, and rationale against the source passage.".into(),
-            "Add the new constraint to your Plugin::build via app.register_constraint(…).".into(),
+            "No validator was created, registered, reviewed or released.".into(),
+            "Report the missing dynamic capability through MCP and preserve the unresolved validation intent. The curator owns shared knowledge repair; application source access is not an authoring path.".into(),
         ],
     })
 }

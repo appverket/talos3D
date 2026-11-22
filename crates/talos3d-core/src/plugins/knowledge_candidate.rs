@@ -632,6 +632,56 @@ mod tests {
     }
 
     #[test]
+    fn native_scenario_observes_reopened_geometry_without_allowing_post_reopen_edits() {
+        let call = |id: &str, tool: &str, args: Value| {
+            json!({
+                "id":id,"tool":tool,"args":args.as_object().unwrap().iter()
+                    .map(|(k,v)| (k.clone(),json!({"expr":"literal","value":v})))
+                    .collect::<serde_json::Map<String,Value>>()
+            })
+        };
+        let observation = json!({"parameter_schema":{"type":"object"},
+            "allowed_tools":["inspect_element_geometry"],"mutation_scope":{"kind":"none"},
+            "steps":[call("mesh","inspect_element_geometry",json!({"element_id":0}))]});
+        let scenario = json!({"script":{"parameter_schema":{"type":"object"},
+            "allowed_tools":["create_box","inspect_element_geometry"],
+            "mutation_scope":{"kind":"project_root"},"steps":[
+                call("body","create_box",json!({"centre":[2.,3.,4.],"half_extents":[0.5,0.6,0.7]})),
+                call("before","inspect_element_geometry",json!({"element_id":0}))]},
+            "round_trip":true,"after_reopen":observation});
+        let run = |scenario: Value| {
+            let mut req = request();
+            req.edits.clear();
+            req.scenario = Some(serde_json::from_value(scenario).unwrap());
+            evaluate_in(req, Context::default())
+        };
+        let scene = run(scenario.clone()).unwrap();
+        assert_eq!(
+            scene.report["calls"][1]["result"],
+            scene.report["round_trip"]["observations"][0]["result"]
+        );
+        assert_eq!(
+            scene.report["round_trip"]["after_reopen"],
+            scene.report["final_state"]
+        );
+        assert!(!scene.report["calls"][1]["result"].is_null());
+        let mut invalid = scenario.clone();
+        invalid["round_trip"] = json!(false);
+        assert!(run(invalid).is_err());
+        let mut invalid = scenario.clone();
+        invalid["after_reopen"]["mutation_scope"] = json!({"kind":"project_root"});
+        assert!(run(invalid).is_err());
+        let mut invalid = scenario;
+        invalid["after_reopen"]["allowed_tools"] = json!(["create_box"]);
+        invalid["after_reopen"]["steps"] = json!([call(
+            "edit",
+            "create_box",
+            json!({"centre":[0.,0.,0.],"half_extents":[1.,1.,1.]})
+        )]);
+        assert!(run(invalid).is_err());
+    }
+
+    #[test]
     fn native_scenario_retires_placeholder_and_preserves_assembly_through_codec_and_history() {
         let mut req = request();
         req.edits.clear();
