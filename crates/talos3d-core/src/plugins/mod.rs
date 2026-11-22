@@ -53,6 +53,8 @@ pub mod import;
 pub mod inference;
 pub mod input_ownership;
 pub mod interference;
+#[cfg(feature = "model-api")]
+pub mod json_schema_shapes;
 pub mod keymap;
 pub mod knowledge_assets;
 #[cfg(feature = "model-api")]

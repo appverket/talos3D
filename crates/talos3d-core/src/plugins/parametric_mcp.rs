@@ -191,6 +191,10 @@ pub struct InspectParametricRequest {
 pub struct SetParametricDriverRequest {
     pub instance_id: u64,
     pub name: String,
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::any_value")
+    )]
     pub value: Value,
 }
 

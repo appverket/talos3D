@@ -1032,6 +1032,10 @@ pub struct QuantityProvenanceInput {
 pub struct QuantitySetRequest {
     pub element_id: u64,
     pub field: String,
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::any_value")
+    )]
     pub value: Value,
     pub material: Option<String>,
     pub provenance: QuantityProvenanceInput,
@@ -1238,6 +1242,10 @@ pub struct AcceptSemanticShadowCandidateRequest {
     #[serde(default)]
     pub refinement_state: Option<String>,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::optional_object")
+    )]
     pub parameters: Option<serde_json::Value>,
     #[serde(default)]
     pub rationale: Option<String>,

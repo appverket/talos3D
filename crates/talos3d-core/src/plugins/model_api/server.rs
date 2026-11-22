@@ -3719,6 +3719,7 @@ pub struct TransformToolRequest {
 #[serde(deny_unknown_fields)]
 pub(super) struct PreviewEditPlanRequest {
     request_kind: String,
+    #[schemars(schema_with = "crate::plugins::json_schema_shapes::object")]
     parameters: Value,
 }
 #[cfg(feature = "model-api")]
@@ -3734,6 +3735,10 @@ pub(super) struct EditPlanIdRequest {
 pub(super) struct SetPropertyRequest {
     pub(super) element_id: u64,
     pub(super) property_name: String,
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::any_value")
+    )]
     pub(super) value: Value,
 }
 
@@ -3774,6 +3779,10 @@ pub(super) struct BimPropertySetSetRequest {
     /// JSON shape (`{"number": 0.18}` / `{"text": "REI60"}` /
     /// `{"boolean": true}` / `{"integer": 60}` / `{"enum": "A1"}`
     /// / `{"json": ...}`).
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::any_value")
+    )]
     pub(super) value: Value,
 }
 
@@ -3818,6 +3827,10 @@ pub(super) struct BimExchangeIdentityListRequest {
 pub(super) struct BimVoidDeclareForDefinitionRequest {
     pub(super) definition_id: String,
     /// JSON-encoded `VoidDeclaration` (shape, placement, exchange_role).
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) declaration: Value,
 }
 
@@ -3856,6 +3869,10 @@ pub(super) struct SetToolbarLayoutRequest {
 pub(super) struct InvokeCommandRequest {
     pub(super) command_id: String,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) parameters: Value,
 }
 
@@ -4092,6 +4109,10 @@ pub(super) struct ApplySubobjectEditRequest {
     pub(super) reference: SelectableSubobjectRef,
     pub(super) operation: String,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) parameters: Value,
 }
 
@@ -4161,6 +4182,10 @@ pub(super) struct DeclareElevationIntentRequest {
     #[serde(default)]
     pub(super) label: Option<String>,
     /// One object per elevation; see the tool description for the fields.
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object_array")
+    )]
     pub(super) elevations: serde_json::Value,
 }
 
@@ -5187,6 +5212,11 @@ pub(super) struct PromoteRefinementRequest {
     pub(super) element_id: u64,
     pub(super) target_state: String,
     pub(super) recipe_id: Option<String>,
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::optional_object")
+    )]
     pub(super) overrides: Option<serde_json::Value>,
 }
 
@@ -5262,6 +5292,10 @@ pub(super) struct RegenerateRefinementBranchRequest {
     pub(super) parent_element_id: u64,
     pub(super) child_element_id: u64,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) overrides: serde_json::Value,
     pub(super) confirm_discard_parked_branch: bool,
 }
@@ -5387,6 +5421,10 @@ pub(super) struct SelectRecipeRequest {
     pub(super) element_class: String,
     /// Context object — expected keys: `target_state` (required), `jurisdiction` (optional).
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) context: serde_json::Value,
 }
 
@@ -5406,6 +5444,10 @@ pub struct CuratedPathDiscoveryRequest {
     #[serde(default)]
     pub query: Option<String>,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub context: serde_json::Value,
 }
 
@@ -5631,6 +5673,10 @@ pub(super) struct PreviewPromotionRequest {
     pub(super) target_state: String,
     pub(super) recipe_id: Option<String>,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) overrides: serde_json::Value,
 }
 
@@ -5644,6 +5690,10 @@ pub(super) struct CatalogQueryRequest {
     pub(super) provider_id: String,
     /// Equality filters from list_catalog_providers.query_contract. Unknown dynamic fields/types are errors. Provider region is metadata; use probe_catalog_scope for a declaration comparison.
     #[serde(default = "empty_catalog_filter")]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) filter: serde_json::Value,
 }
 
@@ -5667,6 +5717,10 @@ pub(super) struct ListGenerationPriorsRequest {
     /// Optional scope filter. Recognised keys: `element_class` (string),
     /// `claim_path` (string). Absent or empty object returns all priors.
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::optional_object")
+    )]
     pub(super) scope_filter: Option<serde_json::Value>,
 }
 
@@ -5783,8 +5837,16 @@ pub struct SaveRecipeDraftRequest {
     #[serde(default)]
     pub(super) runtime_claims: Vec<crate::plugins::knowledge_assets::RuntimeCapabilityClaim>,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) acquisition_context: serde_json::Value,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::any_value")
+    )]
     pub(super) draft_script: serde_json::Value,
     #[serde(default)]
     pub(super) notes: Vec<String>,
@@ -5838,6 +5900,10 @@ pub struct SaveAssemblyPatternDraftRequest {
     #[serde(default)]
     pub(super) tags: Vec<String>,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) parameter_schema: serde_json::Value,
     pub(super) jurisdiction: Option<String>,
     pub(super) gap_id: Option<String>,
@@ -5848,6 +5914,10 @@ pub struct SaveAssemblyPatternDraftRequest {
     #[serde(default)]
     pub(super) runtime_claims: Vec<crate::plugins::knowledge_assets::RuntimeCapabilityClaim>,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) acquisition_context: serde_json::Value,
     #[serde(default)]
     pub(super) notes: Vec<String>,
@@ -5893,8 +5963,16 @@ pub struct CreateAssemblyRequest {
     pub label: String,
     pub members: Vec<AssemblyMemberRefRequest>,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub parameters: Value,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub metadata: Value,
     #[serde(default)]
     pub relations: Vec<CreateRelationRequest>,
@@ -5948,8 +6026,16 @@ pub struct CreateSemanticAssemblyFromSelectionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_role: Option<String>,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub parameters: Value,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub metadata: Value,
 }
 
@@ -6031,6 +6117,10 @@ pub(super) struct DefinitionLibraryExportRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct OccurrenceUpdateOverridesRequest {
     pub(super) element_id: u64,
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) overrides: Value,
 }
 
@@ -6064,6 +6154,10 @@ pub struct ValidateHostFitRequest {
     pub(super) host_element_id: u64,
     pub(super) hosted_element_id: u64,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) contract_parameters: Value,
 }
 
@@ -6076,6 +6170,10 @@ pub struct ValidateDefinitionHostContractRequest {
     pub(super) host_element_id: u64,
     pub(super) hosted_element_id: u64,
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "crate::plugins::json_schema_shapes::object")
+    )]
     pub(super) contract_parameters: Value,
 }
 

@@ -14340,6 +14340,69 @@ mod capability_profiles {
         );
     }
 
+    /// Every advertised tool parameter must declare its JSON shape. A type-less
+    /// `serde_json::Value` schema lets MCP clients send an object as a JSON string
+    /// (observed for `catalog_query.filter`), which handlers rightly reject.
+    #[test]
+    fn served_tool_parameters_declare_a_type() {
+        fn declares_type(
+            schema: &serde_json::Value,
+            defs: Option<&serde_json::Map<String, serde_json::Value>>,
+        ) -> bool {
+            if let Some(reference) = schema.get("$ref").and_then(|r| r.as_str()) {
+                let name = reference.rsplit('/').next().unwrap_or_default();
+                return defs
+                    .and_then(|d| d.get(name))
+                    .is_some_and(|target| declares_type(target, defs));
+            }
+            ["type", "anyOf", "oneOf", "allOf", "enum", "const"]
+                .iter()
+                .any(|key| schema.get(*key).is_some())
+        }
+        let catalog = profile_tool_catalog();
+        let mut untyped = Vec::new();
+        for tool in catalog.router.list_all() {
+            let schema = serde_json::Value::Object((*tool.input_schema).clone());
+            let defs = schema.get("$defs").and_then(|d| d.as_object());
+            for (name, property) in schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .into_iter()
+                .flatten()
+            {
+                if !declares_type(property, defs) {
+                    untyped.push(format!("{}.{name}", tool.name));
+                }
+            }
+        }
+        assert!(untyped.is_empty(), "type-less tool parameters: {untyped:?}");
+
+        // Declaring a shape must not turn optional parameters into required ones.
+        for (tool_name, field) in [
+            ("catalog_query", "filter"),
+            ("promote_refinement", "overrides"),
+            ("list_generation_priors", "scope_filter"),
+            ("agent_guidance_preflight", "proposed_input"),
+        ] {
+            let tool = catalog
+                .router
+                .list_all()
+                .into_iter()
+                .find(|tool| tool.name == tool_name)
+                .unwrap_or_else(|| panic!("missing tool {tool_name}"));
+            let required = tool
+                .input_schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                !required.iter().any(|r| r == field),
+                "{tool_name}.{field} must stay optional"
+            );
+        }
+    }
+
     #[test]
     fn focused_profile_is_bounded_and_keeps_discovery_edit_and_recovery_routes() {
         let catalog = profile_tool_catalog();

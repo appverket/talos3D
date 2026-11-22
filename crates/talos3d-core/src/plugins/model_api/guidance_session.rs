@@ -303,6 +303,7 @@ pub struct GuidanceStateRequest {
 pub struct GuidancePreflightRequest {
     pub proposed_tool: String,
     #[serde(default)]
+    #[schemars(schema_with = "crate::plugins::json_schema_shapes::any_value")]
     pub proposed_input: Value,
     #[serde(default)]
     pub client_session_id: Option<String>,
