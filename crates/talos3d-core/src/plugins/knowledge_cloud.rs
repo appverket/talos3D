@@ -59,6 +59,10 @@ pub struct CandidateCheck {
     /// Parametric driver cases only. An empty list checks defaults.
     #[serde(default)]
     pub driver_cases: Vec<BTreeMap<String, Value>>,
+    /// Catalog-only filters executed by the ordinary runtime query handler in disposable registries.
+    /// At most 16 object filters. Returns actual counts, bounded rows and result hashes; not acceptance.
+    #[serde(default)]
+    pub catalog_queries: Vec<BTreeMap<String, Value>>,
 }
 
 /// Uses the same decoder/validation as admission, in disposable registries.
@@ -77,7 +81,7 @@ pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
 // provenance/rights remain unresolved. It never establishes candidate eligibility.
 fn check_payload(request: CandidateCheck) -> Result<Value, String> {
     let bytes = serde_json::to_vec(&request.asset).map_err(|e| e.to_string())?;
-    if request.driver_cases.len() > 16 {
+    if request.driver_cases.len() > 16 || request.catalog_queries.len() > 16 {
         return Err("Candidate or case limit exceeded".into());
     }
     let revision = hex::encode(Sha256::digest(&bytes));
@@ -113,8 +117,25 @@ fn check_payload(request: CandidateCheck) -> Result<Value, String> {
     } else if !request.driver_cases.is_empty() {
         return Err("Driver cases apply only to parametric_type.v1".into());
     }
+    let mut catalog_cases = Vec::new();
+    if !request.catalog_queries.is_empty() && request.asset.kind != "catalog.v1" {
+        return Err("Catalog query cases apply only to catalog.v1".into());
+    }
+    for filter in request.catalog_queries {
+        let filter = serde_json::to_value(filter).map_err(|e| e.to_string())?;
+        let rows = super::model_api::handle_catalog_query(
+            &scratch,
+            request.asset.id.clone(),
+            filter.clone(),
+        )?;
+        let result = serde_json::to_value(&rows).map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec(&result).map_err(|e| e.to_string())?;
+        catalog_cases.push(json!({"filter":filter,"row_count":rows.len(),
+            "rows":rows.iter().take(100).collect::<Vec<_>>(),"rows_truncated":rows.len()>100,
+            "response_sha256":hex::encode(Sha256::digest(bytes))}));
+    }
     Ok(
-        json!({"content_hash":revision,"payload_validation":"passed", "structural_validation":"passed","parametric_cases":cases,"execution":installation["execution"],
+        json!({"catalog_cases":catalog_cases,"content_hash":revision,"payload_validation":"passed", "structural_validation":"passed","parametric_cases":cases,"execution":installation["execution"],
         "installed":false,"released":false,"model_modified":false,
         "limitations":["No independent source, rights or applicability approval.",
             "No rendered model, placement, load-bearing or construction acceptance.",
@@ -378,7 +399,7 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
             "post_reopen_observations":{"read_only":true,"maximum_calls":32,"result_path":"round_trip.observations","state_path":"round_trip.after_reopen"},
             "observation_contract":{"schema":"talos3d.candidate-scenario-observation.v2","states":"Each state_ref resolves in observed_states in the same response; identical complete native snapshots are transmitted once.","empty_rejection":"An actual failed operation may yield an empty rendered scene, with explicit execution_error and no geometry checks."},
             "geometry_types":["box","profile_extrusion"],
-            "next_tool":"evaluate_knowledge_candidate"}));
+            "candidate_checks":candidate_checks(),"next_tool":"evaluate_knowledge_candidate"}));
     }
     let (payload, constraints) = match kind {
         "catalog.v1" => (
@@ -441,8 +462,16 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
         "payload_schema": payload,
         "constraints": constraints,
         "next_tool": "check_knowledge_candidate",
+        "candidate_checks":candidate_checks(),
         "notice": "This is the runtime decoder contract. Supply independently grounded data and rights; schema validity is not evidence or release approval."
     }))
+}
+
+fn candidate_checks() -> Value {
+    let schema = serde_json::to_value(schemars::schema_for!(CandidateCheck)).unwrap();
+    json!({"catalog.v1":{"tool":"check_knowledge_candidate","query_field":"catalog_queries",
+        "maximum_queries":16,"query_schema":schema["properties"]["catalog_queries"],
+        "result_path":"catalog_cases","scope":"Disposable native catalog queries; not independent acceptance or publication"}})
 }
 
 pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, String> {
@@ -1109,6 +1138,7 @@ mod tests {
         let mut asset = passage("synthetic").asset;
         asset.path_kind = "recipe_or_executable_asset".into();
         let error = check_candidate(CandidateCheck {
+            catalog_queries: vec![],
             asset,
             driver_cases: vec![],
         })
@@ -1131,6 +1161,7 @@ mod tests {
     fn candidate_check_is_not_admission_and_rejects_private_content() {
         let asset = passage("candidate").asset;
         let checked = check_candidate(CandidateCheck {
+            catalog_queries: vec![],
             asset: asset.clone(),
             driver_cases: vec![],
         })
@@ -1145,6 +1176,7 @@ mod tests {
         let mut private = asset;
         private.contains_private_context = true;
         assert!(check_candidate(CandidateCheck {
+            catalog_queries: vec![],
             asset: private,
             driver_cases: vec![]
         })
@@ -1230,6 +1262,69 @@ mod tests {
         assert!(!catalog_value_equal(&json!(7), &json!(7.5)));
         assert_eq!(json_type(&json!(7.0)), "integer");
         assert_eq!(json_type(&json!(7.5)), "number");
+    }
+
+    #[test]
+    fn candidate_catalog_queries_use_native_filters_without_admission() {
+        let mut candidate = passage("catalog-r1");
+        candidate.asset.id = "test.catalog".into();
+        candidate.asset.kind = "catalog.v1".into();
+        candidate.asset.path_kind = "catalog".into();
+        candidate.asset.payload = json!({"id":"test.catalog","label":"Synthetic catalog",
+        "description":"Synthetic contract fixture","category":{"kind":"Other","value":"fixture"},
+        "region":"scope-A","license":{"kind":"Cc0"},"source_version":"one","rows":[{
+            "row_id":"row-one","category":{"kind":"Other","value":"fixture"},
+            "data":{"size":7,"label":"sample"},
+            "provenance":{"source":"Synthetic fixture","source_version":"one","jurisdiction":"scope-A",
+                "ingested_at":0,"license":{"kind":"Cc0"},"backlink":null,"supersedes":[]}
+        }]});
+        let run = |filters: Value| {
+            check_candidate(CandidateCheck {
+                asset: candidate.asset.clone(),
+                driver_cases: vec![],
+                catalog_queries: serde_json::from_value(filters).unwrap(),
+            })
+        };
+        let checked = run(json!([{"size":7},{"size":8}])).unwrap();
+        assert_eq!(checked["catalog_cases"][0]["row_count"], 1);
+        assert_eq!(checked["catalog_cases"][0]["rows"][0]["data"]["size"], 7);
+        assert_eq!(checked["catalog_cases"][1]["row_count"], 0);
+        assert_eq!(checked["catalog_cases"][1]["rows"], json!([]));
+        assert_eq!(checked["installed"], false);
+        assert_eq!(checked["released"], false);
+        assert_eq!(checked["model_modified"], false);
+        let mut world = World::new();
+        install(&mut world, candidate.clone()).unwrap();
+        let native = super::super::model_api::handle_catalog_query(
+            &world,
+            "test.catalog".into(),
+            json!({"size":7}),
+        )
+        .unwrap();
+        assert_eq!(
+            checked["catalog_cases"][0]["response_sha256"],
+            hex::encode(Sha256::digest(
+                serde_json::to_vec(&serde_json::to_value(&native).unwrap()).unwrap()
+            ))
+        );
+        assert!(run(json!([{"unknown":1}])).is_err());
+        assert!(run(json!([{"size":"wrong-type"}])).is_err());
+        assert!(run(json!(vec![json!({}); 17])).is_err());
+        assert!(check_candidate(CandidateCheck {
+            asset: passage("other").asset,
+            driver_cases: vec![],
+            catalog_queries: vec![BTreeMap::new()]
+        })
+        .is_err());
+        let advertised = payload_schema("catalog.v1").unwrap();
+        assert_eq!(
+            advertised["candidate_checks"]["catalog.v1"]["query_schema"]["items"]["type"],
+            "object"
+        );
+        assert_eq!(
+            payload_schema("candidate_runtime.v1").unwrap()["candidate_checks"],
+            advertised["candidate_checks"]
+        );
     }
 
     #[test]

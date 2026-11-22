@@ -133,6 +133,7 @@ pub fn evaluate_in(mut request: Request, context: Context) -> Result<Scene, Stri
         return Err("Candidate execution permits at most 16 edits and 64 driver overrides".into());
     }
     let check = knowledge_cloud::CandidateCheck {
+        catalog_queries: vec![],
         asset: request.asset.clone(),
         driver_cases: vec![request.drivers.clone()],
     };
@@ -779,6 +780,7 @@ mod tests {
                 .contains("collides")
         );
         let checked = knowledge_cloud::check_candidate(knowledge_cloud::CandidateCheck {
+            catalog_queries: vec![],
             asset: req.asset.clone(),
             driver_cases: vec![],
         })
@@ -1048,6 +1050,7 @@ mod tests {
         assert!(inspected.asset.redistribution_rights.is_empty());
         assert!(
             knowledge_cloud::check_candidate(knowledge_cloud::CandidateCheck {
+                catalog_queries: vec![],
                 asset: inspected.asset.clone(),
                 driver_cases: vec![],
             })

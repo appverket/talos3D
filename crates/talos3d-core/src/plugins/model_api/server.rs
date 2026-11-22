@@ -9468,7 +9468,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "check_knowledge_candidate",
-        description = "Check a typed candidate through the runtime payload decoder in disposable registries, without installation, publication or model edits. Parametric driver cases return evaluated member geometry. Recipe/Definition checks are structural only. Independent source review and rendered authoring acceptance remain required."
+        description = "Check a typed candidate through the runtime payload decoder in disposable registries, without installation, publication or model edits. Parametric driver cases return evaluated member geometry. For catalog.v1, supply up to 16 catalog_queries object filters to execute actual native queries in disposable registries and inspect catalog_cases (counts, up to 100 rows each, full result hashes). Recipe/Definition checks are structural only. Independent source review and rendered authoring acceptance remain required."
     )]
     pub(super) async fn check_knowledge_candidate_tool(
         &self,
