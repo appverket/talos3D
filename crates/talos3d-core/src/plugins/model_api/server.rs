@@ -3431,6 +3431,7 @@ pub(super) fn assemble_agent_welcome(
         snapshot.must_read_guidance_card_ids.clear();
         snapshot.must_read_agent_skill_ids.clear();
         snapshot.optional_guidance.clear();
+        snapshot.must_read_before_mutation_card_ids.clear();
     }
     snapshot.next_tools.retain(|tool| {
         profile_allows(profile, tool)
@@ -4436,6 +4437,10 @@ pub struct CapabilitySnapshotInfo {
     /// leaves the required set without appearing here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub optional_guidance: Vec<OptionalGuidanceRef>,
+    /// Cards the active contract requires before the first model mutation.
+    /// They gate mutation, not bootstrap or read-only discovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub must_read_before_mutation_card_ids: Vec<String>,
     pub next_tools: Vec<String>,
 }
 
@@ -4498,6 +4503,7 @@ impl CapabilitySnapshotInfo {
             already_read_guidance_card_ids: Vec::new(),
             already_read_agent_skill_ids: Vec::new(),
             optional_guidance: Vec::new(),
+            must_read_before_mutation_card_ids: Vec::new(),
             next_tools: vec![
                 "list_element_classes".into(),
                 "select_recipe".into(),
@@ -6181,6 +6187,12 @@ impl ModelApiServer {
             context,
             welcome.capability_snapshot.optional_guidance.clone(),
         );
+        self.guidance_state.set_mutation_prerequisites(
+            welcome
+                .capability_snapshot
+                .must_read_before_mutation_card_ids
+                .clone(),
+        );
         // The welcome states the invariants once, at top level. The live state
         // keeps them for `get_agent_guidance_state` and hook rehydration.
         guidance_state.required_invariants = Vec::new();
@@ -6309,6 +6321,42 @@ impl ModelApiServer {
                     .iter()
                     .map(OptionalGuidanceRef::manifest_entry),
             );
+            // Cards required before the first mutation are listed by identity,
+            // not inlined: they gate model edits, not the bootstrap.
+            for card_id in self.guidance_state.mutation_prerequisites() {
+                let key = card_key(&card_id);
+                match self.request_get_guidance_card(card_id.clone()).await {
+                    Ok(card) => {
+                        let resource = GuidanceResource::new(
+                            key.clone(),
+                            "guidance_card",
+                            card_id.clone(),
+                            serde_json::json!({"tool": "get_guidance_card", "arguments": {"card_id": card_id}}),
+                            serde_json::to_value(card)
+                                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+                        );
+                        self.guidance_state
+                            .observe_revisions(
+                                session_id.as_deref(),
+                                [(resource.key.as_str(), resource.digest.as_str())],
+                            )
+                            .map_err(|e| McpError::invalid_params(e, None))?;
+                        let mut entry = resource.manifest_entry(false);
+                        entry["required_before"] = serde_json::json!("first_model_mutation");
+                        manifest.push(entry);
+                    }
+                    Err(error) => {
+                        self.guidance_state
+                            .mark_unavailable(session_id.as_deref(), &key, error.clone())
+                            .map_err(|e| McpError::invalid_params(e, None))?;
+                        manifest.push(serde_json::json!({
+                            "key": key, "id": card_id, "required": false,
+                            "required_before": "first_model_mutation", "available": false,
+                            "error": error, "next_tool": "report_harness_incident",
+                        }));
+                    }
+                }
+            }
         }
         let header = serde_json::to_value(AgentGuidancePacket {
             contract: "talos3d.agent-guidance-packet".to_string(),
@@ -9195,6 +9243,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             snapshot.must_read_guidance_card_ids.clear();
             snapshot.must_read_agent_skill_ids.clear();
             snapshot.optional_guidance.clear();
+            snapshot.must_read_before_mutation_card_ids.clear();
         }
         // One read state owns every obligation. Advertising a resource the
         // bootstrap already delivered as still-must-read is what makes an

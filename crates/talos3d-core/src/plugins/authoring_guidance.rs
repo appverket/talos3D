@@ -306,6 +306,23 @@ impl GuidanceCardRegistry {
 }
 
 /// Domain-owned search aliases consumed by generic curated-path discovery.
+/// Guidance cards a capability's contract requires an agent to read once
+/// before its first model mutation. Declared as data so the session read
+/// ledger, not prose in `prompt_text`, owns the obligation. Cards that cannot
+/// be served become explicit blocking gaps rather than being dropped.
+#[derive(Resource, Debug, Default)]
+pub struct MutationPrerequisiteCards(std::collections::BTreeSet<String>);
+
+impl MutationPrerequisiteCards {
+    pub fn require(&mut self, card_id: impl Into<String>) {
+        self.0.insert(card_id.into());
+    }
+
+    pub fn card_ids(&self) -> impl Iterator<Item = &String> {
+        self.0.iter()
+    }
+}
+
 #[derive(Resource, Debug, Default)]
 pub struct DiscoveryAliases(std::collections::BTreeMap<String, Vec<String>>);
 

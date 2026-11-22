@@ -163,7 +163,7 @@ pub mod component_families {
 /// Capability-owned guidance and discovery vocabulary.
 pub mod guidance {
     pub use talos3d_core::plugins::authoring_guidance::{
-        DiscoveryAliases, GuidanceCardInfo, GuidanceCardRegistry,
+        DiscoveryAliases, GuidanceCardInfo, GuidanceCardRegistry, MutationPrerequisiteCards,
     };
 }
 

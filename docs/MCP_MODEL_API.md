@@ -75,6 +75,17 @@ key. There is no caller-supplied completion assertion. A required resource the
 instance cannot serve stays in the manifest with `available: false`, its error
 and `next_tool: report_harness_incident`, and remains a blocking obligation.
 
+A contract obligation such as "read this chapter before authoring" is data,
+not prose alone. A capability declares it with the `MutationPrerequisiteCards`
+resource. The snapshot lists it as `must_read_before_mutation_card_ids` and the
+packet manifest lists it by identity with `required_before:
+"first_model_mutation"`. It is not inlined into the bootstrap. The session
+enters phase `prepare` after discovery: discovery and inspection stay open, and
+model mutation is blocked until each listed card has been read completely once
+(through `get_guidance_card` or any delivery that records the same digest). A
+declared card the instance cannot serve stays a blocking gap naming
+`report_harness_incident`.
+
 ## What It Exposes
 
 The MCP surface is designed around the authored model rather than render

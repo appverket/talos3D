@@ -14193,6 +14193,18 @@ pub fn handle_get_capability_snapshot_for_task(
     optional_guidance.retain(|entry| {
         entry.kind != OptionalGuidanceRef::CARD || registered_card_ids.contains(&entry.id)
     });
+    // Before-mutation cards are not filtered against the registered set: an
+    // unresolvable declaration must surface as an explicit blocking gap.
+    let must_read_before_mutation_card_ids: Vec<String> = world
+        .get_resource::<crate::plugins::authoring_guidance::MutationPrerequisiteCards>()
+        .map(|registry| {
+            registry
+                .card_ids()
+                .filter(|id| !must_read_guidance_card_ids.contains(id))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut no_curated_paths = Vec::new();
     if let Some(registry) = world.get_resource::<CapabilityRegistry>() {
@@ -14307,6 +14319,7 @@ pub fn handle_get_capability_snapshot_for_task(
         already_read_guidance_card_ids: Vec::new(),
         already_read_agent_skill_ids: Vec::new(),
         optional_guidance,
+        must_read_before_mutation_card_ids,
         next_tools: capability_snapshot_next_tools(),
     };
     // The default snapshot is an onboarding handshake with a hard byte budget,

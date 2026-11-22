@@ -180,6 +180,8 @@ pub(super) fn knowledge_review_invariants() -> Vec<String> {
 pub enum GuidancePhase {
     Bootstrap,
     Discover,
+    /// Read the cards the contract requires before the first model mutation.
+    Prepare,
     Plan,
     Validate,
     Inspect,
@@ -339,6 +341,8 @@ struct GuidanceSession {
     /// out. Optional resources are never obligations.
     element_classes: Vec<String>,
     optional_guidance: Vec<super::OptionalGuidanceRef>,
+    /// Cards the active contract requires before the first model mutation.
+    before_mutation_cards: Vec<String>,
     ledger: ReadLedger,
     metrics: OnboardingMetrics,
     guidance_unavailable: bool,
@@ -393,6 +397,7 @@ impl GuidanceSessionStore {
             required_skills,
             element_classes: Vec::new(),
             optional_guidance: Vec::new(),
+            before_mutation_cards: Vec::new(),
             ledger: ReadLedger::default(),
             metrics: OnboardingMetrics::default(),
             guidance_unavailable: false,
@@ -470,6 +475,30 @@ impl GuidanceSessionStore {
             session.element_classes = context.element_classes;
             session.optional_guidance = optional_guidance;
         }
+    }
+
+    /// Read obligations that gate the first model mutation (not bootstrap).
+    /// Declared as data by capabilities, so the ledger, not prose, owns them.
+    pub fn set_mutation_prerequisites(&self, card_ids: Vec<String>) {
+        if let Some(session) = self
+            .0
+            .lock()
+            .expect("guidance session lock poisoned")
+            .as_mut()
+        {
+            if session.scope == GuidanceScope::Authoring {
+                session.before_mutation_cards = card_ids;
+            }
+        }
+    }
+
+    pub fn mutation_prerequisites(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .expect("guidance session lock poisoned")
+            .as_ref()
+            .map(|session| session.before_mutation_cards.clone())
+            .unwrap_or_default()
     }
 
     pub fn task_context(&self) -> Option<super::GuidanceTaskContext> {
@@ -718,6 +747,12 @@ impl GuidanceSession {
                 .all(|path| self.discovery_paths.contains(*path))
     }
 
+    fn preparation_complete(&self) -> bool {
+        self.before_mutation_cards
+            .iter()
+            .all(|id| self.ledger.satisfied(&card_key(id)))
+    }
+
     fn verification_complete(&self) -> bool {
         REQUIRED_VERIFICATION_TOOLS
             .iter()
@@ -731,6 +766,8 @@ impl GuidanceSession {
             GuidancePhase::Complete
         } else if !self.discovery_complete() {
             GuidancePhase::Discover
+        } else if !self.authored && !self.preparation_complete() {
+            GuidancePhase::Prepare
         } else if !self.authored {
             GuidancePhase::Plan
         } else if !self.verification_complete() {
@@ -750,7 +787,11 @@ impl GuidanceSession {
                 guidance_state: self.snapshot(),
             });
         }
-        if !requires_guidance(tool) || (self.bootstrap_complete() && self.discovery_complete()) {
+        if !requires_guidance(tool)
+            || (self.bootstrap_complete()
+                && self.discovery_complete()
+                && self.preparation_complete())
+        {
             return None;
         }
         let state = self.snapshot();
@@ -853,6 +894,31 @@ impl GuidanceSession {
                         reason: format!("Probe the {path} path before authoring."),
                     });
                 }
+            }
+        }
+
+        if self.scope == GuidanceScope::Authoring && self.bootstrap_complete() {
+            for id in &self.before_mutation_cards {
+                let key = card_key(id);
+                if self.ledger.satisfied(&key) {
+                    satisfied.push(format!("before-mutation-card:{id}"));
+                    continue;
+                }
+                let reason = match self.ledger.unavailable.get(&key) {
+                    Some(error) => format!("The active contract requires this card before the first model mutation, but the running instance cannot serve it ({error}). Do not mutate the model; report the gap with report_harness_incident."),
+                    None => "The active contract requires reading this card once before the first model mutation. Discovery and inspection are not blocked.".to_string(),
+                };
+                blocking.push(GuidanceObligation {
+                    id: format!("read-before-mutation:{id}"),
+                    reason,
+                    blocking: true,
+                });
+                next_actions.push(GuidanceNextAction {
+                    tool: "get_guidance_card".to_string(),
+                    arguments: Some(json!({"card_id": id})),
+                    reason: "Read a card the contract requires before the first model mutation."
+                        .to_string(),
+                });
             }
         }
 
@@ -1461,5 +1527,50 @@ mod tests {
         let metrics = store.snapshot().unwrap().onboarding_metrics;
         assert!(metrics.frozen_at_first_mutation);
         assert_eq!(metrics.response_bytes, 0);
+    }
+
+    #[test]
+    fn before_mutation_cards_gate_edits_not_discovery() {
+        let store = ready_store(Some("author a cottage"));
+        store.set_mutation_prerequisites(vec!["chapter.start".into()]);
+        let state = store.snapshot().unwrap();
+        assert_eq!(state.phase, GuidancePhase::Prepare);
+        assert!(state
+            .blocking_obligations
+            .iter()
+            .any(|o| o.id == "read-before-mutation:chapter.start"));
+        assert_eq!(state.next_actions[0].tool, "get_guidance_card");
+        assert!(store.router_preflight("create_box").is_some());
+        assert!(store.router_preflight("discover_curated_paths").is_none());
+        // One complete read, however delivered, satisfies it.
+        store
+            .record_delivery(
+                Some(&state.guidance_session_id),
+                &[ResourceRead {
+                    key: card_key("chapter.start"),
+                    digest: "d".into(),
+                    bytes: 1,
+                }],
+                1,
+                None,
+            )
+            .unwrap();
+        assert_eq!(store.snapshot().unwrap().phase, GuidancePhase::Plan);
+        assert!(store.router_preflight("create_box").is_none());
+    }
+
+    #[test]
+    fn knowledge_scopes_ignore_mutation_prerequisites() {
+        let store = GuidanceSessionStore::default();
+        store.start_scoped(
+            "rev".into(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            GuidanceScope::KnowledgeUse,
+        );
+        store.set_mutation_prerequisites(vec!["chapter.start".into()]);
+        assert!(store.mutation_prerequisites().is_empty());
     }
 }

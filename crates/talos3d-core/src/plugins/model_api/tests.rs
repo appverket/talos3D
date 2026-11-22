@@ -16338,3 +16338,129 @@ async fn negotiation_hello_states_shared_metadata_once() {
     drop(server);
     worker.await.unwrap();
 }
+
+/// TALOS-cyczbfsk: a contract's "read X before authoring" is data the ledger
+/// owns. It is listed in the manifest by identity, gates mutation (not
+/// bootstrap or discovery), is satisfied by one complete read, and an
+/// unservable declaration is an explicit blocking gap.
+#[cfg(feature = "model-api")]
+#[tokio::test]
+async fn mutation_prerequisites_are_ledger_owned_and_gate_only_mutation() {
+    use super::guidance_session::GuidancePhase;
+    use crate::plugins::authoring_guidance::{
+        AuthoringGuidance, GuidanceChapterDef, MutationPrerequisiteCards,
+    };
+    let (sender, receiver) = mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut world = init_model_api_test_world();
+        world.insert_resource(ModelApiRuntimeInfo {
+            instance_id: "prerequisites".into(),
+            app_name: "test".into(),
+            pid: 1,
+            http_host: "127.0.0.1".into(),
+            http_port: 24844,
+            http_url: "http://127.0.0.1:24844/mcp".into(),
+            registry_path: String::new(),
+            started_at_unix_ms: 1,
+            requested_port: None,
+        });
+        world.insert_resource(AuthoringGuidance {
+            guidance_id: "g".into(),
+            version: 1,
+            prompt_text: "Before authoring read test.chapter.start.".into(),
+            guidance_chapters: vec![GuidanceChapterDef {
+                id: "test.chapter.start".into(),
+                title: "Start".into(),
+                body_markdown: "Start here.\n\n".repeat(2000),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let mut prerequisites = MutationPrerequisiteCards::default();
+        prerequisites.require("test.chapter.start");
+        prerequisites.require("test.chapter.missing");
+        world.insert_resource(prerequisites);
+        while let Ok(request) = receiver.recv() {
+            handle_model_api_request(&mut world, request);
+        }
+    });
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
+    let welcome: AgentWelcome = server
+        .negotiate_agent_session_tool(Parameters(AgentHello::default()))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    assert_eq!(
+        welcome
+            .capability_snapshot
+            .must_read_before_mutation_card_ids,
+        vec![
+            "test.chapter.missing".to_string(),
+            "test.chapter.start".to_string()
+        ]
+    );
+    let (pages, resources) = drain_guidance_packet(&server).await;
+    // Listed by identity, never inlined into the bootstrap.
+    assert!(!resources.contains_key("card:test.chapter.start"));
+    let packet: AgentGuidancePacket = serde_json::from_value(pages[0].clone()).unwrap();
+    let entry = |key: &str| {
+        packet
+            .manifest
+            .iter()
+            .find(|e| e["key"] == key)
+            .cloned()
+            .unwrap()
+    };
+    let start = entry("card:test.chapter.start");
+    assert_eq!(start["required_before"], "first_model_mutation");
+    assert_eq!(start["retrieval"]["tool"], "get_guidance_card");
+    assert_eq!(entry("card:test.chapter.missing")["available"], false);
+    let state = server.guidance_state.snapshot().unwrap();
+    assert_eq!(state.phase, GuidancePhase::Prepare);
+    assert!(server
+        .guidance_state
+        .router_preflight("create_box")
+        .is_some());
+    assert!(server
+        .guidance_state
+        .router_preflight("discover_curated_paths")
+        .is_none());
+    let missing = state
+        .blocking_obligations
+        .iter()
+        .find(|o| o.id == "read-before-mutation:test.chapter.missing")
+        .unwrap();
+    assert!(missing.reason.contains("report_harness_incident"));
+
+    // Reading the served card completely satisfies its obligation.
+    let mut request = GetGuidanceCardRequest {
+        card_id: "test.chapter.start".into(),
+        cursor: None,
+    };
+    loop {
+        let page: serde_json::Value = server
+            .get_guidance_card_tool(Parameters(request.clone()))
+            .await
+            .unwrap()
+            .into_typed()
+            .unwrap();
+        if page["delivery_complete"] != false {
+            break;
+        }
+        request = serde_json::from_value(page["next_arguments"].clone()).unwrap();
+    }
+    let state = server.guidance_state.snapshot().unwrap();
+    assert!(state
+        .satisfied_obligations
+        .iter()
+        .any(|o| o == "before-mutation-card:test.chapter.start"));
+    // The unservable declaration still blocks mutation explicitly.
+    assert_eq!(state.phase, GuidancePhase::Prepare);
+    assert!(server
+        .guidance_state
+        .router_preflight("create_box")
+        .is_some());
+    drop(server);
+    worker.await.unwrap();
+}
