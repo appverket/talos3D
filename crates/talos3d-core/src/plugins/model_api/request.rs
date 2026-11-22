@@ -954,6 +954,10 @@ pub(super) enum ModelApiRequest {
         query: String,
         response: oneshot::Sender<serde_json::Value>,
     },
+    LookupAdmittedPassage {
+        admitted: Box<crate::plugins::knowledge_cloud::AdmittedAsset>,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
     LookupSourcePassage {
         passage_ref: String,
         response: oneshot::Sender<ApiResult<PassageLookupInfo>>,
@@ -2608,6 +2612,11 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::SearchLocalCorpusPassages { query, response } => {
             let _ = response.send(handle_search_local_corpus_passages(world, &query));
+        }
+        ModelApiRequest::LookupAdmittedPassage { admitted, response } => {
+            let _ = response.send(crate::plugins::knowledge_cloud::read_installed_passage(
+                world, *admitted,
+            ));
         }
         ModelApiRequest::LookupSourcePassage {
             passage_ref,

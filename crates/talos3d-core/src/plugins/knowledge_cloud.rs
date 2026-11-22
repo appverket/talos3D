@@ -72,6 +72,11 @@ pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
         .asset
         .validate_envelope()
         .map_err(|error| error.to_string())?;
+    let missing = super::model_api::missing_knowledge_tools(&request.asset.required_tool_ids);
+    if !missing.is_empty() {
+        return Err(json!({"code":"MissingRequiredRuntimeTools","missing_required_tool_ids":missing,
+            "route":"CapabilityGap","notice":"Candidate requirements must name actual MCP tools. Inspect live schemas; never invent aliases. No installation or publication."}).to_string());
+    }
     let mut checked = check_payload(request)?;
     checked["envelope_validation"] = json!("passed");
     Ok(checked)
@@ -222,6 +227,37 @@ pub fn required_tools(admitted: &AdmittedAsset) -> &[String] {
 pub fn inspect(admitted: &AdmittedAsset) -> Value {
     json!({"asset":admitted.asset,"content_hash":admitted.revision,"delivery":"verified_dynamic_corpus","released":admitted.scope_sha256.is_none(),"next_tool":"install_knowledge_asset"})
 }
+/// Resolve only an admitted, currently installed typed passage revision.
+/// A metadata read is reference use, never executable or geometric acceptance.
+pub fn read_installed_passage(world: &World, admitted: AdmittedAsset) -> Result<Value, String> {
+    let a = &admitted.asset;
+    if a.kind != "corpus_passage.v1" {
+        return Err("Pinned source lookup requires corpus_passage.v1".into());
+    }
+    let installed = world
+        .get_resource::<InstalledAssets>()
+        .and_then(|assets| assets.0.get(&a.id));
+    if !installed.is_some_and(|v| {
+        v.kind == a.kind && v.revision == admitted.revision && v.runtime_id == a.id
+    }) {
+        return Err("Install the exact current passage revision before lookup".into());
+    }
+    let info = super::model_api::handle_lookup_source_passage(world, a.id.clone())?;
+    let mut value = serde_json::to_value(info).map_err(|e| e.to_string())?;
+    value["content_hash"] = json!(admitted.revision);
+    value["delivery"] = json!("verified_dynamic_corpus");
+    value["released"] = json!(admitted.scope_sha256.is_none());
+    evaluation::asset_execution(
+        world,
+        &a.kind,
+        &a.id,
+        "lookup_source_passage",
+        &json!({"passage_ref":a.id,"content_hash":admitted.revision}),
+        &value,
+    );
+    Ok(value)
+}
+
 fn decode<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, String> {
     serde_json::from_value(v).map_err(|e| e.to_string())
 }
@@ -470,7 +506,7 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
 fn candidate_checks() -> Value {
     let schema = serde_json::to_value(schemars::schema_for!(CandidateCheck)).unwrap();
     json!({"catalog.v1":{"tool":"check_knowledge_candidate","query_field":"catalog_queries",
-        "maximum_queries":16,"query_schema":schema["properties"]["catalog_queries"],
+        "consumer_tool":"catalog_query","required_tools_checked":true,"maximum_queries":16,"query_schema":schema["properties"]["catalog_queries"],
         "result_path":"catalog_cases","scope":"Disposable native catalog queries; not independent acceptance or publication"}})
 }
 
@@ -1150,6 +1186,31 @@ mod tests {
     }
 
     #[test]
+    fn candidate_and_installation_share_exact_runtime_tool_requirements() {
+        let mut asset = passage("candidate").asset;
+        asset.required_tool_ids = vec!["lookup_source_passage".into()];
+        assert!(
+            super::super::model_api::missing_knowledge_tools(&asset.required_tool_ids).is_empty()
+        );
+        assert!(check_candidate(CandidateCheck {
+            asset: asset.clone(),
+            driver_cases: vec![],
+            catalog_queries: vec![]
+        })
+        .is_ok());
+        asset.required_tool_ids = vec!["invented_test_alias".into()];
+        let expected = super::super::model_api::missing_knowledge_tools(&asset.required_tool_ids);
+        let error = check_candidate(CandidateCheck {
+            asset,
+            driver_cases: vec![],
+            catalog_queries: vec![],
+        })
+        .unwrap_err();
+        let error: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["missing_required_tool_ids"], json!(expected));
+    }
+
+    #[test]
     fn candidate_protocol_is_discoverable_without_source() {
         let schema = serde_json::to_value(schemars::schema_for!(CandidateCheck)).unwrap();
         assert_eq!(
@@ -1181,6 +1242,46 @@ mod tests {
             driver_cases: vec![]
         })
         .is_err());
+    }
+
+    #[test]
+    fn typed_passage_reads_require_exact_installed_revision_and_record_reference_use() {
+        let mut world = World::new();
+        world.init_resource::<evaluation::Observations>();
+        let one = passage("revision-one");
+        assert!(read_installed_passage(&world, one.clone()).is_err());
+        install(&mut world, one.clone()).unwrap();
+        let read = read_installed_passage(&world, one.clone()).unwrap();
+        assert_eq!(read["content_hash"], "revision-one");
+        assert_eq!(read["text"], one.asset.payload["text"]);
+        assert_eq!(read["released"], true);
+        let snapshot = evaluation::snapshot(&world);
+        let event = &snapshot["records"][1]["event"];
+        assert_eq!(event["operation"], "lookup_source_passage");
+        assert_eq!(event["asset_kind"], "corpus_passage.v1");
+        assert_eq!(event["content_hash"], "revision-one");
+        assert_eq!(
+            event["response_sha256"],
+            hex::encode(Sha256::digest(serde_json::to_vec(&read).unwrap()))
+        );
+        let two = passage("revision-two");
+        assert!(read_installed_passage(&world, two.clone()).is_err());
+        install(&mut world, two.clone()).unwrap();
+        assert!(read_installed_passage(&world, one.clone()).is_err());
+        assert_eq!(
+            read_installed_passage(&world, two.clone()).unwrap()["content_hash"],
+            "revision-two"
+        );
+        let mut wrong = two;
+        wrong.asset.kind = "recipe.v1".into();
+        assert!(read_installed_passage(&world, wrong).is_err());
+        let mut staged = one;
+        staged.scope_sha256 = Some("scope".into());
+        install(&mut world, staged.clone()).unwrap();
+        assert_eq!(
+            read_installed_passage(&world, staged).unwrap()["released"],
+            false
+        );
     }
 
     #[test]

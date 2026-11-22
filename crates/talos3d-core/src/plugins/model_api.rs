@@ -19977,6 +19977,20 @@ fn setting_out_policy_applies(world: &World, entity: Entity, class: &str) -> boo
 }
 
 #[cfg(feature = "model-api")]
+pub(crate) fn missing_knowledge_tools(required: &[String]) -> Vec<String> {
+    let available = server::profile_tool_catalog()
+        .tools_for(CapabilityProfile::Full)
+        .iter()
+        .map(|tool| tool.name.as_ref())
+        .collect::<std::collections::HashSet<_>>();
+    required
+        .iter()
+        .filter(|id| !available.contains(id.as_str()))
+        .cloned()
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
 pub(crate) fn browser_tool_definitions(server: &server::ModelApiServer) -> Vec<Value> {
     server::profile_tool_catalog()
         .tools_for(server.profile_state.get())

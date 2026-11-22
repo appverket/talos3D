@@ -9629,17 +9629,9 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .await
             .map_err(|e| McpError::invalid_params(e, None))?,
         );
-        let catalog = profile_tool_catalog();
-        let available = catalog
-            .tools_for(CapabilityProfile::Full)
-            .iter()
-            .map(|t| t.name.as_ref())
-            .collect::<std::collections::HashSet<_>>();
-        let missing = crate::plugins::knowledge_cloud::required_tools(&admitted)
-            .iter()
-            .filter(|id| !available.contains(id.as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
+        let missing = super::missing_knowledge_tools(
+            crate::plugins::knowledge_cloud::required_tools(&admitted),
+        );
         if !missing.is_empty() {
             return Err(McpError::invalid_params(
                 "Knowledge requires unavailable runtime tools",
@@ -9986,7 +9978,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "lookup_source_passage",
-        description = "Read passage text and provenance. content_hash pins a released cloud revision. legacy_snapshot_sha256 instead pins a shared legacy snapshot; never use its hash as a cloud revision. Local shared lookup returns the exact legacy snapshot payload/hash with review_required=true and publication_authorized=false. Legacy identity proves unchanged bytes, not independent approval or reuse rights. No fallback on a mismatched pinned identity."
+        description = "Read passage text and provenance. content_hash pins a signed current cloud revision. For corpus_passage.v1, passage_ref is its asset ID and the exact revision must first be installed with install_knowledge_asset; lookup returns a native reference-use observation. This does not close executable gaps. legacy_snapshot_sha256 instead pins a shared legacy snapshot; never use its hash as a cloud revision. Local shared lookup returns the exact legacy snapshot payload/hash with review_required=true and publication_authorized=false. Legacy identity proves unchanged bytes, not independent approval or reuse rights. No fallback on a mismatched pinned identity."
     )]
     pub(super) async fn lookup_source_passage_tool(
         &self,
@@ -9999,8 +9991,38 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             ));
         }
         if let Some(hash) = params.content_hash {
-            let connection = self.corpus_connection().await;
+            let (connection, scope) = self.knowledge_connection().await?;
             let (_, store) = self.curation_context().await;
+            let index =
+                crate::plugins::knowledge_cloud::index_scoped(&connection, &store, scope.as_ref())
+                    .await
+                    .map_err(|e| McpError::invalid_params(e, None))?;
+            if index
+                .assets
+                .iter()
+                .any(|entry| entry.asset["id"] == params.passage_ref || entry.content_hash == hash)
+            {
+                let admitted = crate::plugins::knowledge_cloud::retrieve_scoped(
+                    &connection,
+                    &store,
+                    &crate::plugins::knowledge_cloud::AssetRequest {
+                        asset_id: params.passage_ref.clone(),
+                        content_hash: hash,
+                    },
+                    scope.as_ref(),
+                )
+                .await
+                .map_err(|e| McpError::invalid_params(e, None))?;
+                let value = self
+                    .round_trip(|response| ModelApiRequest::LookupAdmittedPassage {
+                        admitted: Box::new(admitted),
+                        response,
+                    })
+                    .await
+                    .map_err(|e| McpError::internal_error(e, None))?
+                    .map_err(|e| McpError::invalid_params(e, None))?;
+                return json_tool_result(value);
+            }
             let value = crate::plugins::agent_skill_cloud::released_passage(
                 &connection,
                 &store,
