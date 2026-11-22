@@ -835,6 +835,10 @@ pub fn legacy_list(world: &World) -> Value {
         for p in r.catalog_provider_descriptors() {
             add("catalog.v1", &p.id.0, &p.label, true);
         }
+        // Shared capability descriptors only; document-local pattern drafts are excluded.
+        for p in r.assembly_pattern_descriptors() {
+            add("assembly_pattern.v1", &p.pattern_id, &p.label, false);
+        }
     }
     items.sort_by(|a, b| {
         a["kind"]
@@ -842,7 +846,7 @@ pub fn legacy_list(world: &World) -> Value {
             .cmp(&b["kind"].as_str())
             .then(a["id"].as_str().cmp(&b["id"].as_str()))
     });
-    json!({"assets":items,"coverage":{"portable_kinds":["catalog.v1","corpus_passage.v1","definition_library.v1","parametric_type.v1","recipe.v1"],"excluded_private_content":["document_definitions","occurrences","project_passages","private_parametric_types"],"unsupported_dynamic_kinds":["native_recipe_bodies","generation_priors","native_constraints"],"procedures":"Inspect list_agent_skills and exact resources separately; this inventory is not exhaustive of every compiled registry."},"publication_authorized":false,"notice":"Legacy shared content is a migration candidate, not independently reviewed knowledge. Resolve evidence, rights, applicability and limitations before curator submission. Unsupported native bodies must become explicit gaps."})
+    json!({"assets":items,"coverage":{"portable_kinds":["catalog.v1","corpus_passage.v1","definition_library.v1","parametric_type.v1","recipe.v1"],"excluded_private_content":["document_definitions","occurrences","project_passages","private_parametric_types"],"inspection_only_kinds":["assembly_pattern.v1"],"unsupported_dynamic_kinds":["assembly_pattern.v1","native_recipe_bodies","generation_priors","native_constraints"],"procedures":"Inspect list_agent_skills and exact resources separately; this inventory is not exhaustive of every compiled registry."},"publication_authorized":false,"notice":"Legacy shared content is a migration candidate, not independently reviewed knowledge. Resolve evidence, rights, applicability and limitations before curator submission. Unsupported native bodies must become explicit gaps."})
 }
 pub fn legacy_get(world: &World, request: LegacyRequest) -> Result<Value, String> {
     if !legacy_list(world)["assets"].as_array().is_some_and(|v| {
@@ -886,6 +890,13 @@ pub fn legacy_get(world: &World, request: LegacyRequest) -> Result<Value, String
                 }
             }
         }
+        "assembly_pattern.v1" => serde_json::to_value(
+            world
+                .resource::<crate::capability_registry::CapabilityRegistry>()
+                .assembly_pattern_descriptor(&request.id)
+                .ok_or("Missing shared pattern")?,
+        )
+        .map_err(|e| e.to_string())?,
         "catalog.v1" => {
             let p = world
                 .resource::<crate::capability_registry::CapabilityRegistry>()
@@ -938,6 +949,56 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn legacy_pattern_capture_is_exact_inspection_not_executable_admission() {
+        use crate::capability_registry::{AssemblyPatternDescriptor, CapabilityRegistry};
+        let pattern = AssemblyPatternDescriptor {
+            pattern_id: "synthetic.pattern".into(),
+            label: "Synthetic".into(),
+            description: "Test-only shared descriptor".into(),
+            target_types: vec!["synthetic".into()],
+            axis: "test".into(),
+            layers: vec![],
+            relation_rules: vec![],
+            root_layer_ids: vec![],
+            requires_support_path: false,
+            tags: vec![],
+            parameter_schema: json!({"type":"object"}),
+        };
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_assembly_pattern(pattern.clone());
+        world.insert_resource(registry);
+        let listing = legacy_list(&world);
+        let item = &listing["assets"][0];
+        assert_eq!(item["portable"], false);
+        let capture = legacy_get(
+            &world,
+            LegacyRequest {
+                kind: "assembly_pattern.v1".into(),
+                id: pattern.pattern_id.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(capture["payload"], serde_json::to_value(pattern).unwrap());
+        assert_eq!(capture["publication_authorized"], false);
+        assert!(capture["runtime_inspection"].is_null());
+        let bytes = serde_json::to_vec(&capture["payload"]).unwrap();
+        assert_eq!(
+            capture["snapshot_sha256"],
+            hex::encode(Sha256::digest(bytes))
+        );
+        assert!(payload_schema("assembly_pattern.v1").is_err());
+        assert!(legacy_get(
+            &world,
+            LegacyRequest {
+                kind: "assembly_pattern.v1".into(),
+                id: "private.draft".into()
+            }
+        )
+        .is_err());
+    }
+
     #[test]
     fn catalog_payload_schema_uses_actual_decoder_types() {
         let response = payload_schema("catalog.v1").unwrap();
