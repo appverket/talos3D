@@ -5,7 +5,6 @@ use crate::curation::{
     authoring_script::{AuthoringScript, MutationScope, ScriptInstruction},
     replay::{ToolCall, ToolDispatchError, ToolDispatcher},
 };
-use crate::plugins::procedural_session_mcp::SessionStepExecutor;
 use crate::plugins::{
     history::{History, PendingCommandQueue},
     identity::{ElementId, ElementIdAllocator},
@@ -21,9 +20,8 @@ use crate::plugins::{
 
 /// An observation scenario, not independent acceptance. Uses the existing
 /// AuthoringScript argument/binding format, at most 32 flat calls. Supported:
-/// create_box, create_entity (box/profile_extrusion only), parametric.create,
-/// parametric.set_driver, create_assembly, delete_entities, set_property,
-/// model_summary. No files, imports, native function references or publication.
+/// native document tools advertised by get_knowledge_payload_schema with kind
+/// candidate_runtime.v1. No files, imports, native references or publication.
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Scenario {
@@ -36,9 +34,13 @@ pub struct Scenario {
     /// Undo then redo the final command and report both actual states.
     #[serde(default)]
     pub undo_redo: bool,
+    /// Observe an intentional rejected operation (e.g. missing required inputs).
+    /// The scenario must actually fail; this is not a passing acceptance claim.
+    #[serde(default)]
+    pub expect_failure: bool,
 }
 
-fn empty_world(context: Context) -> World {
+pub(super) fn empty_world(context: Context) -> World {
     use crate::plugins::*;
     let mut w = World::new();
     let mut registry = CapabilityRegistry::default();
@@ -58,6 +60,7 @@ fn empty_world(context: Context) -> World {
         registry.register_relation_type(c);
     }
     w.insert_resource(registry);
+    w.insert_resource(model_api::document_dispatch::DocumentCallBudget(128));
     w.init_resource::<ElementIdAllocator>();
     w.init_resource::<ParametricStore>();
     w.init_resource::<History>();
@@ -89,6 +92,7 @@ fn empty_world(context: Context) -> World {
     w.init_resource::<ChangedDefinitions>();
     w.init_resource::<RepresentationCache>();
     w.init_resource::<named_views::NamedViewRegistry>();
+    w.init_resource::<lighting::SceneLightingSettings>();
     w.init_resource::<property_edit::PropertyEditState>();
     w.init_resource::<transform::TransformState>();
     w.init_resource::<NextState<tools::ActiveTool>>();
@@ -135,59 +139,20 @@ impl ToolDispatcher for Dispatcher<'_> {
             return Err(error("Scenario scope must be project_root or none".into()));
         }
         if matches!(call.mutation_scope, MutationScope::None)
-            && call.tool.as_str() != "model_summary"
+            && !model_api::document_dispatch::read_only(call.tool.as_str())
         {
             return Err(error("A no-mutation scenario cannot dispatch edits".into()));
         }
         let args = Value::Object(call.args.clone());
-        let result: Result<Value, String> = (|| match call.tool.as_str() {
-            "create_entity" => {
-                if !matches!(
-                    args.get("type").and_then(Value::as_str),
-                    Some("box" | "profile_extrusion")
-                ) {
-                    return Err("Scenario create_entity supports box and profile_extrusion; other factories are capability gaps".into());
-                }
-                model_api::ModelApiStepExecutor
-                    .execute(self.world, call.tool, call.args)
-                    .map_err(|e| e.message)
-            }
-            "create_box" | "set_property" | "model_summary" => model_api::ModelApiStepExecutor
-                .execute(self.world, call.tool, call.args)
-                .map_err(|e| e.message),
-            "parametric.create" => {
-                let req: parametric_mcp::CreateParametricRequest =
-                    serde_json::from_value(args).map_err(|e| e.to_string())?;
-                if req.representation.is_some() {
-                    return Err("Scenario creates only the staged candidate; inline type definitions are denied".into());
-                }
-                serde_json::to_value(parametric_mcp::world_create(self.world, req)?)
-                    .map_err(|e| e.to_string())
-            }
-            "parametric.set_driver" => {
-                let req = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                serde_json::to_value(parametric_mcp::world_set_driver(self.world, req)?)
-                    .map_err(|e| e.to_string())
-            }
-            "create_assembly" => {
-                let req = serde_json::from_value(args).map_err(|e| e.to_string())?;
-                serde_json::to_value(model_api::handle_create_assembly(self.world, req)?)
-                    .map_err(|e| e.to_string())
-            }
-            "delete_entities" => {
-                let elements = serde_json::from_value(
-                    args.get("element_ids")
-                        .cloned()
-                        .ok_or("element_ids required")?,
-                )
-                .map_err(|e| e.to_string())?;
-                Ok(json!({"deleted":model_api::handle_delete_entities(self.world, elements)?}))
-            }
-            _ => Err(format!(
-                "Scenario tool {} is unsupported",
-                call.tool.as_str()
-            )),
-        })();
+        if call.tool.as_str() == "parametric.create"
+            && args.get("representation").is_some_and(|v| !v.is_null())
+        {
+            return Err(error(
+                "Scenario creates only staged types; inline type definitions are denied".into(),
+            ));
+        }
+        let result =
+            model_api::document_dispatch::execute(self.world, call.tool.as_str(), args, true);
         let result = result.map_err(error)?;
         let observed_ids = ids(self.world);
         if observed_ids.len() > 128 {
@@ -207,8 +172,35 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
                 .into(),
         );
     }
-    if request.asset.kind != "parametric_type.v1" {
-        return Err("Native scenarios currently support parametric_type.v1 candidates; other kinds remain capability gaps".into());
+    if !matches!(
+        request.asset.kind.as_str(),
+        "parametric_type.v1" | "recipe.v1"
+    ) {
+        return Err("Native scenarios support parametric_type.v1 and portable recipe.v1 candidates; other kinds remain capability gaps".into());
+    }
+    let is_parametric = request.asset.kind == "parametric_type.v1";
+    if !is_parametric {
+        let recipe: crate::curation::RecipeArtifact =
+            serde_json::from_value(request.asset.payload.clone()).map_err(|e| e.to_string())?;
+        let script = recipe
+            .body
+            .script()
+            .ok_or("Only portable AuthoringScript recipes are executable")?;
+        if script.steps.len() > 32
+            || script
+                .steps
+                .iter()
+                .any(|step| !matches!(step, ScriptInstruction::Call(_)))
+        {
+            return Err("Candidate scenario recipe requires at most32 flat native calls".into());
+        }
+        if script
+            .allowed_tools
+            .iter()
+            .any(|t| !model_api::document_dispatch::atomic_step(t.as_str()))
+        {
+            return Err("Candidate recipe declares unsupported/non-atomic tools; inspect candidate_runtime.v1".into());
+        }
     }
     if scenario.script.steps.len() > 32
         || scenario.script.steps.is_empty()
@@ -237,12 +229,16 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
     }
     let checked = knowledge_cloud::check_candidate(knowledge_cloud::CandidateCheck {
         asset: request.asset.clone(),
-        driver_cases: vec![request.drivers.clone()],
+        driver_cases: if is_parametric {
+            vec![request.drivers.clone()]
+        } else {
+            vec![]
+        },
     })?;
     let members = checked["parametric_cases"][0]["members"]
         .as_array()
         .map_or(0, Vec::len);
-    if !(1..=128).contains(&members) {
+    if is_parametric && !(1..=128).contains(&members) {
         return Err("Candidate requires 1..128 members".into());
     }
     let revision = checked["content_hash"]
@@ -262,13 +258,18 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
         world: &mut w,
         calls: vec![],
     };
-    crate::curation::replay::replay(
+    let replay = crate::curation::replay::replay(
         &scenario.script,
         scenario.parameters,
         &mut dispatcher,
         &crate::curation::procedural_session::AlwaysPassOracle,
-    )
-    .map_err(|e| e.to_string())?;
+    );
+    let execution_error = match (scenario.expect_failure, replay) {
+        (false, Ok(_)) => None,
+        (true, Err(error)) => Some(error.to_string()),
+        (false, Err(error)) => return Err(error.to_string()),
+        (true, Ok(_)) => return Err("Scenario expected rejection, but execution succeeded".into()),
+    };
     let calls = dispatcher.calls;
     let before = state(&mut w)?;
     let mut history = Value::Null;
@@ -335,6 +336,6 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
     Ok(Scene {
         parts,
         bounds,
-        report: json!({"schema":"talos3d.candidate-scenario-observation.v1","content_hash":revision,"calls":calls,"before_persistence":before,"history":history,"round_trip":roundtrip,"final_state":final_state,"geometry":observed,"mesh_vertices":vertices,"cpu_elapsed_ms":started.elapsed().as_secs_f64()*1000.,"model_modified":false,"installed":false,"released":false,"rendered":false,"limitations":["Curator-created synthetic scenario, not private-project evidence or independent qualification.","Only the advertised native tool and geometry subset is supported.","AABB overlaps and floating checks are approximate; no structural engineering approval."]}),
+        report: json!({"schema":"talos3d.candidate-scenario-observation.v1","content_hash":revision,"calls":calls,"execution_error":execution_error,"before_persistence":before,"history":history,"round_trip":roundtrip,"final_state":final_state,"geometry":observed,"mesh_vertices":vertices,"cpu_elapsed_ms":started.elapsed().as_secs_f64()*1000.,"model_modified":false,"installed":false,"released":false,"rendered":false,"limitations":["Curator-created synthetic scenario, not private-project evidence or independent qualification.","Only the advertised native tool and geometry subset is supported.","AABB overlaps and floating checks are approximate; no structural engineering approval."]}),
     })
 }

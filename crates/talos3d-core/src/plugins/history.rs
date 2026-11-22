@@ -238,6 +238,7 @@ pub(crate) struct HistoryTransaction {
     previous: History,
     document: Option<crate::plugins::document_state::DocumentState>,
     next_element_id: Option<u64>,
+    parametric_watermark: Option<u64>,
 }
 
 impl HistoryTransaction {
@@ -266,12 +267,16 @@ impl HistoryTransaction {
         let next_element_id = world
             .get_resource::<crate::plugins::identity::ElementIdAllocator>()
             .map(|a| a.next_value());
+        let parametric_watermark = world
+            .get_resource::<crate::relational::registry::ParametricStore>()
+            .map(|s| s.allocation_watermark());
         world.insert_resource(working);
         // Retain the original history itself (commands cannot be cloned).
         Ok(Self {
             previous,
             document,
             next_element_id,
+            parametric_watermark,
         })
     }
 
@@ -316,6 +321,18 @@ impl HistoryTransaction {
                 world.get_resource_mut::<crate::plugins::identity::ElementIdAllocator>(),
             ) {
                 allocator.set_next(next);
+            }
+            match self.parametric_watermark {
+                Some(watermark) => {
+                    if let Some(mut store) =
+                        world.get_resource_mut::<crate::relational::registry::ParametricStore>()
+                    {
+                        store.restore_allocation_watermark(watermark);
+                    }
+                }
+                None => {
+                    world.remove_resource::<crate::relational::registry::ParametricStore>();
+                }
             }
             if let Some(document) = self.document {
                 world.insert_resource(document);

@@ -3,6 +3,8 @@ use crate::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "model-api")]
 pub mod concept_tools;
 #[cfg(feature = "model-api")]
+pub(crate) mod document_dispatch;
+#[cfg(feature = "model-api")]
 mod recipe_history;
 
 #[cfg(all(test, feature = "model-api"))]
@@ -10432,18 +10434,9 @@ pub struct ModelApiStepExecutor;
 #[cfg(feature = "model-api")]
 impl crate::plugins::procedural_session_mcp::SessionStepExecutor for ModelApiStepExecutor {
     fn supports_atomic_step(&self, tool: &crate::curation::McpToolId) -> bool {
-        matches!(
-            tool.as_str(),
-            "create_box"
-                | "create_entity"
-                | "definition.create"
-                | "definition.instantiate"
-                | "occurrence.place"
-                | "set_property"
-                | "model_summary"
-                | "run_validation_v2"
-        )
+        document_dispatch::atomic_step(tool.as_str())
     }
+
     fn prepare_transaction(&self, world: &World) -> Result<(), String> {
         if crate::plugins::commands::has_pending_command_events(world) {
             return Err("Pending user command events must finish before procedural commit".into());
@@ -10456,80 +10449,8 @@ impl crate::plugins::procedural_session_mcp::SessionStepExecutor for ModelApiSte
         tool: &crate::curation::McpToolId,
         args: &serde_json::Map<String, Value>,
     ) -> Result<Value, crate::curation::ToolDispatchError> {
-        use crate::curation::ToolDispatchError;
-        let to_err = |code: &str, e: String| ToolDispatchError::new(code, e);
-        match tool.as_str() {
-            "create_box" => {
-                let request: CreateBoxRequest = serde_json::from_value(Value::Object(args.clone()))
-                    .map_err(|e| to_err("invalid_args", e.to_string()))?;
-                let id = handle_create_box(world, request)
-                    .map_err(|e| to_err("create_box_failed", e))?;
-                Ok(serde_json::json!({ "element_id": id }))
-            }
-            "create_entity" => {
-                let id = handle_create_entity(world, Value::Object(args.clone()))
-                    .map_err(|e| to_err("create_entity_failed", e))?;
-                Ok(serde_json::json!({ "element_id": id }))
-            }
-            "definition.create" => {
-                let entry = handle_create_definition(world, Value::Object(args.clone()))
-                    .map_err(|e| to_err("definition_create_failed", e))?;
-                serde_json::to_value(entry)
-                    .map_err(|e| to_err("definition_create_failed", e.to_string()))
-            }
-            "definition.instantiate" => {
-                let result = handle_instantiate_definition(world, Value::Object(args.clone()))
-                    .map_err(|e| to_err("definition_instantiate_failed", e))?;
-                serde_json::to_value(result)
-                    .map_err(|e| to_err("definition_instantiate_failed", e.to_string()))
-            }
-            "occurrence.place" => {
-                let element_id = handle_place_occurrence(world, Value::Object(args.clone()))
-                    .map_err(|e| to_err("occurrence_place_failed", e))?;
-                Ok(serde_json::json!({ "element_id": element_id }))
-            }
-            "parametric.create" => {
-                let request: crate::plugins::parametric_mcp::CreateParametricRequest =
-                    serde_json::from_value(Value::Object(args.clone()))
-                        .map_err(|e| to_err("invalid_args", e.to_string()))?;
-                let response = crate::plugins::parametric_mcp::world_create(world, request)
-                    .map_err(|e| to_err("parametric_create_failed", e))?;
-                serde_json::to_value(response)
-                    .map_err(|e| to_err("parametric_create_failed", e.to_string()))
-            }
-            "set_property" => {
-                let element_id = args
-                    .get("element_id")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| to_err("invalid_args", "missing element_id".into()))?;
-                let property_name = args
-                    .get("property_name")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| to_err("invalid_args", "missing property_name".into()))?;
-                let value = args.get("value").cloned().unwrap_or(Value::Null);
-                let result = handle_set_property(world, element_id, property_name, value)
-                    .map_err(|e| to_err("set_property_failed", e))?;
-                Ok(result)
-            }
-            "model_summary" => serde_json::to_value(model_summary(world))
-                .map_err(|e| to_err("model_summary_failed", e.to_string())),
-            "run_validation_v2" => {
-                let element_id = args.get("element_id").and_then(|value| {
-                    if value.is_null() {
-                        Some(None)
-                    } else {
-                        value.as_u64().map(Some)
-                    }
-                });
-                crate::plugins::validation::validation_sweep_system(world);
-                serde_json::to_value(handle_run_validation_v2(world, element_id.unwrap_or(None)))
-                    .map_err(|e| to_err("run_validation_v2_failed", e.to_string()))
-            }
-            other => Err(to_err(
-                "unsupported_tool",
-                format!("ModelApiStepExecutor does not support tool '{other}'"),
-            )),
-        }
+        document_dispatch::execute(world, tool.as_str(), Value::Object(args.clone()), false)
+            .map_err(|error| crate::curation::ToolDispatchError::new("native_step_failed", error))
     }
 }
 
@@ -10633,6 +10554,7 @@ pub fn register_model_api_session_tools(
         creates_obligations: Vec::new(),
         satisfies_obligation_ids: Vec::new(),
     });
+    document_dispatch::register_session_tools(registry);
 }
 
 #[cfg(feature = "model-api")]

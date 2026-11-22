@@ -15,6 +15,9 @@ pub(crate) struct ModelApiServer {
     pub(super) guidance_state: GuidanceSessionStore,
     pub(super) guidance_delivery: GuidanceDeliveryStore,
     pub(super) transport_security: ModelApiTransportSecurity,
+    /// Embedded document execution has no telemetry, filesystem or network
+    /// authority. The outer ordinary MCP call owns incident delivery.
+    pub(super) document_execution: bool,
 }
 
 #[cfg(feature = "model-api")]
@@ -205,6 +208,9 @@ impl ModelApiServer {
     }
 
     async fn capture_operation_failure(&self, capability: &'static str) -> Value {
+        if self.document_execution {
+            return json!({"status":"document_execution_observation","submission":"not_attempted"});
+        }
         let Ok((policy, store, connection, corpus)) = self
             .round_trip(ModelApiRequest::HarnessIncidentContext)
             .await
@@ -411,6 +417,7 @@ impl ModelApiServer {
             guidance_state: GuidanceSessionStore::default(),
             guidance_delivery: GuidanceDeliveryStore::default(),
             transport_security: ModelApiTransportSecurity::LocalStdio,
+            document_execution: false,
         }
     }
 
@@ -428,6 +435,7 @@ impl ModelApiServer {
             guidance_state: GuidanceSessionStore::default(),
             guidance_delivery: GuidanceDeliveryStore::default(),
             transport_security: ModelApiTransportSecurity::LocalStdio,
+            document_execution: false,
         }
     }
 
@@ -442,6 +450,7 @@ impl ModelApiServer {
             guidance_state: GuidanceSessionStore::default(),
             guidance_delivery: GuidanceDeliveryStore::default(),
             transport_security: ModelApiTransportSecurity::InstanceBearerHttp,
+            document_execution: false,
         }
     }
 
@@ -3121,7 +3130,7 @@ fn tool_requires_authored_base(name: &str) -> bool {
     guarded && !matches!(name, "list_edit_requests" | "inspect_edit_plan")
 }
 
-#[cfg(all(feature = "model-api", any(test, target_arch = "wasm32")))]
+#[cfg(feature = "model-api")]
 include!(concat!(env!("OUT_DIR"), "/mcp_without_peer.rs"));
 
 // Hand-written (instead of `#[tool_handler]`) so tools/list and tools/call are
@@ -9392,7 +9401,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "get_knowledge_payload_schema",
-        description = "Read the runtime-derived wire schema for a portable knowledge payload kind. Supports catalog.v1, recipe.v1, parametric_type.v1, definition_library.v1 and corpus_passage.v1. No domain facts, source access or authoring guidance are needed to inspect the schema."
+        description = "Read the runtime-derived wire schema for a portable knowledge payload kind. Supports catalog.v1, recipe.v1, parametric_type.v1, definition_library.v1 and corpus_passage.v1. Use candidate_runtime.v1 for the isolated evaluation request schema and exact supported native tool schemas. No domain facts, source access or authoring guidance are needed to inspect the schema."
     )]
     pub(super) async fn get_knowledge_payload_schema_tool(
         &self,
@@ -9448,7 +9457,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "evaluate_knowledge_candidate",
-        description = "Execute a bounded parametric candidate in a disposable scene using ordinary create/driver handlers, report AABB checks and return an isolated GPU image. An isolated self-test: never installs, submits, reviews or publishes candidate knowledge, and never edits the user document. Supports parametric_type.v1 only, at most128 members and16 driver edits. Optional scenario uses up to32 flat AuthoringScript calls in an empty native document to observe create/edit/assembly/delete, undo/redo and an in-memory native save/reopen. Read the scenario schema for supported tools. Neutral render materials; no rights, structural or independent qualification. Unsupported operations remain capability gaps."
+        description = "Execute a bounded parametric candidate in a disposable scene using ordinary create/driver handlers, report AABB checks and return an isolated GPU image. An isolated self-test: never installs, submits, reviews or publishes candidate knowledge, and never edits the user document. Plain preview supports parametric_type.v1, at most128 members and16 driver edits. Scenarios also support portable recipe.v1. Optional scenario uses up to32 flat AuthoringScript calls in an empty native document to observe create/edit/assembly/delete, undo/redo and an in-memory native save/reopen. Call get_knowledge_payload_schema with kind candidate_runtime.v1 for exact request and tool schemas before writing a scenario. Neutral render materials; no rights, structural or independent qualification. Unsupported operations remain capability gaps."
     )]
     pub(super) async fn evaluate_knowledge_candidate_tool(
         &self,

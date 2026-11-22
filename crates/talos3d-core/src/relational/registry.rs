@@ -484,6 +484,15 @@ pub struct ParametricStore {
 }
 
 impl ParametricStore {
+    pub(crate) fn allocation_watermark(&self) -> u64 {
+        self.next_id
+    }
+    /// Used only after an aborted native history transaction has undone its
+    /// instance commands. Ordinary undo keeps identities monotonically allocated.
+    pub(crate) fn restore_allocation_watermark(&mut self, watermark: u64) {
+        self.next_id = watermark.max(self.instances.keys().copied().max().unwrap_or(0));
+    }
+
     /// CREATE: instantiate a registered type with empty overrides and default placement.
     pub fn instantiate(&mut self, type_id: &str) -> u64 {
         self.instantiate_with(type_id, BTreeMap::new(), Placement::default())

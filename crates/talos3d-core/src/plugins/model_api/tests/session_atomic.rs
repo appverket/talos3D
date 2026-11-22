@@ -277,7 +277,16 @@ fn procedural_session_real_validation_controls_acceptance_and_reports_live_findi
 #[test]
 fn procedural_session_unsupported_step_is_rejected_before_first_effect() {
     let (mut world, _) = prepared_world();
-    let request = new_session(&mut world, &["create_box", "parametric.create"]);
+    world
+        .resource_mut::<crate::curation::procedural_session::SessionToolRegistry>()
+        .register(crate::curation::procedural_session::SessionToolDescriptor {
+            tool: McpToolId::new("untrusted.external_tool"),
+            mutates: true,
+            default_stub: Some(json!({})),
+            creates_obligations: vec![],
+            satisfies_obligation_ids: vec![],
+        });
+    let request = new_session(&mut world, &["create_box", "untrusted.external_tool"]);
     append(
         &mut world,
         &request,
@@ -289,7 +298,7 @@ fn procedural_session_unsupported_step_is_rejected_before_first_effect() {
         &mut world,
         &request,
         "parametric",
-        "parametric.create",
+        "untrusted.external_tool",
         json!({}),
     );
     let before = world.resource::<History>().revision_token();

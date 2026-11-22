@@ -592,6 +592,170 @@ mod tests {
     }
 
     #[test]
+    fn portable_recipe_scenario_uses_native_router_and_round_trip() {
+        use crate::curation::provenance::{Confidence, Lineage, Provenance};
+        use crate::curation::{AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeBody};
+        use crate::plugins::refinement::{AgentId, RefinementState};
+        let mut req = request();
+        req.edits.clear();
+        let script = serde_json::from_value(json!({
+            "parameter_schema":{"type":"object","required":["confirmed"]},
+            "allowed_tools":["create_box"],"mutation_scope":{"kind":"project_root"},
+            "steps":[{"id":"body","tool":"create_box","args":{
+                "centre":{"expr":"literal","value":[0,0,0]},
+                "half_extents":{"expr":"literal","value":[1,1,1]}
+            }}]
+        }))
+        .unwrap();
+        let recipe = RecipeArtifact {
+            meta: CurationMeta::new(
+                AssetId("recipe.v1/fixture".into()),
+                AssetKindId("recipe.v1".into()),
+                Provenance {
+                    author: AgentId("unit-test".into()),
+                    confidence: Confidence::High,
+                    lineage: Lineage::Freeform,
+                    rationale: Some("Synthetic dispatch fixture".into()),
+                    jurisdiction: None,
+                    catalog_dependencies: vec![],
+                    evidence: vec![],
+                },
+            ),
+            body: RecipeBody::AuthoringScript { script },
+            parameter_schema: json!({}),
+            target_class: "fixture".into(),
+            supported_refinement_states: vec![RefinementState::Schematic],
+            tests: vec![],
+        };
+        req.asset.id = "recipe.v1/fixture".into();
+        req.asset.kind = "recipe.v1".into();
+        req.asset.path_kind = "recipe".into();
+        req.asset.payload = serde_json::to_value(recipe).unwrap();
+        req.scenario=Some(serde_json::from_value(json!({"script":{
+            "parameter_schema":{},"allowed_tools":["instantiate_recipe"],"mutation_scope":{"kind":"project_root"},
+            "steps":[{"id":"recipe","tool":"instantiate_recipe","args":{
+                "family_id":{"expr":"literal","value":"fixture"},
+                "target_class":{"expr":"literal","value":"fixture"},
+                "target_state":{"expr":"literal","value":"Schematic"},
+                "parameters":{"expr":"literal","value":{"confirmed":true}}
+            }}]},"round_trip":true,"undo_redo":true})).unwrap());
+        let context=Context {classes:vec![serde_json::from_value(json!({"id":"fixture","label":"Fixture","description":"Synthetic fixture","semantic_roles":[],"class_min_obligations":{},"class_min_promotion_critical_paths":{},"parameter_schema":{}})).unwrap()],..Default::default()};
+        let mut negative_scenario = serde_json::to_value(req.scenario.as_ref().unwrap()).unwrap();
+        negative_scenario["script"]["steps"][0]["args"]["parameters"]["value"] = json!({});
+        negative_scenario["script"]["allowed_tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("create_box"));
+        negative_scenario["script"]["steps"].as_array_mut().unwrap().insert(0,json!({"id":"sentinel","tool":"create_box","args":{
+            "centre":{"expr":"literal","value":[5,0,0]},"half_extents":{"expr":"literal","value":[1,1,1]}
+        }}));
+        negative_scenario["expect_failure"] = json!(true);
+        negative_scenario["undo_redo"] = json!(false);
+        let negative = Request {
+            scenario: Some(serde_json::from_value(negative_scenario).unwrap()),
+            asset: req.asset.clone(),
+            drivers: default(),
+            placement: default(),
+            edits: vec![],
+            inspection_snapshot: None,
+        };
+        let negative_context = Context {
+            classes: context.classes.clone(),
+            ..Default::default()
+        };
+        let rejected = evaluate_in(negative, negative_context).unwrap();
+        assert!(
+            rejected.report["execution_error"]
+                .as_str()
+                .unwrap()
+                .contains("confirmed"),
+            "{}",
+            rejected.report["execution_error"]
+        );
+        assert_eq!(
+            rejected.report["before_persistence"]["element_ids"],
+            json!([0]),
+            "{}",
+            rejected.report
+        );
+        assert_eq!(
+            rejected.report["final_state"]["element_ids"],
+            json!([0]),
+            "{}",
+            rejected.report
+        );
+        assert_eq!(
+            rejected.report["final_state"],
+            rejected.report["round_trip"]["after_reopen"]
+        );
+        let scene = evaluate_in(req, context).unwrap();
+        assert_eq!(scene.report["calls"][0]["result"]["steps_run_count"], 1);
+        assert_eq!(
+            scene.report["history"]["after_undo"]["element_ids"],
+            json!([])
+        );
+        assert_eq!(
+            scene.report["before_persistence"],
+            scene.report["history"]["after_redo"]
+        );
+        assert_eq!(
+            scene.report["final_state"],
+            scene.report["round_trip"]["after_reopen"]
+        );
+        assert!(!scene.parts.is_empty());
+    }
+
+    #[test]
+    fn native_dispatch_failed_transaction_restores_parametric_store_and_geometry() {
+        let req = request();
+        let mut world = scenario::empty_world(Context::default());
+        knowledge_cloud::install_payload(
+            &mut world,
+            knowledge_cloud::AdmittedAsset {
+                scope_sha256: None,
+                asset: req.asset,
+                revision: "fixture".into(),
+            },
+        )
+        .unwrap();
+        let before = serde_json::to_value(world.resource::<ParametricStore>()).unwrap();
+        let transaction = crate::plugins::history::HistoryTransaction::begin(&mut world).unwrap();
+        let created = model_api::document_dispatch::execute(
+            &mut world,
+            "parametric.create",
+            json!({"type_id":"test.candidate"}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(created["element_ids"].as_array().unwrap().len(), 1);
+        assert!(model_api::document_dispatch::execute(
+            &mut world,
+            "set_property",
+            json!({"element_id":999,"property_name":"missing","value":0}),
+            false
+        )
+        .is_err());
+        transaction.finish(&mut world, false);
+        assert_eq!(
+            world
+                .query::<&crate::plugins::identity::ElementId>()
+                .iter(&world)
+                .count(),
+            0
+        );
+        assert_eq!(
+            serde_json::to_value(world.resource::<ParametricStore>()).unwrap(),
+            before
+        );
+        assert_eq!(
+            world
+                .resource::<crate::plugins::history::History>()
+                .undo_stack_len(),
+            0
+        );
+    }
+
+    #[test]
     fn native_scenario_denies_host_routes_and_claimed_acceptance() {
         for tool in [
             "load_project",
@@ -602,7 +766,11 @@ mod tests {
             let mut req = request();
             req.edits.clear();
             req.scenario=Some(serde_json::from_value(json!({"script":{"parameter_schema":{"type":"object"},"allowed_tools":[tool],"mutation_scope":{"kind":"project_root"},"steps":[{"id":"deny","tool":tool,"args":{}}]}})).unwrap());
-            assert!(evaluate(req, vec![]).err().unwrap().contains("unsupported"));
+            assert!(evaluate(req, vec![])
+                .err()
+                .unwrap()
+                .to_lowercase()
+                .contains("unsupported"));
         }
     }
 

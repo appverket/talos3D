@@ -369,6 +369,14 @@ struct ParametricPayload {
 }
 
 pub fn payload_schema(kind: &str) -> Result<Value, String> {
+    if kind == "candidate_runtime.v1" {
+        return Ok(json!({"kind":kind,
+            "request_schema":schemars::schema_for!(candidate_runtime::Request),
+            "execution":super::model_api::document_dispatch::contract(),
+            "candidate_kinds":["parametric_type.v1","recipe.v1"],
+            "geometry_types":["box","profile_extrusion"],
+            "next_tool":"evaluate_knowledge_candidate"}));
+    }
     let (payload, constraints) = match kind {
         "catalog.v1" => (
             serde_json::to_value(schemars::schema_for!(CatalogData)).unwrap(),

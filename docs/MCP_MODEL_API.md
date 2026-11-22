@@ -1874,22 +1874,35 @@ Model writes and publication remain outside those read-only permissions.
 ### Isolated candidate integration scenarios
 
 `evaluate_knowledge_candidate` accepts an optional `scenario` for a staged
-`parametric_type.v1` candidate. The scenario runs in a new empty document, never
-in the current project. It uses the existing AuthoringScript argument/binding
-schema and native handlers, with 1–32 flat calls and no asserted postconditions.
-The schema lists supported tools; unsupported factories and operations fail.
-`create_entity` is limited to core box/profile-extrusion geometry and
-`parametric.create` uses the staged type, never an inline replacement.
+`parametric_type.v1` or portable `recipe.v1` candidate. Discover the exact request
+and native tool schemas with `get_knowledge_payload_schema` and
+`kind: "candidate_runtime.v1"`. The schema is generated from the runtime types;
+no repository access is needed.
+
+Scenarios and ordinary recipe steps use the generated MCP router and the normal
+native request handlers. A single positive capability list governs dispatch and
+schema discovery. It excludes host I/O, remote requests, publication and arbitrary
+commands. Legacy script bindings retain their output shape: create_box,
+create_entity and set_property expose CommandResult.output; occurrence.place
+exposes element_id. Neither a script nor a scenario implements domain behavior.
+
+The scenario runs in an empty isolated document, never a copy of a private
+project. Only public semantic descriptors are copied. It supports up to32 flat
+AuthoringScript calls and128 total native calls including candidate recipe steps.
+Recipe bodies are bounded flat scripts in this evaluator. Unsupported geometry
+and capabilities remain gaps; the current renderer covers boxes and profile
+extrusions. Scenario results are synthetic observations, not independent approval.
 
 `scenario.undo_redo` observes undo and redo of the final command.
-`scenario.round_trip` encodes and reopens native project bytes in memory and
-returns the actual restored entity/semantic state. Neither option grants host
-file access. The result includes step outputs, geometry checks and a GPU view.
-The top-level `drivers` supplies a valid payload-check case; scenario steps
-supply their own invocation inputs. Do not combine scenario steps with the older
-`edits` list. Scenarios are bounded to 128 authored entities, 100,000 rendered
-vertices, 1 MiB each for candidate/scenario input and 4 MiB native snapshots.
+`scenario.round_trip` encodes and reopens native bytes entirely in memory,
+reporting authored identities and semantic sidecars. `scenario.expect_failure`
+requires an actual rejected operation and reports its error and remaining state;
+it fails if execution succeeds. Create a generalized sentinel before the rejected
+operation to inspect unchanged geometry and rollback. No failed scenario becomes
+a successful qualification receipt.
 
-Self-testing does not establish source rights, structural adequacy, independent
-qualification or applicability to a private model. No candidate, project or
-release is installed outside the disposable document.
+The top-level `drivers` supplies a valid parametric payload-check case; scenario
+steps supply invocation inputs. Do not combine scenarios with `edits`.
+Bounds are128 authored entities,100000 render vertices,1MiB each for candidate
+and scenario input and4MiB native snapshots. GPU capture uses derived PreviewOnly
+meshes without document IDs; timeout and completion reclaim those resources.
