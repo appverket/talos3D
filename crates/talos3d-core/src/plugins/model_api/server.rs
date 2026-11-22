@@ -9497,7 +9497,9 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .map_err(|e| McpError::internal_error(e, None))?
             .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![
-            Content::json(report)?,
+            Content::json(
+                crate::plugins::knowledge_cloud::candidate_runtime::compact_scenario_report(report),
+            )?,
             Content::image(png, "image/png"),
         ]))
     }

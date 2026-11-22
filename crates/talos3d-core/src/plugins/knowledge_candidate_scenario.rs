@@ -114,11 +114,12 @@ fn state(w: &mut World) -> Result<Value, String> {
         return Err("Scenario exceeds 128 authored entities".into());
     }
     let registry = w.resource::<CapabilityRegistry>();
-    let entities: Vec<_> = w.iter_entities().filter_map(|e| {
+    let mut entities: Vec<_> = w.iter_entities().filter_map(|e| {
         let id = e.get::<ElementId>()?;
         let snapshot = registry.capture_edit_snapshot(&e, w)?;
         Some(json!({"element_id":id.0,"type":snapshot.type_name(),"data":snapshot.to_persisted_json(),"semantic":persistence::capture_semantic_sidecars(&e)}))
     }).collect();
+    entities.sort_by_key(|e| e["element_id"].as_u64());
     Ok(json!({"element_ids":element_ids,"entities":entities}))
 }
 
@@ -305,7 +306,7 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
     meshes::<BoxPrimitive>(&mut w, &mut parts);
     meshes::<ProfileExtrusion>(&mut w, &mut parts);
     let vertices: usize = parts.iter().map(|(m, _)| m.count_vertices()).sum();
-    if parts.is_empty() || vertices > 100_000 {
+    if (parts.is_empty() && execution_error.is_none()) || vertices > 100_000 {
         return Err("Scenario must produce 1..100000 render vertices".into());
     }
     let geometry_ids: Vec<_> = w
@@ -314,18 +315,34 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
         .filter(|(_, b, p)| b.is_some() || p.is_some())
         .map(|(id, _, _)| id.0)
         .collect();
-    let observed = super::observations(&w, geometry_ids.clone())?;
-    let aabb = model_api::handle_get_world_aabb(
-        &w,
-        model_api::GetWorldAabbRequest {
-            element_ids: geometry_ids,
+    let observed = if geometry_ids.is_empty() {
+        json!({"element_ids":[],"checks":"not_run_no_geometry"})
+    } else {
+        super::observations(&w, geometry_ids.clone())?
+    };
+    let aabb = if geometry_ids.is_empty() {
+        None
+    } else {
+        model_api::handle_get_world_aabb(
+            &w,
+            model_api::GetWorldAabbRequest {
+                element_ids: geometry_ids,
+            },
+        )?
+        .combined
+    };
+    // A rejected empty scene is useful evidence. This neutral camera frame
+    // adds no geometry and is not reported as authored bounds.
+    let bounds = match aabb {
+        Some(aabb) => crate::authored_entity::EntityBounds {
+            min: Vec3::from_array(aabb.min.map(|v| v as f32)),
+            max: Vec3::from_array(aabb.max.map(|v| v as f32)),
         },
-    )?
-    .combined
-    .ok_or("Scenario bounds missing")?;
-    let bounds = crate::authored_entity::EntityBounds {
-        min: Vec3::from_array(aabb.min.map(|v| v as f32)),
-        max: Vec3::from_array(aabb.max.map(|v| v as f32)),
+        None if execution_error.is_some() => crate::authored_entity::EntityBounds {
+            min: Vec3::splat(-1.),
+            max: Vec3::splat(1.),
+        },
+        None => return Err("Scenario bounds missing".into()),
     };
     if !bounds.min.is_finite()
         || !bounds.max.is_finite()
@@ -336,6 +353,6 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
     Ok(Scene {
         parts,
         bounds,
-        report: json!({"schema":"talos3d.candidate-scenario-observation.v1","content_hash":revision,"calls":calls,"execution_error":execution_error,"before_persistence":before,"history":history,"round_trip":roundtrip,"final_state":final_state,"geometry":observed,"mesh_vertices":vertices,"cpu_elapsed_ms":started.elapsed().as_secs_f64()*1000.,"model_modified":false,"installed":false,"released":false,"rendered":false,"limitations":["Curator-created synthetic scenario, not private-project evidence or independent qualification.","Only the advertised native tool and geometry subset is supported.","AABB overlaps and floating checks are approximate; no structural engineering approval."]}),
+        report: json!({"schema":"talos3d.candidate-scenario-observation.v1","content_hash":revision,"calls":calls,"execution_error":execution_error,"empty_scene":vertices==0,"before_persistence":before,"history":history,"round_trip":roundtrip,"final_state":final_state,"geometry":observed,"mesh_vertices":vertices,"cpu_elapsed_ms":started.elapsed().as_secs_f64()*1000.,"model_modified":false,"installed":false,"released":false,"rendered":false,"limitations":["Curator-created synthetic scenario, not private-project evidence or independent qualification.","Only the advertised native tool and geometry subset is supported.","AABB overlaps and floating checks are approximate; no structural engineering approval."]}),
     })
 }

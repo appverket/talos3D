@@ -164,19 +164,21 @@ impl RecipeArtifact {
     pub fn family_id(&self) -> Option<&RecipeFamilyId> {
         self.body.family_id()
     }
-}
-
-/// Derive a `RecipeFamilyId` from a recipe `AssetId` of the form
-/// `<kind>/<family>` (e.g. `recipe.v1/pier_foundation` or
-/// `installed_recipe/floor_slab`). Used to index AuthoringScript recipe
-/// bodies — which do not carry a family id of their own — by family so
-/// `get_by_family` and the replay path can find them.
-fn family_id_from_asset_id(asset_id: &AssetId) -> Option<RecipeFamilyId> {
-    asset_id
-        .0
-        .split_once('/')
-        .map(|(_, family)| RecipeFamilyId(family.to_string()))
-        .filter(|f| !f.0.is_empty())
+    /// The same executable identity is used by installation and MCP discovery.
+    /// Portable assets may use opaque IDs; legacy namespaced IDs retain their
+    /// family suffix. Never advertise a fallback that the registry cannot call.
+    pub fn execution_family_id(&self) -> RecipeFamilyId {
+        self.family_id().cloned().unwrap_or_else(|| {
+            RecipeFamilyId(
+                self.meta
+                    .id
+                    .0
+                    .split_once('/')
+                    .map_or(self.meta.id.0.as_str(), |(_, tail)| tail)
+                    .to_owned(),
+            )
+        })
+    }
 }
 
 /// Bevy resource holding all registered `RecipeArtifact`s keyed by
@@ -195,20 +197,14 @@ pub struct RecipeArtifactRegistry {
 impl RecipeArtifactRegistry {
     pub fn insert(&mut self, artifact: RecipeArtifact) -> AssetId {
         let asset_id = artifact.meta.id.clone();
-        // Index by family for `get_by_family`. Native bodies carry the
-        // family id directly; AuthoringScript (learned) bodies do not, so
-        // fall back to deriving it from the asset-id path segment. Both
-        // `recipe.v1/<family>` (shipped) and `installed_recipe/<family>`
-        // (agent-learned) encode the family after the first `/`. Without
-        // this fallback, learned recipes are invisible to `get_by_family`
-        // and `instantiate_recipe`/`promote_refinement` silently no-op.
-        let family = artifact
-            .family_id()
-            .cloned()
-            .or_else(|| family_id_from_asset_id(&asset_id));
-        if let Some(family) = family {
-            self.by_family_id.insert(family, asset_id.clone());
+        let family = artifact.execution_family_id();
+        if let Some(previous) = self.entries.get(&asset_id) {
+            let previous_family = previous.execution_family_id();
+            if self.by_family_id.get(&previous_family) == Some(&asset_id) {
+                self.by_family_id.remove(&previous_family);
+            }
         }
+        self.by_family_id.insert(family, asset_id.clone());
         self.entries.insert(asset_id.clone(), artifact);
         asset_id
     }
@@ -227,13 +223,9 @@ impl RecipeArtifactRegistry {
         {
             return Err("Private recipe cannot overwrite shipped knowledge".into());
         }
-        let family = artifact
-            .family_id()
-            .cloned()
-            .or_else(|| family_id_from_asset_id(id));
-        if family
-            .as_ref()
-            .and_then(|f| self.get_by_family(f))
+        let family = artifact.execution_family_id();
+        if self
+            .get_by_family(&family)
             .is_some_and(|a| a.meta.scope == super::Scope::Shipped)
         {
             return Err(
@@ -450,6 +442,35 @@ mod tests {
         assert!(s.is_authoring_script());
         assert!(s.family_id().is_none());
         assert!(s.script().is_some());
+    }
+
+    #[test]
+    fn portable_identity_is_shared_by_opaque_and_legacy_registration() {
+        for id in [
+            "opaque.fixture",
+            "recipe.v1/opaque.fixture",
+            "installed_recipe/opaque.fixture",
+        ] {
+            let mut artifact = sample_artifact("unused", "fixture");
+            artifact.meta.id = AssetId(id.into());
+            artifact.body = RecipeBody::authoring_script(
+                super::super::authoring_script::AuthoringScript::stub(
+                    super::super::authoring_script::MutationScope::None,
+                ),
+            );
+            let family = artifact.execution_family_id();
+            assert_eq!(family.0, "opaque.fixture");
+            let mut registry = RecipeArtifactRegistry::default();
+            registry.insert(artifact.clone());
+            assert_eq!(registry.get_by_family(&family).unwrap().meta.id.0, id);
+            // Replacing the same asset cannot retain an obsolete native alias.
+            artifact.body = RecipeBody::native(RecipeFamilyId("replacement".into()));
+            registry.insert(artifact);
+            assert!(registry.get_by_family(&family).is_none());
+            assert!(registry
+                .get_by_family(&RecipeFamilyId("replacement".into()))
+                .is_some());
+        }
     }
 
     #[test]

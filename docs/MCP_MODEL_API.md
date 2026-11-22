@@ -1906,3 +1906,15 @@ steps supply invocation inputs. Do not combine scenarios with `edits`.
 Bounds are128 authored entities,100000 render vertices,1MiB each for candidate
 and scenario input and4MiB native snapshots. GPU capture uses derived PreviewOnly
 meshes without document IDs; timeout and completion reclaim those resources.
+
+Recipe executable identity is shared by registry and discovery. Opaque asset IDs
+are valid family IDs; legacy `kind/family` IDs retain the family suffix.
+Candidate checks and installation return `execution.arguments` with the exact
+family/class; callers do not guess ID prefixes. Admission rejects a different
+asset that would shadow an existing family.
+
+Scenario observation v2 transports complete native states once in
+`observed_states`. Every `state_ref` resolves in that same response; matching
+references mean actual observed states were equal. Empty rejection scenarios
+return an explicit error observation and empty render; geometric checks are
+marked not run when no geometry exists. This is never a successful retry claim.

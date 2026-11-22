@@ -82,7 +82,7 @@ fn check_payload(request: CandidateCheck) -> Result<Value, String> {
     }
     let revision = hex::encode(Sha256::digest(&bytes));
     let mut scratch = World::new();
-    install_payload(
+    let installation = install_payload(
         &mut scratch,
         AdmittedAsset {
             asset: request.asset.clone(),
@@ -114,7 +114,7 @@ fn check_payload(request: CandidateCheck) -> Result<Value, String> {
         return Err("Driver cases apply only to parametric_type.v1".into());
     }
     Ok(
-        json!({"content_hash":revision,"payload_validation":"passed", "structural_validation":"passed","parametric_cases":cases,
+        json!({"content_hash":revision,"payload_validation":"passed", "structural_validation":"passed","parametric_cases":cases,"execution":installation["execution"],
         "installed":false,"released":false,"model_modified":false,
         "limitations":["No independent source, rights or applicability approval.",
             "No rendered model, placement, load-bearing or construction acceptance.",
@@ -374,6 +374,7 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
             "request_schema":schemars::schema_for!(candidate_runtime::Request),
             "execution":super::model_api::document_dispatch::contract(),
             "candidate_kinds":["parametric_type.v1","recipe.v1"],
+            "observation_contract":{"schema":"talos3d.candidate-scenario-observation.v2","states":"Each state_ref resolves in observed_states in the same response; identical complete native snapshots are transmitted once.","empty_rejection":"An actual failed operation may yield an empty rendered scene, with explicit execution_error and no geometry checks."},
             "geometry_types":["box","profile_extrusion"],
             "next_tool":"evaluate_knowledge_candidate"}));
     }
@@ -399,7 +400,7 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
                 serde_json::to_value(schemars::schema_for!(crate::curation::RecipeArtifact))
                     .unwrap();
             schema["allOf"] = json!([{"properties":{"body":{"properties":{"kind":{"const":"authoring_script"}}}}}]);
-            (schema,vec!["payload.meta.id must equal asset.id", "Only authoring_script recipe bodies are portable; native function references are not executable releases", "Script structure must pass the native validator"])
+            (schema,vec!["payload.meta.id must equal asset.id; opaque IDs are executable family IDs, legacy kind/family IDs use the family suffix. check_knowledge_candidate returns the exact execution arguments", "Only authoring_script recipe bodies are portable; native function references are not executable releases", "Script structure must pass the native validator"])
         }
         "definition_library.v1" => (
             serde_json::to_value(schemars::schema_for!(
@@ -461,6 +462,7 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
     let a = admitted.asset;
     let mut catalog_contract = None;
     // Parse and validate the complete supported payload before any registry mutation.
+    let mut execution = Value::Null;
     let runtime_id = match a.kind.as_str() {
         "parametric_type.v1" => {
             let payload: ParametricPayload = decode(a.payload.clone())?;
@@ -536,6 +538,18 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
             {
                 return Err("Dynamic release cannot overwrite a private recipe".into());
             }
+            let family = recipe.execution_family_id();
+            if family.0.trim().is_empty() {
+                return Err("Recipe executable family identity is empty".into());
+            }
+            if world
+                .get_resource::<RecipeArtifactRegistry>()
+                .and_then(|r| r.get_by_family(&family))
+                .is_some_and(|other| other.meta.id.0 != a.id)
+            {
+                return Err("Recipe executable identity collides with another asset; use a distinct identity".into());
+            }
+            execution = json!({"tool":"instantiate_recipe","arguments":{"family_id":family.0,"target_class":recipe.target_class},"required_parameters":recipe.body.script().map(|s|s.parameter_schema["required"].clone()),"supported_refinement_states":recipe.supported_refinement_states,"notice":"Supply parameters and choose a supported target_state. Use this exact executable identity. Candidate checks install only in scratch registries; geometry and applicability still require execution and review."});
             recipe
                 .body
                 .script()
@@ -672,7 +686,7 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
         },
     );
     Ok(
-        json!({"asset_id":a.id,"kind":a.kind,"content_hash":admitted.revision,"installed":true,"model_modified":false,"next_step":"Rediscover the registered path and use its advertised authoring tool. Installation is not a verified model outcome."}),
+        json!({"asset_id":a.id,"kind":a.kind,"content_hash":admitted.revision,"installed":true,"model_modified":false,"execution":execution,"next_step":"Rediscover the registered path and use its advertised authoring tool. Installation is not a verified model outcome."}),
     )
 }
 

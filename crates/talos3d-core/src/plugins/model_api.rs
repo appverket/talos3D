@@ -13843,17 +13843,7 @@ pub fn handle_get_capability_snapshot_for_task(
             recipe_family_ids.iter().cloned().collect();
         for artifact in artifact_registry.iter() {
             installed_recipe_classes.insert(artifact.target_class.clone());
-            let asset_id = &artifact.meta.id;
-            let family_id = artifact
-                .family_id()
-                .map(|f| f.0.clone())
-                .unwrap_or_else(|| {
-                    asset_id
-                        .0
-                        .split_once('/')
-                        .map(|(_, tail)| tail.to_string())
-                        .unwrap_or_else(|| asset_id.0.clone())
-                });
+            let family_id = artifact.execution_family_id().0;
             if !already.contains(&family_id) && !recipe_family_ids.contains(&family_id) {
                 recipe_family_ids.push(family_id);
             }
@@ -14466,23 +14456,14 @@ pub fn handle_list_recipe_families_with_options(
     {
         let mut emitted: std::collections::HashSet<String> =
             families.iter().map(|family| family.id.clone()).collect();
-        for (asset_id, artifact) in artifact_registry.entries.iter().filter(|(_, artifact)| {
+        for (_asset_id, artifact) in artifact_registry.entries.iter().filter(|(_, artifact)| {
             element_class.as_deref().is_none_or(|_| {
                 lookup_filters
                     .iter()
                     .any(|class| artifact.target_class == class.0)
             }) && artifact.meta.provenance.jurisdiction.is_none()
         }) {
-            let family_id = artifact
-                .family_id()
-                .map(|family| family.0.clone())
-                .unwrap_or_else(|| {
-                    asset_id
-                        .0
-                        .split_once('/')
-                        .map(|(_, tail)| tail.to_string())
-                        .unwrap_or_else(|| asset_id.0.clone())
-                });
+            let family_id = artifact.execution_family_id().0;
             if !emitted.insert(family_id.clone()) {
                 continue;
             }
@@ -15057,7 +15038,7 @@ pub fn handle_select_recipe(
         if let Some(artifact_registry) =
             world.get_resource::<crate::curation::RecipeArtifactRegistry>()
         {
-            for (asset_id, artifact) in lookup_class_ids
+            for (_asset_id, artifact) in lookup_class_ids
                 .iter()
                 .flat_map(|lookup_class| artifact_registry.artifacts_for_class(&lookup_class.0))
             {
@@ -15082,16 +15063,7 @@ pub fn handle_select_recipe(
                 }
 
                 // Derive a family id from the asset id (e.g. `installed_recipe/foo` → `foo`).
-                let family_id = artifact
-                    .family_id()
-                    .map(|f| f.0.clone())
-                    .unwrap_or_else(|| {
-                        asset_id
-                            .0
-                            .split_once('/')
-                            .map(|(_, tail)| tail.to_string())
-                            .unwrap_or_else(|| asset_id.0.clone())
-                    });
+                let family_id = artifact.execution_family_id().0;
 
                 if already_emitted.contains(&family_id) {
                     continue;

@@ -281,6 +281,38 @@ fn observations(world: &World, ids: Vec<u64>) -> Result<Value, String> {
     Ok(json!({"element_ids":ids,"world_aabb":aabb,"overlaps":overlaps,"floating":floating}))
 }
 
+/// Transport each observed state once. References resolve within this same
+/// response; equality is established from the actual complete native snapshots.
+/// This changes no observation and grants no independent acceptance credit.
+pub fn compact_scenario_report(mut report: Value) -> Value {
+    if report["schema"] != "talos3d.candidate-scenario-observation.v1" {
+        return report;
+    }
+    use sha2::{Digest, Sha256};
+    let mut states = serde_json::Map::new();
+    for path in [
+        "/before_persistence",
+        "/history/after_undo",
+        "/history/after_redo",
+        "/round_trip/after_reopen",
+        "/final_state",
+    ] {
+        if let Some(value) = report.pointer_mut(path) {
+            if !value.is_null() {
+                let hash = hex::encode(Sha256::digest(
+                    serde_json::to_vec(&value).expect("JSON state"),
+                ));
+                states.entry(hash.clone()).or_insert_with(|| value.clone());
+                *value = json!({"state_ref":hash});
+            }
+        }
+    }
+    report["schema"] = json!("talos3d.candidate-scenario-observation.v2");
+    report["observed_states"] = Value::Object(states);
+    report["state_reference_contract"]=json!("Resolve each state_ref in observed_states in this response. Keys are SHA-256 of the complete serialized observed state. Reused references mean actual snapshots were identical, not that checks were skipped.");
+    report
+}
+
 pub type RuntimeResult = Result<(Value, String), String>;
 type Reply = std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<RuntimeResult>>>>;
 #[derive(Resource)]
@@ -550,6 +582,37 @@ mod tests {
         }
     }
     #[test]
+    fn compact_observations_preserve_all_states_without_repeating_geometry() {
+        let state = json!({"element_ids":[1],"entities":[{"element_id":1,"data":{"fixture":"x".repeat(4096)}}]});
+        let report = json!({"schema":"talos3d.candidate-scenario-observation.v1","before_persistence":state,"final_state":state,"history":{"after_undo":{"element_ids":[],"entities":[]},"after_redo":state},"round_trip":{"after_reopen":state}});
+        let compact = compact_scenario_report(report.clone());
+        assert_eq!(
+            compact["schema"],
+            "talos3d.candidate-scenario-observation.v2"
+        );
+        assert_eq!(compact["observed_states"].as_object().unwrap().len(), 2);
+        for path in [
+            "/before_persistence",
+            "/final_state",
+            "/history/after_undo",
+            "/history/after_redo",
+            "/round_trip/after_reopen",
+        ] {
+            let key = compact.pointer(path).unwrap()["state_ref"]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                &compact["observed_states"][key],
+                report.pointer(path).unwrap()
+            );
+        }
+        assert!(
+            serde_json::to_vec(&compact).unwrap().len() * 2
+                < serde_json::to_vec(&report).unwrap().len()
+        );
+    }
+
+    #[test]
     fn native_scenario_retires_placeholder_and_preserves_assembly_through_codec_and_history() {
         let mut req = request();
         req.edits.clear();
@@ -609,7 +672,7 @@ mod tests {
         .unwrap();
         let recipe = RecipeArtifact {
             meta: CurationMeta::new(
-                AssetId("recipe.v1/fixture".into()),
+                AssetId("fixture".into()),
                 AssetKindId("recipe.v1".into()),
                 Provenance {
                     author: AgentId("unit-test".into()),
@@ -627,10 +690,36 @@ mod tests {
             supported_refinement_states: vec![RefinementState::Schematic],
             tests: vec![],
         };
-        req.asset.id = "recipe.v1/fixture".into();
+        req.asset.id = "fixture".into();
         req.asset.kind = "recipe.v1".into();
         req.asset.path_kind = "recipe".into();
         req.asset.payload = serde_json::to_value(recipe).unwrap();
+        let mut registry_world = World::new();
+        let admitted = |asset| knowledge_cloud::AdmittedAsset {
+            scope_sha256: None,
+            asset,
+            revision: "fixture".into(),
+        };
+        knowledge_cloud::install_payload(&mut registry_world, admitted(req.asset.clone())).unwrap();
+        let mut collision = req.asset.clone();
+        collision.id = "recipe.v1/fixture".into();
+        collision.payload["meta"]["id"] = json!(collision.id);
+        assert!(
+            knowledge_cloud::install_payload(&mut registry_world, admitted(collision))
+                .unwrap_err()
+                .contains("collides")
+        );
+        let checked = knowledge_cloud::check_candidate(knowledge_cloud::CandidateCheck {
+            asset: req.asset.clone(),
+            driver_cases: vec![],
+        })
+        .unwrap();
+        assert_eq!(checked["execution"]["arguments"]["family_id"], "fixture");
+        assert_eq!(
+            checked["execution"]["required_parameters"],
+            json!(["confirmed"])
+        );
+
         req.scenario=Some(serde_json::from_value(json!({"script":{
             "parameter_schema":{},"allowed_tools":["instantiate_recipe"],"mutation_scope":{"kind":"project_root"},
             "steps":[{"id":"recipe","tool":"instantiate_recipe","args":{
@@ -651,6 +740,31 @@ mod tests {
         }}));
         negative_scenario["expect_failure"] = json!(true);
         negative_scenario["undo_redo"] = json!(false);
+        let mut empty_scenario = negative_scenario.clone();
+        empty_scenario["script"]["steps"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        let empty_request = Request {
+            scenario: Some(serde_json::from_value(empty_scenario).unwrap()),
+            asset: req.asset.clone(),
+            drivers: default(),
+            placement: default(),
+            edits: vec![],
+            inspection_snapshot: None,
+        };
+        let empty_context = Context {
+            classes: context.classes.clone(),
+            ..Default::default()
+        };
+        let empty = evaluate_in(empty_request, empty_context).unwrap();
+        assert!(empty.parts.is_empty());
+        assert_eq!(empty.report["empty_scene"], true);
+        assert_eq!(empty.report["final_state"]["element_ids"], json!([]));
+        assert!(empty.report["execution_error"]
+            .as_str()
+            .unwrap()
+            .contains("confirmed"));
         let negative = Request {
             scenario: Some(serde_json::from_value(negative_scenario).unwrap()),
             asset: req.asset.clone(),
