@@ -9,6 +9,7 @@ const ATOMIC_WRITES: &[&str] = &[
     "create_box",
     "create_entity",
     "set_property",
+    "resolve_obligation",
     "delete_entities",
     "create_assembly",
     "definition.create",
@@ -19,6 +20,10 @@ const ATOMIC_WRITES: &[&str] = &[
 ];
 const READS: &[&str] = &[
     "model_summary",
+    "get_obligations",
+    "get_refinement_state",
+    "get_claim_grounding",
+    "get_authoring_provenance",
     "run_validation_v2",
     "get_world_aabb",
     "check_overlaps",
@@ -29,7 +34,7 @@ const READS: &[&str] = &[
     "list_assembly_members",
     "query_relations",
 ];
-const SCENARIO_ONLY: &[&str] = &["instantiate_recipe"];
+const SCENARIO_ONLY: &[&str] = &["instantiate_recipe", "promote_refinement"];
 
 pub(crate) fn atomic_step(name: &str) -> bool {
     ATOMIC_WRITES.contains(&name) || READS.contains(&name)

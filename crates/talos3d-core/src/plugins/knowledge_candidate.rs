@@ -313,7 +313,7 @@ pub fn compact_scenario_report(mut report: Value) -> Value {
     report
 }
 
-pub type RuntimeResult = Result<(Value, String), String>;
+pub type RuntimeResult = Result<(Value, Option<String>), String>;
 type Reply = std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<RuntimeResult>>>>;
 #[derive(Resource)]
 struct PendingRender {
@@ -337,6 +337,25 @@ pub fn start(
     scene: Scene,
     response: tokio::sync::oneshot::Sender<RuntimeResult>,
 ) {
+    if scene.parts.is_empty() {
+        if scene.report["empty_scene"] == true
+            && scene.report["execution_error"]
+                .as_str()
+                .is_some_and(|e| !e.is_empty())
+            && scene.report["final_state"]["element_ids"] == json!([])
+        {
+            let mut report = scene.report;
+            report["rendered"] = json!(false);
+            report["presentation"] = json!({"kind":"expected_rejection_no_geometry",
+                "notice":"No geometry remained after the expected rejection. No image or visual acceptance is claimed."});
+            let _ = response.send(Ok((report, None)));
+        } else {
+            let _ = response.send(Err(
+                "Empty candidate has no verified rejection observation".into()
+            ));
+        }
+        return;
+    }
     if world.contains_resource::<PendingRender>() {
         let _ = response.send(Err(
             "Candidate renderer busy; only one bounded evaluation may run at a time".into(),
@@ -467,7 +486,7 @@ pub fn start(
                 }
                 Ok((
                     report.clone(),
-                    base64::engine::general_purpose::STANDARD.encode(bytes.into_inner()),
+                    Some(base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())),
                 ))
             })();
             if let Some(sender) = observer_reply.lock().unwrap().take() {
@@ -765,6 +784,35 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("confirmed"));
+        let mut untouched = World::new();
+        let initial_entity_count = untouched.entities().len();
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        start(&mut untouched, empty, sender);
+        let (report, image) = receiver.try_recv().unwrap().unwrap();
+        assert!(image.is_none());
+        assert_eq!(report["rendered"], false);
+        assert_eq!(
+            report["presentation"]["kind"],
+            "expected_rejection_no_geometry"
+        );
+        assert!(!untouched.contains_resource::<PendingRender>());
+        assert_eq!(untouched.entities().len(), initial_entity_count);
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        let mut invalid = report;
+        invalid["execution_error"] = Value::Null;
+        start(
+            &mut untouched,
+            Scene {
+                parts: vec![],
+                bounds: crate::authored_entity::EntityBounds {
+                    min: Vec3::ZERO,
+                    max: Vec3::ONE,
+                },
+                report: invalid,
+            },
+            sender,
+        );
+        assert!(receiver.try_recv().unwrap().is_err());
         let negative = Request {
             scenario: Some(serde_json::from_value(negative_scenario).unwrap()),
             asset: req.asset.clone(),

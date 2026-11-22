@@ -9457,7 +9457,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "evaluate_knowledge_candidate",
-        description = "Execute a bounded parametric candidate in a disposable scene using ordinary create/driver handlers, report AABB checks and return an isolated GPU image. An isolated self-test: never installs, submits, reviews or publishes candidate knowledge, and never edits the user document. Plain preview supports parametric_type.v1, at most128 members and16 driver edits. Scenarios also support portable recipe.v1. Optional scenario uses up to32 flat AuthoringScript calls in an empty native document to observe create/edit/assembly/delete, undo/redo and an in-memory native save/reopen. Call get_knowledge_payload_schema with kind candidate_runtime.v1 for exact request and tool schemas before writing a scenario. Neutral render materials; no rights, structural or independent qualification. Unsupported operations remain capability gaps."
+        description = "Execute a bounded parametric candidate in a disposable scene using ordinary create/driver handlers, report AABB checks and return an isolated GPU image. An isolated self-test: never installs, submits, reviews or publishes candidate knowledge, and never edits the user document. Plain preview supports parametric_type.v1, at most128 members and16 driver edits. Scenarios also support portable recipe.v1. Optional scenario uses up to32 flat AuthoringScript calls in an empty native document to observe create/edit/assembly/delete, undo/redo and an in-memory native save/reopen. Call get_knowledge_payload_schema with kind candidate_runtime.v1 for exact request and tool schemas before writing a scenario. An expected rejection leaving an empty scene returns explicit no-geometry observations without an image or visual-acceptance claim. Neutral render materials; no rights, structural or independent qualification. Unsupported operations remain capability gaps."
     )]
     pub(super) async fn evaluate_knowledge_candidate_tool(
         &self,
@@ -9496,12 +9496,13 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .await
             .map_err(|e| McpError::internal_error(e, None))?
             .map_err(|e| McpError::invalid_params(e, None))?;
-        Ok(CallToolResult::success(vec![
-            Content::json(
-                crate::plugins::knowledge_cloud::candidate_runtime::compact_scenario_report(report),
-            )?,
-            Content::image(png, "image/png"),
-        ]))
+        let mut content = vec![Content::json(
+            crate::plugins::knowledge_cloud::candidate_runtime::compact_scenario_report(report),
+        )?];
+        if let Some(png) = png {
+            content.push(Content::image(png, "image/png"));
+        }
+        Ok(CallToolResult::success(content))
     }
 
     #[tool(

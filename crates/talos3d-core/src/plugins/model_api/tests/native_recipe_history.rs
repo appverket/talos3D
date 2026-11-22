@@ -135,3 +135,37 @@ fn native_recipe_cannot_claim_an_unsupported_higher_state() {
     assert_eq!(collect_element_ids(&mut world), ids);
     assert_eq!(metadata(&world, root), before);
 }
+
+#[test]
+fn bounded_document_dispatch_uses_native_obligation_resolution_and_undo() {
+    use crate::plugins::refinement::{Obligation, ObligationId, ObligationStatus};
+    let (mut world, root) = fixture(false);
+    let entity = find_entity_by_element_id_readonly(&world, ElementId(root)).unwrap();
+    world.entity_mut(entity).insert(ObligationSet {
+        entries: vec![Obligation {
+            id: ObligationId("synthetic_detail".into()),
+            role: crate::plugins::refinement::SemanticRole("synthetic_role".into()),
+            required_by_state: RefinementState::Schematic,
+            status: ObligationStatus::Unresolved,
+        }],
+    });
+    let before = metadata(&world, root);
+    let out = document_dispatch::execute(
+        &mut world,
+        "get_obligations",
+        json!({"element_id":root}),
+        true,
+    )
+    .unwrap();
+    assert!(out.to_string().contains("synthetic_detail"));
+    document_dispatch::execute(&mut world, "resolve_obligation", json!({"element_id":root,
+        "obligation_id":"synthetic_detail", "resolution":{"deferred":{"reason":"Synthetic unresolved detail"}}}), true).unwrap();
+    flush_model_api_write_pipeline(&mut world);
+    assert!(matches!(
+        world.get::<ObligationSet>(entity).unwrap().entries[0].status,
+        ObligationStatus::Deferred(_)
+    ));
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    crate::plugins::commands::flush_queued_commands(&mut world);
+    assert_eq!(metadata(&world, root), before);
+}
