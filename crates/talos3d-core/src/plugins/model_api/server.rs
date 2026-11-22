@@ -6857,12 +6857,18 @@ impl ModelApiServer {
         json_tool_result(importers)
     }
 
-    #[tool(name = "inspect_element_geometry", description = "Read bounded evaluated world-space triangle vertices and normals for one directly meshed element. Omit element_id to read the contract. Pages include a whole-mesh fingerprint; never combine different fingerprints. Uses native render meshes, not AABBs or authored parameter claims. Unsupported/aggregate geometry is an explicit error. No construction or release approval.")]
+    #[tool(
+        name = "inspect_element_geometry",
+        description = "Read bounded evaluated world-space triangle vertices and normals for one directly meshed element. Omit element_id to read the contract. Pages include a whole-mesh fingerprint; never combine different fingerprints. Uses native render meshes, not AABBs or authored parameter claims. Unsupported/aggregate geometry is an explicit error. No construction or release approval."
+    )]
     pub(super) async fn inspect_element_geometry_tool(
-        &self, Parameters(request): Parameters<geometry_measurement::Request>,
+        &self,
+        Parameters(request): Parameters<geometry_measurement::Request>,
     ) -> Result<CallToolResult, McpError> {
-        let value = self.round_trip(|response| ModelApiRequest::InspectElementGeometry { request, response })
-            .await.map_err(|e| McpError::internal_error(e, None))?
+        let value = self
+            .round_trip(|response| ModelApiRequest::InspectElementGeometry { request, response })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
             .map_err(|e| McpError::invalid_params(e, None))?;
         json_tool_result(value)
     }

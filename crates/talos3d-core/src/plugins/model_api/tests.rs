@@ -17022,12 +17022,16 @@ fn native_factory_creation_schemas_are_discoverable_and_match_profile_parsers() 
         assert!(factory.from_create_request(&world, &request).is_err());
     }
     for name in ["unknown", "box"] {
-        assert!(document_dispatch::execute(
-            &mut world,
-            "get_entity_creation_schema",
-            json!({"entity_type":name}),
-            false,
-        ).is_err(), "unsupported schemas must be MCP errors, not successful Result envelopes");
+        assert!(
+            document_dispatch::execute(
+                &mut world,
+                "get_entity_creation_schema",
+                json!({"entity_type":name}),
+                false,
+            )
+            .is_err(),
+            "unsupported schemas must be MCP errors, not successful Result envelopes"
+        );
     }
     assert!(handle_entity_creation_schema(&world, "unknown".into()).is_err());
     assert!(handle_entity_creation_schema(&world, "box".into())

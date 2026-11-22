@@ -5,9 +5,9 @@ pub mod concept_tools;
 #[cfg(feature = "model-api")]
 pub(crate) mod document_dispatch;
 #[cfg(feature = "model-api")]
-mod recipe_history;
-#[cfg(feature = "model-api")]
 pub(crate) mod geometry_measurement;
+#[cfg(feature = "model-api")]
+mod recipe_history;
 
 #[cfg(all(test, feature = "model-api"))]
 use crate::plugins::history::apply_pending_history_commands;
@@ -10688,6 +10688,7 @@ fn handle_entity_creation_schema(world: &World, entity_type: String) -> Result<V
     )
 }
 
+#[cfg(feature = "model-api")]
 pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, String> {
     let mut request_json = json;
     coerce_stringified_json(&mut request_json);
