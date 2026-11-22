@@ -4052,6 +4052,12 @@ pub(super) struct SetSelectionRequest {
 
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Deserialize)]
+pub(super) struct EntityCreationSchemaRequest {
+    pub entity_type: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ListSubobjectsRequest {
     pub(super) element_id: u64,
@@ -6852,8 +6858,27 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "get_entity_creation_schema",
+        description = "Retrieve a registered native entity factory's actual creation payload schema before using create_entity. Native wire metadata only; domain recipes and obligations still apply. Missing schemas return an explicit unsupported result."
+    )]
+    pub(super) async fn entity_creation_schema_tool(
+        &self,
+        Parameters(params): Parameters<EntityCreationSchemaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .round_trip(|response| ModelApiRequest::EntityCreationSchema {
+                entity_type: params.entity_type,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
         name = "create_entity",
-        description = "Create an authored entity from a typed JSON object through the command pipeline. Returns CommandResult."
+        description = "Create an authored entity through the command pipeline. First retrieve get_entity_creation_schema for its type; supply the payload directly, including type. Do not discover fields by repeated failed creation. Domain recipes and obligations still apply. Returns CommandResult."
     )]
     pub(super) async fn create_entity_tool(
         &self,

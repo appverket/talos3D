@@ -46,6 +46,17 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
         P::TYPE_NAME
     }
 
+    fn creation_schema(&self) -> Option<Value> {
+        let mut schema = P::creation_schema()?;
+        schema["properties"]["type"] = serde_json::json!({"type":"string","const":P::TYPE_NAME});
+        schema["properties"]["rotation"] = serde_json::json!({"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"Optional quaternion [x,y,z,w]."});
+        schema["properties"]["layer"] = serde_json::json!({"type":"string"});
+        schema["required"]
+            .as_array_mut()?
+            .push(serde_json::json!("type"));
+        Some(schema)
+    }
+
     fn allows_automatic_face_edit(&self, entity_ref: &EntityRef) -> bool {
         entity_ref.contains::<P>()
     }

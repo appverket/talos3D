@@ -16952,3 +16952,85 @@ fn discovery_repeats_shared_sections_compactly_with_owner_routes() {
     assert!(parametric.no_curated_path.is_some());
     assert_eq!(recipe.suggested_next_tool, "request_corpus_expansion");
 }
+
+#[cfg(feature = "model-api")]
+#[test]
+fn native_factory_creation_schemas_are_discoverable_and_match_profile_parsers() {
+    use crate::plugins::modeling::profile::{ProfileRevolve, ProfileSweep};
+    let mut registry = CapabilityRegistry::default();
+    registry.register_factory(PrimitiveFactory::<ProfileExtrusion>::new());
+    registry.register_factory(PrimitiveFactory::<ProfileSweep>::new());
+    registry.register_factory(PrimitiveFactory::<ProfileRevolve>::new());
+    registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+    let mut world = World::new();
+    world.insert_resource(registry);
+    world.insert_resource(ElementIdAllocator::default());
+    let profile = json!({"start":[0.,0.],"segments":[{"seg":"line_to","to":[2.,0.]},{"seg":"line_to","to":[2.,3.]},{"seg":"line_to","to":[0.,3.]}]});
+    fn check_refs(node: &Value, root: &Value) {
+        match node {
+            Value::Object(values) => {
+                if let Some(Value::String(reference)) = values.get("$ref") {
+                    assert!(reference.starts_with('#'));
+                    assert!(root.pointer(&reference[1..]).is_some(), "{reference}");
+                }
+                for value in values.values() {
+                    check_refs(value, root);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    check_refs(value, root);
+                }
+            }
+            _ => (),
+        }
+    }
+    for (name, fields) in [
+        ("profile_extrusion", json!({"height":1.})),
+        ("profile_sweep", json!({"path":[[0.,0.,0.],[0.,2.,0.]]})),
+        ("profile_revolve", json!({"angle":1.5,"segments":8})),
+    ] {
+        let reply = document_dispatch::execute(
+            &mut world,
+            "get_entity_creation_schema",
+            json!({"entity_type":name}),
+            false,
+        )
+        .unwrap();
+        assert_eq!(reply["next_tool"], "create_entity");
+        let schema = &reply["payload_schema"];
+        assert_eq!(schema["properties"]["type"]["const"], name);
+        for required in ["type", "centre", "profile"] {
+            assert!(schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(required)));
+        }
+        check_refs(schema, schema);
+        let mut request = json!({"type":name,"centre":[0.,0.,0.],"profile":profile});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let factory = world
+            .resource::<CapabilityRegistry>()
+            .factory_for(name)
+            .unwrap();
+        let snapshot = factory.from_create_request(&world, &request).unwrap();
+        assert_eq!(snapshot.type_name(), name);
+        request.as_object_mut().unwrap().remove("profile");
+        assert!(factory.from_create_request(&world, &request).is_err());
+    }
+    for name in ["unknown", "box"] {
+        assert!(document_dispatch::execute(
+            &mut world,
+            "get_entity_creation_schema",
+            json!({"entity_type":name}),
+            false,
+        ).is_err(), "unsupported schemas must be MCP errors, not successful Result envelopes");
+    }
+    assert!(handle_entity_creation_schema(&world, "unknown".into()).is_err());
+    assert!(handle_entity_creation_schema(&world, "box".into())
+        .unwrap_err()
+        .contains("CreationSchemaUnavailable"));
+}

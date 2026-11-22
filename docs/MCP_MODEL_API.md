@@ -10,6 +10,21 @@ This is a public part of the platform rather than a private editor hook. The
 same command substrate backs keyboard shortcuts, toolbar actions, menus, the
 command palette, and MCP operations.
 
+## Native factory input contracts
+
+`get_entity_creation_schema({"entity_type":"profile_extrusion"})` returns
+factory-owned `payload_schema` and `next_tool: create_entity`. Profile extrusion,
+sweep and revolve schemas are derived from the same structs their parsers use,
+including tagged profile segments and vector dimensions. Factory wrappers must
+forward this metadata. Unknown factories and factories without metadata return
+errors; they do not provide guessed schemas. This initial coverage does not imply
+that every registered factory has a schema.
+
+The schema describes native wire inputs, not construction knowledge, geometric
+validity or a curated domain authoring path. Existing recipe and refinement
+obligations remain in force. Schema inspection is read-only and available to
+knowledge-review sessions and bounded candidate scenarios.
+
 ## Captured edit plans
 
 Use `list_edit_requests` to discover capability-owned request schemas, then

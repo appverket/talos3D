@@ -1174,6 +1174,11 @@ pub struct ElementClassAssignment {
 pub trait AuthoredEntityFactory: Send + Sync + 'static {
     fn type_name(&self) -> &'static str;
 
+    /// Native wire contract, not domain authoring knowledge.
+    fn creation_schema(&self) -> Option<Value> {
+        None
+    }
+
     fn capture_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity>;
 
     /// Capture authored equality/history state without optional derived bounds.

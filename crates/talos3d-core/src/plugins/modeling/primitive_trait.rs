@@ -58,6 +58,11 @@ pub trait Primitive: Component + Clone + Send + Sync + 'static {
     /// Short, stable identifier used in serialisation and type-name matching.
     const TYPE_NAME: &'static str;
 
+    /// Schema of the actual deserialized primitive payload when advertised.
+    fn creation_schema() -> Option<serde_json::Value> {
+        None
+    }
+
     /// Geometric centre of the primitive in world space.
     fn centre(&self) -> Vec3;
 

@@ -19,6 +19,7 @@ const ATOMIC_WRITES: &[&str] = &[
     "parametric.set_driver",
 ];
 const READS: &[&str] = &[
+    "get_entity_creation_schema",
     "model_summary",
     "get_obligations",
     "get_refinement_state",

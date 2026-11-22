@@ -277,6 +277,9 @@ impl<F: AuthoredEntityFactory> AuthoredEntityFactory for MaterialFactory<F> {
     fn type_name(&self) -> &'static str {
         self.0.type_name()
     }
+    fn creation_schema(&self) -> Option<Value> {
+        self.0.creation_schema()
+    }
     fn capture_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity> {
         self.0.capture_snapshot(entity_ref, world).map(|snapshot| {
             // Occurrences resolve inherited display material separately from overrides.

@@ -31,8 +31,10 @@ use super::primitives::bounds_from_points;
 /// The contour is implicitly closed: the last segment's endpoint connects
 /// back to `start` with a straight line (unless it already coincides).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct Profile2d {
     /// Starting point of the contour.
+    #[cfg_attr(feature = "model-api", schemars(with = "[f32; 2]"))]
     pub start: Vec2,
     /// Ordered segments forming the contour.
     pub segments: Vec<ProfileSegment>,
@@ -41,15 +43,23 @@ pub struct Profile2d {
 /// A single segment in a 2D profile contour.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "seg", rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum ProfileSegment {
     /// Straight line to the given point.
-    LineTo { to: Vec2 },
+    LineTo {
+        #[cfg_attr(feature = "model-api", schemars(with = "[f32; 2]"))]
+        to: Vec2,
+    },
     /// Circular arc to the given point.
     ///
     /// `bulge` is the tangent of 1/4 the included arc angle (DWG/DXF convention).
     /// Positive bulges left relative to the travel direction.
     /// A bulge of 0 is equivalent to a straight line.
-    ArcTo { to: Vec2, bulge: f32 },
+    ArcTo {
+        #[cfg_attr(feature = "model-api", schemars(with = "[f32; 2]"))]
+        to: Vec2,
+        bulge: f32,
+    },
 }
 
 impl ProfileSegment {
@@ -412,8 +422,10 @@ fn tessellate_arc(from: Vec2, to: Vec2, bulge: f32, segments_per_circle: u32) ->
 /// The profile lies in the local XZ plane (profile X → local X, profile Y → local Z).
 /// The extrusion rises from `y = -height/2` to `y = +height/2` relative to `centre`.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ProfileExtrusion {
     /// World-space centre of the extrusion's bounding volume.
+    #[cfg_attr(feature = "model-api", schemars(with = "[f32; 3]"))]
     pub centre: Vec3,
     /// The 2D profile contour.
     pub profile: Profile2d,
@@ -495,6 +507,17 @@ impl ProfileExtrusion {
 
 impl Primitive for ProfileExtrusion {
     const TYPE_NAME: &'static str = "profile_extrusion";
+
+    fn creation_schema() -> Option<Value> {
+        #[cfg(feature = "model-api")]
+        {
+            serde_json::to_value(schemars::schema_for!(Self)).ok()
+        }
+        #[cfg(not(feature = "model-api"))]
+        {
+            None
+        }
+    }
 
     fn centre(&self) -> Vec3 {
         self.centre
@@ -903,12 +926,15 @@ fn build_extrusion_editable_mesh(extrusion: &ProfileExtrusion, rotation: Quat) -
 ///   1 = end cap (closed end at path end)
 ///   2..2+N*(M-1) = side quads, where N = profile vertex count, M = path point count
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ProfileSweep {
     /// World-space offset applied to the entire sweep.
+    #[cfg_attr(feature = "model-api", schemars(with = "[f32; 3]"))]
     pub centre: Vec3,
     /// The 2D cross-section profile.
     pub profile: Profile2d,
     /// 3D path points in local space. Must have at least 2 points.
+    #[cfg_attr(feature = "model-api", schemars(with = "Vec<[f32; 3]>"))]
     pub path: Vec<Vec3>,
 }
 
@@ -1018,6 +1044,17 @@ fn initial_normal(tangent: Vec3) -> Vec3 {
 
 impl Primitive for ProfileSweep {
     const TYPE_NAME: &'static str = "profile_sweep";
+
+    fn creation_schema() -> Option<Value> {
+        #[cfg(feature = "model-api")]
+        {
+            serde_json::to_value(schemars::schema_for!(Self)).ok()
+        }
+        #[cfg(not(feature = "model-api"))]
+        {
+            None
+        }
+    }
 
     fn centre(&self) -> Vec3 {
         self.centre
@@ -1377,8 +1414,10 @@ fn build_sweep_editable_mesh(sweep: &ProfileSweep) -> EditableMesh {
 /// `angle` is the revolution angle in radians. A full revolution (TAU) creates
 /// a closed solid; partial revolutions create an open solid with start and end caps.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ProfileRevolve {
     /// World-space centre of the solid.
+    #[cfg_attr(feature = "model-api", schemars(with = "[f32; 3]"))]
     pub centre: Vec3,
     /// The 2D profile to revolve.
     pub profile: Profile2d,
@@ -1435,6 +1474,17 @@ impl ProfileRevolve {
 
 impl Primitive for ProfileRevolve {
     const TYPE_NAME: &'static str = "profile_revolve";
+
+    fn creation_schema() -> Option<Value> {
+        #[cfg(feature = "model-api")]
+        {
+            serde_json::to_value(schemars::schema_for!(Self)).ok()
+        }
+        #[cfg(not(feature = "model-api"))]
+        {
+            None
+        }
+    }
 
     fn centre(&self) -> Vec3 {
         self.centre

@@ -22,6 +22,10 @@ pub(super) enum ModelApiRequest {
         request: ProjectKnowledgeIndexRequest,
         response: oneshot::Sender<Value>,
     },
+    EntityCreationSchema {
+        entity_type: String,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     ListEntities(oneshot::Sender<Vec<EntityEntry>>),
     GetEntity {
         element_id: u64,
@@ -1339,6 +1343,12 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::GetInstanceInfo(response) => {
             let _ = response.send(handle_get_instance_info(world));
+        }
+        ModelApiRequest::EntityCreationSchema {
+            entity_type,
+            response,
+        } => {
+            let _ = response.send(handle_entity_creation_schema(world, entity_type));
         }
         ModelApiRequest::ListEntities(response) => {
             let _ = response.send(list_entities(world));

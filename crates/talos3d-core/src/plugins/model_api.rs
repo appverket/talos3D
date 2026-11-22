@@ -10670,6 +10670,22 @@ fn coerce_stringified_json(value: &mut Value) {
 }
 
 #[cfg(feature = "model-api")]
+fn handle_entity_creation_schema(world: &World, entity_type: String) -> Result<Value, String> {
+    let registry = world.resource::<CapabilityRegistry>();
+    let factory = registry
+        .factory_for(&entity_type.to_ascii_lowercase())
+        .ok_or_else(|| "Unknown entity type; inspect registered capabilities".to_string())?;
+    let schema = factory.creation_schema().ok_or_else(|| {
+        "CreationSchemaUnavailable: this factory does not advertise its native input contract"
+            .to_string()
+    })?;
+    Ok(
+        serde_json::json!({"entity_type":factory.type_name(),"next_tool":"create_entity",
+        "payload_schema":schema,"scope":"native_geometry_protocol",
+        "notice":"This describes wire fields, not a curated domain path or permission to bypass authoring obligations."}),
+    )
+}
+
 pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, String> {
     let mut request_json = json;
     coerce_stringified_json(&mut request_json);
