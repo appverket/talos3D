@@ -12883,6 +12883,22 @@ fn instantiate_recipe_placement_transforms_geometry_without_physical_root() {
     let actual = compute_group_bounds_from_world(&world, &[group]).unwrap();
     assert_eq!(actual.min, expected.min);
     assert_eq!(actual.max, expected.max);
+    let error = handle_promote_refinement(
+        &mut world,
+        result.root_element_id,
+        "Schematic".into(),
+        None,
+        json!({}),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("empty unclassified group or recipe locator"),
+        "{error}"
+    );
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(result.root_element_id)).unwrap(),
+        root
+    );
     let ids = collect_element_ids(&mut world);
     world.resource_mut::<PendingCommandQueue>().queue_undo();
     crate::plugins::commands::flush_queued_commands(&mut world);

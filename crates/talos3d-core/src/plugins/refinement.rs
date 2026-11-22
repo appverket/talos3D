@@ -1994,6 +1994,22 @@ fn apply_promote_refinement_inner(
             .ok_or_else(|| format!("Entity {} not found", request.entity_element_id))?
     };
 
+    // An empty identity locator is not resolved design content. Keep this in
+    // the shared kernel so native commands and MCP cannot promote a label on
+    // a recipe's locator while bypassing its aggregate's obligations.
+    if world
+        .get::<crate::plugins::modeling::group::GroupMembers>(entity)
+        .is_some_and(|group| group.member_ids.is_empty())
+        && world.get::<ElementClassAssignment>(entity).is_none()
+        && world
+            .get::<crate::plugins::modeling::assembly::SemanticAssembly>(entity)
+            .is_none()
+    {
+        return Err(PromoteError::Other(
+            "Cannot promote an empty unclassified group or recipe locator; select the authored semantic aggregate".into()
+        ));
+    }
+
     // Validate state direction.
     let current_state = world
         .get::<RefinementStateComponent>(entity)
