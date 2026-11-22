@@ -70,6 +70,45 @@ impl Metadata {
     }
 }
 
+/// Preserve the locator's identity and semantics without manufacturing geometry.
+/// A type transition must remove the old representation: applying a group
+/// snapshot over an existing box would leave the box's physical components.
+struct FinalizeLocator {
+    before: BoxedEntity,
+    after: BoxedEntity,
+    metadata: Metadata,
+}
+impl EditorCommand for FinalizeLocator {
+    fn label(&self) -> &'static str {
+        "Finalize recipe locator"
+    }
+    fn apply(&mut self, world: &mut World) {
+        self.before.remove_from(world);
+        self.after.apply_to(world);
+        self.metadata.apply(world);
+    }
+    fn undo(&mut self, world: &mut World) {
+        self.after.remove_from(world);
+        self.before.apply_to(world);
+        self.metadata.apply(world);
+    }
+}
+
+pub(super) fn finalize_locator(world: &mut World, root: ElementId) -> ApiResult<()> {
+    let before = capture_snapshot_by_id(world, root)?;
+    let metadata = Metadata::capture(world, root);
+    let after = physical_group_snapshot(world, root, "Recipe locator".into(), vec![]);
+    world
+        .resource_mut::<PendingCommandQueue>()
+        .push_command(Box::new(FinalizeLocator {
+            before,
+            after,
+            metadata,
+        }));
+    flush_model_api_write_pipeline(world);
+    Ok(())
+}
+
 struct FinalizeRecipeMetadata {
     before: Vec<Metadata>,
     after: Vec<Metadata>,

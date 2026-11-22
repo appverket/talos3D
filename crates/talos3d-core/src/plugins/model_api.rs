@@ -12063,33 +12063,6 @@ fn apply_instantiate_recipe_placement(
     Ok(())
 }
 
-#[cfg(feature = "model-api")]
-fn shrink_recipe_root_locator(world: &mut World, root: ElementId) -> ApiResult<()> {
-    let Ok(snap) = capture_snapshot_by_id(world, root) else {
-        return Ok(());
-    };
-    let Some(bounds) = snap.bounds() else {
-        return Ok(());
-    };
-    let size = bounds.max - bounds.min;
-    let max_extent = size.x.max(size.y).max(size.z);
-    if max_extent <= 0.025 {
-        return Ok(());
-    }
-
-    let factor = (0.02 / max_extent).max(0.0001);
-    let shrunk = snap.scale_by(Vec3::splat(factor), snap.center());
-    send_event(
-        world,
-        ApplyEntityChangesCommand {
-            label: "shrink recipe root locator",
-            before: vec![snap],
-            after: vec![shrunk],
-        },
-    );
-    Ok(())
-}
-
 /// Transform a whole group as a rigid body (ADR-058): rigidly move/rotate every
 /// leaf member, and update the local frame of the group and any nested subgroup,
 /// so the assembly keeps its internal rectified authoring space. Returns
@@ -13269,10 +13242,9 @@ fn instantiate_recipe_in_transaction(
     }
 
     // Recipe roots are semantic locators, not visible construction geometry.
-    // Some recipes need a sized root during generation; shrink it after the
-    // recipe has emitted its real members so broad material application does
-    // not leave placeholder cubes on the finished structure.
-    if let Err(error) = shrink_recipe_root_locator(world, ElementId(root)) {
+    // Some recipes need a sized root during generation. Replace that transient
+    // representation with a geometry-free locator before computing group bounds.
+    if let Err(error) = recipe_history::finalize_locator(world, ElementId(root)) {
         crate::plugins::history::rollback_to_undo_depth(world, transaction_history_depth);
         return Err(format!(
             "Recipe root finalization failed and instantiate_recipe was rolled back: {error}"

@@ -12668,6 +12668,9 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
     use crate::plugins::refinement::SemanticRole;
 
     let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::group::GroupFactory);
 
     // Register "wall_assembly" as a semantic element class so that
     // handle_instantiate_recipe's element_class validation passes.
@@ -12811,11 +12814,14 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
 
 #[cfg(feature = "model-api")]
 #[test]
-fn instantiate_recipe_placement_transforms_generated_geometry_and_shrinks_root() {
+fn instantiate_recipe_placement_transforms_geometry_without_physical_root() {
     use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
     use crate::plugins::refinement::SemanticRole;
 
     let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::group::GroupFactory);
     world
         .resource_mut::<CapabilityRegistry>()
         .register_element_class(ElementClassDescriptor {
@@ -12856,16 +12862,41 @@ fn instantiate_recipe_placement_transforms_generated_geometry_and_shrinks_root()
 
     let root = get_entity_snapshot(&world, ElementId(result.root_element_id))
         .expect("root locator exists");
-    assert_eq!(root["centre"], json!([10.0, 5.0, -2.0]));
-    let half_extents = root["half_extents"]
-        .as_array()
-        .expect("box root should report half_extents");
+    assert!(root.get("Group").is_some(), "{root}");
     assert!(
-        half_extents
-            .iter()
-            .all(|v| v.as_f64().unwrap_or(f64::INFINITY) <= 0.011),
-        "root locator should be shrunk after recipe generation, got {half_extents:?}"
+        capture_snapshot_by_id(&world, ElementId(result.root_element_id))
+            .unwrap()
+            .bounds()
+            .is_none()
     );
+    let group = ElementId(result.group_element_id.unwrap());
+    let expected = compute_group_bounds_from_world(
+        &world,
+        &result
+            .created_element_ids
+            .iter()
+            .copied()
+            .map(ElementId)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let actual = compute_group_bounds_from_world(&world, &[group]).unwrap();
+    assert_eq!(actual.min, expected.min);
+    assert_eq!(actual.max, expected.max);
+    let ids = collect_element_ids(&mut world);
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    crate::plugins::commands::flush_queued_commands(&mut world);
+    assert!(collect_element_ids(&mut world).is_empty());
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    crate::plugins::commands::flush_queued_commands(&mut world);
+    assert_eq!(collect_element_ids(&mut world), ids);
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(result.root_element_id)).unwrap(),
+        root
+    );
+    let actual = compute_group_bounds_from_world(&world, &[group]).unwrap();
+    assert_eq!(actual.min, expected.min);
+    assert_eq!(actual.max, expected.max);
 }
 
 #[cfg(feature = "model-api")]
