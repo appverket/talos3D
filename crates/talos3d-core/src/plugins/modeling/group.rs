@@ -814,6 +814,19 @@ fn group_contains_with_members(
     false
 }
 
+/// Explicit representation links are authored topology, not legacy guesses.
+/// Seed the shared normalization plan with their exact member lists so both
+/// creation and loading preserve them, including nested recipe aggregates.
+fn explicit_physical_members(
+    groups: &HashMap<ElementId, PhysicalGroupRecord>,
+    links: &HashMap<ElementId, ElementId>,
+) -> HashMap<ElementId, Vec<ElementId>> {
+    links
+        .values()
+        .filter_map(|id| groups.get(id).map(|group| (*id, group.members.clone())))
+        .collect()
+}
+
 fn normalize_assembly_group_members(
     assembly_id: ElementId,
     assemblies: &HashMap<ElementId, AssemblyGroupRecord>,
@@ -871,7 +884,7 @@ pub fn canonical_physical_members_for_assembly(
     let (assemblies, groups, explicit_links) = assembly_group_records(world);
     let links = infer_legacy_assembly_group_links(&assemblies, &groups, &explicit_links);
     let paired_groups: HashSet<ElementId> = links.values().copied().collect();
-    let mut normalized = HashMap::new();
+    let mut normalized = explicit_physical_members(&groups, &explicit_links);
     let mut visiting = HashSet::new();
     for assembly_id in assemblies.keys().copied() {
         normalize_assembly_group_members(
@@ -907,8 +920,8 @@ pub fn canonical_physical_members_for_assembly(
     physical_members
 }
 
-/// Pair legacy semantic assemblies with their physical groups and rewrite the
-/// group side into a strict containment tree. This runs during project load,
+/// Pair unlinked legacy semantic assemblies with their physical groups and
+/// normalize only those inferred groups. Explicit authored topology is retained. This runs during project load,
 /// before history/dirty state is reset, so old files gain stable outliner and
 /// viewport behavior without creating a user-visible edit.
 pub fn reconcile_semantic_assembly_groups(world: &mut World) -> AssemblyGroupReconcileReport {
@@ -916,7 +929,7 @@ pub fn reconcile_semantic_assembly_groups(world: &mut World) -> AssemblyGroupRec
 
     let (assemblies, groups, explicit_links) = assembly_group_records(world);
     let links = infer_legacy_assembly_group_links(&assemblies, &groups, &explicit_links);
-    let mut normalized = HashMap::new();
+    let mut normalized = explicit_physical_members(&groups, &explicit_links);
     let mut visiting = HashSet::new();
     for assembly_id in assemblies.keys().copied() {
         normalize_assembly_group_members(
@@ -1288,6 +1301,80 @@ mod frame_tests {
 
     fn approx(a: Vec3, b: Vec3) -> bool {
         a.abs_diff_eq(b, 1e-4)
+    }
+
+    #[test]
+    fn explicit_assembly_group_is_not_reparented_into_recipe_wrapper_on_load() {
+        use crate::plugins::modeling::assembly::{
+            AssemblyMemberRef, SemanticAssembly, SemanticRelation,
+        };
+        let mut world = World::new();
+        world.init_resource::<ElementIdAllocator>();
+        world.resource_mut::<ElementIdAllocator>().set_next(10);
+        for id in [1, 2] {
+            world.spawn(ElementId(id));
+        }
+        world.spawn((
+            ElementId(3),
+            SemanticAssembly {
+                assembly_type: "synthetic".into(),
+                label: "Synthetic".into(),
+                members: vec![
+                    AssemblyMemberRef {
+                        target: ElementId(1),
+                        role: "part".into(),
+                    },
+                    AssemblyMemberRef {
+                        target: ElementId(2),
+                        role: "part".into(),
+                    },
+                ],
+                parameters: serde_json::Value::Null,
+                metadata: serde_json::Value::Null,
+            },
+        ));
+        let group = world
+            .spawn((
+                ElementId(4),
+                GroupMembers {
+                    name: "Synthetic".into(),
+                    member_ids: vec![ElementId(1), ElementId(2)],
+                    frame: GroupFrame::identity(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        world.spawn((
+            ElementId(5),
+            SemanticRelation {
+                source: ElementId(3),
+                target: ElementId(4),
+                relation_type: ASSEMBLY_PHYSICAL_GROUP_RELATION.into(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+        world.spawn((
+            ElementId(6),
+            GroupMembers {
+                name: "Recipe aggregate".into(),
+                member_ids: vec![ElementId(1), ElementId(2), ElementId(3), ElementId(4)],
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+        for _ in 0..2 {
+            let report = reconcile_semantic_assembly_groups(&mut world);
+            assert_eq!(report.linked_assemblies, 0);
+            assert_eq!(report.rewritten_groups, 0);
+            assert_eq!(
+                world.get::<GroupMembers>(group).unwrap().member_ids,
+                vec![ElementId(1), ElementId(2)]
+            );
+            assert_eq!(
+                canonical_physical_members_for_assembly(&world, &[ElementId(3)]),
+                vec![ElementId(4)]
+            );
+        }
     }
 
     #[test]
