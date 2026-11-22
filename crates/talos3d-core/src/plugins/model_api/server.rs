@@ -6859,7 +6859,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "inspect_element_geometry",
-        description = "Read bounded evaluated world-space triangle vertices and normals for one directly meshed element. Omit element_id to read the contract. Pages include a whole-mesh fingerprint; never combine different fingerprints. Uses native render meshes, not AABBs or authored parameter claims. Unsupported/aggregate geometry is an explicit error. No construction or release approval."
+        description = "Read bounded evaluated world-space triangle vertices and normals for one directly meshed element. Alternatively provide bounded pairs for minimum evaluated surface distances and nearest triangles; this does not classify solid containment or intended contact. Omit element_id and pairs to read the contract. Pages include a whole-mesh fingerprint; never combine different fingerprints. Uses native render meshes, not AABBs or authored parameter claims. Unsupported/aggregate geometry is an explicit error. No construction or release approval."
     )]
     pub(super) async fn inspect_element_geometry_tool(
         &self,

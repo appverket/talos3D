@@ -12,6 +12,12 @@ use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 pub struct Request {
     /// Omit to inspect the measurement contract without touching geometry.
     pub element_id: Option<u64>,
+    /// Alternatively measure minimum surface distance for explicit element pairs.
+    /// At most 32 pairs and 16 distinct directly meshed elements, each <=256 triangles.
+    /// Does not classify solid containment, expected contact or structural support.
+    #[serde(default)]
+    #[schemars(length(max = 32))]
+    pub pairs: Vec<[u64; 2]>,
     #[serde(default)]
     pub triangle_offset: usize,
     #[serde(default = "page_size")]
@@ -27,15 +33,21 @@ const MAX_PAGE: usize = 256;
 
 pub fn contract() -> Value {
     json!({"schema":"talos3d.geometry-measurement.v1","coordinates":"world_metres",
-        "observations":["triangle_vertices","triangle_normals"],
+        "observations":["triangle_vertices","triangle_normals","pair_surface_distance"],
         "ordinary_source":"current_direct_render_mesh","scenario_source":"native_mesh_generator",
         "coverage":"one directly meshed element; not an assembly, child hierarchy or entire document",
-        "limits":{"vertices":MAX_VERTICES,"triangles":MAX_TRIANGLES,"page_triangles":MAX_PAGE},
+        "limits":{"vertices":MAX_VERTICES,"triangles":MAX_TRIANGLES,"page_triangles":MAX_PAGE,"pairs":32,"pair_elements":16,"pair_mesh_triangles":MAX_PAGE},
         "unsupported":"Missing direct meshes, unsupported topology and exceeded bounds are errors. No fallback to bounding boxes.",
         "acceptance":false})
 }
 
 pub fn inspect(world: &World, request: Request) -> Result<Value, String> {
+    if !request.pairs.is_empty() {
+        if request.element_id.is_some() || request.triangle_offset != 0 {
+            return Err("Choose either one paged element or explicit pairs".into());
+        }
+        return inspect_pairs(world, &request.pairs);
+    }
     let Some(id) = request.element_id else {
         return Ok(contract());
     };
@@ -88,6 +100,92 @@ pub fn inspect(world: &World, request: Request) -> Result<Value, String> {
         }
     }
     Err("No supported direct evaluated mesh; aggregate and unsupported geometry require another measurement capability".into())
+}
+
+/// On-demand BVHs are built once per distinct selected mesh, reused for the batch
+/// and dropped on return. No scene-wide geometry rebuild or persistent mesh copy.
+fn inspect_pairs(world: &World, pairs: &[[u64; 2]]) -> Result<Value, String> {
+    use parry3d::{
+        math::{Pose, Vector},
+        shape::TriMesh,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    let ids: BTreeSet<_> = pairs.iter().flatten().copied().collect();
+    if pairs.len() > 32 || ids.len() > 16 || pairs.iter().any(|p| p[0] == p[1]) {
+        return Err(
+            "Pair measurement requires <=32 distinct-element pairs and <=16 elements".into(),
+        );
+    }
+    let mut meshes = BTreeMap::new();
+    for id in ids {
+        let observation = inspect(
+            world,
+            Request {
+                element_id: Some(id),
+                pairs: Vec::new(),
+                triangle_offset: 0,
+                triangle_limit: MAX_PAGE,
+            },
+        )?;
+        if observation["complete_mesh"] != true {
+            return Err(format!(
+                "Element {id} exceeds the complete pair-mesh bound of 256 triangles"
+            ));
+        }
+        let triangles = observation["triangles"]
+            .as_array()
+            .ok_or("Missing measured triangles")?;
+        let mut vertices = Vec::with_capacity(triangles.len() * 3);
+        let mut indices = Vec::with_capacity(triangles.len());
+        for (index, triangle) in triangles.iter().enumerate() {
+            if triangle["degenerate"] != false {
+                return Err(format!(
+                    "Element {id} has a degenerate triangle; pair measurement unavailable"
+                ));
+            }
+            for point in triangle["vertices"]
+                .as_array()
+                .ok_or("Missing measured vertices")?
+            {
+                let xyz = point.as_array().ok_or("Invalid measured vertex")?;
+                let component = |i: usize| {
+                    xyz[i]
+                        .as_f64()
+                        .ok_or("Invalid measured coordinate")
+                        .map(|v| v as f32)
+                };
+                vertices.push(Vector::new(component(0)?, component(1)?, component(2)?));
+            }
+            let base = (index * 3) as u32;
+            indices.push([base, base + 1, base + 2]);
+        }
+        let mesh = TriMesh::new(vertices, indices).map_err(|_| "Invalid measured triangle mesh")?;
+        meshes.insert(id, (mesh, observation));
+    }
+    let mut results = Vec::with_capacity(pairs.len());
+    for [a, b] in pairs {
+        let (ma, oa) = &meshes[a];
+        let (mb, ob) = &meshes[b];
+        let distance = parry3d::query::distance(&Pose::IDENTITY, ma, &Pose::IDENTITY, mb)
+            .map_err(|_| "Evaluated surface pair is unsupported")?;
+        if !distance.distance.is_finite() {
+            return Err("Non-finite surface distance".into());
+        }
+        results.push(
+            json!({"elements":[a,b],"minimum_surface_distance_m":distance.distance,
+            "nearest_triangle_a":oa["triangles"].get(distance.subshape1 as usize),
+            "nearest_triangle_b":ob["triangles"].get(distance.subshape2 as usize)}),
+        );
+    }
+    Ok(
+        json!({"schema":"talos3d.geometry-pairs.v1","coordinates":"world_metres",
+        "meshes":meshes.iter().map(|(id,(_,o))| json!({"element_id":id,
+            "geometry_sha256":o["geometry_sha256"],"source":o["source"],"total_triangles":o["total_triangles"]})).collect::<Vec<_>>(),
+        "pairs":results,"acceptance":false,
+        "limitations":["Surface distance only: positive distance does not exclude complete solid containment.",
+            "Zero distance means surfaces touch or cross; it does not establish an intended joint, support, penetration depth or construction approval.",
+            "Direct current render meshes only; no aggregate traversal or bounding-box substitute."]}),
+    )
 }
 
 fn observe(
@@ -168,9 +266,106 @@ mod tests {
     fn req(offset: usize, limit: usize) -> Request {
         Request {
             element_id: Some(1),
+            pairs: Vec::new(),
             triangle_offset: offset,
             triangle_limit: limit,
         }
+    }
+    fn pair_request(pairs: Vec<[u64; 2]>) -> Request {
+        Request {
+            element_id: None,
+            pairs,
+            triangle_offset: 0,
+            triangle_limit: 64,
+        }
+    }
+    fn mesh_element(world: &mut World, id: u64, size: Vec3, transform: Transform) {
+        let handle = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::from_size(size));
+        world.spawn((
+            ElementId(id),
+            Mesh3d(handle),
+            GlobalTransform::from(transform),
+        ));
+    }
+    #[test]
+    fn pair_distances_use_evaluated_surfaces_and_do_not_claim_solid_containment() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        for (id, x, size) in [
+            (1, 0., 2.),
+            (2, 3., 2.),
+            (3, 2., 2.),
+            (4, 1., 2.),
+            (5, 0., 0.5),
+        ] {
+            mesh_element(
+                &mut world,
+                id,
+                Vec3::splat(size),
+                Transform::from_xyz(x, 0., 0.),
+            );
+        }
+        let result = inspect(&world, pair_request(vec![[1, 2], [1, 3], [1, 4], [1, 5]])).unwrap();
+        for (index, expected) in [1., 0., 0., 0.75].into_iter().enumerate() {
+            assert!(
+                (result["pairs"][index]["minimum_surface_distance_m"]
+                    .as_f64()
+                    .unwrap()
+                    - expected)
+                    .abs()
+                    < 1e-5
+            );
+            assert!(result["pairs"][index]["nearest_triangle_a"]["vertices"].is_array());
+            assert!(result["pairs"][index]["nearest_triangle_b"]["vertices"].is_array());
+        }
+        assert_eq!(result["meshes"].as_array().unwrap().len(), 5);
+        assert_eq!(result["acceptance"], false);
+        assert!(result["limitations"][0]
+            .as_str()
+            .unwrap()
+            .contains("containment"));
+    }
+    #[test]
+    fn overlapping_aabbs_can_have_positive_evaluated_surface_distance() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        mesh_element(
+            &mut world,
+            1,
+            Vec3::new(2., 0.2, 0.2),
+            Transform::from_rotation(rotation),
+        );
+        mesh_element(
+            &mut world,
+            2,
+            Vec3::new(2., 0.2, 0.2),
+            Transform::from_translation(rotation * Vec3::Z * 0.3).with_rotation(rotation),
+        );
+        let result = inspect(&world, pair_request(vec![[1, 2]])).unwrap();
+        assert!(
+            (result["pairs"][0]["minimum_surface_distance_m"]
+                .as_f64()
+                .unwrap()
+                - 0.1)
+                .abs()
+                < 1e-5
+        );
+    }
+    #[test]
+    fn pair_bound_and_missing_mesh_fail_without_aabb_fallback() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        mesh_element(&mut world, 1, Vec3::ONE, Transform::IDENTITY);
+        world.spawn((ElementId(2), GlobalTransform::IDENTITY));
+        assert!(inspect(&world, pair_request(vec![[1, 2]])).is_err());
+        assert!(inspect(&world, pair_request(vec![[1, 1]])).is_err());
+        assert!(inspect(&world, pair_request(vec![[1, 2]; 33])).is_err());
+        let mut conflicting = pair_request(vec![[1, 2]]);
+        conflicting.element_id = Some(1);
+        assert!(inspect(&world, conflicting).is_err());
     }
     #[test]
     fn reads_actual_transformed_mesh_and_fingerprints_all_pages_without_mutating_assets() {

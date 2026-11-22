@@ -35,6 +35,19 @@ system. It does not recursively rebuild CSG or traverse aggregate children.
 Missing meshes and unsupported topology return errors instead of authored-parameter
 or AABB substitutes. Display visibility does not change the selected mesh data.
 
+Alternatively pass `pairs: [[first_id, second_id], ...]` to measure minimum
+surface distance using Parry's accelerated triangle-mesh queries. The batch is
+bounded to 32 pairs, 16 distinct direct meshes and 256 triangles per mesh. Each
+selected mesh is captured once and its temporary BVH is reused within the call;
+no retained cache, scene rebuild or model mutation occurs. Output binds distances
+and nearest triangles to mesh fingerprints. Missing/oversized/degenerate meshes
+fail explicitly; split larger inspections into appropriately bounded queries.
+
+This measures surfaces, not solid containment or penetration depth. Zero distance
+means surfaces touch or cross; it does not establish an intended joint or support.
+A positive distance does not exclude one closed solid being inside another.
+No domain-specific clearance threshold or acceptance verdict is supplied.
+
 Pages carry a whole-mesh/transform fingerprint. Discard earlier pages if that
 fingerprint changes. Triangle indices are snapshot-local, not stable face IDs.
 The full mesh is bounded at 100,000 vertices and triangles; a call hashes O(V+I)
