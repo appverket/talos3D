@@ -382,7 +382,7 @@ impl HarnessIncidentStore {
         // Coalesce this detector's signal per core version and host identity,
         // including after restart/submission. Check and insert under one lock.
         // Explicit reports retain their caller-selected event semantics.
-        if detector.is_some() {
+        if let Some(detector_name) = detector {
             if let Some(old) = state.records.values().find(|record| {
                 record.detector.as_deref() == detector
                     && record.observation.knowledge_request == observation.knowledge_request
@@ -399,7 +399,7 @@ impl HarnessIncidentStore {
                 &observation,
                 &source,
                 &credential_fingerprint,
-                detector.unwrap(),
+                detector_name,
             )? {
                 observation.event_id = old.observation.event_id;
             }
