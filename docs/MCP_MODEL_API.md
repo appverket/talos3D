@@ -25,6 +25,29 @@ validity or a curated domain authoring path. Existing recipe and refinement
 obligations remain in force. Schema inspection is read-only and available to
 knowledge-review sessions and bounded candidate scenarios.
 
+## Evaluated geometry measurements
+
+Call `inspect_element_geometry({})` for the runtime contract, then pass one
+`element_id` and optional `triangle_offset`/`triangle_limit` (1–256). Results
+contain world-space metre coordinates and triangle normals from the direct render
+mesh and its world transform. This is on-demand inspection, not a per-frame
+system. It does not recursively rebuild CSG or traverse aggregate children.
+Missing meshes and unsupported topology return errors instead of authored-parameter
+or AABB substitutes. Display visibility does not change the selected mesh data.
+
+Pages carry a whole-mesh/transform fingerprint. Discard earlier pages if that
+fingerprint changes. Triangle indices are snapshot-local, not stable face IDs.
+The full mesh is bounded at 100,000 vertices and triangles; a call hashes O(V+I)
+input bytes and transforms only its returned page, with O(page) retained output.
+No geometry cache or duplicate persistent mesh is introduced. A complete direct
+mesh is not a claim that an assembly's children, construction joints or structural
+adequacy have been verified.
+
+The isolated document scenario uses its existing native mesh generators and the
+same measurement conversion, explicitly labelled `native_mesh_generator`.
+The live app never falls back to this path when its render mesh is unavailable.
+This supplies measurements; independent evaluation still decides acceptance.
+
 ## Captured edit plans
 
 Use `list_edit_requests` to discover capability-owned request schemas, then

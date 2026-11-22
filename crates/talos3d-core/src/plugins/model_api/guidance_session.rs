@@ -142,6 +142,7 @@ pub(super) fn knowledge_review_tool(tool: &str) -> bool {
             | "check_knowledge_candidate"
             | "get_knowledge_payload_schema"
             | "get_entity_creation_schema"
+            | "inspect_element_geometry"
             | "search_corpus_knowledge"
             | "lookup_source_passage"
             | "list_catalog_providers"

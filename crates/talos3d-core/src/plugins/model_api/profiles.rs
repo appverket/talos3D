@@ -252,6 +252,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ),
     ("get_legacy_knowledge_asset", ToolCategory::CurationExtended),
     ("get_entity_creation_schema", ToolCategory::Inspection),
+    ("inspect_element_geometry", ToolCategory::Inspection),
     ("list_knowledge_assets", ToolCategory::Inspection),
     (
         "get_knowledge_runtime_observations",

@@ -6,6 +6,8 @@ pub mod concept_tools;
 pub(crate) mod document_dispatch;
 #[cfg(feature = "model-api")]
 mod recipe_history;
+#[cfg(feature = "model-api")]
+pub(crate) mod geometry_measurement;
 
 #[cfg(all(test, feature = "model-api"))]
 use crate::plugins::history::apply_pending_history_commands;

@@ -20,6 +20,7 @@ const ATOMIC_WRITES: &[&str] = &[
 ];
 const READS: &[&str] = &[
     "get_entity_creation_schema",
+    "inspect_element_geometry",
     "model_summary",
     "get_obligations",
     "get_refinement_state",

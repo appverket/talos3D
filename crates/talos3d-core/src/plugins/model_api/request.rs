@@ -22,6 +22,10 @@ pub(super) enum ModelApiRequest {
         request: ProjectKnowledgeIndexRequest,
         response: oneshot::Sender<Value>,
     },
+    InspectElementGeometry {
+        request: geometry_measurement::Request,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     EntityCreationSchema {
         entity_type: String,
         response: oneshot::Sender<ApiResult<Value>>,
@@ -1343,6 +1347,9 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::GetInstanceInfo(response) => {
             let _ = response.send(handle_get_instance_info(world));
+        }
+        ModelApiRequest::InspectElementGeometry { request, response } => {
+            let _ = response.send(geometry_measurement::inspect(world, request));
         }
         ModelApiRequest::EntityCreationSchema {
             entity_type,
