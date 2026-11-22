@@ -86,6 +86,13 @@ model mutation is blocked until each listed card has been read completely once
 declared card the instance cannot serve stays a blocking gap naming
 `report_harness_incident`.
 
+`list_agent_skills` and `find_agent_skills` list operating procedures. A
+reference-passage record (no referenced or validation tools, no success
+criteria, requiring only `search_corpus_knowledge`/`lookup_source_passage`) is
+not listed by default and is never recommended in the session welcome; the
+listing's note gives the hidden count. Its passages stay available through
+`search_corpus_knowledge`, and `include_references: true` lists the records.
+
 ## What It Exposes
 
 The MCP surface is designed around the authored model rather than render

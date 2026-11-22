@@ -153,6 +153,29 @@ pub struct AgentSkillSummary {
     pub source_path: Option<String>,
 }
 
+/// Tools a reference record needs to retrieve its cited passages.
+const PASSAGE_RETRIEVAL_TOOLS: [&str; 2] = ["search_corpus_knowledge", "lookup_source_passage"];
+
+impl AgentSkillSummary {
+    /// A reference-passage pointer, not an operating procedure: it names no
+    /// tools to act with or validate by, and only needs passage retrieval.
+    /// Its passages are served through `search_corpus_knowledge`, so listing
+    /// and recommending it as an agent skill only adds discovery noise.
+    /// Structural classification; no domain vocabulary. A bootstrap-mandatory
+    /// record is never classified away.
+    pub fn is_reference_pointer(&self) -> bool {
+        !self.must_read_at_bootstrap
+            && self.referenced_tool_ids.is_empty()
+            && self.validation_tool_ids.is_empty()
+            && self.success_criteria.is_empty()
+            && !self.required_tool_ids.is_empty()
+            && self
+                .required_tool_ids
+                .iter()
+                .all(|tool| PASSAGE_RETRIEVAL_TOOLS.contains(&tool.as_str()))
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct AgentSkillSearch {

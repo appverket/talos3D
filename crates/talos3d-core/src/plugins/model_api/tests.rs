@@ -16464,3 +16464,125 @@ async fn mutation_prerequisites_are_ledger_owned_and_gate_only_mutation() {
     drop(server);
     worker.await.unwrap();
 }
+
+/// TALOS-cyczbfsk: reference-passage records (no procedure or validation
+/// tools) are not listed or recommended as agent skills by default; they stay
+/// reachable explicitly. Structural rule, no domain vocabulary.
+#[cfg(feature = "model-api")]
+#[tokio::test]
+async fn reference_passage_records_do_not_crowd_skill_discovery() {
+    use crate::plugins::agent_skills::{
+        AgentSkill, AgentSkillId, AgentSkillRegistry, AgentSkillTrustLevel,
+    };
+    let skill = |id: &str, procedure: bool| AgentSkill {
+        id: AgentSkillId(id.into()),
+        title: id.into(),
+        summary: format!("{id} roof truss guidance"),
+        task_tags: vec!["roof".into(), "truss".into()],
+        must_read_at_bootstrap: false,
+        referenced_tool_ids: if procedure {
+            vec!["discover_curated_paths".into()]
+        } else {
+            vec![]
+        },
+        required_tool_ids: if procedure {
+            vec!["get_capability_snapshot".into()]
+        } else {
+            vec![
+                "search_corpus_knowledge".into(),
+                "lookup_source_passage".into(),
+            ]
+        },
+        forbidden_tool_ids: vec![],
+        validation_tool_ids: if procedure {
+            vec!["run_validation_v2".into()]
+        } else {
+            vec![]
+        },
+        success_criteria: if procedure {
+            vec!["Validates.".into()]
+        } else {
+            vec![]
+        },
+        stop_conditions: vec![],
+        screenshot_requirements: vec![],
+        common_failure_modes: vec![],
+        regression_prompt_ids: vec![],
+        next_skill_ids: vec![],
+        body_markdown: "Body.".into(),
+        trust_level: AgentSkillTrustLevel::Shipped,
+        source_path: None,
+    };
+    let (sender, receiver) = mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let mut world = init_model_api_test_world();
+        world.insert_resource(ModelApiRuntimeInfo {
+            instance_id: "references".into(),
+            app_name: "test".into(),
+            pid: 1,
+            http_host: "127.0.0.1".into(),
+            http_port: 24845,
+            http_url: "http://127.0.0.1:24845/mcp".into(),
+            registry_path: String::new(),
+            started_at_unix_ms: 1,
+            requested_port: None,
+        });
+        let mut registry = AgentSkillRegistry::default();
+        registry.insert(skill("test.procedure.roof", true));
+        registry.insert(skill("test.reference.site_handling", false));
+        world.insert_resource(registry);
+        while let Ok(request) = receiver.recv() {
+            handle_model_api_request(&mut world, request);
+        }
+    });
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
+    let ids = |result: &rmcp::model::CallToolResult| -> Vec<String> {
+        let text = result.content[0].as_text().unwrap().text.clone();
+        serde_json::from_str::<Vec<serde_json::Value>>(&text)
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let listed = server
+        .list_agent_skills_tool(Parameters(ListAgentSkillsRequest::default()))
+        .await
+        .unwrap();
+    assert_eq!(ids(&listed), vec!["test.procedure.roof".to_string()]);
+    let note = listed
+        .content
+        .last()
+        .unwrap()
+        .as_text()
+        .unwrap()
+        .text
+        .clone();
+    assert!(
+        note.contains("1 reference-passage record") && note.contains("search_corpus_knowledge")
+    );
+    let all = server
+        .list_agent_skills_tool(Parameters(ListAgentSkillsRequest {
+            include_references: true,
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(ids(&all).len(), 2);
+    let welcome: AgentWelcome = server
+        .negotiate_agent_session_tool(Parameters(AgentHello {
+            task: Some("author a roof truss".into()),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_typed()
+        .unwrap();
+    let recommended: Vec<_> = welcome
+        .recommended_agent_skills
+        .iter()
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(recommended, vec!["test.procedure.roof"]);
+    drop(server);
+    worker.await.unwrap();
+}

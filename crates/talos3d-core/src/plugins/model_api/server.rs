@@ -3375,6 +3375,7 @@ fn relevant_agent_skills(
         .collect::<Vec<_>>();
     let mut scored = skills
         .into_iter()
+        .filter(|skill| !skill.is_reference_pointer())
         .filter_map(|skill| {
             let mut score = usize::from(must_read_ids.contains(&skill.id)) * 100;
             let searchable = format!(
@@ -5505,6 +5506,10 @@ pub(super) struct ListAgentSkillsRequest {
     pub(super) query: Option<String>,
     #[serde(default)]
     pub(super) tags: Vec<String>,
+    /// Also list reference-passage records (no procedure or validation tools;
+    /// their passages are served by `search_corpus_knowledge`). Default false.
+    #[serde(default)]
+    pub(super) include_references: bool,
 }
 
 impl From<ListAgentSkillsRequest> for crate::plugins::agent_skills::AgentSkillSearch {
@@ -10163,18 +10168,29 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "list_agent_skills",
         description = "List MCP-visible agent operating-procedure skills. Pass query and/or tags \
-            to narrow results; use get_agent_skill to retrieve the full body."
+            to narrow results; use get_agent_skill to retrieve the full body. Reference-passage \
+            records (no procedure or validation tools) are not listed by default; their passages \
+            are served by search_corpus_knowledge, or pass include_references=true."
     )]
     pub(super) async fn list_agent_skills_tool(
         &self,
         Parameters(params): Parameters<ListAgentSkillsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (skills, status) = self.cloud_skill_list(params.into()).await;
+        let include_references = params.include_references;
+        let (mut skills, status) = self.cloud_skill_list(params.into()).await;
+        let before = skills.len();
+        if !include_references {
+            skills.retain(|skill| !skill.is_reference_pointer());
+        }
+        let hidden = before - skills.len();
         let mut result = json_tool_result(skills)?;
-        result.content.push(rmcp::model::Content::text(format!(
-            "Cloud corpus: {}",
-            status
-        )));
+        let mut note = format!("Cloud corpus: {status}");
+        if hidden > 0 {
+            note.push_str(&format!(
+                "\n{hidden} reference-passage record(s) not listed: they carry no procedure or validation tools. Retrieve their passages with search_corpus_knowledge, or pass include_references=true to list them."
+            ));
+        }
+        result.content.push(rmcp::model::Content::text(note));
         Ok(result)
     }
 
@@ -10185,15 +10201,9 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     )]
     pub(super) async fn find_agent_skills_tool(
         &self,
-        Parameters(params): Parameters<ListAgentSkillsRequest>,
+        params: Parameters<ListAgentSkillsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let (skills, status) = self.cloud_skill_list(params.into()).await;
-        let mut result = json_tool_result(skills)?;
-        result.content.push(rmcp::model::Content::text(format!(
-            "Cloud corpus: {}",
-            status
-        )));
-        Ok(result)
+        self.list_agent_skills_tool(params).await
     }
 
     #[tool(
