@@ -162,6 +162,7 @@ pub fn evaluate_in(mut request: Request, context: Context) -> Result<Scene, Stri
     scratch.insert_resource(registry);
     scratch.init_resource::<crate::plugins::identity::ElementIdAllocator>();
     scratch.init_resource::<ParametricStore>();
+    scratch.init_resource::<model_api::geometry_measurement::IsolatedEvaluationWorld>();
     // Candidate eligibility was checked above; legacy inspection deliberately
     // establishes no envelope, provenance or release authority.
     knowledge_cloud::install_payload(
@@ -549,6 +550,15 @@ fn cleanup_render(world: &mut World) {
 mod tests {
     use super::*;
     fn request() -> Request {
+        request_with(|_| vec![])
+    }
+
+    /// The synthetic candidate plus extra members built from the same helpers.
+    fn request_with(
+        extra: impl FnOnce(
+            &dyn Fn(f64, f64, f64) -> crate::relational::registry::ParametricMember,
+        ) -> Vec<crate::relational::registry::ParametricMember>,
+    ) -> Request {
         use crate::relational::{
             component::{ComponentParams, DriverPolicy},
             param_expr::{Quantity, ScalarExpr, Unit},
@@ -556,6 +566,28 @@ mod tests {
             transform::TransformBindings,
         };
         let zero = || std::array::from_fn(|_| ScalarExpr::lit(Quantity::mm(0.0)));
+        // A 1000 x 100 x 100 mm member at x (mm), rotated about Y (degrees).
+        let member = |x: f64, z: f64, rotate_y_deg: f64| ParametricMember {
+            size: [
+                ScalarExpr::lit(Quantity::mm(1000.0)),
+                ScalarExpr::lit(Quantity::mm(100.0)),
+                ScalarExpr::lit(Quantity::mm(100.0)),
+            ],
+            translate: [
+                ScalarExpr::lit(Quantity::mm(x)),
+                ScalarExpr::lit(Quantity::mm(0.0)),
+                ScalarExpr::lit(Quantity::mm(z)),
+            ],
+            rotate_euler_deg: [
+                ScalarExpr::lit(Quantity::deg(0.0)),
+                ScalarExpr::lit(Quantity::deg(rotate_y_deg)),
+                ScalarExpr::lit(Quantity::deg(0.0)),
+            ],
+            profile_xz: vec![],
+            label: None,
+            semantic: None,
+        };
+        let extra = extra(&member);
         let definition = ParametricTypeDef {
             id: "test.candidate".into(),
             label: "Synthetic candidate fixture".into(),
@@ -577,7 +609,10 @@ mod tests {
                     profile_xz: vec![],
                     label: None,
                     semantic: None,
-                }],
+                }]
+                .into_iter()
+                .chain(extra)
+                .collect(),
             }),
         };
         let asset = knowledge_cloud::Asset {
@@ -1224,6 +1259,23 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn parametric_candidate_measures_angled_member_joints() {
+        // Two members meeting at an angle with uncut ends interpenetrate; the
+        // scratch runtime must measure them, not report them unmeasured.
+        let scene = evaluate(
+            request_with(|member| vec![member(3000.0, 0.0, 0.0), member(3400.0, 0.0, 30.0)]),
+            vec![],
+        )
+        .unwrap();
+        let joints = &scene.report["initial"]["member_joints"];
+        assert_eq!(joints["unmeasured"], json!([]), "{joints}");
+        assert_eq!(
+            joints["interpenetrating"].as_array().unwrap().len(),
+            1,
+            "{joints}"
+        );
+    }
     #[test]
     fn scratch_runtime_uses_real_geometry_and_driver_updates() {
         let scene = evaluate(request(), vec![]).unwrap();

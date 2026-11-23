@@ -66,6 +66,7 @@ pub(super) fn empty_world(context: Context) -> World {
     }
     w.insert_resource(registry);
     w.insert_resource(model_api::document_dispatch::DocumentCallBudget(128));
+    w.init_resource::<model_api::geometry_measurement::IsolatedEvaluationWorld>();
     w.init_resource::<ElementIdAllocator>();
     w.init_resource::<ParametricStore>();
     w.init_resource::<History>();

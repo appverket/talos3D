@@ -8,6 +8,12 @@ use crate::plugins::modeling::{
 };
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 
+/// Marks a renderer-less isolated evaluation world (candidate checks and
+/// scenarios). Only there may measurement use the presentation generator for a
+/// member that has no render mesh; a live app always measures its displayed mesh.
+#[derive(bevy::prelude::Resource, Default)]
+pub(crate) struct IsolatedEvaluationWorld;
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct Request {
     /// Omit to inspect the measurement contract without touching geometry.
@@ -73,7 +79,7 @@ pub fn inspect(world: &World, request: Request) -> Result<Value, String> {
     }
     // Isolated native scenarios have no renderer/assets. Use their existing
     // presentation generator only; never substitute authored geometry in a live app.
-    if world.contains_resource::<document_dispatch::DocumentCallBudget>() {
+    if world.contains_resource::<IsolatedEvaluationWorld>() {
         let rotation = world
             .get::<crate::plugins::modeling::primitives::ShapeRotation>(entity)
             .copied()
@@ -682,7 +688,7 @@ mod tests {
             },
         ));
         assert!(inspect(&world, req(0, 64)).is_err());
-        world.insert_resource(document_dispatch::DocumentCallBudget(4));
+        world.init_resource::<IsolatedEvaluationWorld>();
         assert_eq!(
             inspect(&world, req(0, 64)).unwrap()["source"],
             "native_mesh_generator"
