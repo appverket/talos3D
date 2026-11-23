@@ -1020,13 +1020,15 @@ pub(super) fn hook_tool_name(tool: &str) -> &str {
 }
 
 fn read_only_name(tool: &str) -> bool {
-    let leaf = tool.rsplit(['.', '_']).next().unwrap_or(tool);
+    // Namespaced tools (`parametric.get_type`) carry their verb after the last dot.
+    let operation = tool.rsplit('.').next().unwrap_or(tool);
+    let leaf = operation.rsplit('_').next().unwrap_or(operation);
     [
         "get", "list", "find", "query", "check", "validate", "describe", "explain", "inspect",
         "preview", "select", "discover", "summary", "info", "details",
     ]
     .iter()
-    .any(|verb| tool.starts_with(verb) || leaf == *verb)
+    .any(|verb| operation.starts_with(verb) || leaf == *verb)
 }
 
 fn requires_guidance(tool: &str) -> bool {
@@ -1112,6 +1114,25 @@ fn inactive_guidance_state() -> AgentGuidanceState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn namespaced_reads_do_not_require_guidance() {
+        for tool in [
+            "parametric.get_type",
+            "parametric.list_types",
+            "definition.get",
+            "mcp__talos__parametric.get_type",
+        ] {
+            assert!(!super::requires_guidance(tool), "{tool}");
+        }
+        for tool in [
+            "parametric.create",
+            "parametric.set_driver",
+            "definition.instantiate",
+        ] {
+            assert!(super::requires_guidance(tool), "{tool}");
+        }
+    }
+
     use super::*;
 
     fn ready_store(task: Option<&str>) -> GuidanceSessionStore {
