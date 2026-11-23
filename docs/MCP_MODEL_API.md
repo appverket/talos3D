@@ -1938,9 +1938,12 @@ create_entity and set_property expose CommandResult.output; occurrence.place
 exposes element_id. Neither a script nor a scenario implements domain behavior.
 
 The scenario runs in an empty isolated document, never a copy of a private
-project. Only public semantic descriptors are copied. It supports up to32 flat
-AuthoringScript calls and128 total native calls including candidate recipe steps.
-Recipe bodies are bounded flat scripts in this evaluator. Unsupported geometry
+project. Only public semantic descriptors are copied. It supports up to 32 flat
+AuthoringScript calls and 128 total native calls including candidate recipe steps.
+Candidate recipe bodies may use `repeat` blocks (at most 32 instructions per
+block, non-empty bodies) for regular series such as rafters or studs; every
+expanded call counts toward the shared 128-call budget. Calls to other recipe
+families are rejected because only the candidate is installed. Unsupported geometry
 and capabilities remain gaps; the current renderer covers boxes and profile
 extrusions. Scenario results are synthetic observations, not independent approval.
 

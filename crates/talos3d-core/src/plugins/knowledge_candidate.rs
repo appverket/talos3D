@@ -988,6 +988,114 @@ mod tests {
         }
     }
 
+    /// Candidate `recipe.v1` request whose AuthoringScript body is `steps`, run by a
+    /// scenario that instantiates it with `parameters`.
+    fn repeat_recipe_request(steps: Value, parameters: Value) -> (Request, Context) {
+        use crate::curation::provenance::{Confidence, Lineage, Provenance};
+        use crate::curation::{AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeBody};
+        use crate::plugins::refinement::{AgentId, RefinementState};
+        let script = serde_json::from_value(json!({
+            "parameter_schema":{"type":"object"},
+            "allowed_tools":["create_box"],"mutation_scope":{"kind":"project_root"},"steps":steps
+        }))
+        .unwrap();
+        let recipe = RecipeArtifact {
+            meta: CurationMeta::new(
+                AssetId("series".into()),
+                AssetKindId("recipe.v1".into()),
+                Provenance {
+                    author: AgentId("unit-test".into()),
+                    confidence: Confidence::High,
+                    lineage: Lineage::Freeform,
+                    rationale: Some("Synthetic regular-series fixture".into()),
+                    jurisdiction: None,
+                    catalog_dependencies: vec![],
+                    evidence: vec![],
+                },
+            ),
+            body: RecipeBody::AuthoringScript { script },
+            parameter_schema: json!({}),
+            target_class: "fixture".into(),
+            supported_refinement_states: vec![RefinementState::Schematic],
+            tests: vec![],
+        };
+        let mut req = request();
+        req.edits.clear();
+        req.asset.id = "series".into();
+        req.asset.kind = "recipe.v1".into();
+        req.asset.path_kind = "recipe".into();
+        req.asset.payload = serde_json::to_value(recipe).unwrap();
+        req.scenario = Some(serde_json::from_value(json!({"script":{
+            "parameter_schema":{},"allowed_tools":["instantiate_recipe"],"mutation_scope":{"kind":"project_root"},
+            "steps":[{"id":"recipe","tool":"instantiate_recipe","args":{
+                "family_id":{"expr":"literal","value":"series"},
+                "target_class":{"expr":"literal","value":"fixture"},
+                "target_state":{"expr":"literal","value":"Schematic"},
+                "parameters":{"expr":"literal","value":parameters}
+            }}]}})).unwrap());
+        let context = Context {classes:vec![serde_json::from_value(json!({"id":"fixture","label":"Fixture","description":"Synthetic fixture","semantic_roles":[],"class_min_obligations":{},"class_min_promotion_critical_paths":{},"parameter_schema":{}})).unwrap()],..Default::default()};
+        (req, context)
+    }
+
+    #[test]
+    fn candidate_recipe_repeat_is_executed_within_the_shared_call_budget() {
+        let member = json!({"id":"member","tool":"create_box","args":{
+            "centre":{"expr":"array","items":[
+                {"expr":"expr","formula":"i * 0.6"},{"expr":"literal","value":0},{"expr":"literal","value":1}]},
+            "half_extents":{"expr":"literal","value":[0.0225,0.06,1]}}});
+        let series = |count: Value, body: Value| json!([{"kind":"repeat","id":"series","var":"i","count":count,"body":body}]);
+        let run = |steps: Value, parameters: Value| {
+            let (mut req, context) = repeat_recipe_request(steps, parameters);
+            let script = req.scenario.take().unwrap();
+            scenario::evaluate(req, script, context)
+        };
+
+        let scene = run(
+            series(
+                json!({"expr":"param","name":"count"}),
+                json!([member.clone()]),
+            ),
+            json!({"count":5}),
+        )
+        .unwrap();
+        assert_eq!(
+            scene.report["geometry"]["element_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+
+        // Expansion beyond the shared nested budget is refused at execution time.
+        let error = run(
+            series(
+                json!({"expr":"literal","value":500}),
+                json!([member.clone()]),
+            ),
+            json!({}),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("budget") || error.contains("128"), "{error}");
+
+        // An empty body would loop without spending the budget.
+        let error = run(
+            series(json!({"expr":"literal","value":1000000}), json!([])),
+            json!({}),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("empty body"), "{error}");
+
+        let delegate = json!([{"kind":"call_recipe","id":"other","family_id":"elsewhere"}]);
+        assert!(run(delegate, json!({}))
+            .err()
+            .unwrap()
+            .contains("another recipe family"));
+        let error = run(json!(vec![member; 33]), json!({})).err().unwrap();
+        assert!(error.contains("at most 32"), "{error}");
+    }
+
     #[test]
     fn native_scenario_rejects_unbounded_programs_and_false_postconditions() {
         let call = json!({"id":"step","tool":"model_summary","args":{}});

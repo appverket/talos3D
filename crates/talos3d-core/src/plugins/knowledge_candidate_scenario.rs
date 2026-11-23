@@ -170,6 +170,44 @@ impl ToolDispatcher for Dispatcher<'_> {
     }
 }
 
+/// Portable candidate recipes may loop with `Repeat`; execution stays bounded by
+/// the scenario's shared nested native-call budget and entity cap. Delegation to
+/// other recipe families is excluded because only the candidate is installed.
+fn portable_recipe_steps(steps: &[ScriptInstruction], depth: usize) -> Result<(), String> {
+    const MAX_RECIPE_STEPS: usize = 32;
+    if steps.len() > MAX_RECIPE_STEPS {
+        return Err(format!(
+            "Candidate recipe has {} instructions in one block; at most {MAX_RECIPE_STEPS} are allowed (use repeat for regular series)",
+            steps.len()
+        ));
+    }
+    if depth >= crate::curation::authoring_script::MAX_CALL_RECIPE_DEPTH {
+        return Err("Candidate recipe repeat blocks are nested too deeply".into());
+    }
+    for step in steps {
+        match step {
+            ScriptInstruction::Call(_) => {}
+            ScriptInstruction::Repeat { id, body, .. } => {
+                // An empty body would iterate without spending the native-call budget.
+                if body.is_empty() {
+                    return Err(format!(
+                        "Candidate recipe repeat '{}' has an empty body",
+                        id.0
+                    ));
+                }
+                portable_recipe_steps(body, depth + 1)?;
+            }
+            ScriptInstruction::CallRecipe { id, .. } => {
+                return Err(format!(
+                    "Candidate recipe step '{}' calls another recipe family; portable candidates must inline calls or use repeat",
+                    id.0
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Result<Scene, String> {
     let started = std::time::Instant::now();
     if request.inspection_snapshot.is_some() {
@@ -192,14 +230,7 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
             .body
             .script()
             .ok_or("Only portable AuthoringScript recipes are executable")?;
-        if script.steps.len() > 32
-            || script
-                .steps
-                .iter()
-                .any(|step| !matches!(step, ScriptInstruction::Call(_)))
-        {
-            return Err("Candidate scenario recipe requires at most32 flat native calls".into());
-        }
+        portable_recipe_steps(&script.steps, 0)?;
         if script
             .allowed_tools
             .iter()
