@@ -174,13 +174,26 @@ impl Observation {
         if self.schema != OBSERVATION_SCHEMA || uuid::Uuid::parse_str(&self.event_id).is_err() {
             return Err("Invalid incident schema or event identity".into());
         }
-        let fields = self.applicability.fields();
-        if !identifier(&self.failure_code)
-            || !identifier(&self.app_revision)
-            || fields.iter().all(|v| v.is_none())
-            || !fields.into_iter().flatten().all(|v| identifier(v))
-        {
-            return Err("Incidents require bounded public failure/applicability identifiers; no prose, prompts or geometry".into());
+        let named = self.applicability.named_fields();
+        if named.iter().all(|(_, v)| v.is_none()) {
+            return Err("Incidents require at least one applicability identifier (gap_kind, element_class, path_kind, target_state, capability_id or contract_revision)".into());
+        }
+        let checked = [
+            ("failure_code", &self.failure_code),
+            ("app_revision", &self.app_revision),
+        ]
+        .into_iter()
+        .chain(
+            named
+                .into_iter()
+                .filter_map(|(n, v)| v.as_ref().map(|v| (n, v))),
+        );
+        for (name, value) in checked {
+            if !identifier(value) {
+                // Name the field and the rule so a caller corrects only that value
+                // instead of discarding valid specific fields such as capability_id.
+                return Err(format!("Incident field '{name}' must be 1..160 characters of letters, digits and . _ : - (no spaces, '@' or prose); other fields were accepted"));
+            }
         }
         if let Some(request) = &self.knowledge_request {
             request.validate()?;
@@ -1176,6 +1189,34 @@ fn write_pending(_: &Path, _: &[u8]) -> Result<(), String> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    #[test]
+    fn invalid_incident_field_is_named_so_specific_fields_survive() {
+        let observation = |app_revision: &str| super::Observation {
+            schema: super::OBSERVATION_SCHEMA.into(),
+            event_id: uuid::Uuid::new_v4().to_string(),
+            kind: super::ObservationKind::CorpusGap,
+            applicability: crate::plugins::curation::RemedyKey {
+                element_class: Some("roof_system".into()),
+                capability_id: Some("fink_truss_prefabricated".into()),
+                ..Default::default()
+            },
+            failure_code: "no_executable_path".into(),
+            app_revision: app_revision.into(),
+            export_authorized: false,
+            knowledge_request: None,
+        };
+        let error = observation("architecture.component_structure@83")
+            .validate_local()
+            .unwrap_err();
+        assert!(
+            error.contains("'app_revision'") && error.contains("'@'"),
+            "{error}"
+        );
+        observation("architecture.component_structure.83")
+            .validate_local()
+            .unwrap();
+    }
+
     #[cfg(feature = "model-api")]
     #[tokio::test]
     async fn submitted_status_uses_server_account_authority_after_token_renewal() {

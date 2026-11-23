@@ -51,13 +51,16 @@ pub struct RemedyKey {
 }
 impl RemedyKey {
     fn fields(&self) -> [&Option<String>; 6] {
+        self.named_fields().map(|(_, value)| value)
+    }
+    pub(crate) fn named_fields(&self) -> [(&'static str, &Option<String>); 6] {
         [
-            &self.gap_kind,
-            &self.element_class,
-            &self.path_kind,
-            &self.target_state,
-            &self.capability_id,
-            &self.contract_revision,
+            ("gap_kind", &self.gap_kind),
+            ("element_class", &self.element_class),
+            ("path_kind", &self.path_kind),
+            ("target_state", &self.target_state),
+            ("capability_id", &self.capability_id),
+            ("contract_revision", &self.contract_revision),
         ]
     }
     /// A release's declared constraints must all occur in the local observation.
