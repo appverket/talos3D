@@ -279,7 +279,14 @@ fn observations(world: &World, ids: Vec<u64>) -> Result<Value, String> {
             tolerance_m: None,
         },
     )?;
-    Ok(json!({"element_ids":ids,"world_aabb":aabb,"overlaps":overlaps,"floating":floating}))
+    // AABB overlaps of rotated members are mostly false positives; measure the
+    // actual solids so unmitred or overlapping joints are visible to the curator.
+    let pairs: Vec<[u64; 2]> = overlaps.overlaps.iter().map(|o| [o.a, o.b]).collect();
+    let member_joints =
+        model_api::geometry_measurement::interpenetrating_pairs(world, &pairs, 0.001);
+    Ok(
+        json!({"element_ids":ids,"world_aabb":aabb,"overlaps":overlaps,"floating":floating,"member_joints":member_joints}),
+    )
 }
 
 /// Transport each observed state once. References resolve within this same
@@ -1035,6 +1042,29 @@ mod tests {
             }}]}})).unwrap());
         let context = Context {classes:vec![serde_json::from_value(json!({"id":"fixture","label":"Fixture","description":"Synthetic fixture","semantic_roles":[],"class_min_obligations":{},"class_min_promotion_critical_paths":{},"parameter_schema":{}})).unwrap()],..Default::default()};
         (req, context)
+    }
+
+    #[test]
+    fn candidate_scenario_reports_interpenetrating_member_joints() {
+        let member = |id: &str, x: f64| {
+            json!({"id":id,"tool":"create_box","args":{
+            "centre":{"expr":"literal","value":[x,0,1]},
+            "half_extents":{"expr":"literal","value":[0.5,0.05,0.05]}}})
+        };
+        // Members overlapping 200 mm (ends not cut) and a member clear of both.
+        let (mut req, context) = repeat_recipe_request(
+            json!([member("a", 0.0), member("b", 0.8), member("c", 3.0)]),
+            json!({}),
+        );
+        let script = req.scenario.take().unwrap();
+        let scene = scenario::evaluate(req, script, context).unwrap();
+        let joints = &scene.report["geometry"]["member_joints"];
+        let found = joints["interpenetrating"].as_array().unwrap();
+        assert_eq!(found.len(), 1, "{joints}");
+        assert!(
+            (found[0]["penetration_depth_m"].as_f64().unwrap() - 0.1).abs() < 1e-4,
+            "{joints}"
+        );
     }
 
     #[test]

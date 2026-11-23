@@ -6963,7 +6963,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "inspect_element_geometry",
-        description = "Read bounded evaluated world-space triangle vertices and normals for one directly meshed element. Alternatively provide bounded pairs for minimum evaluated surface distances and nearest triangles; this does not classify solid containment or intended contact. Omit element_id and pairs to read the contract. Pages include a whole-mesh fingerprint; never combine different fingerprints. Uses native render meshes, not AABBs or authored parameter claims. Unsupported/aggregate geometry is an explicit error. No construction or release approval."
+        description = "Read bounded evaluated world-space triangle vertices and normals for one directly meshed element. Alternatively provide bounded pairs for minimum evaluated surface distances, solid interference (penetration depth and separation of the members' solids) and nearest triangles. Use pairs to verify joints between members that meet at an angle: penetration_depth_m > 0 means the members interpenetrate (ends not cut or mitred), minimum_surface_distance_m > 0 means a gap. Intended contact and tolerance remain the caller's judgment. Omit element_id and pairs to read the contract. Pages include a whole-mesh fingerprint; never combine different fingerprints. Uses native render meshes, not AABBs or authored parameter claims. Unsupported/aggregate geometry is an explicit error. No construction or release approval."
     )]
     pub(super) async fn inspect_element_geometry_tool(
         &self,
@@ -11992,8 +11992,9 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "check_overlaps",
         description = "Report pairwise AABB intersections among the given elements (or all \
-            authored entities when element_ids is empty). AABB-level only — false positives are \
-            possible for complex shapes. Capped at 500 pairs; sets truncated=true when the \
+            authored entities when element_ids is empty). AABB-level only — rotated or angled \
+            members almost always overlap here; measure their actual solids with \
+            inspect_element_geometry pairs (solid_interference). Capped at 500 pairs; sets truncated=true when the \
             candidate set exceeds the cap. Parent/child group-containment pairs are filtered out \
             when group membership data is available."
     )]
