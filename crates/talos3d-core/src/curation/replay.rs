@@ -570,21 +570,66 @@ fn merge_defaults(script: &AuthoringScript, mut params: Map<String, Value>) -> M
     params
 }
 
-/// Minimal JSON schema check for PP82: enforces `required` array (if
-/// any) has values present. Full JSON Schema compliance is future work.
+/// Applicability check for recipe parameters: every `required` key must be
+/// present, and each supplied value must satisfy its property's declared
+/// `type`, `enum`, `minimum`/`maximum` and `exclusiveMinimum`/`exclusiveMaximum`.
+/// A recipe's declared envelope is a contract; out-of-envelope requests are
+/// refused before any mutation instead of being silently authored.
 fn validate_param_schema(
     schema: &Value,
     params: &Map<String, Value>,
 ) -> Result<(), InvocationError> {
-    let Some(required) = schema.get("required").and_then(|r| r.as_array()) else {
+    let fail = |message: String| Err(InvocationError::ParameterSchemaFailed { message });
+    for key in schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !params.contains_key(key) {
+            return fail(format!("required parameter '{key}' missing"));
+        }
+    }
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
         return Ok(());
     };
-    for req in required {
-        let Some(key) = req.as_str() else { continue };
-        if !params.contains_key(key) {
-            return Err(InvocationError::ParameterSchemaFailed {
-                message: format!("required parameter '{key}' missing"),
-            });
+    for (key, rule) in properties {
+        let Some(value) = params.get(key) else { continue };
+        if let Some(kind) = rule.get("type").and_then(Value::as_str) {
+            let matches = match kind {
+                "number" => value.is_number(),
+                "integer" => value.as_i64().is_some() || value.as_u64().is_some()
+                    || value.as_f64().is_some_and(|v| v.fract() == 0.0),
+                "string" => value.is_string(),
+                "boolean" => value.is_boolean(),
+                "array" => value.is_array(),
+                "object" => value.is_object(),
+                _ => true,
+            };
+            if !matches {
+                return fail(format!("parameter '{key}' must be of type {kind}, got {value}"));
+            }
+        }
+        if let Some(allowed) = rule.get("enum").and_then(Value::as_array) {
+            if !allowed.contains(value) {
+                return fail(format!("parameter '{key}' = {value} is not one of {}", Value::Array(allowed.clone())));
+            }
+        }
+        let Some(number) = value.as_f64() else { continue };
+        let bound = |name: &str| rule.get(name).and_then(Value::as_f64);
+        let violation = [
+            ("minimum", bound("minimum").filter(|b| number < *b)),
+            ("maximum", bound("maximum").filter(|b| number > *b)),
+            ("exclusiveMinimum", bound("exclusiveMinimum").filter(|b| number <= *b)),
+            ("exclusiveMaximum", bound("exclusiveMaximum").filter(|b| number >= *b)),
+        ]
+        .into_iter()
+        .find_map(|(name, hit)| hit.map(|b| (name, b)));
+        if let Some((name, b)) = violation {
+            return fail(format!(
+                "parameter '{key}' = {number} is outside the recipe's declared envelope ({name} {b})"
+            ));
         }
     }
     Ok(())
@@ -1084,6 +1129,50 @@ mod tests {
         };
         let err = replay(&s, Map::new(), &mut d, &o).unwrap_err();
         assert!(matches!(err, InvocationError::ParameterSchemaFailed { .. }));
+    }
+
+    #[test]
+    fn replay_refuses_parameters_outside_declared_envelope_before_dispatch() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "width_mm": {"type": "number", "minimum": 2400, "maximum": 6000},
+                "count": {"type": "integer", "exclusiveMinimum": 0},
+                "finish": {"type": "string", "enum": ["timber", "steel"]}
+            }
+        });
+        let params = |v: Value| v.as_object().unwrap().clone();
+        let refused = |v: Value| {
+            matches!(
+                validate_param_schema(&schema, &params(v)),
+                Err(InvocationError::ParameterSchemaFailed { .. })
+            )
+        };
+        assert!(validate_param_schema(&schema, &params(serde_json::json!({"width_mm": 2400, "count": 2, "finish": "steel"}))).is_ok());
+        assert!(refused(serde_json::json!({"width_mm": 2000})));
+        assert!(refused(serde_json::json!({"width_mm": 6000.5})));
+        assert!(refused(serde_json::json!({"count": 0})));
+        assert!(refused(serde_json::json!({"count": 1.5})));
+        assert!(refused(serde_json::json!({"finish": "concrete"})));
+        assert!(refused(serde_json::json!({"width_mm": "wide"})));
+
+        use super::super::authoring_script::{ScriptInstruction, Step};
+        let mut s = AuthoringScript::stub(MutationScope::None);
+        s.allowed_tools.insert(tool("t"));
+        s.parameter_schema = schema.clone();
+        s.steps.push(ScriptInstruction::Call(Step {
+            id: StepId::new("a"),
+            tool: tool("t"),
+            args: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+            essential: true,
+            precondition: None,
+        }));
+        let mut d = FixtureDispatcher::new(vec![Value::Null]);
+        let o = FixtureOracle { fail_relation_kind: None };
+        let err = replay(&s, params(serde_json::json!({"width_mm": 2000})), &mut d, &o).unwrap_err();
+        assert!(matches!(err, InvocationError::ParameterSchemaFailed { .. }));
+        assert!(d.calls.is_empty(), "no tool may run for an out-of-envelope request");
     }
 
     #[test]
