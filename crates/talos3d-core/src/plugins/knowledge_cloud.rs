@@ -588,6 +588,7 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
                 registry.register_placement_contract(&a.id, contract);
             }
             registry.register_driver_bounds(&a.id, bounds)?;
+            registry.register_knowledge_revision(&a.id, &admitted.revision);
             a.id.clone()
         }
         "definition_library.v1" => {
@@ -1097,6 +1098,22 @@ mod tests {
             decode::<ParametricPayload>(json!({"definition":definition,"driver_bounds":bounds}))
                 .unwrap_or_else(|e| panic!("top-level bounds decode: {e}"));
         assert_eq!(placed.driver_bounds.len(), 1);
+
+        // Installation records the exact admitted revision for later grounding.
+        let mut admitted = passage("strict-rev");
+        admitted.asset.id = "test.strict".into();
+        admitted.asset.kind = "parametric_type.v1".into();
+        admitted.asset.path_kind = "parametric".into();
+        admitted.asset.payload = json!({"definition":definition,"driver_bounds":bounds});
+        let mut world = World::new();
+        world.init_resource::<evaluation::Observations>();
+        install(&mut world, admitted).unwrap();
+        assert_eq!(
+            world
+                .resource::<crate::relational::registry::ParametricRegistry>()
+                .knowledge_revision("test.strict"),
+            Some("strict-rev")
+        );
 
         let mut asset = passage("r").asset;
         asset.payload["unread"] = json!(true);

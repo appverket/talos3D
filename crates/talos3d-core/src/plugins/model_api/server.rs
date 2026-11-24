@@ -9164,7 +9164,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "get_claim_grounding",
-        description = "Get per-claim grounding for an entity, optionally filtered to a specific claim path. The is_promotion_critical flag is false in PP70 (element-class descriptors land in PP74)."
+        description = "Get per-claim grounding for an entity, optionally filtered to a specific claim path. Members generated from shared knowledge carry a runtime-stamped ReleasedKnowledge grounding with asset_id, asset_kind and the exact content_hash that produced them; agents cannot supply it. The is_promotion_critical flag is false in PP70 (element-class descriptors land in PP74)."
     )]
     pub(super) async fn get_claim_grounding_tool(
         &self,

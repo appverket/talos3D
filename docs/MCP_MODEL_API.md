@@ -895,6 +895,13 @@ Declared native recipe refinement limits are enforced before generation.
 
 Saved projects retain obligations, claim grounding and refinement-branch
 metadata as generic semantic sidecars, including on groups and relations.
+Members of a parametric instance created from an installed shared-knowledge
+type are grounded `ReleasedKnowledge {asset_id, asset_kind, content_hash}` on
+their `parametric_source` claim. The revision is pinned with the instance's
+definition (`parametric.inspect` returns it as `knowledge_revision`), so driver
+edits, undo/redo, save/reload and later releases keep pointing at the revision
+that actually produced the geometry. Compiled or private types keep their
+previous heuristic grounding.
 JSON numeric controls use the dependency's `float_roundtrip` parser feature so
 save/reload does not alter their values or fingerprint inputs. Older files
 without these sidecars remain readable; missing historical decisions are not

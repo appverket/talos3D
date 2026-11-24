@@ -631,11 +631,25 @@ pub enum Grounding {
     /// The `RecipeFamilyId` newtype in `capability_registry` converts to/from
     /// this via `RecipeFamilyId(String)`.
     GeneratedByRecipe(String),
+    /// Produced by executing exact released (or candidate-under-evaluation)
+    /// shared knowledge. The runtime stamps the installed revision; an agent
+    /// cannot supply it.
+    ReleasedKnowledge(KnowledgeRevisionRef),
     /// Derived from LLM implicit knowledge; requires rationale + tag.
     LLMHeuristic {
         rationale: String,
         heuristic_tag: HeuristicTag,
     },
+}
+
+/// Exact shared-knowledge revision that produced an element.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct KnowledgeRevisionRef {
+    pub asset_id: String,
+    pub asset_kind: String,
+    /// Content hash of the installed asset revision.
+    pub content_hash: String,
 }
 
 /// A single grounded claim record.

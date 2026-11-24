@@ -346,6 +346,8 @@ pub struct ParametricRegistry {
     types: BTreeMap<String, ParametricTypeDef>,
     placement_contracts: BTreeMap<String, ParametricPlacementContract>,
     driver_bounds: BTreeMap<String, BTreeMap<String, DriverBounds>>,
+    /// Content hash of the installed shared-knowledge revision per type id.
+    knowledge_revisions: BTreeMap<String, String>,
 }
 
 /// Declared applicability range of one driver, in the driver's own unit.
@@ -441,7 +443,18 @@ impl ParametricRegistry {
     pub fn remove(&mut self, id: &str) -> Option<ParametricTypeDef> {
         self.placement_contracts.remove(id);
         self.driver_bounds.remove(id);
+        self.knowledge_revisions.remove(id);
         self.types.remove(id)
+    }
+
+    /// Record the exact installed knowledge revision that registered `type_id`.
+    pub fn register_knowledge_revision(&mut self, type_id: &str, content_hash: &str) {
+        self.knowledge_revisions
+            .insert(type_id.to_string(), content_hash.to_string());
+    }
+
+    pub fn knowledge_revision(&self, type_id: &str) -> Option<&str> {
+        self.knowledge_revisions.get(type_id).map(String::as_str)
     }
 
     pub fn register(&mut self, def: ParametricTypeDef) {
@@ -553,6 +566,10 @@ pub struct ParametricInstance {
     /// Element IDs of spawned geometry entities (updated by synthesis / re-synthesis).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub geometry: Vec<u64>,
+    /// Shared-knowledge revision pinned with `definition` at creation, so
+    /// re-synthesis keeps grounding members in the revision actually used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_revision: Option<String>,
 }
 
 /// Snapshot returned to the inspect UX.
@@ -566,6 +583,10 @@ pub struct ParametricSnapshot {
     pub drivers: BTreeMap<String, Value>,
     /// derived name -> computed value
     pub derived: BTreeMap<String, Value>,
+    /// Content hash of the shared-knowledge revision this instance was
+    /// created from; absent for private or compiled types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_revision: Option<String>,
 }
 
 /// Store of live parametric instances (Bevy resource).
@@ -609,6 +630,7 @@ impl ParametricStore {
                 definition: None,
                 placement,
                 geometry: Vec::new(),
+                knowledge_revision: None,
             },
         );
         id
@@ -632,10 +654,16 @@ impl ParametricStore {
     }
 
     /// Pin only to this authored instance; file contents cannot publish a type.
-    pub fn pin_definition(&mut self, id: u64, mut definition: ParametricTypeDef) {
+    pub fn pin_definition(
+        &mut self,
+        id: u64,
+        mut definition: ParametricTypeDef,
+        knowledge_revision: Option<String>,
+    ) {
         definition.public = false;
         if let Some(instance) = self.instances.get_mut(&id) {
             instance.definition = Some(definition);
+            instance.knowledge_revision = knowledge_revision;
         }
     }
 
@@ -714,6 +742,7 @@ impl ParametricStore {
             label: def.label.clone(),
             drivers,
             derived,
+            knowledge_revision: inst.knowledge_revision.clone(),
         })
     }
 

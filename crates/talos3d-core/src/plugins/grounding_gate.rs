@@ -108,7 +108,9 @@ pub fn project_grounding(g: &Grounding) -> GroundingTag {
         Grounding::ExplicitRule(_) | Grounding::CatalogRow(_) | Grounding::Imported(_) => {
             GroundingTag::SourceBacked
         }
-        Grounding::GeneratedByRecipe(_) | Grounding::Refined(_) => GroundingTag::PolicyBacked,
+        Grounding::GeneratedByRecipe(_)
+        | Grounding::Refined(_)
+        | Grounding::ReleasedKnowledge(_) => GroundingTag::PolicyBacked,
         Grounding::LLMHeuristic { .. } => GroundingTag::Unresolved,
     }
 }
