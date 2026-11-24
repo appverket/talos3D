@@ -160,6 +160,57 @@ impl EditorCommand for Command {
             .collect()
     }
 }
+/// Members and their instance record leave and return together, so a deleted
+/// parametric instance never leaves a dangling record that blocks saving.
+struct DeleteInstances {
+    states: Vec<State>,
+}
+impl EditorCommand for DeleteInstances {
+    fn label(&self) -> &'static str {
+        "Delete parametric instance"
+    }
+    fn apply(&mut self, world: &mut World) {
+        for state in &self.states {
+            install(world, None, Some(state), state.instance.instance_id);
+        }
+    }
+    fn undo(&mut self, world: &mut World) {
+        for state in self.states.iter().rev() {
+            install(world, Some(state), None, state.instance.instance_id);
+        }
+    }
+}
+
+/// Split a deletion: any selected parametric member deletes its whole instance
+/// (members are generated, not independently authored). Returns the instance
+/// command, if any, and the remaining ordinary ids.
+pub(crate) fn split_delete(
+    world: &World,
+    ids: &[ElementId],
+) -> (Option<Box<dyn EditorCommand>>, Vec<ElementId>) {
+    let Some(store) = world.get_resource::<ParametricStore>() else {
+        return (None, ids.to_vec());
+    };
+    let selected: std::collections::HashSet<u64> = ids.iter().map(|id| id.0).collect();
+    let states: Vec<State> = store
+        .instances()
+        .filter(|i| i.geometry.iter().any(|g| selected.contains(g)))
+        .filter_map(|i| capture(world, i.instance_id).ok())
+        .collect();
+    let covered: std::collections::HashSet<u64> = states
+        .iter()
+        .flat_map(|s| s.instance.geometry.iter().copied())
+        .collect();
+    let rest = ids
+        .iter()
+        .copied()
+        .filter(|id| !covered.contains(&id.0))
+        .collect();
+    let command = (!states.is_empty())
+        .then(|| Box::new(DeleteInstances { states }) as Box<dyn EditorCommand>);
+    (command, rest)
+}
+
 fn prepare(world: &mut World, id: Option<u64>) -> Result<(World, Option<State>), String> {
     if world.contains_resource::<crate::plugins::document_state::ReadOnlyDocument>() {
         return Err("Read-only document".into());

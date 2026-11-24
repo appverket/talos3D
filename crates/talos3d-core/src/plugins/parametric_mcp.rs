@@ -33,7 +33,7 @@ use crate::relational::registry::{
 use crate::relational::transform::{TransformAxis, TransformGesture, TransformOutcome};
 
 #[path = "parametric_edit.rs"]
-mod edit;
+pub(crate) mod edit;
 
 // --- request / response DTOs -----------------------------------------------
 
@@ -339,6 +339,9 @@ fn direct_create(
 
     if let Some(contract) = reg.placement_contract(&effective_type_id) {
         contract.validate(&placement)?;
+    }
+    if let Some(def) = reg.get(&effective_type_id) {
+        reg.check_drivers(&effective_type_id, &def.effective_drivers(&req.overrides))?;
     }
 
     let instance_id = {
@@ -1225,6 +1228,58 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_parametric_member_deletes_the_instance_and_keeps_saves_valid() {
+        use crate::plugins::history::{
+            apply_pending_history_commands, History, PendingCommandQueue,
+        };
+        let mut app = app();
+        let w = app.world_mut();
+        w.init_resource::<History>();
+        w.init_resource::<PendingCommandQueue>();
+        let created = world_create(
+            w,
+            CreateParametricRequest {
+                type_id: "test.repr_box".into(),
+                ..default()
+            },
+        )
+        .unwrap();
+        let id = created.snapshot.instance_id;
+        let members = |w: &mut World| {
+            w.query::<&ElementId>()
+                .iter(w)
+                .map(|e| e.0)
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let valid = |w: &mut World| {
+            let ids = members(w);
+            w.resource_mut::<ParametricStore>().validate_document(&ids)
+        };
+        // Selecting one generated member deletes the whole instance as one step.
+        let (command, rest) = edit::split_delete(w, &[ElementId(created.element_ids[0])]);
+        assert!(rest.is_empty());
+        w.resource_mut::<PendingCommandQueue>()
+            .commands
+            .push(command.unwrap());
+        apply_pending_history_commands(w);
+        assert!(w.resource::<ParametricStore>().get(id).is_none());
+        assert_eq!(w.query::<&ProfileExtrusion>().iter(w).count(), 0);
+        assert!(valid(w).is_ok(), "no dangling instance record blocks save");
+        w.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands(w);
+        assert_eq!(
+            w.resource::<ParametricStore>().get(id).unwrap().geometry,
+            created.element_ids
+        );
+        assert_eq!(w.query::<&ProfileExtrusion>().iter(w).count(), 2);
+        assert!(valid(w).is_ok());
+        w.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands(w);
+        assert!(w.resource::<ParametricStore>().get(id).is_none());
+        assert!(valid(w).is_ok());
+    }
+
+    #[test]
     fn set_driver_resynthesize_replaces_geometry() {
         let mut app = app();
         let w = app.world_mut();
@@ -1264,6 +1319,71 @@ mod tests {
         // Instance geometry list must be updated.
         let store = w.resource::<ParametricStore>();
         assert_eq!(store.get(instance_id).unwrap().geometry, new_ids);
+    }
+
+    #[test]
+    fn declared_driver_bounds_refuse_create_and_edit_without_geometry() {
+        use crate::relational::registry::DriverBounds;
+        let mut app = app();
+        let w = app.world_mut();
+        let bounds = BTreeMap::from([(
+            "width".to_string(),
+            DriverBounds {
+                min: Some(500.0),
+                max: Some(2000.0),
+            },
+        )]);
+        w.resource_mut::<ParametricRegistry>()
+            .register_driver_bounds("test.repr_box", bounds)
+            .unwrap();
+        let entities = |w: &mut World| {
+            w.query::<&crate::plugins::identity::ElementId>()
+                .iter(w)
+                .count()
+        };
+        let before = entities(w);
+        let refused = world_create(
+            w,
+            CreateParametricRequest {
+                type_id: "test.repr_box".into(),
+                overrides: BTreeMap::from([("width".to_string(), json!(3000.0))]),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            refused.contains("outside the declared applicability range"),
+            "{refused}"
+        );
+        assert_eq!(entities(w), before, "a refused create emits no geometry");
+
+        let created = world_create(
+            w,
+            CreateParametricRequest {
+                type_id: "test.repr_box".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = created.snapshot.instance_id;
+        let edit = world_set_driver(
+            w,
+            SetParametricDriverRequest {
+                instance_id: id,
+                name: "width".into(),
+                value: json!(100.0),
+            },
+        );
+        assert!(edit.is_err(), "out-of-range driver edits are refused");
+        assert_eq!(
+            w.resource::<ParametricStore>()
+                .get(id)
+                .unwrap()
+                .overrides
+                .get("width"),
+            None,
+            "a refused edit leaves the instance unchanged"
+        );
     }
 
     // ---- P2a: provenance components are attached ---------------------------

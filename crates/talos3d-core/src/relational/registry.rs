@@ -345,6 +345,64 @@ fn evaluate_members(
 pub struct ParametricRegistry {
     types: BTreeMap<String, ParametricTypeDef>,
     placement_contracts: BTreeMap<String, ParametricPlacementContract>,
+    driver_bounds: BTreeMap<String, BTreeMap<String, DriverBounds>>,
+}
+
+/// Declared applicability range of one driver, in the driver's own unit.
+/// Creation and driver edits outside the range are refused before any geometry
+/// is emitted, so a type can enforce the envelope it claims.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct DriverBounds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+}
+
+impl DriverBounds {
+    /// Bounds must name declared drivers, be finite and ordered, and admit the defaults.
+    pub fn validate_all(
+        def: &ParametricTypeDef,
+        bounds: &BTreeMap<String, DriverBounds>,
+    ) -> Result<(), String> {
+        for (name, b) in bounds {
+            if !def.driver_units.contains_key(name) {
+                return Err(format!("driver_bounds names unknown driver '{name}'"));
+            }
+            if b.min.or(b.max).is_none()
+                || [b.min, b.max].iter().flatten().any(|v| !v.is_finite())
+                || matches!((b.min, b.max), (Some(lo), Some(hi)) if lo > hi)
+            {
+                return Err(format!(
+                    "driver_bounds for '{name}' must be finite with min <= max"
+                ));
+            }
+        }
+        check_bounds(bounds, &def.effective_drivers(&BTreeMap::new()))
+            .map_err(|e| format!("default drivers violate driver_bounds: {e}"))
+    }
+}
+
+fn check_bounds(
+    bounds: &BTreeMap<String, DriverBounds>,
+    drivers: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    for (name, b) in bounds {
+        let Some(v) = drivers.get(name).and_then(Value::as_f64) else {
+            continue;
+        };
+        if b.min.is_some_and(|lo| v < lo) || b.max.is_some_and(|hi| v > hi) {
+            let bound = |o: Option<f64>| o.map_or("unbounded".to_string(), |v| v.to_string());
+            return Err(format!(
+                "driver '{name}' = {v} is outside the declared applicability range [{}, {}]; the type refuses rather than emit unsupported geometry",
+                bound(b.min),
+                bound(b.max)
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Declares axes whose member coordinates already include an absolute datum
@@ -382,6 +440,7 @@ impl ParametricPlacementContract {
 impl ParametricRegistry {
     pub fn remove(&mut self, id: &str) -> Option<ParametricTypeDef> {
         self.placement_contracts.remove(id);
+        self.driver_bounds.remove(id);
         self.types.remove(id)
     }
 
@@ -399,6 +458,40 @@ impl ParametricRegistry {
 
     pub fn placement_contract(&self, type_id: &str) -> Option<&ParametricPlacementContract> {
         self.placement_contracts.get(type_id)
+    }
+
+    /// Register validated driver bounds for a registered type.
+    pub fn register_driver_bounds(
+        &mut self,
+        type_id: &str,
+        bounds: BTreeMap<String, DriverBounds>,
+    ) -> Result<(), String> {
+        let def = self
+            .types
+            .get(type_id)
+            .ok_or_else(|| format!("unknown parametric type '{type_id}'"))?;
+        DriverBounds::validate_all(def, &bounds)?;
+        if bounds.is_empty() {
+            self.driver_bounds.remove(type_id);
+        } else {
+            self.driver_bounds.insert(type_id.to_string(), bounds);
+        }
+        Ok(())
+    }
+
+    pub fn driver_bounds(&self, type_id: &str) -> Option<&BTreeMap<String, DriverBounds>> {
+        self.driver_bounds.get(type_id)
+    }
+
+    /// Refuse effective drivers outside the type's declared bounds.
+    pub fn check_drivers(
+        &self,
+        type_id: &str,
+        drivers: &BTreeMap<String, Value>,
+    ) -> Result<(), String> {
+        self.driver_bounds
+            .get(type_id)
+            .map_or(Ok(()), |bounds| check_bounds(bounds, drivers))
     }
 
     /// Register an ephemeral (runtime-only, non-public) type and return its
@@ -660,6 +753,11 @@ impl ParametricStore {
             let _ = comp.set_driver(&k, v, &derive);
         }
         let report = comp.set_driver(name, value.clone(), &derive)?;
+        let mut proposed = inst.overrides.clone();
+        proposed.insert(name.to_string(), value.clone());
+        registry
+            .check_drivers(&inst.type_id, &def.effective_drivers(&proposed))
+            .map_err(DriverEditError::OutOfBounds)?;
         inst.overrides.insert(name.to_string(), value);
         Ok(report)
     }
@@ -933,6 +1031,34 @@ mod tests {
                 members: vec![m0, m1],
             }),
         }
+    }
+
+    #[test]
+    fn driver_bounds_must_name_drivers_be_ordered_and_admit_defaults() {
+        let mut reg = ParametricRegistry::default();
+        reg.register(repr_type());
+        let one =
+            |name: &str, min, max| BTreeMap::from([(name.to_string(), DriverBounds { min, max })]);
+        assert!(reg
+            .register_driver_bounds("test.repr", one("nope", Some(0.0), None))
+            .is_err());
+        assert!(reg
+            .register_driver_bounds("test.repr", one("w", Some(2.0), Some(1.0)))
+            .is_err());
+        assert!(reg
+            .register_driver_bounds("test.repr", one("w", None, None))
+            .is_err());
+        // The default w = 1000 must lie inside the declared range.
+        assert!(reg
+            .register_driver_bounds("test.repr", one("w", Some(1500.0), None))
+            .is_err());
+        reg.register_driver_bounds("test.repr", one("w", Some(500.0), Some(2000.0)))
+            .unwrap();
+        let w = |v: f64| BTreeMap::from([("w".to_string(), Value::from(v))]);
+        assert!(reg.check_drivers("test.repr", &w(2000.0)).is_ok());
+        assert!(reg.check_drivers("test.repr", &w(2000.5)).is_err());
+        reg.remove("test.repr");
+        assert!(reg.driver_bounds("test.repr").is_none());
     }
 
     #[test]

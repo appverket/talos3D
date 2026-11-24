@@ -348,12 +348,12 @@ fn queue_delete_entities_commands(world: &mut World) {
     let history_commands: Vec<Box<dyn EditorCommand>> = commands
         .iter()
         .filter_map(|command| {
-            let (snapshots, repair_before, repair_after) =
-                capture_delete_snapshots(world, &command.element_ids);
-            if snapshots.is_empty() {
-                return None;
-            }
-            if repair_before.is_empty() {
+            let (parametric, rest) =
+                crate::plugins::parametric_mcp::edit::split_delete(world, &command.element_ids);
+            let (snapshots, repair_before, repair_after) = capture_delete_snapshots(world, &rest);
+            let ordinary = if snapshots.is_empty() {
+                None
+            } else if repair_before.is_empty() {
                 Some(Box::new(DeleteEntitiesHistoryCommand { snapshots }) as Box<dyn EditorCommand>)
             } else {
                 Some(Box::new(DeleteWithAggregateRepairCommand {
@@ -361,6 +361,13 @@ fn queue_delete_entities_commands(world: &mut World) {
                     repair_before,
                     repair_after,
                 }) as Box<dyn EditorCommand>)
+            };
+            match (ordinary, parametric) {
+                (Some(a), Some(b)) => Some(crate::plugins::history::group(
+                    "Delete selection",
+                    vec![a, b],
+                )),
+                (a, b) => a.or(b),
             }
         })
         .collect();

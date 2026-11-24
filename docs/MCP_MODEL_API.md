@@ -1779,6 +1779,21 @@ separate GPU render layer; the response contains the exact candidate hash,
 observations and inline PNG. No candidate registry or authored entity enters the
 open document, and no file is read or written by this operation.
 
+Observations also include `member_joints`: AABB-overlapping member pairs are
+measured with exact convex-hull separating axes, and any pair that
+interpenetrates by more than 1 mm is listed under `interpenetrating`. Members
+that meet at an angle should be cut or mitred so the list stays empty.
+
+A `parametric_type.v1` payload may declare `driver_bounds`, a per-driver
+`{min, max}` applicability range in the driver's unit. Bounds must name declared
+drivers and admit the defaults. `parametric.create` and driver edits outside a
+range are refused before any geometry is emitted, so a type enforces the
+envelope it claims rather than silently emitting unsupported geometry.
+
+Deleting any member of a parametric instance deletes the whole instance as one
+undoable step: generated members and the instance record leave and return
+together.
+
 One evaluation runs at a time, bounded to 128 members, 16 edits, 100,000 vertices
 and a 768-square image. Expression evaluation and mesh preparation run off the
 frame thread; rendering uses the existing Bevy mesh and material pipeline.

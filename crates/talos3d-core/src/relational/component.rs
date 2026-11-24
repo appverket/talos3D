@@ -93,6 +93,8 @@ pub enum DriverEditError {
     ReadOnly(String),
     /// The driver is locked; edits must use the lock/inversion workflow.
     Locked(String),
+    /// The value is outside the type's declared driver bounds.
+    OutOfBounds(String),
 }
 
 impl std::fmt::Display for DriverEditError {
@@ -104,6 +106,7 @@ impl std::fmt::Display for DriverEditError {
                 "'{n}' is a derived value; it cannot be overridden directly (re-derive or use the lock/inversion workflow)"
             ),
             Self::ReadOnly(n) => write!(f, "driver '{n}' is read-only"),
+            Self::OutOfBounds(reason) => f.write_str(reason),
             Self::Locked(n) => write!(
                 f,
                 "driver '{n}' is locked; edit via the lock/inversion workflow"

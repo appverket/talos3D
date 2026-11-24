@@ -71,6 +71,14 @@ pub trait EditorCommand: Send + Sync + 'static {
     }
 }
 
+/// One undoable step made of several commands, applied in order.
+pub(crate) fn group(
+    label: &'static str,
+    commands: Vec<Box<dyn EditorCommand>>,
+) -> Box<dyn EditorCommand> {
+    Box::new(GroupedCommand { label, commands })
+}
+
 struct GroupedCommand {
     label: &'static str,
     commands: Vec<Box<dyn EditorCommand>>,

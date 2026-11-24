@@ -437,6 +437,10 @@ struct ParametricPayload {
     definition: crate::relational::registry::ParametricTypeDef,
     #[serde(default)]
     placement_contract: Option<crate::relational::registry::ParametricPlacementContract>,
+    /// Optional applicability range per driver (driver unit). parametric.create
+    /// and driver edits outside a range are refused before geometry is emitted.
+    #[serde(default)]
+    driver_bounds: BTreeMap<String, crate::relational::registry::DriverBounds>,
 }
 
 pub fn payload_schema(kind: &str) -> Result<Value, String> {
@@ -549,9 +553,11 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
             let payload: ParametricPayload = decode(a.payload.clone())?;
             let definition = payload.definition;
             let contract = payload.placement_contract;
+            let bounds = payload.driver_bounds;
             if definition.id != a.id {
                 return Err("Parametric identity must match asset identity".into());
             }
+            crate::relational::registry::DriverBounds::validate_all(&definition, &bounds)?;
             // Exercise expression/driver validation through the existing substrate.
             if let Some(result) = definition.evaluate_representation(&BTreeMap::new()) {
                 result?;
@@ -570,6 +576,7 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
             if let Some(contract) = contract {
                 registry.register_placement_contract(&a.id, contract);
             }
+            registry.register_driver_bounds(&a.id, bounds)?;
             a.id.clone()
         }
         "definition_library.v1" => {
@@ -1171,6 +1178,8 @@ mod tests {
             parametric["payload_schema"]["required"],
             json!(["definition"])
         );
+        // Curators can declare an enforced applicability envelope per driver.
+        assert!(parametric["payload_schema"]["properties"]["driver_bounds"].is_object());
         let library = payload_schema("definition_library.v1").unwrap();
         let properties = &library["payload_schema"]["$defs"]["Definition"]["properties"];
         assert!(properties["body"].is_object());
