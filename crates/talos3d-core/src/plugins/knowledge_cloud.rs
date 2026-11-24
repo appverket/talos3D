@@ -272,8 +272,19 @@ pub fn read_installed_passage(world: &World, admitted: AdmittedAsset) -> Result<
     Ok(value)
 }
 
+/// Strict payload decoder shared by candidate checks and installation. A field
+/// the runtime would ignore (unknown or misplaced, e.g. a nested copy of a
+/// top-level option) is refused with its path instead of silently dropping a
+/// declared constraint.
 fn decode<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, String> {
-    serde_json::from_value(v).map_err(|e| e.to_string())
+    let mut ignored = Vec::new();
+    let decoded = serde_ignored::deserialize(v, |path| ignored.push(path.to_string()))
+        .map_err(|e| e.to_string())?;
+    if !ignored.is_empty() {
+        return Err(json!({"code":"UnknownPayloadFields","ignored_paths":ignored,
+            "notice":"The runtime decoder does not read these fields, so they would have no effect. Move or remove them; get_knowledge_payload_schema returns the exact accepted shape."}).to_string());
+    }
+    Ok(decoded)
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -954,12 +965,21 @@ pub fn legacy_get(world: &World, request: LegacyRequest) -> Result<Value, String
         return Err("Not an exposed shared legacy asset".into());
     }
     let payload = match request.kind.as_str() {
-        "parametric_type.v1" => super::parametric_mcp::world_get_type(
-            world,
-            super::parametric_mcp::GetParametricTypeRequest {
-                type_id: request.id.clone(),
-            },
-        )?,
+        "parametric_type.v1" => {
+            // Snapshot the decodable payload shape, not the inspection wrapper.
+            let inspection = super::parametric_mcp::world_get_type(
+                world,
+                super::parametric_mcp::GetParametricTypeRequest {
+                    type_id: request.id.clone(),
+                },
+            )?;
+            let bounds = world
+                .get_resource::<crate::relational::registry::ParametricRegistry>()
+                .and_then(|r| r.driver_bounds(&request.id).cloned())
+                .unwrap_or_default();
+            json!({"definition":inspection["definition"],
+                "placement_contract":inspection["placement_contract"],"driver_bounds":bounds})
+        }
         "definition_library.v1" => serde_json::to_value(
             world
                 .resource::<super::modeling::definition::DefinitionLibraryRegistry>()
@@ -1047,6 +1067,52 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn misplaced_or_unknown_payload_fields_are_refused_not_dropped() {
+        use crate::relational::component::{ComponentParams, DriverPolicy};
+        use crate::relational::{
+            param_expr::Unit, registry::ParametricTypeDef, transform::TransformBindings,
+        };
+        let definition = ParametricTypeDef {
+            id: "test.strict".into(),
+            label: "Strict".into(),
+            params: ComponentParams::default().driver("w", DriverPolicy::Editable),
+            driver_units: BTreeMap::from([("w".into(), Unit::Mm)]),
+            defaults: BTreeMap::from([("w".into(), 100.0)]),
+            derivations: BTreeMap::new(),
+            transform: TransformBindings::default(),
+            public: true,
+            representation: None,
+        };
+        let bounds = json!({"w":{"min":100,"max":100}});
+        let mut nested = serde_json::to_value(&definition).unwrap();
+        nested["driver_bounds"] = bounds.clone();
+        let error = decode::<ParametricPayload>(json!({"definition":nested}))
+            .err()
+            .expect("a bound nested inside definition must not be silently dropped");
+        let error: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["code"], "UnknownPayloadFields");
+        assert_eq!(error["ignored_paths"], json!(["definition.driver_bounds"]));
+        let placed =
+            decode::<ParametricPayload>(json!({"definition":definition,"driver_bounds":bounds}))
+                .unwrap_or_else(|e| panic!("top-level bounds decode: {e}"));
+        assert_eq!(placed.driver_bounds.len(), 1);
+
+        let mut asset = passage("r").asset;
+        asset.payload["unread"] = json!(true);
+        let refused = check_candidate(CandidateCheck {
+            asset,
+            driver_cases: vec![],
+            catalog_queries: vec![],
+        })
+        .err()
+        .expect("candidate checks share the strict installer decoder");
+        assert!(
+            refused.contains("UnknownPayloadFields") && refused.contains("unread"),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn legacy_pattern_capture_is_exact_inspection_not_executable_admission() {
         use crate::capability_registry::{AssemblyPatternDescriptor, CapabilityRegistry};

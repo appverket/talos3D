@@ -183,13 +183,34 @@ pub fn asset_execution(
     }) else {
         return;
     };
-    record(
-        world,
-        json!({"operation":operation, "asset_id":id,
+    let mut event = json!({"operation":operation, "asset_id":id,
         "asset_kind":kind, "content_hash":asset.revision,
         "request_sha256":digest(request), "response_sha256":digest(result),
-        "execution_succeeded":true}),
-    );
+        "execution_succeeded":true});
+    // Bind authored elements to the exact revision that produced them, so a
+    // reviewer need not infer provenance from request/response hashes.
+    let ids = authored_element_ids(result);
+    if !ids.is_empty() {
+        event["authored_element_ids"] = json!(ids);
+    }
+    record(world, event);
+}
+/// Element ids reported by any executable path's result shape.
+fn authored_element_ids(result: &Value) -> Vec<u64> {
+    let mut ids: Vec<u64> = ["element_id", "root_element_id", "group_element_id"]
+        .iter()
+        .filter_map(|key| result[key].as_u64())
+        .chain(
+            ["element_ids", "created_element_ids"]
+                .iter()
+                .filter_map(|key| result[key].as_array())
+                .flatten()
+                .filter_map(Value::as_u64),
+        )
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 pub fn catalog_scope_probe(world: &World, provider: &str, requested: &str, result: &Value) {
     record(
@@ -341,6 +362,21 @@ mod tests {
         assert_eq!(event["asset_id"], "asset.test");
         assert_eq!(event["request_sha256"], digest(&json!({"input":1})));
         assert_eq!(event["response_sha256"], digest(&json!({"result":2})));
+        assert!(event.get("authored_element_ids").is_none());
+        let result = json!({"root_element_id":7,"group_element_id":9,"created_element_ids":[8,7]});
+        asset_execution(
+            &world,
+            "recipe.v1",
+            "test",
+            "instantiate_recipe",
+            &json!({}),
+            &result,
+        );
+        let value = snapshot(&world);
+        assert_eq!(
+            value["records"][1]["event"]["authored_element_ids"],
+            json!([7, 8, 9])
+        );
     }
     #[test]
     fn bounded_observations_fail_closed_on_overflow() {
