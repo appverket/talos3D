@@ -595,12 +595,17 @@ fn validate_param_schema(
         return Ok(());
     };
     for (key, rule) in properties {
-        let Some(value) = params.get(key) else { continue };
+        let Some(value) = params.get(key) else {
+            continue;
+        };
         if let Some(kind) = rule.get("type").and_then(Value::as_str) {
             let matches = match kind {
                 "number" => value.is_number(),
-                "integer" => value.as_i64().is_some() || value.as_u64().is_some()
-                    || value.as_f64().is_some_and(|v| v.fract() == 0.0),
+                "integer" => {
+                    value.as_i64().is_some()
+                        || value.as_u64().is_some()
+                        || value.as_f64().is_some_and(|v| v.fract() == 0.0)
+                }
                 "string" => value.is_string(),
                 "boolean" => value.is_boolean(),
                 "array" => value.is_array(),
@@ -608,21 +613,34 @@ fn validate_param_schema(
                 _ => true,
             };
             if !matches {
-                return fail(format!("parameter '{key}' must be of type {kind}, got {value}"));
+                return fail(format!(
+                    "parameter '{key}' must be of type {kind}, got {value}"
+                ));
             }
         }
         if let Some(allowed) = rule.get("enum").and_then(Value::as_array) {
             if !allowed.contains(value) {
-                return fail(format!("parameter '{key}' = {value} is not one of {}", Value::Array(allowed.clone())));
+                return fail(format!(
+                    "parameter '{key}' = {value} is not one of {}",
+                    Value::Array(allowed.clone())
+                ));
             }
         }
-        let Some(number) = value.as_f64() else { continue };
+        let Some(number) = value.as_f64() else {
+            continue;
+        };
         let bound = |name: &str| rule.get(name).and_then(Value::as_f64);
         let violation = [
             ("minimum", bound("minimum").filter(|b| number < *b)),
             ("maximum", bound("maximum").filter(|b| number > *b)),
-            ("exclusiveMinimum", bound("exclusiveMinimum").filter(|b| number <= *b)),
-            ("exclusiveMaximum", bound("exclusiveMaximum").filter(|b| number >= *b)),
+            (
+                "exclusiveMinimum",
+                bound("exclusiveMinimum").filter(|b| number <= *b),
+            ),
+            (
+                "exclusiveMaximum",
+                bound("exclusiveMaximum").filter(|b| number >= *b),
+            ),
         ]
         .into_iter()
         .find_map(|(name, hit)| hit.map(|b| (name, b)));
@@ -1148,7 +1166,11 @@ mod tests {
                 Err(InvocationError::ParameterSchemaFailed { .. })
             )
         };
-        assert!(validate_param_schema(&schema, &params(serde_json::json!({"width_mm": 2400, "count": 2, "finish": "steel"}))).is_ok());
+        assert!(validate_param_schema(
+            &schema,
+            &params(serde_json::json!({"width_mm": 2400, "count": 2, "finish": "steel"}))
+        )
+        .is_ok());
         assert!(refused(serde_json::json!({"width_mm": 2000})));
         assert!(refused(serde_json::json!({"width_mm": 6000.5})));
         assert!(refused(serde_json::json!({"count": 0})));
@@ -1169,10 +1191,21 @@ mod tests {
             precondition: None,
         }));
         let mut d = FixtureDispatcher::new(vec![Value::Null]);
-        let o = FixtureOracle { fail_relation_kind: None };
-        let err = replay(&s, params(serde_json::json!({"width_mm": 2000})), &mut d, &o).unwrap_err();
+        let o = FixtureOracle {
+            fail_relation_kind: None,
+        };
+        let err = replay(
+            &s,
+            params(serde_json::json!({"width_mm": 2000})),
+            &mut d,
+            &o,
+        )
+        .unwrap_err();
         assert!(matches!(err, InvocationError::ParameterSchemaFailed { .. }));
-        assert!(d.calls.is_empty(), "no tool may run for an out-of-envelope request");
+        assert!(
+            d.calls.is_empty(),
+            "no tool may run for an out-of-envelope request"
+        );
     }
 
     #[test]
