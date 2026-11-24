@@ -100,29 +100,69 @@ pub struct RetryOutcome {
     pub residual_knowledge_gaps: Vec<KnowledgeRequest>,
 }
 impl RetryOutcome {
+    /// Names every violated field constraint, so an MCP client can correct the
+    /// report in one step instead of guessing which bound it missed.
     pub fn validate(&self) -> Result<(), String> {
-        if uuid::Uuid::parse_str(&self.event_id).is_err()
-            || uuid::Uuid::parse_str(&self.feedback_id).is_err()
-            || !identifier(&self.artifact_id)
-            || self.revision.len() != 64
-            || !self
-                .revision
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            || !["succeeded", "failed", "inconclusive"].contains(&self.outcome.as_str())
-            || self.evidence_codes.is_empty()
-            || self.evidence_codes.len() > 16
-            || !self.evidence_codes.iter().all(|v| identifier(v))
-            || self.residual_knowledge_gaps.len() > 4
-            || self
-                .residual_knowledge_gaps
-                .iter()
-                .any(|g| g.validate().is_err())
-            || (self.outcome == "succeeded" && !self.residual_knowledge_gaps.is_empty())
-        {
-            return Err("Invalid bounded retry outcome".into());
+        let hex64 = |v: &str| {
+            v.len() == 64
+                && v.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        let checks = [
+            (
+                uuid::Uuid::parse_str(&self.event_id).is_ok(),
+                "event_id must be a UUID",
+            ),
+            (
+                uuid::Uuid::parse_str(&self.feedback_id).is_ok(),
+                "feedback_id must be a fresh UUID",
+            ),
+            (
+                identifier(&self.artifact_id),
+                "artifact_id must be a released artifact identifier",
+            ),
+            (
+                hex64(&self.revision),
+                "revision must be the 64-character lowercase hex content hash",
+            ),
+            (
+                ["succeeded", "failed", "inconclusive"].contains(&self.outcome.as_str()),
+                "outcome must be succeeded, failed or inconclusive",
+            ),
+            (
+                (1..=16).contains(&self.evidence_codes.len()),
+                "evidence_codes must hold 1 to 16 codes",
+            ),
+            (
+                self.evidence_codes.iter().all(|v| identifier(v)),
+                "each evidence code must be 1-160 characters of [A-Za-z0-9._:-]",
+            ),
+            (
+                self.residual_knowledge_gaps.len() <= 4
+                    && self
+                        .residual_knowledge_gaps
+                        .iter()
+                        .all(|g| g.validate().is_ok()),
+                "residual_knowledge_gaps must hold at most 4 valid knowledge requests",
+            ),
+            (
+                self.outcome != "succeeded" || self.residual_knowledge_gaps.is_empty(),
+                "a succeeded outcome cannot carry residual_knowledge_gaps",
+            ),
+        ];
+        let violations: Vec<&str> = checks
+            .iter()
+            .filter(|(ok, _)| !ok)
+            .map(|(_, rule)| *rule)
+            .collect();
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Invalid bounded retry outcome: {}",
+                violations.join("; ")
+            ))
         }
-        Ok(())
     }
 }
 
@@ -1189,6 +1229,32 @@ fn write_pending(_: &Path, _: &[u8]) -> Result<(), String> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    #[test]
+    fn invalid_retry_outcome_names_every_violated_field() {
+        let report = super::RetryOutcome {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            feedback_id: "fb-retry-1".into(),
+            artifact_id: "knowledge:abc".into(),
+            revision: "a".repeat(64),
+            outcome: "failed".into(),
+            evidence_codes: vec!["penetration_1.2e-7m".into(), "bad code".into()],
+            residual_knowledge_gaps: vec![],
+        };
+        let error = report.validate().unwrap_err();
+        assert!(
+            error.contains("feedback_id must be a fresh UUID"),
+            "{error}"
+        );
+        assert!(error.contains("each evidence code"), "{error}");
+        assert!(!error.contains("event_id"), "{error}");
+        let valid = super::RetryOutcome {
+            feedback_id: uuid::Uuid::new_v4().to_string(),
+            evidence_codes: vec!["promotion_blocked".into()],
+            ..report
+        };
+        assert!(valid.validate().is_ok());
+    }
+
     #[test]
     fn invalid_incident_field_is_named_so_specific_fields_survive() {
         let observation = |app_revision: &str| super::Observation {
