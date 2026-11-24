@@ -1085,6 +1085,113 @@ impl std::fmt::Debug for RecipeFamilyDescriptor {
     }
 }
 
+/// Construction-system refinement content layered on an element class minimum.
+/// Compiled recipe families and portable (dynamic) recipes share this view, so
+/// a released system can declare which layers and decisions it must resolve.
+pub trait RefinementSpecialization {
+    fn obligations_at(&self, state: RefinementState) -> &[ObligationTemplate];
+    fn critical_paths_at(&self, state: RefinementState) -> &[ClaimPath];
+}
+
+impl RefinementSpecialization for RecipeFamilyDescriptor {
+    fn obligations_at(&self, state: RefinementState) -> &[ObligationTemplate] {
+        self.obligation_specializations
+            .get(&state)
+            .map_or(&[], Vec::as_slice)
+    }
+    fn critical_paths_at(&self, state: RefinementState) -> &[ClaimPath] {
+        self.promotion_critical_path_specializations
+            .get(&state)
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Portable refinement specialisation carried by a released recipe payload.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RefinementSpecializations {
+    /// Obligations the system adds beyond the element class minimum, keyed by
+    /// the state that requires them; `required_by_state` must equal that key.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub obligation_specializations: HashMap<RefinementState, Vec<ObligationTemplate>>,
+    /// Claim paths that must be grounded before promotion, keyed by state.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub promotion_critical_path_specializations: HashMap<RefinementState, Vec<ClaimPath>>,
+}
+
+impl RefinementSpecializations {
+    pub fn is_empty(&self) -> bool {
+        self.obligation_specializations.is_empty()
+            && self.promotion_critical_path_specializations.is_empty()
+    }
+    /// Keys and declared states must agree and ids must be unique per state.
+    pub fn validate(&self) -> Result<(), String> {
+        for (state, obligations) in &self.obligation_specializations {
+            let mut seen = std::collections::HashSet::new();
+            for obligation in obligations {
+                if obligation.required_by_state != *state {
+                    return Err(format!(
+                        "obligation '{}' is keyed at {} but declares required_by_state {}",
+                        obligation.id.0,
+                        state.as_str(),
+                        obligation.required_by_state.as_str()
+                    ));
+                }
+                if obligation.id.0.trim().is_empty() || obligation.role.0.trim().is_empty() {
+                    return Err("obligation id and role must be non-empty".into());
+                }
+                if !seen.insert(&obligation.id.0) {
+                    return Err(format!("duplicate obligation '{}'", obligation.id.0));
+                }
+            }
+        }
+        if self
+            .promotion_critical_path_specializations
+            .values()
+            .flatten()
+            .any(|path| path.0.trim().is_empty())
+        {
+            return Err("promotion-critical paths must be non-empty".into());
+        }
+        Ok(())
+    }
+}
+
+impl RefinementSpecialization for RefinementSpecializations {
+    fn obligations_at(&self, state: RefinementState) -> &[ObligationTemplate] {
+        self.obligation_specializations
+            .get(&state)
+            .map_or(&[], Vec::as_slice)
+    }
+    fn critical_paths_at(&self, state: RefinementState) -> &[ClaimPath] {
+        self.promotion_critical_path_specializations
+            .get(&state)
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Specialisations of installed portable recipes, keyed by executable family.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct DynamicRecipeSpecializations(pub HashMap<RecipeFamilyId, RefinementSpecializations>);
+
+/// The refinement specialisation of a compiled or installed portable recipe.
+pub fn recipe_refinement<'w>(
+    world: &'w World,
+    family: &RecipeFamilyId,
+) -> Option<&'w dyn RefinementSpecialization> {
+    world
+        .get_resource::<CapabilityRegistry>()
+        .and_then(|registry| registry.recipe_family_descriptor(family))
+        .map(|descriptor| descriptor as &dyn RefinementSpecialization)
+        .or_else(|| {
+            world
+                .get_resource::<DynamicRecipeSpecializations>()
+                .and_then(|installed| installed.0.get(family))
+                .map(|spec| spec as &dyn RefinementSpecialization)
+        })
+}
+
 /// Compute the cumulative effective obligation list for a target state.
 ///
 /// Refinement is monotonic: reaching a higher rung cannot discard obligations
@@ -1093,7 +1200,7 @@ impl std::fmt::Debug for RecipeFamilyDescriptor {
 /// are emitted once, preserving the first (lowest-rung) declaration.
 pub fn effective_obligations(
     class: &ElementClassDescriptor,
-    recipe: Option<&RecipeFamilyDescriptor>,
+    recipe: Option<&dyn RefinementSpecialization>,
     target_state: RefinementState,
 ) -> Vec<ObligationTemplate> {
     let states = [
@@ -1113,10 +1220,8 @@ pub fn effective_obligations(
                 }
             }
         }
-        if let Some(specializations) =
-            recipe.and_then(|recipe| recipe.obligation_specializations.get(&state))
-        {
-            for obligation in specializations {
+        if let Some(recipe) = recipe {
+            for obligation in recipe.obligations_at(state) {
                 if seen.insert(obligation.id.clone()) {
                     out.push(obligation.clone());
                 }
@@ -1129,7 +1234,7 @@ pub fn effective_obligations(
 /// Compute cumulative promotion-critical paths through a target state.
 pub fn effective_promotion_critical_paths(
     class: &ElementClassDescriptor,
-    recipe: Option<&RecipeFamilyDescriptor>,
+    recipe: Option<&dyn RefinementSpecialization>,
     target_state: RefinementState,
 ) -> Vec<ClaimPath> {
     let states = [
@@ -1149,10 +1254,8 @@ pub fn effective_promotion_critical_paths(
                 }
             }
         }
-        if let Some(specializations) =
-            recipe.and_then(|recipe| recipe.promotion_critical_path_specializations.get(&state))
-        {
-            for path in specializations {
+        if let Some(recipe) = recipe {
+            for path in recipe.critical_paths_at(state) {
                 if seen.insert(path.clone()) {
                     out.push(path.clone());
                 }

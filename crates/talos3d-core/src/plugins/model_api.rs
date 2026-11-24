@@ -12616,7 +12616,7 @@ pub fn handle_get_claim_grounding(
                 let recipe_desc = assignment
                     .active_recipe
                     .as_ref()
-                    .and_then(|rid| registry.recipe_family_descriptor(rid));
+                    .and_then(|rid| crate::capability_registry::recipe_refinement(world, rid));
                 let paths = effective_promotion_critical_paths(class_desc, recipe_desc, state);
                 Some(paths.into_iter().map(|p| p.0).collect())
             })
@@ -17587,7 +17587,15 @@ fn build_refinement_promotion_plan(
     }
 
     let obligation_templates = class_descriptor
-        .map(|class| effective_obligations(class, recipe_descriptor, target_state))
+        .map(|class| {
+            let recipe = effective_recipe_id.as_ref().and_then(|id| {
+                crate::capability_registry::recipe_refinement(
+                    world,
+                    &crate::capability_registry::RecipeFamilyId(id.clone()),
+                )
+            });
+            effective_obligations(class, recipe, target_state)
+        })
         .unwrap_or_default();
     let class_resolution_predicate_available = class_descriptor.is_some_and(|class| {
         class

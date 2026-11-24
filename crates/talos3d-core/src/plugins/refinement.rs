@@ -2134,7 +2134,7 @@ fn apply_promote_refinement_inner(
                 let class_desc = registry.element_class_descriptor(&assignment.element_class);
                 let recipe_desc = effective_recipe_id
                     .as_ref()
-                    .and_then(|rid| registry.recipe_family_descriptor(rid));
+                    .and_then(|rid| crate::capability_registry::recipe_refinement(world, rid));
 
                 let templates = class_desc.map_or_else(Vec::new, |cd| {
                     effective_obligations(cd, recipe_desc, target_state)
@@ -3302,7 +3302,7 @@ fn obligation_schema_version(
         return "unknown-element-class".to_string();
     };
     let recipe = recipe_id.and_then(|recipe_id| {
-        registry.recipe_family_descriptor(&RecipeFamilyId(recipe_id.0.clone()))
+        crate::capability_registry::recipe_refinement(world, &RecipeFamilyId(recipe_id.0.clone()))
     });
     let obligations = effective_obligations(class, recipe, target_state)
         .into_iter()

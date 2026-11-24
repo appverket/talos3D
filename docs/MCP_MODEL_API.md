@@ -1917,6 +1917,14 @@ and payload JSON schemas generated from runtime decoder types. Supported kinds a
 `corpus_passage.v1`, including data-driven proactive guidance. These schemas contain
 wire contracts, not domain assets. Portable recipes require `authoring_script`
 bodies; native function references cannot be released as executable knowledge.
+A portable recipe may also carry `obligation_specializations` and
+`promotion_critical_path_specializations` keyed by refinement state. They declare
+what the selected construction system must resolve beyond the element class
+minimum, exactly like compiled recipe families, so a released system defines its
+own layers (for example every material layer of a wall system at Constructible)
+without an application rebuild. Keys must equal each obligation's
+`required_by_state`; unknown fields are refused, and a revision without them
+clears the previous specialisation.
 Definitions expose the canonical body rather than legacy migration inputs.
 The envelope DTO, kind/path mapping, validator and generated schema are owned by
 `talos3d-knowledge-protocol`, shared with the curator service. The response includes

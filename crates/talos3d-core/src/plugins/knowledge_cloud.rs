@@ -276,6 +276,38 @@ pub fn read_installed_passage(world: &World, admitted: AdmittedAsset) -> Result<
 /// the runtime would ignore (unknown or misplaced, e.g. a nested copy of a
 /// top-level option) is refused with its path instead of silently dropping a
 /// declared constraint.
+/// Recipe payload fields that carry the construction system's refinement
+/// specialisation beside the executable recipe artifact.
+const RECIPE_REFINEMENT_FIELDS: [&str; 2] = [
+    "obligation_specializations",
+    "promotion_critical_path_specializations",
+];
+
+/// Strictly decode a portable recipe payload and its optional specialisation.
+fn decode_recipe(
+    payload: &Value,
+) -> Result<
+    (
+        crate::curation::RecipeArtifact,
+        crate::capability_registry::RefinementSpecializations,
+    ),
+    String,
+> {
+    let mut artifact = payload.clone();
+    let mut refinement = serde_json::Map::new();
+    if let Some(map) = artifact.as_object_mut() {
+        for key in RECIPE_REFINEMENT_FIELDS {
+            if let Some(value) = map.remove(key) {
+                refinement.insert(key.into(), value);
+            }
+        }
+    }
+    let refinement: crate::capability_registry::RefinementSpecializations =
+        decode(Value::Object(refinement))?;
+    refinement.validate()?;
+    Ok((decode(artifact)?, refinement))
+}
+
 fn decode<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, String> {
     let mut ignored = Vec::new();
     let decoded = serde_ignored::deserialize(v, |path| ignored.push(path.to_string()))
@@ -488,7 +520,19 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
                 serde_json::to_value(schemars::schema_for!(crate::curation::RecipeArtifact))
                     .unwrap();
             schema["allOf"] = json!([{"properties":{"body":{"properties":{"kind":{"const":"authoring_script"}}}}}]);
-            (schema,vec!["payload.meta.id must equal asset.id; opaque IDs are executable family IDs, legacy kind/family IDs use the family suffix. check_knowledge_candidate returns the exact execution arguments", "Only authoring_script recipe bodies are portable; native function references are not executable releases", "Script structure must pass the native validator"])
+            let refinement = serde_json::to_value(schemars::schema_for!(
+                crate::capability_registry::RefinementSpecializations
+            ))
+            .unwrap();
+            for key in RECIPE_REFINEMENT_FIELDS {
+                schema["properties"][key] = refinement["properties"][key].clone();
+            }
+            if let Some(defs) = refinement.get("$defs").and_then(Value::as_object) {
+                for (name, def) in defs {
+                    schema["$defs"][name] = def.clone();
+                }
+            }
+            (schema,vec!["Optional obligation_specializations / promotion_critical_path_specializations declare what this construction system must resolve at each refinement state beyond the element class minimum (for example every material layer of the system at Constructible). required_by_state must equal the state key", "payload.meta.id must equal asset.id; opaque IDs are executable family IDs, legacy kind/family IDs use the family suffix. check_knowledge_candidate returns the exact execution arguments", "Only authoring_script recipe bodies are portable; native function references are not executable releases", "Script structure must pass the native validator"])
         }
         "definition_library.v1" => (
             serde_json::to_value(schemars::schema_for!(
@@ -550,6 +594,7 @@ pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, Stri
 // Internal decoder shared by admitted assets and disposable legacy inspection.
 // Never expose this as an admission, publication or model-edit API.
 fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, String> {
+    use crate::capability_registry::DynamicRecipeSpecializations;
     use crate::curation::{RecipeArtifact, RecipeArtifactRegistry, Scope, Trust};
     use crate::plugins::modeling::definition::{
         DefinitionLibrary, DefinitionLibraryRegistry, DefinitionLibraryScope,
@@ -627,7 +672,7 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
             a.id.clone()
         }
         "recipe.v1" => {
-            let mut recipe: RecipeArtifact = decode(a.payload.clone())?;
+            let (mut recipe, refinement): (RecipeArtifact, _) = decode_recipe(&a.payload)?;
             if recipe.meta.id.0 != a.id || !recipe.body.is_authoring_script() {
                 return Err("Portable recipe identity/body required".into());
             }
@@ -658,6 +703,14 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
                 .map_err(|e| e.to_string())?;
             recipe.meta.scope = Scope::Shipped;
             recipe.meta.trust = Trust::Published;
+            world.init_resource::<DynamicRecipeSpecializations>();
+            {
+                let mut installed = world.resource_mut::<DynamicRecipeSpecializations>();
+                installed.0.remove(&family);
+                if !refinement.is_empty() {
+                    installed.0.insert(family.clone(), refinement);
+                }
+            }
             world.init_resource::<RecipeArtifactRegistry>();
             world
                 .resource_mut::<RecipeArtifactRegistry>()
@@ -852,10 +905,14 @@ pub fn reconcile(world: &mut World, index: &Index) -> Value {
                 }
             }
             "recipe.v1" => {
-                if let Some(mut r) =
-                    world.get_resource_mut::<crate::curation::RecipeArtifactRegistry>()
-                {
-                    r.remove(&crate::curation::AssetId::new(&a.runtime_id));
+                let removed = world
+                    .get_resource_mut::<crate::curation::RecipeArtifactRegistry>()
+                    .and_then(|mut r| r.remove(&crate::curation::AssetId::new(&a.runtime_id)));
+                if let (Some(recipe), Some(mut installed)) = (
+                    removed,
+                    world.get_resource_mut::<crate::capability_registry::DynamicRecipeSpecializations>(),
+                ) {
+                    installed.0.remove(&recipe.execution_family_id());
                 }
             }
             "catalog.v1" => {
@@ -1128,6 +1185,114 @@ mod tests {
             refused.contains("UnknownPayloadFields") && refused.contains("unread"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn portable_recipes_carry_construction_system_obligations() {
+        use crate::capability_registry::{
+            effective_obligations, recipe_refinement, ElementClassDescriptor, ObligationTemplate,
+            RecipeFamilyId,
+        };
+        use crate::curation::provenance::{Confidence, Lineage, Provenance};
+        use crate::curation::{AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeBody};
+        use crate::plugins::refinement::{AgentId, ObligationId, RefinementState, SemanticRole};
+        use std::collections::HashMap;
+        let script = serde_json::from_value(json!({"parameter_schema":{"type":"object"},
+            "allowed_tools":["create_box"],"mutation_scope":{"kind":"project_root"},"steps":[]}))
+        .unwrap();
+        let recipe = RecipeArtifact {
+            meta: CurationMeta::new(
+                AssetId("system".into()),
+                AssetKindId("recipe.v1".into()),
+                Provenance {
+                    author: AgentId("unit-test".into()),
+                    confidence: Confidence::High,
+                    lineage: Lineage::Freeform,
+                    rationale: None,
+                    jurisdiction: None,
+                    catalog_dependencies: vec![],
+                    evidence: vec![],
+                },
+            ),
+            body: RecipeBody::AuthoringScript { script },
+            parameter_schema: json!({}),
+            target_class: "fixture".into(),
+            supported_refinement_states: vec![RefinementState::Constructible],
+            tests: vec![],
+        };
+        let mut admitted = passage("system-r1");
+        admitted.asset.id = "system".into();
+        admitted.asset.kind = "recipe.v1".into();
+        admitted.asset.path_kind = "recipe".into();
+        admitted.asset.payload = serde_json::to_value(&recipe).unwrap();
+        admitted.asset.payload["obligation_specializations"] = json!({"Constructible":[
+            {"id":"member_section","role":"primary_structure","required_by_state":"Constructible"}]});
+        admitted.asset.payload["promotion_critical_path_specializations"] =
+            json!({"Constructible":["member_section"]});
+        let mut world = World::new();
+        world.init_resource::<evaluation::Observations>();
+        install(&mut world, admitted.clone()).unwrap();
+        let family = recipe.execution_family_id();
+        let class = ElementClassDescriptor {
+            class_min_obligations: HashMap::from([(
+                RefinementState::Constructible,
+                vec![ObligationTemplate {
+                    id: ObligationId("structure".into()),
+                    role: SemanticRole("primary_structure".into()),
+                    required_by_state: RefinementState::Constructible,
+                }],
+            )]),
+            id: crate::capability_registry::ElementClassId("fixture".into()),
+            label: "Fixture".into(),
+            description: String::new(),
+            semantic_roles: vec![],
+            class_min_promotion_critical_paths: HashMap::new(),
+            parameter_schema: json!({}),
+        };
+        let ids = |world: &World| {
+            effective_obligations(
+                &class,
+                recipe_refinement(world, &family),
+                RefinementState::Constructible,
+            )
+            .into_iter()
+            .map(|o| o.id.0)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&world), ["structure", "member_section"]);
+        assert_eq!(
+            recipe_refinement(&world, &family)
+                .unwrap()
+                .critical_paths_at(RefinementState::Constructible)
+                .len(),
+            1
+        );
+        // Keys and declared states must agree; unknown fields are refused.
+        for (key, value) in [
+            (
+                "obligation_specializations",
+                json!({"Constructible":[
+                {"id":"x","role":"r","required_by_state":"Detailed"}]}),
+            ),
+            (
+                "obligation_specializations",
+                json!({"Constructible":[
+                {"id":"x","role":"r","required_by_state":"Constructible","extra":1}]}),
+            ),
+        ] {
+            let mut bad = admitted.clone();
+            bad.asset.payload[key] = value;
+            assert!(install(&mut World::new(), bad).is_err());
+        }
+        // A revision without specialisation clears the previous one.
+        let mut plain = admitted.clone();
+        plain.revision = "system-r2".into();
+        let map = plain.asset.payload.as_object_mut().unwrap();
+        map.remove("obligation_specializations");
+        map.remove("promotion_critical_path_specializations");
+        install(&mut world, plain).unwrap();
+        assert_eq!(ids(&world), ["structure"]);
+        assert!(recipe_refinement(&world, &RecipeFamilyId("missing".into())).is_none());
     }
 
     #[test]
