@@ -12613,10 +12613,11 @@ pub fn handle_get_claim_grounding(
                     .unwrap_or_default();
                 let registry = world.get_resource::<CapabilityRegistry>()?;
                 let class_desc = registry.element_class_descriptor(&assignment.element_class)?;
-                let recipe_desc = assignment
-                    .active_recipe
-                    .as_ref()
-                    .and_then(|rid| crate::capability_registry::recipe_refinement(world, rid));
+                let recipe_desc = crate::capability_registry::element_refinement(
+                    world,
+                    entity_ref.id(),
+                    assignment.active_recipe.as_ref(),
+                );
                 let paths = effective_promotion_critical_paths(class_desc, recipe_desc, state);
                 Some(paths.into_iter().map(|p| p.0).collect())
             })
@@ -17588,12 +17589,11 @@ fn build_refinement_promotion_plan(
 
     let obligation_templates = class_descriptor
         .map(|class| {
-            let recipe = effective_recipe_id.as_ref().and_then(|id| {
-                crate::capability_registry::recipe_refinement(
-                    world,
-                    &crate::capability_registry::RecipeFamilyId(id.clone()),
-                )
-            });
+            let family = effective_recipe_id
+                .as_ref()
+                .map(|id| crate::capability_registry::RecipeFamilyId(id.clone()));
+            let recipe =
+                crate::capability_registry::element_refinement(world, entity, family.as_ref());
             effective_obligations(class, recipe, target_state)
         })
         .unwrap_or_default();

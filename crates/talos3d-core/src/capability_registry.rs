@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     marker::PhantomData,
     sync::Arc,
 };
@@ -1171,9 +1171,14 @@ impl RefinementSpecialization for RefinementSpecializations {
     }
 }
 
-/// Specialisations of installed portable recipes, keyed by executable family.
+/// Specialisations delivered by installed portable knowledge.
 #[derive(Resource, Debug, Clone, Default)]
-pub struct DynamicRecipeSpecializations(pub HashMap<RecipeFamilyId, RefinementSpecializations>);
+pub struct DynamicSpecializations {
+    /// Keyed by executable recipe family.
+    pub recipes: HashMap<RecipeFamilyId, RefinementSpecializations>,
+    /// Keyed by parametric type id, then by the member element class.
+    pub parametric: HashMap<String, BTreeMap<String, RefinementSpecializations>>,
+}
 
 /// The refinement specialisation of a compiled or installed portable recipe.
 pub fn recipe_refinement<'w>(
@@ -1186,10 +1191,33 @@ pub fn recipe_refinement<'w>(
         .map(|descriptor| descriptor as &dyn RefinementSpecialization)
         .or_else(|| {
             world
-                .get_resource::<DynamicRecipeSpecializations>()
-                .and_then(|installed| installed.0.get(family))
+                .get_resource::<DynamicSpecializations>()
+                .and_then(|installed| installed.recipes.get(family))
                 .map(|spec| spec as &dyn RefinementSpecialization)
         })
+}
+
+/// The refinement specialisation governing one element: its recipe when one
+/// is named, otherwise the shared parametric type that generated it, for the
+/// member's element class.
+pub fn element_refinement<'w>(
+    world: &'w World,
+    entity: Entity,
+    recipe: Option<&RecipeFamilyId>,
+) -> Option<&'w dyn RefinementSpecialization> {
+    if let Some(recipe) = recipe {
+        return recipe_refinement(world, recipe);
+    }
+    let member = world.get::<crate::plugins::parametric_mcp::ParametricInstanceRef>(entity)?;
+    let class = world.get::<ElementClassAssignment>(entity)?;
+    let store = world.get_resource::<crate::relational::registry::ParametricStore>()?;
+    let type_id = &store.get(member.instance_id)?.type_id;
+    world
+        .get_resource::<DynamicSpecializations>()?
+        .parametric
+        .get(type_id)?
+        .get(&class.element_class.0)
+        .map(|spec| spec as &dyn RefinementSpecialization)
 }
 
 /// Compute the cumulative effective obligation list for a target state.

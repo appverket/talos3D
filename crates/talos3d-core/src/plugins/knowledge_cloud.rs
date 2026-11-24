@@ -484,6 +484,12 @@ struct ParametricPayload {
     /// and driver edits outside a range are refused before geometry is emitted.
     #[serde(default)]
     driver_bounds: BTreeMap<String, crate::relational::registry::DriverBounds>,
+    /// Optional construction-system obligations per member element class: what
+    /// members of that class must resolve at each refinement state beyond the
+    /// element class minimum (for example every material layer at Constructible).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    refinement_specializations:
+        BTreeMap<String, crate::capability_registry::RefinementSpecializations>,
 }
 
 pub fn payload_schema(kind: &str) -> Result<Value, String> {
@@ -513,6 +519,7 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
                 "payload.definition.id must equal asset.id",
                 "An executable path requires a valid emitting representation",
                 "A release cannot overwrite a private/internal type",
+                "Optional refinement_specializations map a member element_class to the obligations and promotion-critical paths that construction system must resolve per refinement state beyond the class minimum; each class must be declared by a member semantic, and required_by_state must equal the state key",
             ],
         ),
         "recipe.v1" => {
@@ -594,7 +601,7 @@ pub fn install(world: &mut World, admitted: AdmittedAsset) -> Result<Value, Stri
 // Internal decoder shared by admitted assets and disposable legacy inspection.
 // Never expose this as an admission, publication or model-edit API.
 fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, String> {
-    use crate::capability_registry::DynamicRecipeSpecializations;
+    use crate::capability_registry::DynamicSpecializations;
     use crate::curation::{RecipeArtifact, RecipeArtifactRegistry, Scope, Trust};
     use crate::plugins::modeling::definition::{
         DefinitionLibrary, DefinitionLibraryRegistry, DefinitionLibraryScope,
@@ -610,8 +617,24 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
             let definition = payload.definition;
             let contract = payload.placement_contract;
             let bounds = payload.driver_bounds;
+            let refinement = payload.refinement_specializations;
             if definition.id != a.id {
                 return Err("Parametric identity must match asset identity".into());
+            }
+            let member_classes: std::collections::BTreeSet<&str> = definition
+                .representation
+                .iter()
+                .flat_map(|r| &r.members)
+                .filter_map(|m| m.semantic.as_ref()?.element_class.as_deref())
+                .collect();
+            for (class, spec) in &refinement {
+                if !member_classes.contains(class.as_str()) {
+                    return Err(format!(
+                        "refinement_specializations names element class '{class}', which no member declares"
+                    ));
+                }
+                spec.validate()
+                    .map_err(|e| format!("refinement_specializations.{class}: {e}"))?;
             }
             crate::relational::registry::DriverBounds::validate_all(&definition, &bounds)?;
             // Exercise expression/driver validation through the existing substrate.
@@ -634,6 +657,12 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
             }
             registry.register_driver_bounds(&a.id, bounds)?;
             registry.register_knowledge_revision(&a.id, &admitted.revision);
+            world.init_resource::<DynamicSpecializations>();
+            let mut installed = world.resource_mut::<DynamicSpecializations>();
+            installed.parametric.remove(&a.id);
+            if !refinement.is_empty() {
+                installed.parametric.insert(a.id.clone(), refinement);
+            }
             a.id.clone()
         }
         "definition_library.v1" => {
@@ -703,12 +732,12 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
                 .map_err(|e| e.to_string())?;
             recipe.meta.scope = Scope::Shipped;
             recipe.meta.trust = Trust::Published;
-            world.init_resource::<DynamicRecipeSpecializations>();
+            world.init_resource::<DynamicSpecializations>();
             {
-                let mut installed = world.resource_mut::<DynamicRecipeSpecializations>();
-                installed.0.remove(&family);
+                let mut installed = world.resource_mut::<DynamicSpecializations>();
+                installed.recipes.remove(&family);
                 if !refinement.is_empty() {
-                    installed.0.insert(family.clone(), refinement);
+                    installed.recipes.insert(family.clone(), refinement);
                 }
             }
             world.init_resource::<RecipeArtifactRegistry>();
@@ -894,6 +923,11 @@ pub fn reconcile(world: &mut World, index: &Index) -> Value {
                 {
                     r.remove(&a.runtime_id);
                 }
+                if let Some(mut installed) =
+                    world.get_resource_mut::<crate::capability_registry::DynamicSpecializations>()
+                {
+                    installed.parametric.remove(&a.runtime_id);
+                }
             }
             "definition_library.v1" => {
                 if let Some(mut r) = world
@@ -910,9 +944,9 @@ pub fn reconcile(world: &mut World, index: &Index) -> Value {
                     .and_then(|mut r| r.remove(&crate::curation::AssetId::new(&a.runtime_id)));
                 if let (Some(recipe), Some(mut installed)) = (
                     removed,
-                    world.get_resource_mut::<crate::capability_registry::DynamicRecipeSpecializations>(),
+                    world.get_resource_mut::<crate::capability_registry::DynamicSpecializations>(),
                 ) {
-                    installed.0.remove(&recipe.execution_family_id());
+                    installed.recipes.remove(&recipe.execution_family_id());
                 }
             }
             "catalog.v1" => {
@@ -1293,6 +1327,106 @@ mod tests {
         install(&mut world, plain).unwrap();
         assert_eq!(ids(&world), ["structure"]);
         assert!(recipe_refinement(&world, &RecipeFamilyId("missing".into())).is_none());
+    }
+
+    #[test]
+    fn released_parametric_members_carry_system_obligations() {
+        use crate::capability_registry::{
+            effective_obligations, element_refinement, CapabilityRegistry, ElementClassDescriptor,
+            ElementClassId,
+        };
+        use crate::plugins::parametric_mcp::{world_create, CreateParametricRequest};
+        use crate::plugins::refinement::RefinementState;
+        use crate::relational::component::{ComponentParams, DriverPolicy};
+        use crate::relational::param_expr::{Quantity, ScalarExpr, Unit};
+        use crate::relational::registry::{
+            ParametricMember, ParametricMemberSemantic, ParametricRepresentation, ParametricTypeDef,
+        };
+        let mut app = bevy::app::App::new();
+        app.add_plugins(crate::plugins::parametric_mcp::ParametricMcpPlugin);
+        app.init_resource::<crate::plugins::identity::ElementIdAllocator>();
+        app.init_resource::<CapabilityRegistry>();
+        app.init_resource::<evaluation::Observations>();
+        let w = app.world_mut();
+        let class = ElementClassDescriptor {
+            id: ElementClassId("test_panel".into()),
+            label: "Panel".into(),
+            description: String::new(),
+            semantic_roles: vec![],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: Value::Null,
+        };
+        w.resource_mut::<CapabilityRegistry>()
+            .register_element_class(class.clone());
+        let lit = |mm| ScalarExpr::lit(Quantity::mm(mm));
+        let definition = ParametricTypeDef {
+            id: "test.panel".into(),
+            label: "Panel".into(),
+            params: ComponentParams::default().driver("w", DriverPolicy::Editable),
+            driver_units: BTreeMap::from([("w".into(), Unit::Mm)]),
+            defaults: BTreeMap::from([("w".into(), 1000.0)]),
+            derivations: BTreeMap::new(),
+            transform: Default::default(),
+            public: true,
+            representation: Some(ParametricRepresentation {
+                members: vec![ParametricMember {
+                    size: [ScalarExpr::param("w"), lit(200.0), lit(100.0)],
+                    translate: [lit(0.0), lit(0.0), lit(0.0)],
+                    rotate_euler_deg: [lit(0.0), lit(0.0), lit(0.0)],
+                    profile_xz: Vec::new(),
+                    label: Some("panel".into()),
+                    semantic: Some(ParametricMemberSemantic {
+                        element_class: Some("test_panel".into()),
+                        refinement_state: Some("Schematic".into()),
+                        parameters: json!({}),
+                        rationale: None,
+                        concept: None,
+                    }),
+                }],
+            }),
+        };
+        let spec = json!({"obligation_specializations":{"Constructible":[
+            {"id":"panel_layers","role":"layer_composition","required_by_state":"Constructible"}]}});
+        let admitted = |classes: Value| {
+            let mut a = passage("panel-r1");
+            a.asset.id = "test.panel".into();
+            a.asset.kind = "parametric_type.v1".into();
+            a.asset.path_kind = "parametric".into();
+            a.asset.payload = json!({"definition":definition,"refinement_specializations":classes});
+            a
+        };
+        assert!(install(w, admitted(json!({"other_class":spec})))
+            .unwrap_err()
+            .contains("no member declares"));
+        install(w, admitted(json!({"test_panel":spec}))).unwrap();
+        let created = world_create(
+            w,
+            CreateParametricRequest {
+                type_id: "test.panel".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let entity = w
+            .query::<(Entity, &crate::plugins::identity::ElementId)>()
+            .iter(w)
+            .find_map(|(e, id)| (id.0 == created.element_ids[0]).then_some(e))
+            .unwrap();
+        let ids = |w: &World| {
+            effective_obligations(
+                &class,
+                element_refinement(w, entity, None),
+                RefinementState::Constructible,
+            )
+            .into_iter()
+            .map(|o| o.id.0)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(w), ["panel_layers"]);
+        // A revision without specialisation clears it for existing members too.
+        install(w, admitted(json!({}))).unwrap();
+        assert!(ids(w).is_empty());
     }
 
     #[test]

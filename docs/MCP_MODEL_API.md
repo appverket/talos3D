@@ -1924,7 +1924,10 @@ minimum, exactly like compiled recipe families, so a released system defines its
 own layers (for example every material layer of a wall system at Constructible)
 without an application rebuild. Keys must equal each obligation's
 `required_by_state`; unknown fields are refused, and a revision without them
-clears the previous specialisation.
+clears the previous specialisation. A `parametric_type.v1` payload may carry the
+same specialisation per member element class in `refinement_specializations`
+(each class must be declared by a member semantic); members created from the
+installed type are refined against it.
 Definitions expose the canonical body rather than legacy migration inputs.
 The envelope DTO, kind/path mapping, validator and generated schema are owned by
 `talos3d-knowledge-protocol`, shared with the curator service. The response includes
