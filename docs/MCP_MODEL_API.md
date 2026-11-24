@@ -1743,7 +1743,11 @@ compatible. `succeeded` with residual gaps is rejected.
 
 A `failed` outcome, or an `inconclusive` outcome with explicit residual gaps, can
 queue a continuation through the existing intake. An inconclusive outcome alone
-does not queue work. The host durably retains the continuation receipt under the
+does not queue work. Report `failed` when the remedy was used but the requested
+result was not achieved (for example a requested refinement state, member set or
+constraint is missing); reserve `inconclusive` for retries that could not
+determine whether the remedy works. Each outcome uses a fresh UUID `feedback_id`,
+and validation errors name every violated field. The host durably retains the continuation receipt under the
 feedback id, with the original source/identity binding, so it is available through
 `get_harness_incident_status`. The worker reads residuals in private history; it
 still needs a fresh evaluation contract and available budget. Nothing grants

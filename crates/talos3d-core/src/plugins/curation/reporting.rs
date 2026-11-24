@@ -88,10 +88,14 @@ pub struct IncidentStatusRequest {
 #[serde(deny_unknown_fields)]
 pub struct RetryOutcome {
     pub event_id: String,
+    /// A fresh UUID per outcome; reuse only for transport retries of the same outcome.
     pub feedback_id: String,
     pub artifact_id: String,
     pub revision: String,
-    /// succeeded, failed or inconclusive. This is reported project evidence, not independent acceptance.
+    /// succeeded (requested task achieved, including requested state and constraints),
+    /// failed (remedy used but the requested result was not achieved; queues a bounded
+    /// curator follow-up) or inconclusive (could not determine; evidence only).
+    /// This is reported project evidence, not independent acceptance.
     pub outcome: String,
     pub evidence_codes: Vec<String>,
     /// Remaining reference questions from an actual retry, not project design inputs.
