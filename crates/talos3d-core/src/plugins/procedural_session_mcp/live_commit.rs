@@ -17,7 +17,7 @@ use crate::plugins::{
     history::{HistoryTransaction, SemanticEnforcement},
     identity::ElementId,
     modeling::assembly::SemanticRelation,
-    refinement::{ClaimGrounding, ObligationSet, ObligationStatus},
+    refinement::{ClaimGrounding, ObligationId, ObligationSet, ObligationStatus},
     validation::{validation_sweep_system, DiscoveryFindingsBudget, Findings},
 };
 
@@ -59,6 +59,10 @@ impl ToolDispatcher for SharedDispatcher<'_, '_, '_> {
 struct LiveOracle<'a, 'w, 'e> {
     inner: &'a RefCell<CommandQueueDispatcher<'w, 'e>>,
     target: Option<u64>,
+    /// Recipe replay: `obligation_satisfied` is a declaration the promote
+    /// applies afterwards, so it passes once the satisfier exists. Procedural
+    /// commits keep checking an already-recorded satisfaction.
+    declares_satisfaction: bool,
 }
 
 impl PostconditionOracle for LiveOracle<'_, '_, '_> {
@@ -117,7 +121,9 @@ impl PostconditionOracle for LiveOracle<'_, '_, '_> {
                     .get(by_step)
                     .and_then(|out| out.get("element_id"))
                     .and_then(Value::as_u64);
-                if let (Some(obligation), Some(by), Some(mut query)) = (
+                if self.declares_satisfaction {
+                    declared_satisfier(world, obligation_id, by, self.target).is_some()
+                } else if let (Some(obligation), Some(by), Some(mut query)) = (
                     obligation_id.as_str(),
                     by,
                     world.try_query::<(&ElementId, &ObligationSet)>(),
@@ -141,9 +147,49 @@ impl PostconditionOracle for LiveOracle<'_, '_, '_> {
             PostconditionVerdict::Pass
         } else {
             PostconditionVerdict::Fail { reason:
-            format!("Live model does not establish {condition:?}; claim/obligation checks need an unambiguous target and actual grounding/satisfaction") }
+            format!("Live model does not establish {condition:?}; claim/obligation checks need an unambiguous target and actual grounding/satisfaction; obligation_satisfied needs a non-empty obligation id and a by_step that binds the element it created as `element_id`") }
         }
     }
+}
+
+/// The `(obligation, satisfier)` pair a recipe postcondition declares, when the
+/// obligation id is a non-empty string and the satisfier is a live element
+/// other than the refinement root itself.
+fn declared_satisfier(
+    world: &World,
+    obligation_id: &Value,
+    by: Option<u64>,
+    target: Option<u64>,
+) -> Option<(ObligationId, u64)> {
+    let obligation = obligation_id.as_str().filter(|id| !id.is_empty())?;
+    let by = by.filter(|by| Some(*by) != target)?;
+    let mut query = world.try_query::<&ElementId>()?;
+    query
+        .iter(world)
+        .any(|id| id.0 == by)
+        .then(|| (ObligationId(obligation.to_string()), by))
+}
+
+/// Satisfaction links declared by a replayed recipe's passing
+/// `obligation_satisfied` postconditions, in declaration order.
+pub(crate) fn declared_satisfaction_links(
+    report: &crate::curation::InvocationReport,
+) -> Vec<(ObligationId, u64)> {
+    report
+        .postcondition_results
+        .iter()
+        .filter(|result| result.verdict == PostconditionVerdict::Pass)
+        .filter_map(|result| match &result.postcondition {
+            ResolvedPostcondition::ObligationSatisfied {
+                obligation_id,
+                by_step,
+            } => Some((
+                ObligationId(obligation_id.as_str()?.to_string()),
+                report.outputs.get(by_step)?.get("element_id")?.as_u64()?,
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Execute ordinary recipes against the same live postcondition oracle used by
@@ -172,6 +218,7 @@ pub(crate) fn replay_recipe(
     let oracle = LiveOracle {
         inner: &inner,
         target: Some(target),
+        declares_satisfaction: true,
     };
     crate::curation::replay::replay_with_lookup(
         script,
@@ -315,6 +362,7 @@ pub(super) fn commit_live(
                 .refinement_target
                 .as_ref()
                 .and_then(Value::as_u64),
+            declares_satisfaction: false,
         };
         commit_with_validation(
             session,
@@ -428,6 +476,7 @@ mod tests {
         let oracle = LiveOracle {
             inner: &shared,
             target: Some(42),
+            declares_satisfaction: false,
         };
         let outputs = [(
             StepId::new("member"),

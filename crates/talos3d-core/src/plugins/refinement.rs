@@ -387,8 +387,9 @@ itself.** Instantiating a recipe, placing an occurrence, or spawning a child
 that *could* fulfil an obligation does not auto-link it — the obligation stays
 `Unresolved` until you explicitly record the link with `resolve_obligation`
 `satisfied_by` that child's `element_id`. (A recipe only auto-satisfies the
-specific obligations it declares satisfaction-links for; do not assume it covers
-the class ladder.) So the normal order is: build the sub-element → read its
+specific obligations it declares satisfaction-links for — for a governed
+`AuthoringScript` recipe, each `obligation_satisfied` postcondition naming the
+step whose element fulfils it; do not assume it covers the class ladder.) So the normal order is: build the sub-element → read its
 `element_id` → `resolve_obligation { satisfied_by }` → re-promote.
 
 Prefer `SatisfiedBy` a genuine sub-element over `Deferred`/`Waived`: deferring or
@@ -1966,6 +1967,18 @@ pub fn apply_promote_refinement(
     world: &mut World,
     request: PromoteRefinementRequest,
 ) -> Result<RefinementState, PromoteError> {
+    apply_promote_refinement_with_links(world, request, Vec::new())
+}
+
+/// Promote with satisfaction links declared by a data recipe body that has
+/// already run (an `AuthoringScript` `obligation_satisfied` postcondition).
+/// They join the links returned by a registered `generate` fn, so governed
+/// recipes resolve obligations through the same path as compiled ones.
+pub fn apply_promote_refinement_with_links(
+    world: &mut World,
+    request: PromoteRefinementRequest,
+    declared_links: Vec<(ObligationId, u64)>,
+) -> Result<RefinementState, PromoteError> {
     let id = ElementId(request.entity_element_id);
     let entity = find_entity_by_element_id_readonly(world, id)
         .ok_or_else(|| format!("Entity {} not found", id.0))?;
@@ -1974,7 +1987,7 @@ pub fn apply_promote_refinement(
         .map(|s| s.state)
         .unwrap_or_default();
     let before = RefinementStateSnapshot::capture(world, id, state);
-    let result = apply_promote_refinement_inner(world, request);
+    let result = apply_promote_refinement_inner(world, request, declared_links);
     let entity = find_entity_by_element_id_readonly(world, id)
         .ok_or_else(|| format!("Recipe removed refinement root {}", id.0))?;
     let state = world
@@ -1991,6 +2004,7 @@ pub fn apply_promote_refinement(
 fn apply_promote_refinement_inner(
     world: &mut World,
     request: PromoteRefinementRequest,
+    declared_links: Vec<(ObligationId, u64)>,
 ) -> Result<RefinementState, PromoteError> {
     use crate::capability_registry::{
         effective_obligations, effective_promotion_critical_paths, ElementClassAssignment,
@@ -2259,7 +2273,7 @@ fn apply_promote_refinement_inner(
 
     // Apply satisfaction links to the initial obligation set.
     let mut obligations = initial_obligations;
-    for (obligation_id, child_eid) in &satisfaction_links {
+    for (obligation_id, child_eid) in declared_links.iter().chain(&satisfaction_links) {
         if let Some(ob) = obligations.iter_mut().find(|o| &o.id == obligation_id) {
             ob.status = ObligationStatus::SatisfiedBy(*child_eid);
         }

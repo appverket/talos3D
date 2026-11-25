@@ -13541,6 +13541,131 @@ fn promote_refinement_gate_block_after_script_reports_partial_state() {
     );
 }
 
+/// A governed recipe resolves obligations the same way a compiled one does:
+/// each `obligation_satisfied` postcondition links the obligation to the
+/// element its step created, so the gate passes without manual resolution.
+#[cfg(feature = "model-api")]
+fn gated_two_box_world_declaring(satisfied: &[(&str, &str)]) -> World {
+    use crate::curation::authoring_script::{ArgExpr, Postcondition, StepId};
+
+    let mut world = gated_two_box_world(&["structure", "thermal_layer"]);
+    let family = crate::capability_registry::RecipeFamilyId("two_box_wall".into());
+    let mut artifact = world
+        .resource::<crate::curation::RecipeArtifactRegistry>()
+        .get_by_family(&family)
+        .unwrap()
+        .clone();
+    let crate::curation::RecipeBody::AuthoringScript { script } = &mut artifact.body else {
+        unreachable!("two-box recipe is a script");
+    };
+    // The satisfier is the step's primary output: its `element_id` binding.
+    for instruction in &mut script.steps {
+        if let crate::curation::authoring_script::ScriptInstruction::Call(step) = instruction {
+            step.bindings = [(
+                "element_id".into(),
+                crate::curation::authoring_script::OutputPath::new("element_id"),
+            )]
+            .into_iter()
+            .collect();
+        }
+    }
+    script.postconditions = satisfied
+        .iter()
+        .map(|(obligation, step)| Postcondition::ObligationSatisfied {
+            obligation_id_expr: ArgExpr::Literal {
+                value: serde_json::json!(obligation),
+            },
+            by_step: StepId::new(*step),
+        })
+        .collect();
+    world
+        .resource_mut::<crate::curation::RecipeArtifactRegistry>()
+        .insert(artifact);
+    world
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn governed_recipe_postconditions_satisfy_obligations_on_instantiate_and_promote() {
+    use crate::plugins::refinement::{ObligationSet, ObligationStatus};
+
+    let declared = [("structure", "box_a"), ("thermal_layer", "box_b")];
+    let mut world = gated_two_box_world_declaring(&declared);
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "two_box_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect("declared satisfaction must let the instantiation reach its target");
+    assert!(
+        result.promotion_blocked.is_none(),
+        "{:?}",
+        result.promotion_blocked
+    );
+    assert_eq!(result.state, "Constructible");
+    let carrier = find_entity_by_element_id_readonly(
+        &world,
+        ElementId(
+            result
+                .group_element_id
+                .expect("instantiate creates a group"),
+        ),
+    )
+    .unwrap();
+    let satisfiers: Vec<u64> = world
+        .get::<ObligationSet>(carrier)
+        .unwrap()
+        .entries
+        .iter()
+        .map(|entry| match entry.status {
+            ObligationStatus::SatisfiedBy(id) => id,
+            ref other => panic!("{} left {other:?}", entry.id.0),
+        })
+        .collect();
+    assert_eq!(satisfiers.len(), 2);
+    assert!(satisfiers
+        .iter()
+        .all(|id| result.created_element_ids.contains(id)));
+    assert_ne!(
+        satisfiers[0], satisfiers[1],
+        "each obligation names its own step"
+    );
+
+    // The bare promote path applies the same declarations, and a recipe that
+    // declares only part of the ladder still reports the remainder.
+    let mut world = gated_two_box_world_declaring(&declared[..1]);
+    let root = handle_create_entity(
+        &mut world,
+        serde_json::json!({
+            "type": "box",
+            "centre": [0.0, 0.0, 0.0],
+            "half_extents": [0.5, 0.5, 0.5],
+            "semantic": {"element_class": "wall_assembly", "refinement_state": "Schematic", "parameters": {}}
+        }),
+    )
+    .unwrap();
+    let result = handle_promote_refinement(
+        &mut world,
+        root,
+        "Constructible".into(),
+        Some("two_box_wall".into()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    assert_eq!(
+        result
+            .promotion_blocked
+            .expect("thermal_layer is undeclared")
+            .unsatisfied_obligations,
+        vec!["thermal_layer".to_string()]
+    );
+}
+
 /// A gate block with NO recipe side effects (no script ran, nothing created)
 /// keeps the plain-error semantics of promote_refinement: there is no partial
 /// state to report, and the error message already names the recovery path.

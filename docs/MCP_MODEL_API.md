@@ -1232,6 +1232,13 @@ postconditions inspect real endpoints; claim grounding must match on an
 unambiguous target; obligation satisfaction must refer to the actual output
 entity of the specified step. Missing or ambiguous evidence fails closed.
 
+An installed recipe replayed by `instantiate_recipe` or `promote_refinement`
+uses `obligation_satisfied` as a declaration instead: once the step's
+`element_id` binding names a live element other than the refinement root, the
+promotion records that obligation as `SatisfiedBy` that element, exactly like
+the satisfaction links a registered native `generate` function returns.
+Obligations a recipe does not declare stay unresolved and block promotion.
+
 ## Design explanation
 
 `explain_design { element_id }` returns the same read projection shown in the

@@ -12729,8 +12729,8 @@ fn promote_refinement_in_transaction(
     overrides: serde_json::Value,
 ) -> Result<PromoteRefinementResult, crate::plugins::refinement::PromoteError> {
     use crate::plugins::refinement::{
-        apply_promote_refinement, ClaimPath, PromoteError, PromoteRefinementRequest, RecipeId,
-        RefinementState, RefinementStateComponent,
+        apply_promote_refinement_with_links, ClaimPath, PromoteError, PromoteRefinementRequest,
+        RecipeId, RefinementState, RefinementStateComponent,
     };
 
     let transaction_history_depth = world
@@ -12787,6 +12787,7 @@ fn promote_refinement_in_transaction(
     //   NativeFnRef with fn NOT registered → hard error (not a silent no-op);
     //     the recipe path is broken; caller must request_corpus_expansion.
     let mut script_steps_run: usize = 0;
+    let mut declared_links = Vec::new();
     if let Some(recipe_id) = recipe_id.as_deref() {
         // Fetch the installed artifact, capturing body kind + script + state
         // support in one immutable borrow so we can use `&mut world` after.
@@ -12874,6 +12875,10 @@ fn promote_refinement_in_transaction(
                             }
                         };
                         script_steps_run = report.steps_run.len();
+                        declared_links =
+                            crate::plugins::procedural_session_mcp::declared_satisfaction_links(
+                                &report,
+                            );
                     }
                     ArtifactBody::NativeResolvable => {
                         // The generate fn is registered; apply_promote_refinement
@@ -12969,7 +12974,7 @@ fn promote_refinement_in_transaction(
         overrides: overrides_map,
     };
 
-    let promote_result = apply_promote_refinement(world, request);
+    let promote_result = apply_promote_refinement_with_links(world, request, declared_links);
     flush_model_api_write_pipeline(world);
 
     // Elements the recipe body created (script replay above or native

@@ -425,9 +425,11 @@ pub enum Postcondition {
         path: ClaimPath,
         grounding: GroundingKind,
     },
-    /// An obligation resolved from `obligation_id_expr` must be marked
-    /// satisfied by the entity produced by the named step's primary
-    /// output.
+    /// The obligation resolved from `obligation_id_expr` is satisfied by
+    /// the element the named step created, read from that step's
+    /// `element_id` binding. A recipe replayed for a promotion declares the
+    /// link and the promotion records it as `SatisfiedBy`; procedural
+    /// commits check that the link is already recorded.
     ObligationSatisfied {
         obligation_id_expr: ArgExpr,
         by_step: StepId,
