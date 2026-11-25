@@ -4817,6 +4817,10 @@ pub struct AuthoringProvenanceInfo {
     /// `"ViaRecipe:<id>"`, `"Imported:<ref>"`, or `"Refined:<id>"`.
     pub mode: String,
     pub rationale: Option<String>,
+    /// Installed corpus asset id, kind and content hash that generated the
+    /// entity; absent for compiled-in or hand-authored content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_revision: Option<crate::plugins::refinement::KnowledgeRevisionRef>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]

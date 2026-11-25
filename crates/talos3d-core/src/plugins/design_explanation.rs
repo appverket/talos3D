@@ -842,6 +842,7 @@ mod tests {
                     "fixture".into(),
                 )),
                 rationale: None,
+                knowledge_revision: None,
             },
         ));
         world.spawn((

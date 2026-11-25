@@ -808,6 +808,7 @@ mod tests {
         world.entity_mut(entity).insert(AuthoringProvenance {
             mode: AuthoringMode::Freeform,
             rationale: Some("Human decision".into()),
+            knowledge_revision: None,
         });
         sync_property_panel_data(&mut world);
         assert!(world

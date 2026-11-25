@@ -52,6 +52,33 @@ struct InstalledAsset {
     catalog_contract: Option<Value>,
 }
 
+impl InstalledAssets {
+    /// The installed asset whose runtime registration (recipe family, catalog
+    /// provider, parametric type) is `runtime_id`.
+    fn by_runtime(&self, kind: &str, runtime_id: &str) -> Option<(&String, &InstalledAsset)> {
+        self.0
+            .iter()
+            .find(|(_, a)| a.kind == kind && a.runtime_id == runtime_id)
+    }
+}
+
+/// Exact shared-knowledge revision behind a runtime registration, when it was
+/// installed from the governed corpus rather than compiled in.
+pub fn installed_revision(
+    world: &World,
+    kind: &str,
+    runtime_id: &str,
+) -> Option<crate::plugins::refinement::KnowledgeRevisionRef> {
+    let (id, asset) = world
+        .get_resource::<InstalledAssets>()?
+        .by_runtime(kind, runtime_id)?;
+    Some(crate::plugins::refinement::KnowledgeRevisionRef {
+        asset_id: id.clone(),
+        asset_kind: asset.kind.clone(),
+        content_hash: asset.revision.clone(),
+    })
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateCheck {
@@ -407,8 +434,8 @@ fn build_catalog_query_contract(data: &CatalogData) -> Result<Value, String> {
     )
 }
 pub fn catalog_query_contract(world: &World, provider: &str) -> Value {
-    world.get_resource::<InstalledAssets>().and_then(|assets|assets.0.values().find(|a|a.kind=="catalog.v1" && a.runtime_id==provider))
-        .and_then(|a|a.catalog_contract.clone()).unwrap_or_else(||json!({"filter_mode":"provider_defined","filter_schema":null,
+    world.get_resource::<InstalledAssets>().and_then(|assets|assets.by_runtime("catalog.v1", provider))
+        .and_then(|(_, a)|a.catalog_contract.clone()).unwrap_or_else(||json!({"filter_mode":"provider_defined","filter_schema":null,
             "scope_probe_tool":"probe_catalog_scope","scope_semantics":"Opaque provider declaration only; unknown provider filtering behavior is not scope evidence."}))
 }
 pub fn validate_catalog_filter(
@@ -447,10 +474,9 @@ pub fn probe_catalog_scope(
         .get_resource::<CapabilityRegistry>()
         .and_then(|r| r.catalog_provider_descriptor(&CatalogProviderId(provider.into())))
         .ok_or_else(|| format!("Unknown catalog provider '{provider}'"))?;
-    let installed = world.get_resource::<InstalledAssets>().and_then(|r| {
-        r.0.iter()
-            .find(|(_, a)| a.kind == "catalog.v1" && a.runtime_id == provider)
-    });
+    let installed = world
+        .get_resource::<InstalledAssets>()
+        .and_then(|r| r.by_runtime("catalog.v1", provider));
     let declared = descriptor
         .region
         .as_deref()
@@ -1267,6 +1293,13 @@ mod tests {
         world.init_resource::<evaluation::Observations>();
         install(&mut world, admitted.clone()).unwrap();
         let family = recipe.execution_family_id();
+        // Recipe outputs are stamped with the exact installed revision.
+        let revision = installed_revision(&world, "recipe.v1", &family.0).unwrap();
+        assert_eq!(
+            (revision.asset_id.as_str(), revision.content_hash.as_str()),
+            ("system", "system-r1")
+        );
+        assert!(installed_revision(&world, "catalog.v1", &family.0).is_none());
         let class = ElementClassDescriptor {
             class_min_obligations: HashMap::from([(
                 RefinementState::Constructible,

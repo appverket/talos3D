@@ -560,6 +560,10 @@ pub enum AuthoringMode {
 pub struct AuthoringProvenance {
     pub mode: AuthoringMode,
     pub rationale: Option<String>,
+    /// Exact governed knowledge revision that generated the entity, when it
+    /// came from an installed corpus asset rather than compiled-in knowledge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_revision: Option<KnowledgeRevisionRef>,
 }
 
 impl Default for AuthoringProvenance {
@@ -567,6 +571,7 @@ impl Default for AuthoringProvenance {
         Self {
             mode: AuthoringMode::Freeform,
             rationale: None,
+            knowledge_revision: None,
         }
     }
 }

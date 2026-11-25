@@ -4224,6 +4224,7 @@ mod tests {
         let authoring_provenance = AuthoringProvenance {
             mode: AuthoringMode::Freeform,
             rationale: Some("PP-185 persistence fixture".into()),
+            knowledge_revision: None,
         };
 
         // Like capability-owned geometry snapshots, AssemblySnapshot has no
@@ -4508,6 +4509,7 @@ mod tests {
         let authoring_provenance = AuthoringProvenance {
             mode: AuthoringMode::Freeform,
             rationale: Some("semantic primitive persistence fixture".into()),
+            knowledge_revision: None,
         };
         let setting_out_contract = SettingOutContract {
             revision: 2,

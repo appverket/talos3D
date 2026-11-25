@@ -10998,6 +10998,7 @@ fn semantic_annotation_metadata(
         grounding: None,
         setting_out: None,
         provenance: annotation.rationale.map(|rationale| AuthoringProvenance {
+            knowledge_revision: None,
             mode: AuthoringMode::Freeform,
             rationale: Some(rationale),
         }),
@@ -12574,12 +12575,14 @@ fn handle_get_authoring_provenance(
                 element_id,
                 mode: mode_str,
                 rationale: prov.rationale.clone(),
+                knowledge_revision: prov.knowledge_revision.clone(),
             })
         })
         .unwrap_or_else(|| AuthoringProvenanceInfo {
             element_id,
             mode: "Unrecorded".to_string(),
             rationale: None,
+            knowledge_revision: None,
         });
 
     Ok(entry)

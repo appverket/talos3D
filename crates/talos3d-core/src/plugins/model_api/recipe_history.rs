@@ -148,6 +148,8 @@ pub(super) fn finalize(
     if let Some(group) = group {
         move_recipe_semantics_from_anchor_to_group(world, root, group);
     }
+    let knowledge_revision =
+        crate::plugins::knowledge_cloud::installed_revision(world, "recipe.v1", family_id);
     for id in &ids {
         let entity = find_entity_by_element_id_readonly(world, *id).expect("recipe output exists");
         let rationale = world
@@ -156,6 +158,7 @@ pub(super) fn finalize(
         world.entity_mut(entity).insert(AuthoringProvenance {
             mode: AuthoringMode::ViaRecipe(RecipeId(family_id.into())),
             rationale,
+            knowledge_revision: knowledge_revision.clone(),
         });
     }
     let after = ids.iter().map(|id| Metadata::capture(world, *id)).collect();

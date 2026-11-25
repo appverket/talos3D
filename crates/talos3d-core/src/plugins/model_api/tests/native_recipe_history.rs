@@ -28,6 +28,7 @@ fn fixture(fail: bool) -> (World, u64) {
         AuthoringProvenance {
             mode: AuthoringMode::Freeform,
             rationale: Some("manual fixture".into()),
+            knowledge_revision: None,
         },
     ));
     world
