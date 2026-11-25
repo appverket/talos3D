@@ -1238,6 +1238,11 @@ uses `obligation_satisfied` as a declaration instead: once the step's
 promotion records that obligation as `SatisfiedBy` that element, exactly like
 the satisfaction links a registered native `generate` function returns.
 Obligations a recipe does not declare stay unresolved and block promotion.
+`install_knowledge_asset` for a recipe returns
+`execution.obligation_coverage.by_state`: for each supported state, the
+obligations in force on the target class (class minimum plus the recipe's own
+specializations), the ones the recipe leaves undeclared, and `covered`. When
+several variants are available, prefer one that covers the requested state.
 
 ## Design explanation
 

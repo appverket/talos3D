@@ -62,6 +62,70 @@ impl InstalledAssets {
     }
 }
 
+/// For each refinement state a recipe supports, the obligations in force on its
+/// target class (class minimum plus the recipe's own specializations) and which
+/// of them the recipe declares a satisfier for through `obligation_satisfied`
+/// postconditions. Undeclared obligations stay unresolved after execution, so
+/// an agent can tell before authoring whether a recipe can reach a state.
+fn recipe_obligation_coverage(
+    world: &World,
+    recipe: &crate::curation::RecipeArtifact,
+    refinement: &crate::capability_registry::RefinementSpecializations,
+) -> Value {
+    use crate::capability_registry::{effective_obligations, CapabilityRegistry, ElementClassId};
+    use crate::curation::authoring_script::{ArgExpr, Postcondition};
+    let Some(class) = world
+        .get_resource::<CapabilityRegistry>()
+        .and_then(|registry| {
+            registry.element_class_descriptor(&ElementClassId(recipe.target_class.clone()))
+        })
+    else {
+        return json!({"status":"unknown_target_class"});
+    };
+    let mut declared = std::collections::BTreeSet::new();
+    let mut computed_declarations = 0;
+    for condition in recipe
+        .body
+        .script()
+        .map_or(&[][..], |s| &s.postconditions[..])
+    {
+        if let Postcondition::ObligationSatisfied {
+            obligation_id_expr, ..
+        } = condition
+        {
+            match obligation_id_expr {
+                ArgExpr::Literal {
+                    value: Value::String(id),
+                } => {
+                    declared.insert(id.clone());
+                }
+                _ => computed_declarations += 1,
+            }
+        }
+    }
+    let states: serde_json::Map<String, Value> = recipe
+        .supported_refinement_states
+        .iter()
+        .map(|state| {
+            let required: Vec<String> = effective_obligations(class, Some(refinement), *state)
+                .into_iter()
+                .map(|o| o.id.0)
+                .collect();
+            let undeclared: Vec<&String> = required
+                .iter()
+                .filter(|id| !declared.contains(*id))
+                .collect();
+            (
+                state.as_str().to_string(),
+                json!({"in_force":required,"undeclared":undeclared,
+                    "covered":undeclared.is_empty()}),
+            )
+        })
+        .collect();
+    json!({"by_state":states,"computed_declarations":computed_declarations,
+        "notice":"Undeclared obligations remain unresolved after execution and block promotion unless resolved, deferred or waived explicitly. Prefer a variant that covers the requested state."})
+}
+
 /// Exact shared-knowledge revision behind a runtime registration, when it was
 /// installed from the governed corpus rather than compiled in.
 pub fn installed_revision(
@@ -750,6 +814,8 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
                 return Err("Recipe executable identity collides with another asset; use a distinct identity".into());
             }
             execution = json!({"tool":"instantiate_recipe","arguments":{"family_id":family.0,"target_class":recipe.target_class},"required_parameters":recipe.body.script().map(|s|s.parameter_schema["required"].clone()),"supported_refinement_states":recipe.supported_refinement_states,"notice":"Supply parameters and choose a supported target_state. Use this exact executable identity. Candidate checks install only in scratch registries; geometry and applicability still require execution and review."});
+            execution["obligation_coverage"] =
+                recipe_obligation_coverage(world, &recipe, &refinement);
             recipe
                 .body
                 .script()
@@ -1258,7 +1324,10 @@ mod tests {
         use crate::plugins::refinement::{AgentId, ObligationId, RefinementState, SemanticRole};
         use std::collections::HashMap;
         let script = serde_json::from_value(json!({"parameter_schema":{"type":"object"},
-            "allowed_tools":["create_box"],"mutation_scope":{"kind":"project_root"},"steps":[]}))
+            "allowed_tools":["create_box"],"mutation_scope":{"kind":"project_root"},
+            "steps":[{"id":"frame","tool":"create_box","args":{}}],
+            "postconditions":[{"postcondition":"obligation_satisfied",
+                "obligation_id_expr":{"expr":"literal","value":"structure"},"by_step":"frame"}]}))
         .unwrap();
         let recipe = RecipeArtifact {
             meta: CurationMeta::new(
@@ -1291,7 +1360,31 @@ mod tests {
             json!({"Constructible":["member_section"]});
         let mut world = World::new();
         world.init_resource::<evaluation::Observations>();
-        install(&mut world, admitted.clone()).unwrap();
+        world.insert_resource(crate::capability_registry::CapabilityRegistry::default());
+        world
+            .resource_mut::<crate::capability_registry::CapabilityRegistry>()
+            .register_element_class(ElementClassDescriptor {
+                class_min_obligations: HashMap::from([(
+                    RefinementState::Constructible,
+                    vec![ObligationTemplate {
+                        id: ObligationId("structure".into()),
+                        role: SemanticRole("primary_structure".into()),
+                        required_by_state: RefinementState::Constructible,
+                    }],
+                )]),
+                id: crate::capability_registry::ElementClassId("fixture".into()),
+                label: "Fixture".into(),
+                description: String::new(),
+                semantic_roles: vec![],
+                class_min_promotion_critical_paths: HashMap::new(),
+                parameter_schema: json!({}),
+            });
+        let installed = install(&mut world, admitted.clone()).unwrap();
+        // The install response says which in-force obligations stay undeclared.
+        let coverage = &installed["execution"]["obligation_coverage"]["by_state"]["Constructible"];
+        assert_eq!(coverage["in_force"], json!(["structure", "member_section"]));
+        assert_eq!(coverage["undeclared"], json!(["member_section"]));
+        assert_eq!(coverage["covered"], json!(false));
         let family = recipe.execution_family_id();
         // Recipe outputs are stamped with the exact installed revision.
         let revision = installed_revision(&world, "recipe.v1", &family.0).unwrap();
