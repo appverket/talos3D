@@ -204,6 +204,10 @@ pub struct EntitySemanticDetails {
     pub unresolved_decisions: Vec<crate::plugins::refinement::UnresolvedDecisionRecord>,
     pub source_refs: Vec<crate::plugins::refinement::SemanticSourceRef>,
     pub authoring_rationale: Option<String>,
+    /// Exact installed corpus revision (asset id, kind, content hash) that
+    /// generated this entity; absent for compiled-in or hand-authored content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_revision: Option<crate::plugins::refinement::KnowledgeRevisionRef>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]

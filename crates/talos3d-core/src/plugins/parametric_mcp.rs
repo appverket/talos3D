@@ -1226,6 +1226,19 @@ mod tests {
             apply_pending_history_commands(w);
         }
         assert_eq!(sources(w), pinned);
+        // Member provenance names the same exact revision.
+        let provenance: Vec<_> = w
+            .query::<(&ParametricInstanceRef, &AuthoringProvenance)>()
+            .iter(w)
+            .filter(|(r, _)| r.instance_id == id)
+            .map(|(_, p)| p.knowledge_revision.clone())
+            .collect();
+        assert!(!provenance.is_empty());
+        assert!(provenance.iter().all(|r| r.as_ref()
+            == Some(match &pinned[0] {
+                Grounding::ReleasedKnowledge(r) => r,
+                _ => unreachable!(),
+            })));
         // Compiled or private types keep their non-knowledge grounding.
         let plain = world_create(
             w,

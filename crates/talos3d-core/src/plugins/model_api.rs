@@ -722,6 +722,7 @@ fn semantic_details_for_entity(
             .map(|intent| intent.source_refs.clone())
             .unwrap_or_default(),
         authoring_rationale: provenance.and_then(|provenance| provenance.rationale.clone()),
+        knowledge_revision: provenance.and_then(|provenance| provenance.knowledge_revision.clone()),
     })
 }
 
