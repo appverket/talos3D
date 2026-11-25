@@ -684,11 +684,13 @@ fn semantic_details_for_entity(
     let refinement_state = entity_ref.get::<RefinementStateComponent>();
     let semantic_intent = entity_ref.get::<SemanticIntent>();
     let provenance = entity_ref.get::<AuthoringProvenance>();
+    let assembly_memberships = assembly_memberships_of(world, element_id);
 
     if assignment.is_none()
         && refinement_state.is_none()
         && semantic_intent.is_none()
         && provenance.is_none()
+        && assembly_memberships.is_empty()
     {
         return None;
     }
@@ -723,7 +725,33 @@ fn semantic_details_for_entity(
             .unwrap_or_default(),
         authoring_rationale: provenance.and_then(|provenance| provenance.rationale.clone()),
         knowledge_revision: provenance.and_then(|provenance| provenance.knowledge_revision.clone()),
+        assembly_memberships,
     })
+}
+
+/// Roles an entity plays in semantic assemblies. A member's role lives on the
+/// assembly, so a reader of the member alone would otherwise not see it.
+fn assembly_memberships_of(world: &World, element_id: ElementId) -> Vec<AssemblyMembershipDetails> {
+    use crate::plugins::modeling::assembly::SemanticAssembly;
+    let Some(mut query) = world.try_query::<(&ElementId, &SemanticAssembly)>() else {
+        return Vec::new();
+    };
+    let mut memberships: Vec<_> = query
+        .iter(world)
+        .flat_map(|(assembly_id, assembly)| {
+            assembly
+                .members
+                .iter()
+                .filter(|member| member.target == element_id)
+                .map(|member| AssemblyMembershipDetails {
+                    assembly_id: assembly_id.0,
+                    assembly_type: assembly.assembly_type.clone(),
+                    role: member.role.clone(),
+                })
+        })
+        .collect();
+    memberships.sort_by(|a, b| (a.assembly_id, &a.role).cmp(&(b.assembly_id, &b.role)));
+    memberships
 }
 
 #[cfg(feature = "model-api")]

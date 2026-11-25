@@ -208,6 +208,17 @@ pub struct EntitySemanticDetails {
     /// generated this entity; absent for compiled-in or hand-authored content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge_revision: Option<crate::plugins::refinement::KnowledgeRevisionRef>,
+    /// Semantic assemblies this entity is a member of, with its role in each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assembly_memberships: Vec<AssemblyMembershipDetails>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssemblyMembershipDetails {
+    pub assembly_id: u64,
+    pub assembly_type: String,
+    pub role: String,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]

@@ -8352,6 +8352,19 @@ fn create_assembly_creates_selected_physical_group_for_members() {
         },
     )
     .expect("assembly should be creatable");
+    // A member read on its own reports the role it plays in the assembly.
+    let memberships = get_entity_details(&world, ElementId(wall))
+        .and_then(|details| details.semantic)
+        .expect("a member exposes semantic details")
+        .assembly_memberships;
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(
+        (
+            memberships[0].assembly_type.as_str(),
+            memberships[0].role.as_str()
+        ),
+        ("house", "exterior_wall")
+    );
     let group_id = ElementId(result.group_element_id.expect("physical group id"));
     let group_entity = find_entity_by_element_id_readonly(&world, group_id)
         .expect("physical group entity should exist");
