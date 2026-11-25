@@ -175,12 +175,10 @@ pub fn asset_execution(
     request: &Value,
     result: &Value,
 ) {
-    let Some((id, asset)) = world.get_resource::<InstalledAssets>().and_then(|assets| {
-        assets
-            .0
-            .iter()
-            .find(|(_, a)| a.kind == kind && a.runtime_id == runtime_id)
-    }) else {
+    let Some((id, asset)) = world
+        .get_resource::<InstalledAssets>()
+        .and_then(|assets| assets.by_runtime(kind, runtime_id))
+    else {
         return;
     };
     let mut event = json!({"operation":operation, "asset_id":id,
