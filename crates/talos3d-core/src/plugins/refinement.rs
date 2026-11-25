@@ -389,8 +389,9 @@ that *could* fulfil an obligation does not auto-link it — the obligation stays
 `satisfied_by` that child's `element_id`. (A recipe only auto-satisfies the
 specific obligations it declares satisfaction-links for — for a governed
 `AuthoringScript` recipe, each `obligation_satisfied` postcondition naming the
-step whose element fulfils it; do not assume it covers the class ladder.) So the normal order is: build the sub-element → read its
-`element_id` → `resolve_obligation { satisfied_by }` → re-promote.
+step whose element fulfils it; do not assume it covers the class ladder.)
+So the normal order is: build the sub-element → read its `element_id` →
+`resolve_obligation { satisfied_by }` → re-promote.
 
 Prefer `SatisfiedBy` a genuine sub-element over `Deferred`/`Waived`: deferring or
 waiving records an honest gap, but it does not add the resolved content the level
