@@ -317,6 +317,15 @@ where
 
     let mut postcondition_results = Vec::new();
     for pc in &script.postconditions {
+        // A postcondition about a step that its precondition skipped asserts
+        // nothing: conditional steps carry conditional promises.
+        if pc
+            .step_dependencies()
+            .iter()
+            .any(|step| steps_skipped.contains(step))
+        {
+            continue;
+        }
         let resolved = resolve_postcondition(pc, &merged_params, &outputs).map_err(|reason| {
             InvocationError::UnresolvedArgExpr {
                 step: StepId::new("(postcondition)"),
@@ -1305,6 +1314,41 @@ mod tests {
             err,
             InvocationError::EssentialStepPreconditionFailed { .. }
         ));
+    }
+
+    #[test]
+    fn postconditions_about_skipped_steps_assert_nothing() {
+        use super::super::authoring_script::{Postcondition, ScriptInstruction, Step};
+        let mut s = AuthoringScript::stub(MutationScope::None);
+        s.allowed_tools.insert(tool("t"));
+        s.steps.push(ScriptInstruction::Call(Step {
+            id: StepId::new("optional_host"),
+            tool: tool("t"),
+            args: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+            essential: false,
+            precondition: Some(Predicate::Equals {
+                lhs: ArgExpr::Literal {
+                    value: Value::from(1),
+                },
+                rhs: ArgExpr::Literal {
+                    value: Value::from(2),
+                },
+            }),
+        }));
+        s.postconditions.push(Postcondition::ObligationSatisfied {
+            obligation_id_expr: ArgExpr::Literal {
+                value: Value::from("structure"),
+            },
+            by_step: StepId::new("optional_host"),
+        });
+        let mut d = FixtureDispatcher::new(vec![]);
+        let o = FixtureOracle {
+            fail_relation_kind: None,
+        };
+        let report = replay(&s, Map::new(), &mut d, &o).expect("a skipped step's promise is void");
+        assert_eq!(report.steps_skipped, vec![StepId::new("optional_host")]);
+        assert!(report.postcondition_results.is_empty());
     }
 
     #[test]

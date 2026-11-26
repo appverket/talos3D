@@ -436,6 +436,32 @@ pub enum Postcondition {
     },
 }
 
+impl Postcondition {
+    fn collect_output_refs(&self, out: &mut BTreeSet<StepId>) {
+        match self {
+            Postcondition::Relation { from, to, .. } => {
+                collect_step_refs(from, out);
+                collect_step_refs(to, out);
+            }
+            Postcondition::ObligationSatisfied {
+                obligation_id_expr, ..
+            } => collect_step_refs(obligation_id_expr, out),
+            Postcondition::Claim { .. } => {}
+        }
+    }
+
+    /// Every step this postcondition depends on: steps whose outputs it reads
+    /// and the step it names as an obligation's satisfier.
+    pub fn step_dependencies(&self) -> BTreeSet<StepId> {
+        let mut out = BTreeSet::new();
+        self.collect_output_refs(&mut out);
+        if let Postcondition::ObligationSatisfied { by_step, .. } = self {
+            out.insert(by_step.clone());
+        }
+        out
+    }
+}
+
 /// Schema version this module implements. Carried on
 /// `CurationMeta.compatibility.body_schema` when an artifact declares a
 /// `RecipeBody::AuthoringScript` body with this shape.
@@ -500,16 +526,7 @@ impl AuthoringScript {
             instr.collect_step_refs(&mut out);
         }
         for pc in &self.postconditions {
-            match pc {
-                Postcondition::Relation { from, to, .. } => {
-                    collect_step_refs(from, &mut out);
-                    collect_step_refs(to, &mut out);
-                }
-                Postcondition::ObligationSatisfied {
-                    obligation_id_expr, ..
-                } => collect_step_refs(obligation_id_expr, &mut out),
-                Postcondition::Claim { .. } => {}
-            }
+            pc.collect_output_refs(&mut out);
         }
         out
     }

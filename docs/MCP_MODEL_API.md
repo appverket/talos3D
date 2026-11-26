@@ -1238,6 +1238,9 @@ uses `obligation_satisfied` as a declaration instead: once the step's
 promotion records that obligation as `SatisfiedBy` that element, exactly like
 the satisfaction links a registered native `generate` function returns.
 Obligations a recipe does not declare stay unresolved and block promotion.
+A postcondition that depends on a step its precondition skipped asserts nothing,
+so a recipe with optional steps (for example an optional host layer) can declare
+satisfiers for those steps conditionally.
 `install_knowledge_asset` for a recipe returns
 `execution.obligation_coverage.by_state`: for each supported state, the
 obligations in force on the target class (class minimum plus the recipe's own
