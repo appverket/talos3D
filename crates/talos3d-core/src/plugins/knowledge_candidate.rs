@@ -1134,14 +1134,14 @@ mod tests {
         // Expansion beyond the shared nested budget is refused at execution time.
         let error = run(
             series(
-                json!({"expr":"literal","value":500}),
+                json!({"expr":"literal","value":5000}),
                 json!([member.clone()]),
             ),
             json!({}),
         )
         .err()
         .unwrap();
-        assert!(error.contains("budget") || error.contains("128"), "{error}");
+        assert!(error.contains("budget"), "{error}");
 
         // An empty body would loop without spending the budget.
         let error = run(

@@ -65,7 +65,9 @@ pub(super) fn empty_world(context: Context) -> World {
         registry.register_relation_type(c);
     }
     w.insert_resource(registry);
-    w.insert_resource(model_api::document_dispatch::DocumentCallBudget(128));
+    w.insert_resource(model_api::document_dispatch::DocumentCallBudget(
+        SCENARIO_NATIVE_CALL_BUDGET,
+    ));
     w.init_resource::<model_api::geometry_measurement::IsolatedEvaluationWorld>();
     w.init_resource::<ElementIdAllocator>();
     w.init_resource::<ParametricStore>();
@@ -108,6 +110,11 @@ pub(super) fn empty_world(context: Context) -> World {
     w.init_resource::<authored_edit_plan::requests::EditRequestRegistry>();
     w
 }
+
+/// Nested native calls one isolated candidate scenario may make. It bounds a
+/// runaway script while admitting a realistic assembly: an envelope layer of
+/// about a hundred members spends a create, a material and a role call each.
+pub(crate) const SCENARIO_NATIVE_CALL_BUDGET: usize = 1024;
 
 fn ids(w: &mut World) -> Vec<u64> {
     let mut ids: Vec<_> = w.query::<&ElementId>().iter(w).map(|e| e.0).collect();
