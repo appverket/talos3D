@@ -298,15 +298,18 @@ pub fn evaluate(request: Request, scenario: Scenario, context: Context) -> Resul
     {
         return Err("Scenario exceeds 1 MiB".into());
     }
-    let checked = knowledge_cloud::check_candidate(knowledge_cloud::CandidateCheck {
-        catalog_queries: vec![],
-        asset: request.asset.clone(),
-        driver_cases: if is_parametric {
-            vec![request.drivers.clone()]
-        } else {
-            vec![]
+    let checked = knowledge_cloud::check_candidate(
+        &World::new(),
+        knowledge_cloud::CandidateCheck {
+            catalog_queries: vec![],
+            asset: request.asset.clone(),
+            driver_cases: if is_parametric {
+                vec![request.drivers.clone()]
+            } else {
+                vec![]
+            },
         },
-    })?;
+    )?;
     let members = checked["parametric_cases"][0]["members"]
         .as_array()
         .map_or(0, Vec::len);

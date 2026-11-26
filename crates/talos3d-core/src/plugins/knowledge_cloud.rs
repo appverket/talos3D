@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 pub mod declarative_prior;
 pub mod evaluation;
-mod registry_kinds;
+pub mod registry_kinds;
 
 pub use talos3d_knowledge_protocol::{Asset, SCHEMA};
 
@@ -163,7 +163,7 @@ pub struct CandidateCheck {
 
 /// Uses the same decoder/validation as admission, in disposable registries.
 /// No entity, release, trust decision or project state escapes this check.
-pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
+pub fn check_candidate(world: &World, request: CandidateCheck) -> Result<Value, String> {
     request
         .asset
         .validate_envelope()
@@ -173,20 +173,24 @@ pub fn check_candidate(request: CandidateCheck) -> Result<Value, String> {
         return Err(json!({"code":"MissingRequiredRuntimeTools","missing_required_tool_ids":missing,
             "route":"CapabilityGap","notice":"Candidate requirements must name actual MCP tools. Inspect live schemas; never invent aliases. No installation or publication."}).to_string());
     }
-    let mut checked = check_payload(request)?;
+    let mut checked = check_payload(world, request)?;
     checked["envelope_validation"] = json!("passed");
     Ok(checked)
 }
 
 // Payload inspection is also used for exact server-owned legacy snapshots whose
 // provenance/rights remain unresolved. It never establishes candidate eligibility.
-fn check_payload(request: CandidateCheck) -> Result<Value, String> {
+fn check_payload(world: &World, request: CandidateCheck) -> Result<Value, String> {
     let bytes = serde_json::to_vec(&request.asset).map_err(|e| e.to_string())?;
     if request.driver_cases.len() > 16 || request.catalog_queries.len() > 16 {
         return Err("Candidate or case limit exceeded".into());
     }
     let revision = hex::encode(Sha256::digest(&bytes));
     let mut scratch = World::new();
+    // Disposable registries route the same kinds as the live world.
+    if let Some(kinds) = world.get_resource::<registry_kinds::KnowledgeKindRegistry>() {
+        scratch.insert_resource(kinds.clone());
+    }
     let installation = install_payload(
         &mut scratch,
         AdmittedAsset {
@@ -587,7 +591,7 @@ struct ParametricPayload {
         BTreeMap<String, crate::capability_registry::RefinementSpecializations>,
 }
 
-pub fn payload_schema(kind: &str) -> Result<Value, String> {
+pub fn payload_schema(world: &World, kind: &str) -> Result<Value, String> {
     if kind == "candidate_runtime.v1" {
         return Ok(json!({"kind":kind,
             "request_schema":schemars::schema_for!(candidate_runtime::Request),
@@ -600,8 +604,8 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
             "knowledge_observation_operations":evaluation::LIFECYCLE_OPERATIONS,"candidate_checks":candidate_checks(),"next_tool":"evaluate_knowledge_candidate"}));
     }
     let (payload, constraints) = match kind {
-        registry if registry_kinds::handler(registry).is_some() => {
-            let handler = registry_kinds::handler(registry).expect("checked above");
+        registry if registry_kinds::handler(world, registry).is_some() => {
+            let handler = registry_kinds::handler(world, registry).expect("checked above");
             ((handler.payload_schema)(), handler.constraints.to_vec())
         }
         "catalog.v1" => (
@@ -948,7 +952,7 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
             a.id.clone()
         }
         kind => {
-            let handler = registry_kinds::handler(kind).ok_or(
+            let handler = registry_kinds::handler(world, kind).ok_or(
                 "Knowledge kind has no compatible dynamic installer; record a runtime gap",
             )?;
             let previous = world
@@ -1078,7 +1082,7 @@ pub fn reconcile(world: &mut World, index: &Index) -> Value {
             }
             kind => {
                 if let (Some(handler), Some(payload)) =
-                    (registry_kinds::handler(kind), &a.owned_payload)
+                    (registry_kinds::handler(world, kind), &a.owned_payload)
                 {
                     (handler.withdraw)(world, payload);
                 }
@@ -1159,7 +1163,8 @@ pub fn legacy_list(world: &World) -> Value {
             add("catalog.v1", &p.id.0, &p.label, true, None);
         }
     }
-    for handler in registry_kinds::HANDLERS {
+    let handlers = registry_kinds::handlers(world);
+    for handler in &handlers {
         for item in (handler.legacy_list)(world) {
             add(
                 handler.kind,
@@ -1179,8 +1184,10 @@ pub fn legacy_list(world: &World) -> Value {
     let mut portable_kinds: Vec<&str> = talos3d_knowledge_protocol::KINDS
         .iter()
         .map(|(kind, _)| *kind)
+        .chain(handlers.iter().map(|h| h.kind))
         .collect();
     portable_kinds.sort_unstable();
+    portable_kinds.dedup();
     json!({"assets":items,"coverage":{"portable_kinds":portable_kinds,"excluded_private_content":["document_definitions","occurrences","project_passages","private_parametric_types"],"inspection_only_kinds":[],"unsupported_dynamic_kinds":registry_kinds::UNSUPPORTED_NATIVE,"procedures":"Inspect list_agent_skills and exact resources separately; this inventory is not exhaustive of every compiled registry."},"publication_authorized":false,"notice":"Legacy shared content is a migration candidate, not independently reviewed knowledge. Resolve evidence, rights, applicability and limitations before curator submission. Unsupported native bodies must become explicit gaps."})
 }
 pub fn legacy_get(world: &World, request: LegacyRequest) -> Result<Value, String> {
@@ -1243,7 +1250,7 @@ pub fn legacy_get(world: &World, request: LegacyRequest) -> Result<Value, String
                 .ok_or("Missing catalog")?;
             json!({"id":p.id.0,"label":p.label,"description":p.description,"category":p.category,"region":p.region,"license":p.license,"source_version":p.source_version,"rows":(p.query_fn)(&json!({}))})
         }
-        kind => (registry_kinds::handler(kind)
+        kind => (registry_kinds::handler(world, kind)
             .ok_or("Unsupported legacy kind")?
             .legacy_get)(world, &request.id)?,
     };
@@ -1337,11 +1344,14 @@ mod tests {
 
         let mut asset = passage("r").asset;
         asset.payload["unread"] = json!(true);
-        let refused = check_candidate(CandidateCheck {
-            asset,
-            driver_cases: vec![],
-            catalog_queries: vec![],
-        })
+        let refused = check_candidate(
+            &World::new(),
+            CandidateCheck {
+                asset,
+                driver_cases: vec![],
+                catalog_queries: vec![],
+            },
+        )
         .err()
         .expect("candidate checks share the strict installer decoder");
         assert!(
@@ -1631,8 +1641,8 @@ mod tests {
             capture["snapshot_sha256"],
             hex::encode(Sha256::digest(bytes))
         );
-        assert!(payload_schema("assembly_pattern.v1").is_ok());
-        assert!(payload_schema("native_fn_ref").is_err());
+        assert!(payload_schema(&World::new(), "assembly_pattern.v1").is_ok());
+        assert!(payload_schema(&World::new(), "native_fn_ref").is_err());
         assert!(legacy_get(
             &world,
             LegacyRequest {
@@ -1645,7 +1655,7 @@ mod tests {
 
     #[test]
     fn catalog_payload_schema_uses_actual_decoder_types() {
-        let response = payload_schema("catalog.v1").unwrap();
+        let response = payload_schema(&World::new(), "catalog.v1").unwrap();
         let schema = &response["payload_schema"];
         assert_eq!(
             schema,
@@ -1672,8 +1682,8 @@ mod tests {
             .unwrap()
             .contains(&json!("supersedes")));
         assert_eq!(response["next_tool"], "check_knowledge_candidate");
-        assert!(payload_schema("unknown.v1").is_err());
-        assert!(payload_schema("recipe.v1").is_ok());
+        assert!(payload_schema(&World::new(), "unknown.v1").is_err());
+        assert!(payload_schema(&World::new(), "recipe.v1").is_ok());
     }
 
     #[test]
@@ -1704,7 +1714,7 @@ mod tests {
             "definition_library.v1",
             "corpus_passage.v1",
         ] {
-            let response = payload_schema(kind).unwrap();
+            let response = payload_schema(&World::new(), kind).unwrap();
             for field in ["asset_schema", "payload_schema"] {
                 check_refs(&response[field], &response[field]);
             }
@@ -1713,20 +1723,20 @@ mod tests {
             assert!(bytes < 200_000, "{kind}: {bytes}");
             assert_eq!(response["next_tool"], "check_knowledge_candidate");
         }
-        let recipe = payload_schema("recipe.v1").unwrap();
+        let recipe = payload_schema(&World::new(), "recipe.v1").unwrap();
         assert_eq!(
             recipe["payload_schema"]["allOf"][0]["properties"]["body"]["properties"]["kind"]
                 ["const"],
             "authoring_script"
         );
-        let parametric = payload_schema("parametric_type.v1").unwrap();
+        let parametric = payload_schema(&World::new(), "parametric_type.v1").unwrap();
         assert_eq!(
             parametric["payload_schema"]["required"],
             json!(["definition"])
         );
         // Curators can declare an enforced applicability envelope per driver.
         assert!(parametric["payload_schema"]["properties"]["driver_bounds"].is_object());
-        let library = payload_schema("definition_library.v1").unwrap();
+        let library = payload_schema(&World::new(), "definition_library.v1").unwrap();
         let properties = &library["payload_schema"]["$defs"]["Definition"]["properties"];
         assert!(properties["body"].is_object());
         assert!(properties.get("evaluators").is_none());
@@ -1744,7 +1754,7 @@ mod tests {
             .unwrap();
         assert!(required.contains(&json!("body")));
         assert!(!required.contains(&json!("visibility")));
-        let passage = payload_schema("corpus_passage.v1").unwrap();
+        let passage = payload_schema(&World::new(), "corpus_passage.v1").unwrap();
         assert!(passage["payload_schema"]["properties"]["proactive_guidance"].is_object());
     }
 
@@ -1752,11 +1762,14 @@ mod tests {
     fn candidate_check_rejects_envelope_mismatch_before_payload_admission() {
         let mut asset = passage("synthetic").asset;
         asset.path_kind = "recipe_or_executable_asset".into();
-        let error = check_candidate(CandidateCheck {
-            catalog_queries: vec![],
-            asset,
-            driver_cases: vec![],
-        })
+        let error = check_candidate(
+            &World::new(),
+            CandidateCheck {
+                catalog_queries: vec![],
+                asset,
+                driver_cases: vec![],
+            },
+        )
         .unwrap_err();
         let detail: Value = serde_json::from_str(&error).unwrap();
         assert_eq!(detail["error"], "invalid_knowledge_envelope");
@@ -1771,19 +1784,25 @@ mod tests {
         assert!(
             super::super::model_api::missing_knowledge_tools(&asset.required_tool_ids).is_empty()
         );
-        assert!(check_candidate(CandidateCheck {
-            asset: asset.clone(),
-            driver_cases: vec![],
-            catalog_queries: vec![]
-        })
+        assert!(check_candidate(
+            &World::new(),
+            CandidateCheck {
+                asset: asset.clone(),
+                driver_cases: vec![],
+                catalog_queries: vec![]
+            }
+        )
         .is_ok());
         asset.required_tool_ids = vec!["invented_test_alias".into()];
         let expected = super::super::model_api::missing_knowledge_tools(&asset.required_tool_ids);
-        let error = check_candidate(CandidateCheck {
-            asset,
-            driver_cases: vec![],
-            catalog_queries: vec![],
-        })
+        let error = check_candidate(
+            &World::new(),
+            CandidateCheck {
+                asset,
+                driver_cases: vec![],
+                catalog_queries: vec![],
+            },
+        )
         .unwrap_err();
         let error: Value = serde_json::from_str(&error).unwrap();
         assert_eq!(error["missing_required_tool_ids"], json!(expected));
@@ -1800,11 +1819,14 @@ mod tests {
     #[test]
     fn candidate_check_is_not_admission_and_rejects_private_content() {
         let asset = passage("candidate").asset;
-        let checked = check_candidate(CandidateCheck {
-            catalog_queries: vec![],
-            asset: asset.clone(),
-            driver_cases: vec![],
-        })
+        let checked = check_candidate(
+            &World::new(),
+            CandidateCheck {
+                catalog_queries: vec![],
+                asset: asset.clone(),
+                driver_cases: vec![],
+            },
+        )
         .unwrap();
         assert_eq!(checked["installed"], false);
         assert_eq!(checked["released"], false);
@@ -1815,11 +1837,14 @@ mod tests {
         );
         let mut private = asset;
         private.contains_private_context = true;
-        assert!(check_candidate(CandidateCheck {
-            catalog_queries: vec![],
-            asset: private,
-            driver_cases: vec![]
-        })
+        assert!(check_candidate(
+            &World::new(),
+            CandidateCheck {
+                catalog_queries: vec![],
+                asset: private,
+                driver_cases: vec![]
+            }
+        )
         .is_err());
     }
 
@@ -1871,7 +1896,8 @@ mod tests {
             hex::encode(Sha256::digest(serde_json::to_vec(&inspected).unwrap()))
         );
         assert_eq!(
-            payload_schema("candidate_runtime.v1").unwrap()["knowledge_observation_operations"],
+            payload_schema(&World::new(), "candidate_runtime.v1").unwrap()
+                ["knowledge_observation_operations"],
             json!(evaluation::LIFECYCLE_OPERATIONS)
         );
     }
@@ -2012,11 +2038,14 @@ mod tests {
                 "ingested_at":0,"license":{"kind":"Cc0"},"backlink":null,"supersedes":[]}
         }]});
         let run = |filters: Value| {
-            check_candidate(CandidateCheck {
-                asset: candidate.asset.clone(),
-                driver_cases: vec![],
-                catalog_queries: serde_json::from_value(filters).unwrap(),
-            })
+            check_candidate(
+                &World::new(),
+                CandidateCheck {
+                    asset: candidate.asset.clone(),
+                    driver_cases: vec![],
+                    catalog_queries: serde_json::from_value(filters).unwrap(),
+                },
+            )
         };
         let checked = run(json!([{"size":7},{"size":8}])).unwrap();
         assert_eq!(checked["catalog_cases"][0]["row_count"], 1);
@@ -2043,19 +2072,22 @@ mod tests {
         assert!(run(json!([{"unknown":1}])).is_err());
         assert!(run(json!([{"size":"wrong-type"}])).is_err());
         assert!(run(json!(vec![json!({}); 17])).is_err());
-        assert!(check_candidate(CandidateCheck {
-            asset: passage("other").asset,
-            driver_cases: vec![],
-            catalog_queries: vec![BTreeMap::new()]
-        })
+        assert!(check_candidate(
+            &World::new(),
+            CandidateCheck {
+                asset: passage("other").asset,
+                driver_cases: vec![],
+                catalog_queries: vec![BTreeMap::new()]
+            }
+        )
         .is_err());
-        let advertised = payload_schema("catalog.v1").unwrap();
+        let advertised = payload_schema(&World::new(), "catalog.v1").unwrap();
         assert_eq!(
             advertised["candidate_checks"]["catalog.v1"]["query_schema"]["items"]["type"],
             "object"
         );
         assert_eq!(
-            payload_schema("candidate_runtime.v1").unwrap()["candidate_checks"],
+            payload_schema(&World::new(), "candidate_runtime.v1").unwrap()["candidate_checks"],
             advertised["candidate_checks"]
         );
     }

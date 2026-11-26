@@ -31,6 +31,7 @@ pub fn is_builtin_material_id(id: &str) -> bool {
 
 // ─── Alpha mode ───────────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MaterialAlphaMode {
@@ -56,6 +57,7 @@ impl MaterialAlphaMode {
 
 // ─── Texture assets ──────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(transparent)]
 pub struct TextureAssetId(pub String);
@@ -337,6 +339,7 @@ impl TextureRegistry {
 
 /// A reference to a texture, either embedded in the project file or pointing to
 /// a bundled app asset.
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TextureRef {
@@ -605,6 +608,7 @@ where
 }
 
 /// The data definition of a material.  Serialisable, stored in `MaterialRegistry`.
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaterialDef {
     /// Stable unique identifier (UUID-like string).
@@ -997,6 +1001,68 @@ impl MaterialRegistry {
             }
         }
         unreachable!()
+    }
+}
+
+impl MaterialDef {
+    /// Whether any texture slot is set. Texture references are file, bundle or
+    /// byte based and cannot travel as portable data.
+    pub fn has_textures(&self) -> bool {
+        [
+            &self.base_color_texture,
+            &self.normal_map_texture,
+            &self.metallic_roughness_texture,
+            &self.emissive_texture,
+            &self.occlusion_texture,
+        ]
+        .iter()
+        .any(|t| t.is_some())
+    }
+
+    /// Pure checks for a parameter/procedural material delivered as data.
+    pub fn validate_portable(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() || self.name.trim().is_empty() {
+            return Err("Material id and name must be non-empty".into());
+        }
+        if self.has_textures() {
+            return Err("Textured materials are not portable; only parameter/procedural materials can be delivered as data".into());
+        }
+        let unit = |v: f32| v.is_finite() && (0.0..=1.0).contains(&v);
+        let scalars = [
+            self.perceptual_roughness,
+            self.metallic,
+            self.reflectance,
+            self.diffuse_transmission,
+            self.specular_transmission,
+            self.clearcoat,
+            self.clearcoat_perceptual_roughness,
+            self.alpha_cutoff,
+        ];
+        if !scalars.into_iter().all(unit) || self.base_color.iter().any(|c| !c.is_finite()) {
+            return Err("Material scalar parameters must be finite and within [0, 1]".into());
+        }
+        let finite = self
+            .specular_tint
+            .iter()
+            .chain(&self.emissive)
+            .chain(&self.attenuation_color)
+            .chain(&self.uv_scale)
+            .chain(&self.uv_offset)
+            .chain([
+                &self.thickness,
+                &self.ior,
+                &self.anisotropy_strength,
+                &self.anisotropy_rotation,
+                &self.uv_rotation,
+                &self.depth_bias,
+                &self.emissive_exposure_weight,
+                &self.texture_blend_sharpness,
+            ])
+            .all(|v| v.is_finite());
+        if !finite || self.attenuation_distance.is_nan() || self.ior < 1.0 {
+            return Err("Material parameters must be finite and ior at least 1".into());
+        }
+        Ok(())
     }
 }
 
@@ -2633,6 +2699,16 @@ pub struct BuiltinMaterialDefaults(BTreeMap<String, MaterialDef>);
 impl BuiltinMaterialDefaults {
     pub fn insert(&mut self, material: MaterialDef) {
         self.0.insert(material.id.clone(), material);
+    }
+
+    /// Remove a preset; returns it when present.
+    pub fn remove(&mut self, id: &str) -> Option<MaterialDef> {
+        self.0.remove(id)
+    }
+
+    /// Every preset, ordered by id.
+    pub fn iter(&self) -> impl Iterator<Item = &MaterialDef> {
+        self.0.values()
     }
 
     pub fn seed(&self, registry: &mut MaterialRegistry) {

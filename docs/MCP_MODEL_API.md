@@ -1959,7 +1959,8 @@ and payload JSON schemas generated from runtime decoder types. Supported kinds a
 `catalog.v1`, `recipe.v1`, `parametric_type.v1`, `definition_library.v1` and
 `corpus_passage.v1`, including data-driven proactive guidance, plus the registry
 kinds `element_class.v1`, `generation_prior.v1`, `assembly_type.v1`,
-`relation_type.v1`, `assembly_pattern.v1` and `concept_graph.v1`.
+`relation_type.v1`, `assembly_pattern.v1`, `concept_graph.v1`, `material.v1`,
+`constraint_rule.v1`, `setting_out_prior.v1` and `curated_manifest.v1`.
 
 Registry kinds deliver the data compiled plugins otherwise register. The payload
 is the descriptor itself (`ElementClassDescriptor`, `AssemblyTypeDescriptor`,
@@ -1978,6 +1979,35 @@ that fails validation leaves the previous one in place. Asset ids are global, so
 two registries cannot both use the same string as an asset id. These schemas contain
 wire contracts, not domain assets. Portable recipes require `authoring_script`
 bodies; native function references cannot be released as executable knowledge.
+
+Kinds are routed through the `KnowledgeKindRegistry` resource, seeded from the
+core handler table. A plugin that owns a registry core cannot name adds one with
+`app.register_knowledge_kind::<K>()` (`K: RegistryKind`: payload type, identity,
+validation, install, withdraw, legacy inventory); schema, candidate check,
+install, withdrawal, legacy list/get and the legacy coverage block then include
+it, and registering an existing kind id replaces its handler. The kind id must
+also be listed in the protocol `KINDS` table for envelope admission.
+
+`material.v1` is a `MaterialDef`. Only parameter/procedural materials are
+portable: every texture slot must be null (file, bundle and embedded-bytes
+textures cannot travel; compiled textured materials are legacy gaps and
+`textured_materials` is listed as unsupported). Install writes the retained
+`BuiltinMaterialDefaults` (so it survives document replacement like compiled
+presets) and the live `MaterialRegistry`. `setting_out_prior.v1` is a
+`SettingOutThicknessPrior` (evidence `source_ref` required, offsets sum to
+thickness). `curated_manifest.v1` is a `CuratedManifest` (`meta.id` is the asset
+id, `meta.kind` is `curated_manifest.v1`, `body` an object interpreted by a
+registered manifest kind). `constraint_rule.v1` is a declarative rule: element
+class, `parameter_path` (JSON pointer into the subject's
+`SemanticIntent.parameters`), `requirement` (`lt`, `lte`, `gt`, `gte`, `eq` with
+tolerance, `range`) with `unit`, `from_state`, optional `jurisdiction` tag
+(matched against `SemanticIntent.parameters.jurisdiction`), `severity`,
+`message`, `rationale` and `citation` (corpus passage ref, attached to findings as
+their backlink). One generic validator evaluates installed rules; each rule is an
+ordinary registered constraint, so its findings appear in `Findings`,
+`list_constraints` and promotion gating exactly like compiled ones. Compiled
+validators hold native closures and are legacy gaps (`native_constraints`) unless
+declared through `register_declarative_constraint`.
 A portable recipe may also carry `obligation_specializations` and
 `promotion_critical_path_specializations` keyed by refinement state. They declare
 what the selected construction system must resolve beyond the element class

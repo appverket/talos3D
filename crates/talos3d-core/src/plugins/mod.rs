@@ -17,6 +17,7 @@ pub mod commands;
 pub mod compass;
 pub mod component_family;
 pub mod component_structure_quality;
+pub mod constraint_rules;
 pub mod constraint_spec;
 pub mod corpus_gap;
 #[cfg(feature = "model-api")]

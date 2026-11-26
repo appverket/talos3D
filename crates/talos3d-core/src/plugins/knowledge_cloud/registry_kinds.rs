@@ -14,7 +14,7 @@
 //! one upserted so that a corpus entry replaces a compiled one with the same id.
 //! Withdrawal removes the entry and restores nothing compiled.
 
-use std::marker::PhantomData;
+use std::{collections::BTreeMap, marker::PhantomData};
 
 use bevy::prelude::*;
 use schemars::JsonSchema;
@@ -26,10 +26,18 @@ use crate::capability_registry::{
     AssemblyPatternDescriptor, AssemblyTypeDescriptor, CapabilityRegistry, ElementClassDescriptor,
     RelationTypeDescriptor,
 };
+use crate::curation::{CuratedManifest, CuratedManifestRegistry, CURATED_MANIFEST_ASSET_KIND};
+use crate::plugins::constraint_rules::{
+    install_rule, remove_rule, ConstraintRule, DeclarativeConstraintRules,
+};
+use crate::plugins::materials::{
+    ensure_builtin_materials, BuiltinMaterialDefaults, MaterialDef, MaterialRegistry,
+};
+use crate::plugins::refinement::{SettingOutThicknessPrior, SettingOutThicknessPriorRegistry};
 use crate::semantics::{ConceptGraphPack, SemanticGraph};
 
 /// A compiled registry entry offered for migration to the corpus.
-pub(super) struct Legacy<P> {
+pub struct Legacy<P> {
     pub id: String,
     pub label: String,
     /// The exact payload, or why this entry cannot travel as data.
@@ -37,7 +45,7 @@ pub(super) struct Legacy<P> {
 }
 
 /// A portable kind backed by a runtime registry.
-pub(super) trait RegistryKind: 'static {
+pub trait RegistryKind: 'static {
     type Payload: DeserializeOwned + Serialize + JsonSchema + 'static;
     const KIND: &'static str;
     const CONSTRAINTS: &'static [&'static str];
@@ -56,7 +64,7 @@ pub(super) trait RegistryKind: 'static {
 }
 
 /// Registry entry stored in the shared [`CapabilityRegistry`], one descriptor per asset.
-pub(super) trait CapabilityEntry: 'static {
+pub trait CapabilityEntry: 'static {
     type Payload: DeserializeOwned + Serialize + JsonSchema + Clone + 'static;
     const KIND: &'static str;
     const CONSTRAINTS: &'static [&'static str];
@@ -70,7 +78,7 @@ pub(super) trait CapabilityEntry: 'static {
 }
 
 /// Lifts a [`CapabilityEntry`] to a [`RegistryKind`].
-pub(super) struct InCapabilityRegistry<E>(PhantomData<E>);
+pub struct InCapabilityRegistry<E>(PhantomData<E>);
 
 impl<E: CapabilityEntry> RegistryKind for InCapabilityRegistry<E> {
     type Payload = E::Payload;
@@ -103,29 +111,32 @@ impl<E: CapabilityEntry> RegistryKind for InCapabilityRegistry<E> {
 }
 
 /// An inventory row with the payload withheld.
-pub(super) struct LegacyItem {
-    pub id: String,
-    pub label: String,
+pub struct LegacyItem {
+    pub(super) id: String,
+    pub(super) label: String,
     /// `None` when the entry is a portable migration candidate.
-    pub gap: Option<&'static str>,
+    pub(super) gap: Option<&'static str>,
 }
 
 /// Type-erased row of the kind table.
-pub(super) struct KindHandler {
-    pub kind: &'static str,
-    pub constraints: &'static [&'static str],
-    pub payload_schema: fn() -> Value,
+#[derive(Clone, Copy, Debug)]
+pub struct KindHandler {
+    pub(super) kind: &'static str,
+    pub(super) constraints: &'static [&'static str],
+    pub(super) payload_schema: fn() -> Value,
     /// Decode + validate `payload` against `asset_id`, withdraw `previous` (the
     /// payload of the revision being replaced), then install. Nothing is
     /// touched when decoding or validation fails.
-    pub install: fn(&mut World, &str, &Value, Option<&Value>) -> Result<(), String>,
-    pub withdraw: fn(&mut World, &Value),
-    pub legacy_list: fn(&World) -> Vec<LegacyItem>,
-    pub legacy_get: fn(&World, &str) -> Result<Value, String>,
+    pub(super) install: fn(&mut World, &str, &Value, Option<&Value>) -> Result<(), String>,
+    pub(super) withdraw: fn(&mut World, &Value),
+    pub(super) legacy_list: fn(&World) -> Vec<LegacyItem>,
+    pub(super) legacy_get: fn(&World, &str) -> Result<Value, String>,
 }
 
 impl KindHandler {
-    const fn of<K: RegistryKind>() -> Self {
+    /// The type-erased table row for `K`.
+    #[must_use]
+    pub const fn of<K: RegistryKind>() -> Self {
         Self {
             kind: K::KIND,
             constraints: K::CONSTRAINTS,
@@ -190,25 +201,104 @@ fn legacy_get<K: RegistryKind>(world: &World, id: &str) -> Result<Value, String>
 }
 
 /// Every registry-backed portable kind. Adding a kind is one row here.
-pub(super) const HANDLERS: &[KindHandler] = &[
+pub const HANDLERS: &[KindHandler] = &[
     KindHandler::of::<InCapabilityRegistry<ElementClass>>(),
     KindHandler::of::<InCapabilityRegistry<GenerationPrior>>(),
     KindHandler::of::<InCapabilityRegistry<AssemblyType>>(),
     KindHandler::of::<InCapabilityRegistry<RelationType>>(),
     KindHandler::of::<InCapabilityRegistry<AssemblyPattern>>(),
     KindHandler::of::<ConceptGraph>(),
+    KindHandler::of::<Material>(),
+    KindHandler::of::<ConstraintRuleKind>(),
+    KindHandler::of::<SettingOutPrior>(),
+    KindHandler::of::<CuratedManifestKind>(),
 ];
 
-/// The handler for a portable registry kind, if `kind` is one.
-pub(super) fn handler(kind: &str) -> Option<&'static KindHandler> {
-    HANDLERS.iter().find(|h| h.kind == kind)
+/// Every portable registry kind this process can route.
+///
+/// Seeded from the core [`HANDLERS`] table; domain plugins add the kinds whose
+/// registries core cannot name with
+/// [`KnowledgeKindAppExt::register_knowledge_kind`]. Schema, candidate check,
+/// install, withdrawal and legacy inventory all resolve kinds through this
+/// resource, so a registered kind is routed everywhere with no further wiring.
+/// Registering a kind id that already exists replaces its handler.
+#[derive(Resource, Clone, Debug)]
+pub struct KnowledgeKindRegistry {
+    handlers: Vec<KindHandler>,
+}
+
+impl Default for KnowledgeKindRegistry {
+    fn default() -> Self {
+        Self {
+            handlers: HANDLERS.to_vec(),
+        }
+    }
+}
+
+impl KnowledgeKindRegistry {
+    /// Add `handler`, replacing any handler for the same kind id.
+    pub fn register(&mut self, handler: KindHandler) {
+        match self.handlers.iter_mut().find(|h| h.kind == handler.kind) {
+            Some(existing) => *existing = handler,
+            None => self.handlers.push(handler),
+        }
+    }
+
+    /// The handler for `kind`, if routed.
+    #[must_use]
+    pub fn get(&self, kind: &str) -> Option<KindHandler> {
+        self.handlers.iter().find(|h| h.kind == kind).copied()
+    }
+
+    /// All routed handlers in registration order.
+    pub fn iter(&self) -> impl Iterator<Item = &KindHandler> {
+        self.handlers.iter()
+    }
+}
+
+/// `App` extension for plugins that own a portable registry.
+pub trait KnowledgeKindAppExt {
+    /// Route kind `K` (schema, check, install, withdrawal, legacy inventory).
+    fn register_knowledge_kind<K: RegistryKind>(&mut self) -> &mut Self;
+}
+
+impl KnowledgeKindAppExt for App {
+    fn register_knowledge_kind<K: RegistryKind>(&mut self) -> &mut Self {
+        self.init_resource::<KnowledgeKindRegistry>();
+        self.world_mut()
+            .resource_mut::<KnowledgeKindRegistry>()
+            .register(KindHandler::of::<K>());
+        self
+    }
+}
+
+/// The routing table for `world`: its resource, or the core table when absent.
+fn table(world: &World) -> KnowledgeKindRegistry {
+    world
+        .get_resource::<KnowledgeKindRegistry>()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The handler for a portable registry kind, if `kind` is routed in `world`.
+pub(super) fn handler(world: &World, kind: &str) -> Option<KindHandler> {
+    match world.get_resource::<KnowledgeKindRegistry>() {
+        Some(registry) => registry.get(kind),
+        None => HANDLERS.iter().find(|h| h.kind == kind).copied(),
+    }
+}
+
+/// Every routed handler in `world`.
+pub(super) fn handlers(world: &World) -> Vec<KindHandler> {
+    table(world).handlers
 }
 
 /// Compiled-registry categories that cannot be delivered as data.
-pub(super) const UNSUPPORTED_NATIVE: [&str; 3] = [
+pub(super) const UNSUPPORTED_NATIVE: [&str; 4] = [
     "native_recipe_bodies",
     "native_generation_prior_closures",
     "native_constraints",
+    "textured_materials",
 ];
 
 const CLOSURE_GAP: &str = "Compiled prior holds a native closure that cannot be serialised; author an equivalent declarative generation_prior.v1 decision table from grounded sources";
@@ -233,7 +323,7 @@ fn rows<D, P>(
 macro_rules! capability_entry {
     ($name:ident, $payload:ty, $kind:literal, $constraints:expr, id: |$p:ident| $id:expr,
      upsert: $upsert:ident, remove: $remove:ident, list: $list:ident, label: |$l:ident| $label:expr) => {
-        pub(super) struct $name;
+        pub struct $name;
         impl CapabilityEntry for $name {
             type Payload = $payload;
             const KIND: &'static str = $kind;
@@ -302,7 +392,7 @@ capability_entry!(
 );
 
 /// Generation priors travel as a declarative decision table.
-pub(super) struct GenerationPrior;
+pub struct GenerationPrior;
 impl CapabilityEntry for GenerationPrior {
     type Payload = GenerationPriorSpec;
     const KIND: &'static str = "generation_prior.v1";
@@ -338,7 +428,7 @@ impl CapabilityEntry for GenerationPrior {
 /// A pack, not one record per asset: publications, propositions and anchor kinds
 /// reference one another and feed compiled indexes, so they are installed,
 /// replaced and withdrawn atomically.
-pub(super) struct ConceptGraph;
+pub struct ConceptGraph;
 impl RegistryKind for ConceptGraph {
     type Payload = ConceptGraphPack;
     const KIND: &'static str = "concept_graph.v1";
@@ -380,6 +470,209 @@ impl RegistryKind for ConceptGraph {
     }
 }
 
+const TEXTURE_GAP: &str = "Material references a texture (file, bundle or bytes) that cannot travel as portable data; only parameter/procedural materials are portable";
+
+/// Parameter/procedural material definitions.
+///
+/// Installed into the retained `BuiltinMaterialDefaults` (so the material
+/// survives document replacement exactly like compiled presets) and into the
+/// live `MaterialRegistry`.
+pub struct Material;
+impl RegistryKind for Material {
+    type Payload = MaterialDef;
+    const KIND: &'static str = "material.v1";
+    const CONSTRAINTS: &'static [&'static str] = &[
+        "payload.id must equal asset.id",
+        "Only parameter/procedural materials are portable: every texture slot (base_color, normal_map, metallic_roughness, emissive, occlusion) must be null; file, bundle and embedded-bytes textures cannot be delivered",
+        "Scalar PBR parameters (roughness, metallic, reflectance, transmission, clearcoat, alpha_cutoff) are within [0, 1]; ior is at least 1; all values are finite",
+        "Installing replaces a compiled or earlier material with the same id; withdrawal removes it and restores nothing",
+    ];
+    fn payload_id(payload: &Self::Payload) -> &str {
+        &payload.id
+    }
+    fn validate(payload: &Self::Payload) -> Result<(), String> {
+        payload.validate_portable()
+    }
+    fn install(world: &mut World, payload: Self::Payload) {
+        if let Some(mut registry) = world.get_resource_mut::<MaterialRegistry>() {
+            registry.upsert(payload.clone());
+        }
+        world.init_resource::<BuiltinMaterialDefaults>();
+        world
+            .resource_mut::<BuiltinMaterialDefaults>()
+            .insert(payload);
+    }
+    fn withdraw(world: &mut World, payload: &Self::Payload) {
+        if let Some(mut defaults) = world.get_resource_mut::<BuiltinMaterialDefaults>() {
+            defaults.remove(&payload.id);
+        }
+        if let Some(mut registry) = world.get_resource_mut::<MaterialRegistry>() {
+            registry.remove(&payload.id);
+        }
+    }
+    fn legacy(world: &World) -> Vec<Legacy<Self::Payload>> {
+        let mut compiled = MaterialRegistry::default();
+        ensure_builtin_materials(&mut compiled);
+        let mut by_id: BTreeMap<String, MaterialDef> =
+            compiled.all().map(|m| (m.id.clone(), m.clone())).collect();
+        if let Some(defaults) = world.get_resource::<BuiltinMaterialDefaults>() {
+            by_id.extend(defaults.iter().map(|m| (m.id.clone(), m.clone())));
+        }
+        rows(
+            by_id.into_values(),
+            |m| m.id.as_str(),
+            |m| m.name.as_str(),
+            |m| (!m.has_textures()).then_some(m).ok_or(TEXTURE_GAP),
+        )
+    }
+}
+
+/// Declarative validation rules, evaluated by the one generic validator in
+/// `constraint_rules` through the ordinary constraint registry.
+pub struct ConstraintRuleKind;
+impl RegistryKind for ConstraintRuleKind {
+    type Payload = ConstraintRule;
+    const KIND: &'static str = "constraint_rule.v1";
+    const CONSTRAINTS: &'static [&'static str] = &[
+        "payload.id must equal asset.id and becomes the constraint id",
+        "A rule applies to one element_class from refinement state from_state upward; the requirement (lt, lte, gt, gte, eq with tolerance, range) states what must hold and a finding is emitted when it does not",
+        "parameter_path is a JSON pointer into the subject's SemanticIntent.parameters; values and comparison limits are in unit; a missing or non-numeric value emits nothing",
+        "jurisdiction, when set, restricts the rule to subjects whose SemanticIntent.parameters.jurisdiction equals it (case-insensitive)",
+        "citation names the corpus passage that establishes the requirement and is attached to every finding as its backlink",
+        "Installing replaces a compiled or earlier constraint with the same id; withdrawal removes it and restores nothing",
+        "Compiled validators hold native closures and are listed in the legacy inventory as gaps, not exportable payloads",
+    ];
+    fn payload_id(payload: &Self::Payload) -> &str {
+        &payload.id
+    }
+    fn validate(payload: &Self::Payload) -> Result<(), String> {
+        payload.validate()
+    }
+    fn install(world: &mut World, payload: Self::Payload) {
+        install_rule(world, payload);
+    }
+    fn withdraw(world: &mut World, payload: &Self::Payload) {
+        remove_rule(world, &payload.id);
+    }
+    fn legacy(world: &World) -> Vec<Legacy<Self::Payload>> {
+        let declared = world.get_resource::<DeclarativeConstraintRules>();
+        let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+            return Vec::new();
+        };
+        rows(
+            registry.constraint_descriptors().iter(),
+            |d| d.id.0.as_str(),
+            |d| d.label.as_str(),
+            |d| {
+                declared
+                    .and_then(|rules| rules.0.get(&d.id.0))
+                    .cloned()
+                    .ok_or(NATIVE_CONSTRAINT_GAP)
+            },
+        )
+    }
+}
+
+const NATIVE_CONSTRAINT_GAP: &str = "Compiled constraint holds a native validator closure that cannot be serialised; author an equivalent declarative constraint_rule.v1 from grounded sources";
+
+/// Setting-out thickness priors (plain evidence-backed data).
+pub struct SettingOutPrior;
+impl RegistryKind for SettingOutPrior {
+    type Payload = SettingOutThicknessPrior;
+    const KIND: &'static str = "setting_out_prior.v1";
+    const CONSTRAINTS: &'static [&'static str] = &[
+        "payload.prior_id must equal asset.id",
+        "source_ref is required; confidence is within [0, 1]; thickness_mm is positive; negative_offset_mm + positive_offset_mm equals thickness_mm",
+        "Selection prefers a prior naming the construction system and jurisdiction over a general one for the same element_class",
+        "Installing replaces a compiled or earlier prior with the same id; withdrawal removes it and restores nothing",
+    ];
+    fn payload_id(payload: &Self::Payload) -> &str {
+        &payload.prior_id
+    }
+    fn validate(payload: &Self::Payload) -> Result<(), String> {
+        payload.validate()
+    }
+    fn install(world: &mut World, payload: Self::Payload) {
+        world.init_resource::<SettingOutThicknessPriorRegistry>();
+        if let Err(error) = world
+            .resource_mut::<SettingOutThicknessPriorRegistry>()
+            .register(payload)
+        {
+            warn!("validated setting-out prior was rejected on install: {error}");
+        }
+    }
+    fn withdraw(world: &mut World, payload: &Self::Payload) {
+        if let Some(mut registry) = world.get_resource_mut::<SettingOutThicknessPriorRegistry>() {
+            registry.remove(&payload.prior_id);
+        }
+    }
+    fn legacy(world: &World) -> Vec<Legacy<Self::Payload>> {
+        world
+            .get_resource::<SettingOutThicknessPriorRegistry>()
+            .map(|r| {
+                rows(
+                    r.all().iter().cloned(),
+                    |p| p.prior_id.as_str(),
+                    |p| p.element_class.as_str(),
+                    Ok,
+                )
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Curated manifests (for example construction-system manifests).
+pub struct CuratedManifestKind;
+impl RegistryKind for CuratedManifestKind {
+    type Payload = CuratedManifest;
+    const KIND: &'static str = "curated_manifest.v1";
+    const CONSTRAINTS: &'static [&'static str] = &[
+        "payload.meta.id must equal asset.id; payload.meta.kind must be curated_manifest.v1",
+        "manifest_kind names a manifest kind descriptor registered by a capability (get its body_schema from the runtime); body must be a JSON object",
+        "A manifest whose manifest_kind is not registered is stored but reported as an orphan by manifest validation",
+        "Installing replaces a compiled or earlier manifest with the same id; withdrawal removes it and restores nothing",
+    ];
+    fn payload_id(payload: &Self::Payload) -> &str {
+        &payload.meta.id.0
+    }
+    fn validate(payload: &Self::Payload) -> Result<(), String> {
+        if payload.meta.kind != CuratedManifest::asset_kind() {
+            return Err(format!("meta.kind must be {CURATED_MANIFEST_ASSET_KIND}"));
+        }
+        if payload.manifest_kind.as_str().trim().is_empty() {
+            return Err("manifest_kind must be non-empty".into());
+        }
+        if !payload.body.is_object() {
+            return Err("body must be a JSON object".into());
+        }
+        Ok(())
+    }
+    fn install(world: &mut World, payload: Self::Payload) {
+        world.init_resource::<CuratedManifestRegistry>();
+        world
+            .resource_mut::<CuratedManifestRegistry>()
+            .insert(payload);
+    }
+    fn withdraw(world: &mut World, payload: &Self::Payload) {
+        if let Some(mut registry) = world.get_resource_mut::<CuratedManifestRegistry>() {
+            registry.remove(&payload.meta.id);
+        }
+    }
+    fn legacy(world: &World) -> Vec<Legacy<Self::Payload>> {
+        world
+            .get_resource::<CuratedManifestRegistry>()
+            .map(|r| {
+                rows(
+                    r.iter().cloned(),
+                    |m| m.meta.id.0.as_str(),
+                    |m| m.manifest_kind.as_str(),
+                    Ok,
+                )
+            })
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{
@@ -387,7 +680,9 @@ mod tests {
         AdmittedAsset, Asset, CandidateCheck, Index, LegacyRequest, SCHEMA,
     };
     use super::*;
-    use crate::capability_registry::{CapabilityRegistry, ElementClassId, PriorContext, PriorId};
+    use crate::capability_registry::{
+        CapabilityRegistry, ConstraintId, ElementClassId, PriorContext, PriorId,
+    };
     use crate::semantics::SemanticGraph;
     use serde_json::json;
 
@@ -495,7 +790,111 @@ mod tests {
                 },
                 edit: |v| v["concepts"][0]["lexical"][0]["preferred_label"] = json!("corpus"),
             },
+            Fixture {
+                kind: "material.v1",
+                id: "synthetic.material",
+                compiled: serde_json::to_value(MaterialDef {
+                    id: "synthetic.material".into(),
+                    name: "compiled".into(),
+                    ..MaterialDef::default()
+                })
+                .unwrap(),
+                register: |w, v| {
+                    w.init_resource::<BuiltinMaterialDefaults>();
+                    w.resource_mut::<BuiltinMaterialDefaults>().insert(from(v));
+                },
+                observe: |w| {
+                    w.get_resource::<BuiltinMaterialDefaults>()?
+                        .iter()
+                        .find(|m| m.id == "synthetic.material")
+                        .map(|m| m.name.clone())
+                },
+                edit: |v| v["name"] = json!("corpus"),
+            },
+            Fixture {
+                kind: "constraint_rule.v1",
+                id: "synthetic.rule",
+                compiled: rule_json("compiled"),
+                register: |w, v| install_rule(w, from(v)),
+                observe: |w| {
+                    w.get_resource::<CapabilityRegistry>()?
+                        .constraint_descriptor(&ConstraintId("synthetic.rule".into()))
+                        .map(|d| d.label.clone())
+                },
+                edit: relabel,
+            },
+            Fixture {
+                kind: "setting_out_prior.v1",
+                id: "synthetic.setting_out",
+                compiled: json!({"prior_id":"synthetic.setting_out","element_class":"c",
+                    "construction_system_id":null,"jurisdiction":null,"thickness_mm":100.0,
+                    "negative_offset_mm":50.0,"positive_offset_mm":50.0,
+                    "source_ref":"compiled","confidence":0.5}),
+                register: |w, v| {
+                    w.init_resource::<SettingOutThicknessPriorRegistry>();
+                    w.resource_mut::<SettingOutThicknessPriorRegistry>()
+                        .register(from(v))
+                        .unwrap();
+                },
+                observe: |w| {
+                    w.get_resource::<SettingOutThicknessPriorRegistry>()?
+                        .all()
+                        .iter()
+                        .find(|p| p.prior_id == "synthetic.setting_out")
+                        .map(|p| p.source_ref.clone())
+                },
+                edit: |v| v["source_ref"] = json!("corpus"),
+            },
+            Fixture {
+                kind: "curated_manifest.v1",
+                id: "synthetic.kind/m1",
+                compiled: manifest_json("compiled"),
+                register: |w, v| {
+                    w.init_resource::<CuratedManifestRegistry>();
+                    w.resource_mut::<CuratedManifestRegistry>().insert(from(v));
+                },
+                observe: |w| {
+                    w.get_resource::<CuratedManifestRegistry>()?
+                        .get(&crate::curation::AssetId::new("synthetic.kind/m1"))
+                        .and_then(|m| m.body["label"].as_str().map(str::to_owned))
+                },
+                edit: |v| v["body"]["label"] = json!("corpus"),
+            },
         ]
+    }
+
+    fn rule_json(label: &str) -> Value {
+        json!({"id":"synthetic.rule","label":label,"element_class":"synthetic.class",
+            "parameter_path":"/height","requirement":{"comparator":"gte","value":2.0},
+            "unit":"m","from_state":"Schematic","severity":"Warning",
+            "message":"Height is below the requirement","rationale":"synthetic",
+            "citation":"synthetic/passage/1"})
+    }
+
+    fn manifest_json(label: &str) -> Value {
+        use crate::curation::{
+            AssetId, Confidence, CurationMeta, Lineage, ManifestKindId, Provenance,
+        };
+        use crate::plugins::refinement::AgentId;
+        let meta = CurationMeta::new(
+            AssetId::new("synthetic.kind/m1"),
+            CuratedManifest::asset_kind(),
+            Provenance {
+                author: AgentId("test".into()),
+                confidence: Confidence::High,
+                lineage: Lineage::Freeform,
+                rationale: None,
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        );
+        serde_json::to_value(CuratedManifest {
+            meta,
+            manifest_kind: ManifestKindId::new("synthetic.kind"),
+            body: json!({"label": label}),
+        })
+        .unwrap()
     }
 
     fn asset(kind: &str, id: &str, payload: Value) -> Asset {
@@ -549,7 +948,7 @@ mod tests {
         for f in fixtures() {
             let mut world = World::new();
             // Schema is served through the generic mechanism.
-            let schema = payload_schema(f.kind).unwrap();
+            let schema = payload_schema(&world, f.kind).unwrap();
             assert_eq!(schema["kind"], f.kind);
             assert!(schema["payload_schema"].is_object(), "{}", f.kind);
             assert!(!schema["constraints"].as_array().unwrap().is_empty());
@@ -570,11 +969,14 @@ mod tests {
                 },
             )
             .unwrap_or_else(|e| panic!("{}: {e}", f.kind));
-            let checked = check_candidate(CandidateCheck {
-                asset: asset(f.kind, f.id, captured["payload"].clone()),
-                driver_cases: vec![],
-                catalog_queries: vec![],
-            })
+            let checked = check_candidate(
+                &World::new(),
+                CandidateCheck {
+                    asset: asset(f.kind, f.id, captured["payload"].clone()),
+                    driver_cases: vec![],
+                    catalog_queries: vec![],
+                },
+            )
             .unwrap_or_else(|e| panic!("{}: {e}", f.kind));
             assert_eq!(checked["installed"], false);
             assert!((f.observe)(&world).as_deref() == Some("compiled"));
@@ -715,7 +1117,7 @@ mod tests {
             }
         )
         .is_err());
-        assert!(payload_schema("generation_prior.v1").is_ok());
+        assert!(payload_schema(&World::new(), "generation_prior.v1").is_ok());
 
         let spec = json!({"id":"synthetic.prior","label":"corpus","description":"d",
             "scope":{"kind":"RecipeSelection","element_class":"c","recipe_family":null},
@@ -723,11 +1125,14 @@ mod tests {
             "cases":[{"when":{"jurisdiction":"se","terrain_slope_pct_min":10.0},
                       "then":{"weight":0.25,"suggestion":null,"rationale":"steep"}}],
             "otherwise":{"weight":1.0,"suggestion":null,"rationale":"flat"}});
-        check_candidate(CandidateCheck {
-            asset: asset("generation_prior.v1", "synthetic.prior", spec.clone()),
-            driver_cases: vec![],
-            catalog_queries: vec![],
-        })
+        check_candidate(
+            &World::new(),
+            CandidateCheck {
+                asset: asset("generation_prior.v1", "synthetic.prior", spec.clone()),
+                driver_cases: vec![],
+                catalog_queries: vec![],
+            },
+        )
         .unwrap();
         install_asset(
             &mut world,
@@ -784,5 +1189,472 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("native_generation_prior_closures")));
+    }
+
+    // ----- plugin-registered kinds -------------------------------------------------
+
+    #[derive(Resource, Default)]
+    struct PluginStore(BTreeMap<String, i64>);
+
+    #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+    struct PluginPayload {
+        id: String,
+        value: i64,
+    }
+
+    /// A kind core cannot name, as a domain plugin would declare it.
+    struct PluginKind;
+    impl RegistryKind for PluginKind {
+        type Payload = PluginPayload;
+        const KIND: &'static str = "synthetic_plugin.v1";
+        const CONSTRAINTS: &'static [&'static str] = &["payload.id must equal asset.id"];
+        fn payload_id(p: &Self::Payload) -> &str {
+            &p.id
+        }
+        fn install(world: &mut World, p: Self::Payload) {
+            world.init_resource::<PluginStore>();
+            world.resource_mut::<PluginStore>().0.insert(p.id, p.value);
+        }
+        fn withdraw(world: &mut World, p: &Self::Payload) {
+            if let Some(mut store) = world.get_resource_mut::<PluginStore>() {
+                store.0.remove(&p.id);
+            }
+        }
+        fn legacy(world: &World) -> Vec<Legacy<Self::Payload>> {
+            world
+                .get_resource::<PluginStore>()
+                .map(|s| {
+                    s.0.iter()
+                        .map(|(id, value)| Legacy {
+                            id: id.clone(),
+                            label: id.clone(),
+                            payload: Ok(PluginPayload {
+                                id: id.clone(),
+                                value: *value,
+                            }),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    fn plugin_asset(value: i64) -> Asset {
+        let mut a = asset(
+            "relation_type.v1",
+            "synthetic.plugin",
+            json!({"id":"synthetic.plugin","value":value}),
+        );
+        a.kind = PluginKind::KIND.into();
+        a.path_kind = "synthetic_plugin".into();
+        a
+    }
+
+    #[test]
+    fn plugin_registered_kind_routes_through_every_path() {
+        use super::super::{check_payload, install_payload};
+        let mut app = App::new();
+        app.register_knowledge_kind::<PluginKind>();
+        let world = app.world_mut();
+        let plain = World::new();
+
+        // Schema and routing exist only where the plugin registered the kind.
+        let schema = payload_schema(world, PluginKind::KIND).unwrap();
+        assert_eq!(
+            schema["constraints"],
+            json!(["payload.id must equal asset.id"])
+        );
+        assert!(schema["payload_schema"]["properties"]["value"].is_object());
+        assert!(payload_schema(&plain, PluginKind::KIND).is_err());
+        // Core kinds stay routed alongside it.
+        assert!(payload_schema(world, "material.v1").is_ok());
+
+        // Candidate check runs in a disposable world and leaves the live one untouched.
+        let request = |value| CandidateCheck {
+            asset: plugin_asset(value),
+            driver_cases: vec![],
+            catalog_queries: vec![],
+        };
+        check_payload(world, request(1)).unwrap();
+        assert!(world.get_resource::<PluginStore>().is_none());
+
+        // Install, replace, and the legacy inventory.
+        install_payload(world, admitted(plugin_asset(1), "r1")).unwrap();
+        assert_eq!(world.resource::<PluginStore>().0["synthetic.plugin"], 1);
+        install_payload(world, admitted(plugin_asset(2), "r2")).unwrap();
+        assert_eq!(world.resource::<PluginStore>().0["synthetic.plugin"], 2);
+        assert!(listed(world, PluginKind::KIND, "synthetic.plugin").is_none());
+        assert!(legacy_list(world)["coverage"]["portable_kinds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(PluginKind::KIND)));
+        assert!(!legacy_list(&plain)["coverage"]["portable_kinds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(PluginKind::KIND)));
+
+        // Withdrawal reaches the plugin handler and the entry becomes a legacy candidate again.
+        withdrawn(world, "synthetic.plugin");
+        assert!(world.resource::<PluginStore>().0.is_empty());
+        world
+            .resource_mut::<PluginStore>()
+            .0
+            .insert("compiled.entry".into(), 7);
+        assert_eq!(
+            listed(world, PluginKind::KIND, "compiled.entry").unwrap()["portable"],
+            true
+        );
+        let captured = legacy_get(
+            world,
+            LegacyRequest {
+                kind: PluginKind::KIND.into(),
+                id: "compiled.entry".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            captured["payload"],
+            json!({"id":"compiled.entry","value":7})
+        );
+    }
+
+    #[test]
+    fn registering_an_existing_kind_replaces_its_handler() {
+        let mut registry = KnowledgeKindRegistry::default();
+        let count = registry.iter().count();
+        registry.register(KindHandler::of::<Material>());
+        assert_eq!(registry.iter().count(), count);
+        assert!(registry.get("material.v1").is_some());
+    }
+
+    // ----- material.v1 ---------------------------------------------------------------
+
+    #[test]
+    fn textured_materials_are_refused_and_compiled_ones_are_gaps() {
+        let mut world = World::new();
+        let mut textured = MaterialDef {
+            id: "synthetic.textured".into(),
+            ..MaterialDef::default()
+        };
+        textured.base_color_texture = Some(crate::plugins::materials::TextureRef::AssetPath {
+            path: "a/b.png".into(),
+        });
+        let payload = serde_json::to_value(&textured).unwrap();
+        let error = super::super::install(
+            &mut world,
+            admitted(asset("material.v1", "synthetic.textured", payload), "r"),
+        )
+        .unwrap_err();
+        assert!(error.contains("not portable"), "{error}");
+
+        world.init_resource::<BuiltinMaterialDefaults>();
+        world
+            .resource_mut::<BuiltinMaterialDefaults>()
+            .insert(textured);
+        let item = listed(&world, "material.v1", "synthetic.textured").unwrap();
+        assert_eq!(item["portable"], false);
+        assert!(item["gap"].as_str().unwrap().contains("texture"));
+        // Compiled procedural builtins are portable candidates.
+        assert!(legacy_list(&world)["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["kind"] == "material.v1" && a["portable"] == true));
+    }
+
+    #[test]
+    fn installed_material_reaches_the_live_registry_and_survives_reseed() {
+        let mut world = World::new();
+        world.insert_resource(MaterialRegistry::default());
+        let payload = serde_json::to_value(MaterialDef {
+            id: "synthetic.live".into(),
+            name: "corpus".into(),
+            ..MaterialDef::default()
+        })
+        .unwrap();
+        install_asset(&mut world, "material.v1", "synthetic.live", payload, "m1");
+        assert!(world
+            .resource::<MaterialRegistry>()
+            .contains("synthetic.live"));
+        world.insert_resource(MaterialRegistry::default());
+        crate::plugins::materials::reseed_builtin_materials(&mut world);
+        assert!(world
+            .resource::<MaterialRegistry>()
+            .contains("synthetic.live"));
+        withdrawn(&mut world, "synthetic.live");
+        assert!(!world
+            .resource::<MaterialRegistry>()
+            .contains("synthetic.live"));
+    }
+
+    // ----- constraint_rule.v1 ----------------------------------------------------------
+
+    #[test]
+    fn compiled_constraints_are_native_gaps_unless_declared_as_rules() {
+        use crate::capability_registry::{
+            Applicability, ConstraintDescriptor, ConstraintRole, Severity,
+        };
+        let mut world = World::new();
+        registry(&mut world).register_constraint(ConstraintDescriptor {
+            id: ConstraintId("synthetic.native".into()),
+            label: "native".into(),
+            description: "d".into(),
+            applicability: Applicability::any(),
+            default_severity: Severity::Advice,
+            rationale: "r".into(),
+            source_backlink: None,
+            role: ConstraintRole::Validation,
+            validator: std::sync::Arc::new(|_, _| Vec::new()),
+        });
+        install_rule(&mut world, from(rule_json("declared")));
+        let native = listed(&world, "constraint_rule.v1", "synthetic.native").unwrap();
+        assert_eq!(native["portable"], false);
+        assert!(native["gap"].as_str().unwrap().contains("closure"));
+        assert!(legacy_get(
+            &world,
+            LegacyRequest {
+                kind: "constraint_rule.v1".into(),
+                id: "synthetic.native".into()
+            }
+        )
+        .is_err());
+        assert_eq!(
+            listed(&world, "constraint_rule.v1", "synthetic.rule").unwrap()["portable"],
+            true
+        );
+    }
+
+    #[test]
+    fn invalid_rules_are_refused() {
+        for (field, bad) in [
+            ("parameter_path", json!("height")),
+            ("citation", json!(" ")),
+            (
+                "requirement",
+                json!({"comparator":"range","min":3.0,"max":1.0}),
+            ),
+            ("requirement", json!({"comparator":"gt","value":null})),
+        ] {
+            let mut payload = rule_json("x");
+            payload[field] = bad;
+            let mut world = World::new();
+            assert!(
+                super::super::install(
+                    &mut world,
+                    admitted(asset("constraint_rule.v1", "synthetic.rule", payload), "r")
+                )
+                .is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn installed_rule_produces_findings_through_the_validation_sweep_until_withdrawn() {
+        use crate::capability_registry::{ElementClassAssignment, Severity};
+        use crate::plugins::{
+            identity::ElementId,
+            refinement::{RefinementState, RefinementStateComponent, SemanticIntent},
+            validation::{validation_sweep_system, Findings},
+        };
+        let mut world = World::new();
+        world.init_resource::<CapabilityRegistry>();
+        let spawn = |world: &mut World, id: u64, state: RefinementState, params: Value| {
+            world
+                .spawn((
+                    ElementId(id),
+                    ElementClassAssignment {
+                        element_class: ElementClassId("synthetic.class".into()),
+                        active_recipe: None,
+                    },
+                    RefinementStateComponent { state },
+                    SemanticIntent {
+                        parameters: params,
+                        ..Default::default()
+                    },
+                ))
+                .id()
+        };
+        let below = spawn(
+            &mut world,
+            1,
+            RefinementState::Schematic,
+            json!({"height":1.5}),
+        );
+        spawn(
+            &mut world,
+            2,
+            RefinementState::Schematic,
+            json!({"height":2.5}),
+        );
+        spawn(
+            &mut world,
+            3,
+            RefinementState::Conceptual,
+            json!({"height":1.5}),
+        );
+        spawn(
+            &mut world,
+            4,
+            RefinementState::Schematic,
+            json!({"other":1.5}),
+        );
+        let _ = below;
+
+        let sweep = |world: &mut World| {
+            validation_sweep_system(world);
+            world
+                .resource::<Findings>()
+                .all()
+                .map(|f| {
+                    (
+                        f.subject,
+                        f.constraint_id.0.clone(),
+                        f.severity,
+                        f.backlink.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(sweep(&mut world).is_empty());
+
+        install_asset(
+            &mut world,
+            "constraint_rule.v1",
+            "synthetic.rule",
+            rule_json("r"),
+            "c1",
+        );
+        let findings = sweep(&mut world);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let (subject, constraint, severity, backlink) = &findings[0];
+        assert_eq!((*subject, constraint.as_str()), (1, "synthetic.rule"));
+        assert_eq!(*severity, Severity::Warning);
+        assert_eq!(
+            backlink.as_ref().map(|p| p.0.as_str()),
+            Some("synthetic/passage/1")
+        );
+        assert!(world
+            .resource::<CapabilityRegistry>()
+            .constraint_descriptor(&ConstraintId("synthetic.rule".into()))
+            .is_some());
+
+        // A revision that tightens the requirement replaces the validator in place.
+        let mut stricter = rule_json("r");
+        stricter["requirement"] = json!({"comparator":"gte","value":3.0});
+        install_asset(
+            &mut world,
+            "constraint_rule.v1",
+            "synthetic.rule",
+            stricter,
+            "c2",
+        );
+        assert_eq!(sweep(&mut world).len(), 2);
+        assert_eq!(
+            world
+                .resource::<CapabilityRegistry>()
+                .constraint_descriptors()
+                .len(),
+            1
+        );
+
+        withdrawn(&mut world, "synthetic.rule");
+        assert!(sweep(&mut world).is_empty());
+        assert!(world
+            .resource::<CapabilityRegistry>()
+            .constraint_descriptor(&ConstraintId("synthetic.rule".into()))
+            .is_none());
+    }
+
+    #[test]
+    fn jurisdiction_scoped_rule_only_checks_matching_subjects() {
+        use crate::capability_registry::ElementClassAssignment;
+        use crate::plugins::{
+            identity::ElementId,
+            refinement::{RefinementState, RefinementStateComponent, SemanticIntent},
+            validation::{validation_sweep_system, Findings},
+        };
+        let mut world = World::new();
+        world.init_resource::<CapabilityRegistry>();
+        for (id, j) in [(1, "SE"), (2, "us")] {
+            world.spawn((
+                ElementId(id),
+                ElementClassAssignment {
+                    element_class: ElementClassId("synthetic.class".into()),
+                    active_recipe: None,
+                },
+                RefinementStateComponent {
+                    state: RefinementState::Detailed,
+                },
+                SemanticIntent {
+                    parameters: json!({"height":1.0,"jurisdiction":j}),
+                    ..Default::default()
+                },
+            ));
+        }
+        let mut rule = rule_json("r");
+        rule["jurisdiction"] = json!("se");
+        install_asset(
+            &mut world,
+            "constraint_rule.v1",
+            "synthetic.rule",
+            rule,
+            "j1",
+        );
+        validation_sweep_system(&mut world);
+        let subjects: Vec<u64> = world
+            .resource::<Findings>()
+            .all()
+            .map(|f| f.subject)
+            .collect();
+        assert_eq!(subjects, vec![1]);
+    }
+
+    // ----- setting_out_prior.v1 / curated_manifest.v1 ------------------------------------
+
+    #[test]
+    fn invalid_setting_out_priors_and_manifests_are_refused() {
+        let mut world = World::new();
+        let prior = |edit: fn(&mut Value)| {
+            let mut v = json!({"prior_id":"synthetic.p","element_class":"c","construction_system_id":null,
+                "jurisdiction":null,"thickness_mm":100.0,"negative_offset_mm":50.0,
+                "positive_offset_mm":50.0,"source_ref":"s","confidence":0.5});
+            edit(&mut v);
+            v
+        };
+        for edit in [
+            (|v: &mut Value| v["source_ref"] = json!(" ")) as fn(&mut Value),
+            |v| v["confidence"] = json!(1.5),
+            |v| v["positive_offset_mm"] = json!(10.0),
+        ] {
+            assert!(super::super::install(
+                &mut world,
+                admitted(
+                    asset("setting_out_prior.v1", "synthetic.p", prior(edit)),
+                    "r"
+                )
+            )
+            .is_err());
+        }
+        let mut manifest = manifest_json("x");
+        manifest["body"] = json!([1]);
+        assert!(super::super::install(
+            &mut world,
+            admitted(
+                asset("curated_manifest.v1", "synthetic.kind/m1", manifest),
+                "r"
+            )
+        )
+        .is_err());
+        let mut wrong_kind = manifest_json("x");
+        wrong_kind["meta"]["kind"] = json!("recipe.v1");
+        assert!(super::super::install(
+            &mut world,
+            admitted(
+                asset("curated_manifest.v1", "synthetic.kind/m1", wrong_kind),
+                "r"
+            )
+        )
+        .is_err());
     }
 }

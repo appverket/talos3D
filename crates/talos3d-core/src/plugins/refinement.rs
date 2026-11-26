@@ -1683,13 +1683,13 @@ pub struct SettingOutThicknessPrior {
     pub confidence: f32,
 }
 
-#[derive(Resource, Debug, Clone, Default)]
-pub struct SettingOutThicknessPriorRegistry {
-    priors: Vec<SettingOutThicknessPrior>,
-}
-
-impl SettingOutThicknessPriorRegistry {
-    pub fn register(&mut self, prior: SettingOutThicknessPrior) -> Result<(), String> {
+impl SettingOutThicknessPrior {
+    /// Pure data checks shared by compiled registration and corpus delivery.
+    pub fn validate(&self) -> Result<(), String> {
+        let prior = self;
+        if prior.prior_id.trim().is_empty() {
+            return Err("Setting-out prior has an empty prior_id".into());
+        }
         if prior.source_ref.trim().is_empty() {
             return Err(format!(
                 "Setting-out prior '{}' has no evidence source_ref",
@@ -1702,7 +1702,15 @@ impl SettingOutThicknessPriorRegistry {
                 prior.prior_id
             ));
         }
-        if prior.thickness_mm <= 0.0
+        let finite = [
+            prior.thickness_mm,
+            prior.negative_offset_mm,
+            prior.positive_offset_mm,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        if !finite
+            || prior.thickness_mm <= 0.0
             || prior.negative_offset_mm < 0.0
             || prior.positive_offset_mm < 0.0
         {
@@ -1717,10 +1725,32 @@ impl SettingOutThicknessPriorRegistry {
                 prior.prior_id
             ));
         }
+        Ok(())
+    }
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+pub struct SettingOutThicknessPriorRegistry {
+    priors: Vec<SettingOutThicknessPrior>,
+}
+
+impl SettingOutThicknessPriorRegistry {
+    pub fn register(&mut self, prior: SettingOutThicknessPrior) -> Result<(), String> {
+        prior.validate()?;
         self.priors
             .retain(|existing| existing.prior_id != prior.prior_id);
         self.priors.push(prior);
         Ok(())
+    }
+
+    /// Remove a prior by id; a missing id is a no-op.
+    pub fn remove(&mut self, prior_id: &str) {
+        self.priors.retain(|prior| prior.prior_id != prior_id);
+    }
+
+    /// Every registered prior.
+    pub fn all(&self) -> &[SettingOutThicknessPrior] {
+        &self.priors
     }
 
     pub fn select(

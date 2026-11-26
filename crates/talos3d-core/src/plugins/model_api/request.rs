@@ -883,6 +883,14 @@ pub(super) enum ModelApiRequest {
         request: crate::plugins::knowledge_cloud::LegacyRequest,
         response: oneshot::Sender<ApiResult<serde_json::Value>>,
     },
+    KnowledgePayloadSchema {
+        kind: String,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
+    CheckKnowledgeCandidate {
+        request: crate::plugins::knowledge_cloud::CandidateCheck,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
     CandidateRuntimeClasses {
         response: oneshot::Sender<crate::plugins::knowledge_cloud::candidate_runtime::Context>,
     },
@@ -2498,6 +2506,16 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::GetLegacyKnowledgeAsset { request, response } => {
             let _ = response.send(crate::plugins::knowledge_cloud::legacy_get(world, request));
+        }
+        ModelApiRequest::KnowledgePayloadSchema { kind, response } => {
+            let _ = response.send(crate::plugins::knowledge_cloud::payload_schema(
+                world, &kind,
+            ));
+        }
+        ModelApiRequest::CheckKnowledgeCandidate { request, response } => {
+            let _ = response.send(crate::plugins::knowledge_cloud::check_candidate(
+                world, request,
+            ));
         }
         ModelApiRequest::CandidateRuntimeClasses { response } => {
             let classes = world

@@ -138,9 +138,9 @@ pub fn evaluate_in(mut request: Request, context: Context) -> Result<Scene, Stri
         driver_cases: vec![request.drivers.clone()],
     };
     let checked = if request.inspection_snapshot.is_some() {
-        knowledge_cloud::check_payload(check)?
+        knowledge_cloud::check_payload(&World::new(), check)?
     } else {
-        knowledge_cloud::check_candidate(check)?
+        knowledge_cloud::check_candidate(&World::new(), check)?
     };
     let count = checked["parametric_cases"][0]["members"]
         .as_array()
@@ -821,11 +821,14 @@ mod tests {
                 .unwrap_err()
                 .contains("collides")
         );
-        let checked = knowledge_cloud::check_candidate(knowledge_cloud::CandidateCheck {
-            catalog_queries: vec![],
-            asset: req.asset.clone(),
-            driver_cases: vec![],
-        })
+        let checked = knowledge_cloud::check_candidate(
+            &World::new(),
+            knowledge_cloud::CandidateCheck {
+                catalog_queries: vec![],
+                asset: req.asset.clone(),
+                driver_cases: vec![],
+            },
+        )
         .unwrap();
         assert_eq!(checked["execution"]["arguments"]["family_id"], "fixture");
         assert_eq!(
@@ -1221,14 +1224,15 @@ mod tests {
         let inspected = from_legacy(input(), receipt.clone()).unwrap();
         assert!(inspected.asset.evidence.is_empty());
         assert!(inspected.asset.redistribution_rights.is_empty());
-        assert!(
-            knowledge_cloud::check_candidate(knowledge_cloud::CandidateCheck {
+        assert!(knowledge_cloud::check_candidate(
+            &World::new(),
+            knowledge_cloud::CandidateCheck {
                 catalog_queries: vec![],
                 asset: inspected.asset.clone(),
                 driver_cases: vec![],
-            })
-            .is_err()
-        );
+            }
+        )
+        .is_err());
         let forged = json!({"asset":inspected.asset,"inspection_snapshot":hash});
         assert!(serde_json::from_value::<Request>(forged).is_err());
         let scene = evaluate(inspected, vec![]).unwrap();

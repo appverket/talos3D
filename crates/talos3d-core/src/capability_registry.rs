@@ -2036,6 +2036,26 @@ impl CapabilityRegistry {
         self.constraint_descriptors.push(descriptor);
     }
 
+    /// Insert or replace a constraint descriptor by id (corpus-delivered
+    /// constraints replace an earlier revision in place).
+    pub fn upsert_constraint(&mut self, descriptor: ConstraintDescriptor) {
+        match self.constraint_index.get(descriptor.id.0.as_str()).copied() {
+            Some(index) => self.constraint_descriptors[index] = descriptor,
+            None => self.register_constraint(descriptor),
+        }
+    }
+
+    /// Remove a constraint descriptor by id; a missing id is a no-op.
+    pub fn remove_constraint(&mut self, id: &ConstraintId) {
+        self.constraint_descriptors.retain(|c| c.id != *id);
+        self.constraint_index = self
+            .constraint_descriptors
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.id.0.clone(), i))
+            .collect();
+    }
+
     /// Return all registered constraint descriptors.
     pub fn constraint_descriptors(&self) -> &[ConstraintDescriptor] {
         &self.constraint_descriptors

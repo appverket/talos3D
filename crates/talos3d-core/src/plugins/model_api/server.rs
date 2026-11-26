@@ -9633,8 +9633,13 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         Parameters(request): Parameters<crate::plugins::knowledge_cloud::PayloadSchemaRequest>,
     ) -> Result<CallToolResult, McpError> {
         json_tool_result(
-            crate::plugins::knowledge_cloud::payload_schema(&request.kind)
-                .map_err(|e| McpError::invalid_params(e, None))?,
+            self.round_trip(|response| ModelApiRequest::KnowledgePayloadSchema {
+                kind: request.kind,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?,
         )
     }
 
@@ -9647,8 +9652,13 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         Parameters(request): Parameters<crate::plugins::knowledge_cloud::CandidateCheck>,
     ) -> Result<CallToolResult, McpError> {
         json_tool_result(
-            crate::plugins::knowledge_cloud::check_candidate(request)
-                .map_err(|e| McpError::invalid_params(e, None))?,
+            self.round_trip(|response| ModelApiRequest::CheckKnowledgeCandidate {
+                request,
+                response,
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?
+            .map_err(|e| McpError::invalid_params(e, None))?,
         )
     }
 

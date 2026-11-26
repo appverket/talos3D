@@ -231,6 +231,18 @@ impl CuratedManifestRegistry {
         asset_id
     }
 
+    /// Remove a manifest and its kind index entry; returns it when present.
+    pub fn remove(&mut self, id: &AssetId) -> Option<CuratedManifest> {
+        let removed = self.entries.remove(id)?;
+        if let Some(bucket) = self.by_kind.get_mut(&removed.manifest_kind) {
+            bucket.retain(|existing| existing != id);
+            if bucket.is_empty() {
+                self.by_kind.remove(&removed.manifest_kind);
+            }
+        }
+        Some(removed)
+    }
+
     pub fn get(&self, id: &AssetId) -> Option<&CuratedManifest> {
         self.entries.get(id)
     }
