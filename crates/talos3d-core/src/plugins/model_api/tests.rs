@@ -13599,6 +13599,26 @@ fn gated_two_box_world_declaring(satisfied: &[(&str, &str)]) -> World {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn recipes_refuse_a_target_class_they_do_not_author_before_creating_anything() {
+    let mut world = gated_two_box_world(&[]);
+    let before = list_entities(&world).len();
+    let refused = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "two_box_wall".into(),
+            target_class: "roof_system".into(),
+            parameters: json!({}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect_err("a wall recipe cannot author a roof");
+    assert!(refused.contains("wall_assembly"), "{refused}");
+    assert_eq!(list_entities(&world).len(), before);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn instantiated_recipe_setting_out_resolves_through_its_owner_group() {
     let mut world = gated_two_box_world(&["coarse_envelope", "setting_out_reservation"]);
     let family = crate::capability_registry::RecipeFamilyId("two_box_wall".into());

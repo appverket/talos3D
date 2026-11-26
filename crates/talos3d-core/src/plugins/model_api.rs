@@ -5936,6 +5936,32 @@ fn move_recipe_semantics_from_anchor_to_group(
 }
 
 #[cfg(feature = "model-api")]
+/// A governed recipe declares the element class it authors; instantiating it
+/// as another class would emit geometry the class contract cannot govern, so
+/// the mismatch is refused before anything is created.
+fn ensure_recipe_target_class_before_create(
+    world: &World,
+    family_id: &str,
+    target_class: &str,
+) -> ApiResult<()> {
+    let declared = world
+        .get_resource::<crate::curation::RecipeArtifactRegistry>()
+        .and_then(|registry| {
+            registry.get_by_family(&crate::capability_registry::RecipeFamilyId(
+                family_id.to_string(),
+            ))
+        })
+        .map(|artifact| artifact.target_class.clone())
+        .filter(|declared| !declared.is_empty());
+    match declared {
+        Some(declared) if declared != target_class => Err(format!(
+            "recipe '{family_id}' authors element class '{declared}', not '{target_class}'; nothing was created. Instantiate it with target_class '{declared}' or select a recipe for '{target_class}'."
+        )),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(feature = "model-api")]
 fn ensure_recipe_supports_target_state_before_create(
     world: &World,
     family_id: &str,
@@ -13242,6 +13268,7 @@ fn instantiate_recipe_in_transaction(
         &request.family_id,
         target_state.as_str(),
     )?;
+    ensure_recipe_target_class_before_create(world, &request.family_id, &request.target_class)?;
 
     // 1. Create the coarse identity-anchor root carrying the element class +
     //    recipe parameters in the recipe's local frame. The recipe generates
