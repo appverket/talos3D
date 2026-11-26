@@ -8790,13 +8790,20 @@ fn validate_relation_endpoints(
     }
 }
 
-/// The semantic element class an authored entity claims, if any.
+/// The semantic class a relation endpoint claims: its element class, or for
+/// a semantic assembly without one, its assembly type (a `foundation_system`
+/// aggregate is a foundation system to a load-path relation).
 #[cfg(feature = "model-api")]
 fn element_class_of(world: &World, element_id: ElementId) -> Option<String> {
     let entity = crate::plugins::commands::find_entity_by_element_id_readonly(world, element_id)?;
     world
         .get::<crate::capability_registry::ElementClassAssignment>(entity)
         .map(|assignment| assignment.element_class.0.clone())
+        .or_else(|| {
+            world
+                .get::<crate::plugins::modeling::assembly::SemanticAssembly>(entity)
+                .map(|assembly| assembly.assembly_type.clone())
+        })
 }
 
 /// Validate one endpoint against a descriptor's allowed-type list.
@@ -8838,12 +8845,13 @@ fn validate_relation_descriptor(
 
     if !endpoint_type_allowed(&descriptor.valid_source_types, source_type, source_class) {
         return Err(format!(
-            "Relation '{}' does not allow source type '{}'{}",
+            "Relation '{}' does not allow source type '{}'{}; allowed source entity types or element classes: {}",
             relation_type,
             source_type,
             source_class
                 .map(|class| format!(" (element class '{class}')"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            descriptor.valid_source_types.join(", ")
         ));
     }
     if !endpoint_type_allowed(
@@ -8852,12 +8860,13 @@ fn validate_relation_descriptor(
         target_class,
     ) {
         return Err(format!(
-            "Relation '{}' does not allow target type '{}'{}",
+            "Relation '{}' does not allow target type '{}'{}; allowed target entity types or element classes: {}",
             relation_type,
             target_snapshot.type_name(),
             target_class
                 .map(|class| format!(" (element class '{class}')"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            descriptor.valid_target_types.join(", ")
         ));
     }
 

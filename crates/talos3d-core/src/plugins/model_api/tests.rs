@@ -13598,6 +13598,23 @@ fn gated_two_box_world_declaring(satisfied: &[(&str, &str)]) -> World {
 }
 
 #[cfg(feature = "model-api")]
+fn registry_assembly_type(world: &mut World, assembly_type: &str) {
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_assembly_type(crate::capability_registry::AssemblyTypeDescriptor {
+            assembly_type: assembly_type.into(),
+            label: assembly_type.into(),
+            description: "Test aggregate".into(),
+            expected_member_types: Vec::new(),
+            expected_member_roles: vec!["member".into()],
+            member_role_descriptors: Vec::new(),
+            expected_relation_types: vec!["bears_on".into()],
+            parameter_schema: json!({}),
+            member_obligations: Vec::new(),
+        });
+}
+
+#[cfg(feature = "model-api")]
 #[test]
 fn recipe_relations_from_the_refinement_root_follow_it_onto_the_group() {
     use crate::plugins::modeling::assembly::SemanticRelation;
@@ -13624,18 +13641,36 @@ fn recipe_relations_from_the_refinement_root_follow_it_onto_the_group() {
             label: "Bears On".into(),
             description: "Load path".into(),
             valid_source_types: vec!["wall_assembly".into()],
-            valid_target_types: vec!["box".into()],
+            valid_target_types: vec!["foundation_system".into()],
             parameter_schema: json!({}),
             participates_in_dependency_graph: true,
             external_classification: None,
             host_contract_kind: None,
         });
     }
-    let foundation = handle_create_entity(
+    registry_assembly_type(&mut world, "foundation_system");
+    let slab = handle_create_entity(
         &mut world,
         json!({"type":"box","centre":[0.0,-0.25,0.0],"half_extents":[4.0,0.25,1.0]}),
     )
     .unwrap();
+    // A foundation aggregate is a foundation_system endpoint by its assembly type.
+    let foundation = handle_create_assembly(
+        &mut world,
+        CreateAssemblyRequest {
+            assembly_type: "foundation_system".into(),
+            label: "Foundation".into(),
+            members: vec![AssemblyMemberRefRequest {
+                target: slab,
+                role: "member".into(),
+            }],
+            parameters: Value::Null,
+            metadata: Value::Null,
+            relations: Vec::new(),
+        },
+    )
+    .unwrap()
+    .assembly_id;
     let family = crate::capability_registry::RecipeFamilyId("two_box_wall".into());
     let mut artifact = world
         .resource::<crate::curation::RecipeArtifactRegistry>()
