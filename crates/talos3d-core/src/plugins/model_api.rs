@@ -17123,6 +17123,11 @@ fn governing_physical_thickness_mm(world: &World, root: ElementId) -> Result<Opt
                 if let Some(assembly) = world.get::<SemanticAssembly>(entity) {
                     pending.extend(assembly.members.iter().map(|member| member.target));
                 }
+                if let Some(group) =
+                    world.get::<crate::plugins::modeling::group::GroupMembers>(entity)
+                {
+                    pending.extend(group.member_ids.iter().copied());
+                }
             }
         }
         false
@@ -17153,23 +17158,24 @@ fn governing_physical_thickness_mm(world: &World, root: ElementId) -> Result<Opt
         // owner group. Resolve that persisted evidence, never the locator AABB.
         // A unique semantic owner is required and the target is still checked
         // against this locator's active refinement subtree below.
-        let legacy_owners: Vec<_> = if direct_bindings.is_none() {
-            world
-                .iter_entities()
-                .filter(|candidate| {
-                    candidate
-                        .get::<crate::plugins::modeling::group::GroupMembers>()
-                        .is_some_and(|group| group.member_ids.contains(&current))
-                        && candidate
-                            .get::<crate::capability_registry::ElementClassAssignment>()
-                            .is_some()
-                        && candidate
-                            .get::<ElementId>()
-                            .is_some_and(|id| !is_parked_refinement_entity(world, *id))
-                })
-                .collect()
+        let owners: Vec<_> = world
+            .iter_entities()
+            .filter(|candidate| {
+                candidate
+                    .get::<crate::plugins::modeling::group::GroupMembers>()
+                    .is_some_and(|group| group.member_ids.contains(&current))
+                    && candidate
+                        .get::<crate::capability_registry::ElementClassAssignment>()
+                        .is_some()
+                    && candidate
+                        .get::<ElementId>()
+                        .is_some_and(|id| !is_parked_refinement_entity(world, *id))
+            })
+            .collect();
+        let legacy_owners: &[_] = if direct_bindings.is_none() {
+            &owners
         } else {
-            Vec::new()
+            &[]
         };
         if legacy_owners.len() > 1 {
             return Err(format!(
@@ -17177,6 +17183,13 @@ fn governing_physical_thickness_mm(world: &World, root: ElementId) -> Result<Opt
                 current.0
             ));
         }
+        // A recipe locator's bindings name members of its classed owner group,
+        // so their scope is the owner's subtree, not the bare locator's.
+        let scope_root = (owners.len() == 1)
+            .then(|| owners.first())
+            .flatten()
+            .and_then(|owner| owner.get::<ElementId>().copied())
+            .unwrap_or(current);
         let bindings = direct_bindings.or_else(|| {
             legacy_owners
                 .first()
@@ -17223,7 +17236,7 @@ fn governing_physical_thickness_mm(world: &World, root: ElementId) -> Result<Opt
                 target.0
             ));
         }
-        if !in_active_scope(world, current, target) {
+        if !in_active_scope(world, scope_root, target) {
             return Err(format!(
                 "Setting-out physical representation {} is not an active member of refinement {}",
                 target.0, current.0

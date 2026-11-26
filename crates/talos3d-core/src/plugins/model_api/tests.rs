@@ -13599,6 +13599,61 @@ fn gated_two_box_world_declaring(satisfied: &[(&str, &str)]) -> World {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn instantiated_recipe_setting_out_resolves_through_its_owner_group() {
+    let mut world = gated_two_box_world(&["coarse_envelope", "setting_out_reservation"]);
+    let family = crate::capability_registry::RecipeFamilyId("two_box_wall".into());
+    let mut artifact = world
+        .resource::<crate::curation::RecipeArtifactRegistry>()
+        .get_by_family(&family)
+        .unwrap()
+        .clone();
+    let crate::curation::RecipeBody::AuthoringScript { script } = &mut artifact.body else {
+        unreachable!("two-box recipe is a script");
+    };
+    for instruction in &mut script.steps {
+        if let crate::curation::authoring_script::ScriptInstruction::Call(step) = instruction {
+            step.bindings = [(
+                "element_id".into(),
+                crate::curation::authoring_script::OutputPath::new("element_id"),
+            )]
+            .into_iter()
+            .collect();
+        }
+    }
+    script.postconditions = ["coarse_envelope", "setting_out_reservation"]
+        .into_iter()
+        .map(
+            |id| crate::curation::authoring_script::Postcondition::ObligationSatisfied {
+                obligation_id_expr: crate::curation::authoring_script::ArgExpr::Literal {
+                    value: json!(id),
+                },
+                by_step: crate::curation::authoring_script::StepId::new("box_a"),
+            },
+        )
+        .collect();
+    world
+        .resource_mut::<crate::curation::RecipeArtifactRegistry>()
+        .insert(artifact);
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "two_box_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: json!({}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .unwrap();
+    assert_eq!(result.state, "Constructible");
+    // The locator's relocated bindings name a member of its owner group.
+    let thickness = governing_physical_thickness_mm(&world, ElementId(result.root_element_id))
+        .expect("setting-out resolves through the owner group's members");
+    assert!(thickness.is_some_and(|mm| mm > 0.0), "{thickness:?}");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn governed_recipes_assign_member_materials_without_textures() {
     use crate::plugins::materials::MaterialAssignment;
     let mut world = gated_two_box_world(&[]);
