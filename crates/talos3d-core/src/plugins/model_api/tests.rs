@@ -14837,6 +14837,23 @@ mod capability_profiles {
             .collect()
     }
 
+    #[test]
+    fn every_tool_keeps_large_results_inline_for_file_less_agents() {
+        for tool in profile_tool_catalog()
+            .tools_for(CapabilityProfile::Full)
+            .iter()
+        {
+            assert_eq!(
+                tool.meta
+                    .as_ref()
+                    .and_then(|m| m.0.get("anthropic/maxResultSizeChars")),
+                Some(&serde_json::Value::from(400_000u64)),
+                "{}",
+                tool.name
+            );
+        }
+    }
+
     /// Every tool the router registers must classify into a real category.
     /// A new tool landing in `Unclassified` is reachable only through the
     /// `full` profile, which silently hides it from every gated session —

@@ -295,6 +295,9 @@ impl ProfileToolCatalog {
 }
 
 #[cfg(feature = "model-api")]
+/// Size up to which an MCP client keeps a tool result inline.
+pub(super) const MAX_RESULT_SIZE_CHARS: u64 = 400_000;
+
 pub(super) fn profile_tool_catalog() -> &'static ProfileToolCatalog {
     static CATALOG: std::sync::OnceLock<ProfileToolCatalog> = std::sync::OnceLock::new();
     CATALOG.get_or_init(|| {
@@ -309,6 +312,14 @@ pub(super) fn profile_tool_catalog() -> &'static ProfileToolCatalog {
         for route in router.map.values_mut() {
             let schema = std::sync::Arc::make_mut(&mut route.attr.input_schema);
             sanitize_tool_input_schema(schema);
+            // Agents may have MCP and no file tools; a client that spills a
+            // large result to a local file leaves them unable to read it.
+            let mut meta = route.attr.meta.take().unwrap_or_default();
+            meta.0.insert(
+                "anthropic/maxResultSizeChars".into(),
+                serde_json::Value::from(MAX_RESULT_SIZE_CHARS),
+            );
+            route.attr.meta = Some(meta);
         }
         let all = router.list_all();
         let lists = CapabilityProfile::ALL.map(|profile| {

@@ -116,6 +116,10 @@ pub(super) fn empty_world(context: Context) -> World {
 /// about a hundred members spends a create, a material and a role call each.
 pub(crate) const SCENARIO_NATIVE_CALL_BUDGET: usize = 1024;
 
+/// Authored entities one isolated scenario may hold: an envelope layer with a
+/// role assembly per member stays well inside it.
+pub(crate) const SCENARIO_ENTITY_LIMIT: usize = 512;
+
 fn ids(w: &mut World) -> Vec<u64> {
     let mut ids: Vec<_> = w.query::<&ElementId>().iter(w).map(|e| e.0).collect();
     ids.sort_unstable();
@@ -123,8 +127,10 @@ fn ids(w: &mut World) -> Vec<u64> {
 }
 fn state(w: &mut World) -> Result<Value, String> {
     let element_ids = ids(w);
-    if element_ids.len() > 128 {
-        return Err("Scenario exceeds 128 authored entities".into());
+    if element_ids.len() > SCENARIO_ENTITY_LIMIT {
+        return Err(format!(
+            "Scenario exceeds {SCENARIO_ENTITY_LIMIT} authored entities"
+        ));
     }
     let registry = w.resource::<CapabilityRegistry>();
     let mut entities: Vec<_> = w.iter_entities().filter_map(|e| {
@@ -169,8 +175,10 @@ impl ToolDispatcher for Dispatcher<'_> {
             model_api::document_dispatch::execute(self.world, call.tool.as_str(), args, true);
         let result = result.map_err(error)?;
         let observed_ids = ids(self.world);
-        if observed_ids.len() > 128 {
-            return Err(error("Scenario exceeds 128 authored entities".into()));
+        if observed_ids.len() > SCENARIO_ENTITY_LIMIT {
+            return Err(error(format!(
+                "Scenario exceeds {SCENARIO_ENTITY_LIMIT} authored entities"
+            )));
         }
         self.calls
             .push(json!({"tool":call.tool.as_str(),"result":result,"element_ids":observed_ids}));
