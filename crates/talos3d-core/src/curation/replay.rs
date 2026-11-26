@@ -594,6 +594,16 @@ fn validate_param_schema(
     let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
         return Ok(());
     };
+    // A closed schema refuses inputs it does not declare instead of silently
+    // ignoring them and authoring an unchanged result.
+    if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+        if let Some(key) = params.keys().find(|key| !properties.contains_key(*key)) {
+            return fail(format!(
+                "parameter '{key}' is not declared by this recipe; declared parameters: {}",
+                properties.keys().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
     for (key, rule) in properties {
         let Some(value) = params.get(key) else {
             continue;
@@ -1206,6 +1216,28 @@ mod tests {
             d.calls.is_empty(),
             "no tool may run for an out-of-envelope request"
         );
+    }
+
+    #[test]
+    fn closed_parameter_schema_refuses_undeclared_parameters() {
+        let schema = serde_json::json!({"type":"object","additionalProperties":false,
+            "properties":{"length_mm":{"type":"number"}}});
+        let params = |v: Value| v.as_object().unwrap().clone();
+        assert!(
+            validate_param_schema(&schema, &params(serde_json::json!({"length_mm":1}))).is_ok()
+        );
+        let refused = validate_param_schema(
+            &schema,
+            &params(serde_json::json!({"length_mm":1,"opening_w":2})),
+        );
+        assert!(
+            matches!(refused, Err(InvocationError::ParameterSchemaFailed { message })
+            if message.contains("opening_w"))
+        );
+        // Open schemas keep accepting extra keys.
+        let open =
+            serde_json::json!({"type":"object","properties":{"length_mm":{"type":"number"}}});
+        assert!(validate_param_schema(&open, &params(serde_json::json!({"opening_w":2}))).is_ok());
     }
 
     #[test]
