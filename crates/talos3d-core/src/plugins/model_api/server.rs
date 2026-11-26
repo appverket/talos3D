@@ -1737,6 +1737,14 @@ impl ModelApiServer {
             .await?
     }
 
+    async fn request_add_assembly_members(
+        &self,
+        request: AddAssemblyMembersRequest,
+    ) -> ApiResult<AddAssemblyMembersResult> {
+        self.round_trip(|response| ModelApiRequest::AddAssemblyMembers { request, response })
+            .await?
+    }
+
     async fn request_preview_semantic_assembly_from_selection(
         &self,
         request: SemanticAssemblyFromSelectionPreviewRequest,
@@ -5985,6 +5993,26 @@ pub struct CreateAssemblyRequest {
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddAssemblyMembersRequest {
+    /// The semantic assembly (`assembly_id` from create_assembly).
+    pub assembly_id: u64,
+    /// Members to append, each with its role. Repeating an existing
+    /// target+role pair is a no-op.
+    pub members: Vec<AssemblyMemberRefRequest>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AddAssemblyMembersResult {
+    pub assembly_id: u64,
+    pub added: usize,
+    pub member_count: usize,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssemblyMemberRefRequest {
     pub target: u64,
     pub role: String,
@@ -9017,6 +9045,21 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_create_assembly(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "add_assembly_members",
+        description = "Append members with roles to an existing semantic assembly (assembly_id from create_assembly), as one undoable edit. Use it to give every member a role, for example once per iteration of a recipe loop that creates repeated members. Targets must exist; repeating an existing target+role pair is a no-op. Does not change the physical group."
+    )]
+    pub(super) async fn add_assembly_members_tool(
+        &self,
+        Parameters(params): Parameters<AddAssemblyMembersRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_add_assembly_members(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)

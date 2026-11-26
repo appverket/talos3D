@@ -12,6 +12,7 @@ const ATOMIC_WRITES: &[&str] = &[
     "resolve_obligation",
     "delete_entities",
     "create_assembly",
+    "add_assembly_members",
     "assign_material",
     "definition.create",
     "definition.instantiate",

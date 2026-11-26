@@ -490,6 +490,10 @@ pub(super) enum ModelApiRequest {
         request: CreateAssemblyRequest,
         response: oneshot::Sender<ApiResult<CreateAssemblyResult>>,
     },
+    AddAssemblyMembers {
+        request: AddAssemblyMembersRequest,
+        response: oneshot::Sender<ApiResult<AddAssemblyMembersResult>>,
+    },
     PreviewSemanticAssemblyFromSelection {
         request: SemanticAssemblyFromSelectionPreviewRequest,
         response: oneshot::Sender<ApiResult<SemanticAssemblyFromSelectionPreview>>,
@@ -1977,6 +1981,9 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::CreateAssembly { request, response } => {
             let _ = response.send(handle_create_assembly(world, request));
+        }
+        ModelApiRequest::AddAssemblyMembers { request, response } => {
+            let _ = response.send(handle_add_assembly_members(world, request));
         }
         ModelApiRequest::PreviewSemanticAssemblyFromSelection { request, response } => {
             let _ = response.send(handle_preview_semantic_assembly_from_selection(

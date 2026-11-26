@@ -6152,6 +6152,53 @@ pub fn handle_query_relations(
 }
 
 #[cfg(feature = "model-api")]
+pub fn handle_add_assembly_members(
+    world: &mut World,
+    request: AddAssemblyMembersRequest,
+) -> ApiResult<AddAssemblyMembersResult> {
+    use crate::plugins::modeling::assembly::{AssemblyMemberRef, AssemblySnapshot};
+    let id = ElementId(request.assembly_id);
+    for member in &request.members {
+        ensure_entity_exists(world, ElementId(member.target))?;
+    }
+    let before = {
+        let entity = find_entity_by_element_id_readonly(world, id)
+            .ok_or_else(|| format!("Entity {} not found", id.0))?;
+        AssemblySnapshot::capture(&world.entity(entity))
+            .ok_or_else(|| format!("Entity {} is not a semantic assembly", id.0))?
+    };
+    let mut after = before.clone();
+    let mut added = 0;
+    for member in request.members {
+        let member = AssemblyMemberRef {
+            target: ElementId(member.target),
+            role: member.role,
+        };
+        if !after.assembly.members.contains(&member) {
+            after.assembly.members.push(member);
+            added += 1;
+        }
+    }
+    let member_count = after.assembly.members.len();
+    if added > 0 {
+        send_event(
+            world,
+            crate::plugins::commands::ApplyEntityChangesCommand {
+                label: "Add assembly members",
+                before: vec![before.into()],
+                after: vec![after.into()],
+            },
+        );
+        flush_model_api_write_pipeline(world);
+    }
+    Ok(AddAssemblyMembersResult {
+        assembly_id: id.0,
+        added,
+        member_count,
+    })
+}
+
+#[cfg(feature = "model-api")]
 pub fn handle_list_assembly_members(
     world: &World,
     element_id: u64,

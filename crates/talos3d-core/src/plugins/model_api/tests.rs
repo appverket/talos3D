@@ -13743,6 +13743,78 @@ fn governed_recipes_assign_member_materials_without_textures() {
 }
 
 #[cfg(feature = "model-api")]
+#[test]
+fn recipe_loops_give_every_repeated_member_an_assembly_role() {
+    use crate::plugins::modeling::assembly::SemanticAssembly;
+    let mut world = gated_two_box_world(&[]);
+    {
+        let mut registry = world.resource_mut::<CapabilityRegistry>();
+        registry.register_factory(crate::plugins::modeling::group::GroupFactory);
+        registry.register_factory(crate::plugins::modeling::assembly::AssemblyFactory);
+    }
+    registry_assembly_type(&mut world, "cladding_layer");
+    let family = crate::capability_registry::RecipeFamilyId("two_box_wall".into());
+    let mut artifact = world
+        .resource::<crate::curation::RecipeArtifactRegistry>()
+        .get_by_family(&family)
+        .unwrap()
+        .clone();
+    let crate::curation::RecipeBody::AuthoringScript { script } = &mut artifact.body else {
+        unreachable!("two-box recipe is a script");
+    };
+    for tool in ["create_assembly", "add_assembly_members"] {
+        script
+            .allowed_tools
+            .insert(crate::curation::authoring_script::McpToolId::new(tool));
+    }
+    script.steps.push(
+        serde_json::from_value(json!({"id":"layer","tool":"create_assembly",
+            "bindings":{"assembly_id":"assembly_id"},"args":{
+            "assembly_type":{"expr":"literal","value":"cladding_layer"},
+            "label":{"expr":"literal","value":"Cladding"},
+            "members":{"expr":"array","items":[{"expr":"object","entries":{
+                "target":{"expr":"step_output","step_id":"box_a","path":"id_a"},
+                "role":{"expr":"literal","value":"starter"}}}]}}}))
+        .unwrap(),
+    );
+    script.steps.push(
+        serde_json::from_value(json!({"id":"boards","kind":"repeat","var":"i",
+            "count":{"expr":"literal","value":3},"body":[
+            {"id":"board","tool":"create_box","bindings":{"element_id":"element_id"},"args":{
+                "center":{"expr":"array","items":[{"expr":"expr","formula":"i * 0.2"},
+                    {"expr":"literal","value":1.0},{"expr":"literal","value":0.3}]},
+                "half_extents":{"expr":"literal","value":[0.05,1.0,0.01]}}},
+            {"id":"board_role","tool":"add_assembly_members","args":{
+                "assembly_id":{"expr":"step_output","step_id":"layer","path":"assembly_id"},
+                "members":{"expr":"array","items":[{"expr":"object","entries":{
+                    "target":{"expr":"step_output","step_id":"board","path":"element_id"},
+                    "role":{"expr":"literal","value":"board"}}}]}}}]}))
+        .unwrap(),
+    );
+    world
+        .resource_mut::<crate::curation::RecipeArtifactRegistry>()
+        .insert(artifact);
+    handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "two_box_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: json!({}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect("loop members can be given roles");
+    let roles: Vec<String> = world
+        .query::<&SemanticAssembly>()
+        .iter(&world)
+        .filter(|assembly| assembly.assembly_type == "cladding_layer")
+        .flat_map(|assembly| assembly.members.iter().map(|m| m.role.clone()))
+        .collect();
+    assert_eq!(roles, ["starter", "board", "board", "board"]);
+}
+
+#[cfg(feature = "model-api")]
 fn registry_assembly_type(world: &mut World, assembly_type: &str) {
     world
         .resource_mut::<CapabilityRegistry>()

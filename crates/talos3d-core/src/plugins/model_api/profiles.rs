@@ -332,6 +332,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("create_entity", ToolCategory::Editing),
     ("create_box", ToolCategory::Editing),
     ("create_assembly", ToolCategory::Editing),
+    ("add_assembly_members", ToolCategory::Editing),
     (
         "create_semantic_assembly_from_selection",
         ToolCategory::Editing,
@@ -588,6 +589,7 @@ pub(super) const FOCUSED_AUTHORING_TOOLS: &[&str] = &[
     "promote_refinement",
     "resolve_obligation",
     "create_assembly",
+    "add_assembly_members",
     "get_assembly",
     "list_assembly_members",
     "list_entities",

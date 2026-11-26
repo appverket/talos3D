@@ -92,6 +92,22 @@ pub struct AssemblySnapshot {
     pub authoring_provenance: Option<AuthoringProvenance>,
 }
 
+impl AssemblySnapshot {
+    /// The authored state of a semantic assembly entity.
+    pub fn capture(entity_ref: &EntityRef) -> Option<Self> {
+        Some(Self {
+            element_id: *entity_ref.get::<ElementId>()?,
+            assembly: entity_ref.get::<SemanticAssembly>()?.clone(),
+            refinement_state: entity_ref
+                .get::<RefinementStateComponent>()
+                .map(|component| component.state),
+            obligations: entity_ref.get::<ObligationSet>().cloned(),
+            claim_grounding: entity_ref.get::<ClaimGrounding>().cloned(),
+            authoring_provenance: entity_ref.get::<AuthoringProvenance>().cloned(),
+        })
+    }
+}
+
 impl From<AssemblySnapshot> for BoxedEntity {
     fn from(snapshot: AssemblySnapshot) -> Self {
         Self(Box::new(snapshot))
@@ -407,25 +423,7 @@ impl AuthoredEntityFactory for AssemblyFactory {
     }
 
     fn capture_snapshot(&self, entity_ref: &EntityRef, _world: &World) -> Option<BoxedEntity> {
-        let element_id = *entity_ref.get::<ElementId>()?;
-        let assembly = entity_ref.get::<SemanticAssembly>()?;
-        let refinement_state = entity_ref
-            .get::<RefinementStateComponent>()
-            .map(|component| component.state);
-        let obligations = entity_ref.get::<ObligationSet>().cloned();
-        let claim_grounding = entity_ref.get::<ClaimGrounding>().cloned();
-        let authoring_provenance = entity_ref.get::<AuthoringProvenance>().cloned();
-        Some(
-            AssemblySnapshot {
-                element_id,
-                assembly: assembly.clone(),
-                refinement_state,
-                obligations,
-                claim_grounding,
-                authoring_provenance,
-            }
-            .into(),
-        )
+        AssemblySnapshot::capture(entity_ref).map(Into::into)
     }
 
     fn from_persisted_json(&self, data: &Value) -> Result<BoxedEntity, String> {
