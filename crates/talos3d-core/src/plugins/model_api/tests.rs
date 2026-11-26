@@ -14368,6 +14368,15 @@ fn check_overlaps_decides_every_pair_of_a_large_member_set() {
         },
         ShapeRotation::default(),
     ));
+    // A board in face contact (2 µm float overlap) is contact, not overlap.
+    world.spawn((
+        ElementId(2000),
+        BoxPrimitive {
+            centre: Vec3::new(0.0, 1.0, 0.019998),
+            half_extents: Vec3::new(0.05, 1.0, 0.01),
+        },
+        ShapeRotation::default(),
+    ));
     let result = handle_check_overlaps(
         &world,
         CheckOverlapsRequest {
@@ -14376,7 +14385,7 @@ fn check_overlaps_decides_every_pair_of_a_large_member_set() {
     )
     .expect("check_overlaps must succeed");
     assert!(!result.truncated);
-    assert_eq!(result.pairs_checked, 121 * 120 / 2);
+    assert_eq!(result.pairs_checked, 122 * 121 / 2);
     assert_eq!(
         result
             .overlaps

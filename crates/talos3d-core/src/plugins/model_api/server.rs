@@ -12069,7 +12069,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             authored entities when element_ids is empty). AABB-level only — rotated or angled \
             members almost always overlap here; measure their actual solids with \
             inspect_element_geometry pairs (solid_interference). Every pair is decided (sweep and prune), \
-            so large member sets are checked completely; at most 500 overlaps are reported and truncated=true \
+            so large member sets are checked completely; intersections thinner than 0.1 mm on any axis are face contact and not reported; at most 500 overlaps are reported and truncated=true \
             means more exist. Parent/child group-containment pairs are filtered out \
             when group membership data is available."
     )]

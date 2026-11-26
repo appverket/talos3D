@@ -19927,6 +19927,8 @@ fn aabb_distance(a: &ElementAabb, b: &ElementAabb) -> f64 {
 /// returning a truncated result.
 #[cfg(feature = "model-api")]
 const OVERLAP_PAIR_CAP: usize = 500;
+/// AABB intersections thinner than this (0.1 mm) on any axis are face contact.
+const OVERLAP_CONTACT_DEPTH_M: f64 = 1e-4;
 
 #[cfg(feature = "model-api")]
 pub fn handle_get_world_aabb(
@@ -20031,6 +20033,11 @@ pub fn handle_check_overlaps(
                 continue;
             }
             if let Some((extents, volume)) = aabb_intersection(a, b) {
+                // Members in face contact intersect by float noise; that is
+                // contact, not interpenetration, and must not crowd the report.
+                if extents.iter().copied().fold(f64::INFINITY, f64::min) < OVERLAP_CONTACT_DEPTH_M {
+                    continue;
+                }
                 if overlaps.len() >= OVERLAP_PAIR_CAP {
                     truncated = true;
                     break 'outer;
