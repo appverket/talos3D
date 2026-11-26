@@ -151,7 +151,7 @@ impl RetryOutcome {
             ),
             (
                 self.outcome != "succeeded" || self.residual_knowledge_gaps.is_empty(),
-                "a succeeded outcome cannot carry residual_knowledge_gaps",
+                "a succeeded outcome cannot carry residual_knowledge_gaps: if any part of the requested result is not achieved, report outcome failed with these gaps, which queues a curator follow-up; do not drop the gaps to report success",
             ),
         ];
         let violations: Vec<&str> = checks
