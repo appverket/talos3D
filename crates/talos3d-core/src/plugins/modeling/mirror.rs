@@ -319,7 +319,7 @@ impl AuthoredEntity for MirrorSnapshot {
     }
 
     fn to_json(&self) -> Value {
-        serde_json::to_value(&self.mirror_node).unwrap_or(Value::Null)
+        crate::authored_entity::node_json_with_element_id(self.element_id, &self.mirror_node)
     }
 
     fn apply_to(&self, world: &mut World) {

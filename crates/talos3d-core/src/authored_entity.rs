@@ -10,6 +10,19 @@ use crate::{
 
 // --- Shared helpers for AuthoredEntity implementations ---
 
+/// Serialise a derived-geometry node together with its owning element id, the
+/// shape every node factory's `from_persisted_json` reads back.
+pub fn node_json_with_element_id<T: serde::Serialize>(
+    element_id: crate::plugins::identity::ElementId,
+    node: &T,
+) -> Value {
+    let mut value = serde_json::to_value(node).unwrap_or(Value::Null);
+    if let Value::Object(map) = &mut value {
+        map.insert("element_id".into(), Value::from(element_id.0));
+    }
+    value
+}
+
 pub fn property_field(
     name: &'static str,
     kind: PropertyValueKind,

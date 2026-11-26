@@ -156,7 +156,7 @@ impl AuthoredEntity for FilletSnapshot {
     }
 
     fn to_json(&self) -> Value {
-        serde_json::to_value(&self.fillet_node).unwrap_or(Value::Null)
+        crate::authored_entity::node_json_with_element_id(self.element_id, &self.fillet_node)
     }
 
     fn apply_to(&self, world: &mut World) {
@@ -408,7 +408,7 @@ impl AuthoredEntity for ChamferSnapshot {
     }
 
     fn to_json(&self) -> Value {
-        serde_json::to_value(&self.chamfer_node).unwrap_or(Value::Null)
+        crate::authored_entity::node_json_with_element_id(self.element_id, &self.chamfer_node)
     }
 
     fn apply_to(&self, world: &mut World) {

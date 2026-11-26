@@ -175,7 +175,7 @@ impl AuthoredEntity for CsgSnapshot {
     }
 
     fn to_json(&self) -> Value {
-        serde_json::to_value(&self.csg_node).unwrap_or(Value::Null)
+        crate::authored_entity::node_json_with_element_id(self.element_id, &self.csg_node)
     }
 
     fn apply_to(&self, world: &mut World) {
@@ -809,5 +809,29 @@ mod typereg_tests {
         let entity = world.spawn(ElementId(70)).id();
         let edges = CsgFactory.dependency_edges(&world, entity);
         assert_eq!(edges, EntityDependencies::empty());
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[test]
+    fn csg_nodes_survive_save_and_reload() {
+        let snapshot: BoxedEntity = CsgSnapshot {
+            element_id: ElementId(42),
+            csg_node: CsgNode {
+                operand_a: ElementId(7),
+                operand_b: ElementId(8),
+                op: BooleanOp::Difference,
+            },
+        }
+        .into();
+        let saved = snapshot.to_persisted_json();
+        let reloaded = CsgFactory
+            .from_persisted_json(&saved)
+            .expect("a saved CSG node must reload");
+        assert_eq!(reloaded.to_persisted_json(), saved);
+        assert_eq!(saved["element_id"], 42);
     }
 }
