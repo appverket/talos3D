@@ -13650,6 +13650,15 @@ fn instantiated_recipe_setting_out_resolves_through_its_owner_group() {
     let thickness = governing_physical_thickness_mm(&world, ElementId(result.root_element_id))
         .expect("setting-out resolves through the owner group's members");
     assert!(thickness.is_some_and(|mm| mm > 0.0), "{thickness:?}");
+    // The reservation is taken from what the recipe authored, not the locator.
+    let findings = handle_run_validation_v2(&world, Some(result.root_element_id));
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.validator == "SettingOutContractDrift"
+                || f.validator == "SettingOutPhysicalBinding"),
+        "{findings:?}"
+    );
 }
 
 #[cfg(feature = "model-api")]

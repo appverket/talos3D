@@ -13099,11 +13099,22 @@ fn promote_refinement_in_transaction(
 fn apply_recipe_setting_out_contract(
     world: &mut World,
     id: ElementId,
-    contract: crate::plugins::refinement::SettingOutContract,
+    mut contract: crate::plugins::refinement::SettingOutContract,
 ) -> ApiResult<()> {
-    use crate::plugins::refinement::{SettingOutContract, SettingOutContractSnapshot};
+    use crate::plugins::refinement::{
+        SettingOutContract, SettingOutContractSnapshot, SettingOutSource,
+    };
     let entity = find_entity_by_element_id_readonly(world, id)
         .ok_or_else(|| format!("Entity {} not found", id.0))?;
+    // A reservation proposed from authored geometry was measured before the
+    // recipe ran, when the root was only its locator; reserve what the
+    // recipe's governing physical representation actually is.
+    if contract.source == SettingOutSource::AuthoredPhysical {
+        if let Ok(Some(thickness)) = governing_physical_thickness_mm(world, id) {
+            contract.reserved_negative_offset_mm = thickness * 0.5;
+            contract.reserved_positive_offset_mm = thickness * 0.5;
+        }
+    }
     if world.get::<SettingOutContract>(entity) == Some(&contract) {
         return Ok(());
     }
@@ -13395,6 +13406,15 @@ fn instantiate_recipe_in_transaction(
         group_element_id.map(ElementId),
         &request.family_id,
     );
+    // The owner group now exists, so a physically derived reservation can be
+    // measured on what the recipe authored instead of its locator.
+    let root_entity = find_entity_by_element_id_readonly(world, ElementId(root));
+    if let Some(contract) = root_entity
+        .and_then(|entity| world.get::<crate::plugins::refinement::SettingOutContract>(entity))
+        .cloned()
+    {
+        apply_recipe_setting_out_contract(world, ElementId(root), contract)?;
+    }
 
     // 5. Run validation on the semantic aggregate when the recipe produced one.
     //    Failures here are surfaced as structured findings, not as a hard error:
