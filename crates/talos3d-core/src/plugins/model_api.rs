@@ -17189,7 +17189,7 @@ fn governing_physical_thickness_mm(world: &World, root: ElementId) -> Result<Opt
             .collect::<std::collections::BTreeSet<_>>();
         if targets.len() > 1 {
             return Err(format!(
-                "Ambiguous setting-out physical representations for element {}: {:?}",
+                "Ambiguous setting-out physical representations for element {}: {:?}; coarse_envelope and setting_out_reservation must be satisfied by the same physical element (the one whose thickness sets out the assembly)",
                 current.0, targets
             ));
         }
