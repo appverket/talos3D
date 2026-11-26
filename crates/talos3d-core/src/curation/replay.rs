@@ -734,9 +734,15 @@ fn resolve_arg_expr(
             let step_out = outputs
                 .get(step_id)
                 .ok_or_else(|| format!("step '{}' has no captured output (skipped?)", step_id.0))?;
+            // An exact binding name, or `binding.rest` walking into the bound
+            // value (numeric segments index lists, e.g. `ids.3`).
             step_out
                 .get(path.as_str())
                 .cloned()
+                .or_else(|| {
+                    let (binding, rest) = path.as_str().split_once('.')?;
+                    read_path(step_out.get(binding)?, &OutputPath::new(rest))
+                })
                 .ok_or_else(|| format!("step '{}' output has no binding '{}'", step_id.0, path.0,))
         }
         ArgExpr::ClaimRef { path } => {
@@ -943,7 +949,10 @@ fn read_path(value: &Value, path: &OutputPath) -> Option<Value> {
     }
     let mut cur = value;
     for segment in stripped.split('.').filter(|s| !s.is_empty()) {
-        cur = cur.get(segment)?;
+        cur = match cur {
+            Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+            _ => cur.get(segment)?,
+        };
     }
     Some(cur.clone())
 }
@@ -1354,6 +1363,29 @@ mod tests {
             .into_iter()
             .collect();
         assert!(replay(&s, supplied, &mut d, &o).is_err());
+    }
+
+    #[test]
+    fn step_output_paths_walk_into_bound_lists_and_objects() {
+        let bound = serde_json::json!({"ids":[10,11,12],"group":{"members":[{"id":7}]}});
+        let outputs: BTreeMap<StepId, Map<String, Value>> =
+            [(StepId::new("make"), bound.as_object().unwrap().clone())]
+                .into_iter()
+                .collect();
+        let read = |path: &str| {
+            resolve_arg_expr(
+                &ArgExpr::StepOutput {
+                    step_id: StepId::new("make"),
+                    path: OutputPath::new(path),
+                },
+                &Map::new(),
+                &outputs,
+            )
+        };
+        assert_eq!(read("ids.2").unwrap(), Value::from(12));
+        assert_eq!(read("group.members.0.id").unwrap(), Value::from(7));
+        assert_eq!(read("ids").unwrap(), serde_json::json!([10, 11, 12]));
+        assert!(read("ids.9").is_err());
     }
 
     #[test]
