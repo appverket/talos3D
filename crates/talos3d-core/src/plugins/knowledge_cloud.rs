@@ -862,19 +862,9 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
             }
             catalog_contract = Some(build_catalog_query_contract(&data)?);
             let id = CatalogProviderId(data.id);
-            // Catalog descriptors have no private/shared scope. Only replace a
-            // catalog already admitted by this loader, never infer ownership
-            // from an identifier supplied by a release.
-            let existing = world
-                .get_resource::<CapabilityRegistry>()
-                .and_then(|r| r.catalog_provider_descriptor(&id));
-            let owned = world
-                .get_resource::<InstalledAssets>()
-                .and_then(|r| r.0.get(&a.id))
-                .is_some_and(|r| r.kind == a.kind && r.runtime_id == id.0);
-            if existing.is_some() && !owned {
-                return Err("Dynamic release cannot overwrite an unowned catalog".into());
-            }
+            // Corpus knowledge wins over a compiled catalog with the same id:
+            // that is how compiled catalogs migrate to the corpus. The payload
+            // id equals the asset id, so no other corpus asset can claim it.
             let provider = CatalogProviderDescriptor {
                 id: id.clone(),
                 label: data.label,
@@ -2178,7 +2168,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_replacement_requires_existing_dynamic_ownership() {
+    fn corpus_catalog_replaces_a_compiled_catalog_with_the_same_id() {
         use crate::capability_registry::{CapabilityRegistry, CatalogProviderId};
         let mut candidate = passage("catalog-one");
         candidate.asset.id = "test.catalog".into();
@@ -2210,20 +2200,19 @@ mod tests {
         assert_eq!(observations["records"][1]["event"]["row_count"], 0);
         candidate.asset.payload["source_version"] = json!("two");
         install(&mut world, candidate.clone()).unwrap();
+        // A corpus revision replaces a compiled catalog with the same id.
         world.remove_resource::<InstalledAssets>();
-        candidate.asset.payload["source_version"] = json!("unowned-overwrite");
-        assert!(install(&mut world, candidate)
-            .unwrap_err()
-            .contains("unowned catalog"));
+        candidate.asset.payload["source_version"] = json!("migrated-from-compiled");
+        install(&mut world, candidate).unwrap();
         assert_eq!(
             world
                 .resource::<CapabilityRegistry>()
                 .catalog_provider_descriptor(&CatalogProviderId("test.catalog".into()))
                 .unwrap()
                 .source_version,
-            "two"
+            "migrated-from-compiled"
         );
-        assert!(world.get_resource::<InstalledAssets>().is_none());
+        assert!(world.get_resource::<InstalledAssets>().is_some());
     }
 }
 

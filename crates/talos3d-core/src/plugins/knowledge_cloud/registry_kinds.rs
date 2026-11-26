@@ -203,7 +203,7 @@ fn legacy_get<K: RegistryKind>(world: &World, id: &str) -> Result<Value, String>
 /// Every registry-backed portable kind. Adding a kind is one row here.
 pub const HANDLERS: &[KindHandler] = &[
     KindHandler::of::<InCapabilityRegistry<ElementClass>>(),
-    KindHandler::of::<InCapabilityRegistry<GenerationPrior>>(),
+    KindHandler::of::<RetainedGenerationPrior>(),
     KindHandler::of::<InCapabilityRegistry<AssemblyType>>(),
     KindHandler::of::<InCapabilityRegistry<RelationType>>(),
     KindHandler::of::<InCapabilityRegistry<AssemblyPattern>>(),
@@ -399,7 +399,7 @@ impl CapabilityEntry for GenerationPrior {
     const CONSTRAINTS: &'static [&'static str] = &[
         "payload.id must equal asset.id",
         "A prior is a first-match-wins decision table over jurisdiction, style_intent, terrain slope and exact context keys; every weight is within [0, 1]",
-        "Compiled priors hold native closures and are listed in the legacy inventory as gaps, not exportable payloads",
+        "Compiled priors registered as declarative tables are listed as portable candidates; compiled priors holding a native closure are listed as gaps with their reason",
     ];
     fn id(payload: &Self::Payload) -> &str {
         &payload.id.0
@@ -420,6 +420,103 @@ impl CapabilityEntry for GenerationPrior {
             |d| d.label.as_str(),
             |_| Err(CLOSURE_GAP),
         )
+    }
+}
+
+/// Portable specs of compiled table priors, and why native priors are not.
+///
+/// Compiled plugins register priors through [`DeclaredPriorAppExt`] so the
+/// legacy inventory can offer each table prior as an exact `generation_prior.v1`
+/// payload, and each native prior as a gap with its own reason.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct DeclaredPriors {
+    specs: BTreeMap<String, GenerationPriorSpec>,
+    native_gaps: BTreeMap<String, &'static str>,
+}
+
+/// `App` extension for compiled plugins that register generation priors.
+pub trait DeclaredPriorAppExt {
+    /// Register a declarative prior and retain its portable spec.
+    fn register_declarative_generation_prior(&mut self, spec: GenerationPriorSpec) -> &mut Self;
+    /// Register a native prior and record why it cannot travel as a table.
+    fn register_native_generation_prior(
+        &mut self,
+        descriptor: crate::capability_registry::GenerationPriorDescriptor,
+        gap: &'static str,
+    ) -> &mut Self;
+}
+
+impl DeclaredPriorAppExt for App {
+    fn register_declarative_generation_prior(&mut self, spec: GenerationPriorSpec) -> &mut Self {
+        self.init_resource::<DeclaredPriors>();
+        self.world_mut()
+            .resource_mut::<DeclaredPriors>()
+            .specs
+            .insert(spec.id.0.clone(), spec.clone());
+        crate::capability_registry::CapabilityRegistryAppExt::register_generation_prior(
+            self,
+            spec.into_descriptor(),
+        )
+    }
+
+    fn register_native_generation_prior(
+        &mut self,
+        descriptor: crate::capability_registry::GenerationPriorDescriptor,
+        gap: &'static str,
+    ) -> &mut Self {
+        self.init_resource::<DeclaredPriors>();
+        self.world_mut()
+            .resource_mut::<DeclaredPriors>()
+            .native_gaps
+            .insert(descriptor.id.0.clone(), gap);
+        crate::capability_registry::CapabilityRegistryAppExt::register_generation_prior(
+            self, descriptor,
+        )
+    }
+}
+
+/// `generation_prior.v1`: the registry kind, with compiled table priors
+/// offered as exact payloads through [`DeclaredPriors`].
+pub struct RetainedGenerationPrior;
+type CorePrior = InCapabilityRegistry<GenerationPrior>;
+impl RegistryKind for RetainedGenerationPrior {
+    type Payload = GenerationPriorSpec;
+    const KIND: &'static str = <CorePrior as RegistryKind>::KIND;
+    const CONSTRAINTS: &'static [&'static str] = <CorePrior as RegistryKind>::CONSTRAINTS;
+    fn payload_id(payload: &Self::Payload) -> &str {
+        <CorePrior as RegistryKind>::payload_id(payload)
+    }
+    fn validate(payload: &Self::Payload) -> Result<(), String> {
+        <CorePrior as RegistryKind>::validate(payload)
+    }
+    fn install(world: &mut World, payload: Self::Payload) {
+        world.init_resource::<DeclaredPriors>();
+        let mut declared = world.resource_mut::<DeclaredPriors>();
+        declared.native_gaps.remove(&payload.id.0);
+        declared.specs.insert(payload.id.0.clone(), payload.clone());
+        <CorePrior as RegistryKind>::install(world, payload);
+    }
+    fn withdraw(world: &mut World, payload: &Self::Payload) {
+        if let Some(mut declared) = world.get_resource_mut::<DeclaredPriors>() {
+            declared.specs.remove(&payload.id.0);
+        }
+        <CorePrior as RegistryKind>::withdraw(world, payload);
+    }
+    fn legacy(world: &World) -> Vec<Legacy<Self::Payload>> {
+        let declared = world.get_resource::<DeclaredPriors>();
+        <CorePrior as RegistryKind>::legacy(world)
+            .into_iter()
+            .map(|mut row| {
+                if let Some(declared) = declared {
+                    if let Some(spec) = declared.specs.get(&row.id) {
+                        row.payload = Ok(spec.clone());
+                    } else if let Some(gap) = declared.native_gaps.get(&row.id) {
+                        row.payload = Err(gap);
+                    }
+                }
+                row
+            })
+            .collect()
     }
 }
 
@@ -1084,6 +1181,53 @@ mod tests {
             rebuilt.0.concepts().count() + rebuilt.0.publications().len(),
             0
         );
+    }
+
+    #[test]
+    fn declared_table_priors_are_portable_and_native_priors_carry_their_gap() {
+        let provenance = json!({"source":"synthetic","source_version":"v","jurisdiction":null,
+            "ingested_at":0,"license":{"kind":"Cc0"},"backlink":null,"supersedes":[]});
+        let spec: GenerationPriorSpec = from(
+            json!({"id":"synthetic.table","label":"table","description":"d",
+            "scope":{"kind":"RecipeSelection","element_class":"c","recipe_family":null},
+            "source_provenance":provenance.clone(),"cases":[],
+            "otherwise":{"weight":0.5,"suggestion":null,"rationale":"default"}}),
+        );
+        let mut app = App::new();
+        app.init_resource::<CapabilityRegistry>();
+        app.register_declarative_generation_prior(spec.clone());
+        app.register_native_generation_prior(
+            crate::capability_registry::GenerationPriorDescriptor {
+                id: PriorId("synthetic.native".into()),
+                label: "native".into(),
+                description: "d".into(),
+                scope: from(
+                    json!({"kind":"RecipeSelection","element_class":"c","recipe_family":null}),
+                ),
+                source_provenance: from(provenance),
+                prior_fn: std::sync::Arc::new(|_| {
+                    crate::capability_registry::PriorEvaluation::neutral("native")
+                }),
+            },
+            "synthetic native reason",
+        );
+        let world = app.world();
+        assert_eq!(
+            listed(world, "generation_prior.v1", "synthetic.table").unwrap()["portable"],
+            true
+        );
+        let exact = legacy_get(
+            world,
+            LegacyRequest {
+                kind: "generation_prior.v1".into(),
+                id: "synthetic.table".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(exact["payload"], serde_json::to_value(&spec).unwrap());
+        let native = listed(world, "generation_prior.v1", "synthetic.native").unwrap();
+        assert_eq!(native["portable"], false);
+        assert_eq!(native["gap"], "synthetic native reason");
     }
 
     #[test]

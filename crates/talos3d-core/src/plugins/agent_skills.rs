@@ -53,6 +53,11 @@ impl AgentSkillTrustLevel {
     }
 }
 
+/// Task tag marking compiled domain knowledge exposed only so the curator can
+/// migrate it to the shared corpus. Such skills are hidden from ordinary agent
+/// sessions; the curator lists them by searching for this tag.
+pub const MIGRATION_CANDIDATE_TAG: &str = "migration_candidate";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct AgentSkill {
@@ -111,6 +116,11 @@ impl AgentSkill {
             trust_level: self.trust_level.as_str().to_string(),
             source_path: self.source_path.clone(),
         }
+    }
+
+    /// Whether this is a compiled migration candidate (see [`MIGRATION_CANDIDATE_TAG`]).
+    pub fn is_migration_candidate(&self) -> bool {
+        self.task_tags.iter().any(|t| t == MIGRATION_CANDIDATE_TAG)
     }
 
     pub(crate) fn matches(&self, query: Option<&str>, tags: &[String]) -> bool {
@@ -287,13 +297,22 @@ impl AgentSkillRegistry {
         self.insert(skill);
         Ok(())
     }
+    /// Skills an ordinary agent session receives: every skill except compiled
+    /// migration candidates, which only the curator enumerates.
     pub fn list(&self) -> Vec<&AgentSkill> {
-        self.skills.values().collect()
-    }
-
-    pub fn search(&self, filter: AgentSkillSearch) -> Vec<&AgentSkill> {
         self.skills
             .values()
+            .filter(|skill| !skill.is_migration_candidate())
+            .collect()
+    }
+
+    /// Search skills. Migration candidates match only when the filter names
+    /// [`MIGRATION_CANDIDATE_TAG`], which is how the curator lists them.
+    pub fn search(&self, filter: AgentSkillSearch) -> Vec<&AgentSkill> {
+        let wants_candidates = filter.tags.iter().any(|t| t == MIGRATION_CANDIDATE_TAG);
+        self.skills
+            .values()
+            .filter(|skill| wants_candidates || !skill.is_migration_candidate())
             .filter(|skill| skill.matches(filter.query.as_deref(), &filter.tags))
             .collect()
     }
@@ -368,6 +387,55 @@ mod tests {
         });
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id.0, "architecture.skill.window_authoring");
+    }
+
+    #[test]
+    fn migration_candidates_are_hidden_unless_the_curator_asks_for_them() {
+        let mut registry = AgentSkillRegistry::default();
+        for (id, tags) in [
+            ("ordinary", vec!["window".to_string()]),
+            (
+                "candidate",
+                vec!["window".to_string(), MIGRATION_CANDIDATE_TAG.to_string()],
+            ),
+        ] {
+            registry.insert(AgentSkill {
+                id: AgentSkillId(id.into()),
+                title: id.into(),
+                summary: "s".into(),
+                task_tags: tags,
+                must_read_at_bootstrap: false,
+                referenced_tool_ids: vec![],
+                required_tool_ids: vec![],
+                forbidden_tool_ids: vec![],
+                validation_tool_ids: vec![],
+                success_criteria: vec![],
+                stop_conditions: vec![],
+                screenshot_requirements: vec![],
+                common_failure_modes: vec![],
+                regression_prompt_ids: vec![],
+                next_skill_ids: vec![],
+                body_markdown: "b".into(),
+                trust_level: AgentSkillTrustLevel::Shipped,
+                source_path: None,
+            });
+        }
+        let ids = |v: Vec<&AgentSkill>| v.into_iter().map(|s| s.id.0.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(registry.list()), ["ordinary"]);
+        assert_eq!(
+            ids(registry.search(AgentSkillSearch {
+                query: None,
+                tags: vec!["window".into()]
+            })),
+            ["ordinary"]
+        );
+        assert_eq!(
+            ids(registry.search(AgentSkillSearch {
+                query: None,
+                tags: vec![MIGRATION_CANDIDATE_TAG.into()]
+            })),
+            ["candidate"]
+        );
     }
 
     #[test]
