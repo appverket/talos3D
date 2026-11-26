@@ -9678,7 +9678,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "get_knowledge_runtime_observations",
-        description = "Read the bounded native knowledge lifecycle chain: signed list_knowledge_assets discovery (including empty results), exact get_knowledge_asset reads, installation, catalog queries and supported asset use. Discovery/read response hashes bind actual MCP results. Hashes prove which runtime revision was used, not source rights or semantic acceptance. No credentials or evaluation arm labels are returned."
+        description = "Read the bounded native knowledge lifecycle chain: signed list_knowledge_assets discovery (including empty results), exact get_knowledge_asset reads, installation, catalog queries, supported asset use and verification (inspect_element_geometry, get_world_aabb, check_overlaps, check_floating and check_clearance runs over elements the asset authored, one event per exact revision). Discovery/read response hashes bind actual MCP results. Hashes prove which runtime revision was used, not source rights or semantic acceptance. No credentials or evaluation arm labels are returned."
     )]
     pub(super) async fn knowledge_observations_tool(&self) -> Result<CallToolResult, McpError> {
         let value = self

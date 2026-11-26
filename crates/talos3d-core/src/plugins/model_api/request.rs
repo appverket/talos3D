@@ -1360,7 +1360,14 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             let _ = response.send(handle_get_instance_info(world));
         }
         ModelApiRequest::InspectElementGeometry { request, response } => {
-            let _ = response.send(geometry_measurement::inspect(world, request));
+            let ids: Vec<u64> = request
+                .element_id
+                .into_iter()
+                .chain(request.pairs.iter().flatten().copied())
+                .collect();
+            let result = geometry_measurement::inspect(world, request);
+            record_verification(world, "inspect_element_geometry", &ids, &result);
+            let _ = response.send(result);
         }
         ModelApiRequest::EntityCreationSchema {
             entity_type,
@@ -2862,16 +2869,28 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         // --- Geometric validators (Item C) ---
         ModelApiRequest::GetWorldAabb { request, response } => {
-            let _ = response.send(handle_get_world_aabb(world, request));
+            let ids = request.element_ids.clone();
+            let result = handle_get_world_aabb(world, request);
+            record_verification(world, "get_world_aabb", &ids, &result);
+            let _ = response.send(result);
         }
         ModelApiRequest::CheckOverlaps { request, response } => {
-            let _ = response.send(handle_check_overlaps(world, request));
+            let ids = request.element_ids.clone();
+            let result = handle_check_overlaps(world, request);
+            record_verification(world, "check_overlaps", &ids, &result);
+            let _ = response.send(result);
         }
         ModelApiRequest::CheckFloating { request, response } => {
-            let _ = response.send(handle_check_floating(world, request));
+            let ids = request.element_ids.clone();
+            let result = handle_check_floating(world, request);
+            record_verification(world, "check_floating", &ids, &result);
+            let _ = response.send(result);
         }
         ModelApiRequest::CheckClearance { request, response } => {
-            let _ = response.send(handle_check_clearance(world, request));
+            let ids = vec![request.a, request.b];
+            let result = handle_check_clearance(world, request);
+            record_verification(world, "check_clearance", &ids, &result);
+            let _ = response.send(result);
         }
     }
 }
@@ -3121,5 +3140,22 @@ pub(super) fn handle_edit_plan_request(
             }
         }
         _ => Err("Unknown edit-plan action".into()),
+    }
+}
+
+/// Link a successful verification to the governed revisions it inspected.
+fn record_verification<T: serde::Serialize>(
+    world: &World,
+    tool: &str,
+    element_ids: &[u64],
+    result: &Result<T, String>,
+) {
+    if let Ok(value) = result {
+        crate::plugins::knowledge_cloud::evaluation::verification(
+            world,
+            tool,
+            element_ids,
+            &serde_json::to_value(value).unwrap_or_default(),
+        );
     }
 }

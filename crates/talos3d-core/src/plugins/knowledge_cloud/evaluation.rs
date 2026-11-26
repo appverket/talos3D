@@ -151,6 +151,46 @@ pub fn record(world: &World, event: Value) {
     log.head = digest(&item);
     log.records.push(item);
 }
+/// Record that a verification tool inspected elements an installed corpus
+/// asset authored, one event per exact revision, so the runtime chain links
+/// discovery, installation and execution to the checks run on the output.
+/// An empty `element_ids` means a whole-scene check.
+pub fn verification(world: &World, tool: &str, element_ids: &[u64], result: &Value) {
+    use crate::plugins::{identity::ElementId, refinement::AuthoringProvenance};
+    if world.get_resource::<Observations>().is_none() {
+        return;
+    }
+    let mut inspected: BTreeMap<(String, String, String), Vec<u64>> = BTreeMap::new();
+    let Some(mut query) = world.try_query::<(&ElementId, &AuthoringProvenance)>() else {
+        return;
+    };
+    for (id, provenance) in query.iter(world) {
+        let Some(revision) = &provenance.knowledge_revision else {
+            continue;
+        };
+        if element_ids.is_empty() || element_ids.contains(&id.0) {
+            inspected
+                .entry((
+                    revision.asset_id.clone(),
+                    revision.asset_kind.clone(),
+                    revision.content_hash.clone(),
+                ))
+                .or_default()
+                .push(id.0);
+        }
+    }
+    let response_sha256 = digest(result);
+    for ((asset_id, asset_kind, content_hash), mut ids) in inspected {
+        ids.sort_unstable();
+        record(
+            world,
+            json!({"operation":"verification","tool":tool,"asset_id":asset_id,
+                "asset_kind":asset_kind,"content_hash":content_hash,
+                "inspected_element_ids":ids,"response_sha256":response_sha256}),
+        );
+    }
+}
+
 pub fn catalog_query(world: &World, provider: &str, filter: &Value, result: &Value) {
     let installed = world.get_resource::<InstalledAssets>().and_then(|assets| {
         assets
@@ -375,6 +415,38 @@ mod tests {
             value["records"][1]["event"]["authored_element_ids"],
             json!([7, 8, 9])
         );
+    }
+    #[test]
+    fn verification_links_checks_to_the_revisions_that_authored_the_inspected_elements() {
+        use crate::plugins::{
+            identity::ElementId,
+            refinement::{AuthoringProvenance, KnowledgeRevisionRef},
+        };
+        let mut world = World::new();
+        world.init_resource::<Observations>();
+        let revision = |hash: &str| AuthoringProvenance {
+            knowledge_revision: Some(KnowledgeRevisionRef {
+                asset_id: "cladding".into(),
+                asset_kind: "recipe.v1".into(),
+                content_hash: hash.into(),
+            }),
+            ..Default::default()
+        };
+        world.spawn((ElementId(1), revision("r1")));
+        world.spawn((ElementId(2), revision("r1")));
+        world.spawn((ElementId(3), AuthoringProvenance::default()));
+        verification(&world, "check_overlaps", &[2, 3], &json!({"overlaps":[]}));
+        verification(&world, "check_floating", &[3], &json!({}));
+        let records = snapshot(&world)["records"].clone();
+        assert_eq!(
+            records.as_array().unwrap().len(),
+            1,
+            "hand-authored checks record nothing"
+        );
+        let event = &records[0]["event"];
+        assert_eq!(event["operation"], "verification");
+        assert_eq!(event["content_hash"], "r1");
+        assert_eq!(event["inspected_element_ids"], json!([2]));
     }
     #[test]
     fn bounded_observations_fail_closed_on_overflow() {
