@@ -272,6 +272,11 @@ pub fn replay<D: ToolDispatcher, O: PostconditionOracle>(
     replay_with_lookup(script, params, dispatcher, oracle, &NoRecipeLookup, 0)
 }
 
+/// Reserved parameter a recipe replayed for a refinement root reads to name
+/// that root, for example as the source of a relation the root's obligations
+/// check. Supplied by the runtime after parameter validation; never declared.
+pub const TARGET_ELEMENT_PARAM: &str = "target_element_id";
+
 /// Like [`replay`] but accepts a `RecipeLookup` to resolve `CallRecipe`
 /// steps and an explicit `depth` counter used to enforce
 /// [`MAX_CALL_RECIPE_DEPTH`].
@@ -291,12 +296,41 @@ where
     O: PostconditionOracle,
     L: RecipeLookup,
 {
+    replay_with_context(
+        script,
+        params,
+        dispatcher,
+        oracle,
+        lookup,
+        depth,
+        Map::new(),
+    )
+}
+
+/// Like [`replay_with_lookup`] with runtime-supplied values (such as
+/// [`TARGET_ELEMENT_PARAM`]) added after the caller's parameters pass the
+/// script's schema, so closed schemas need not declare them.
+pub fn replay_with_context<D, O, L>(
+    script: &AuthoringScript,
+    params: Map<String, Value>,
+    dispatcher: &mut D,
+    oracle: &O,
+    lookup: &L,
+    depth: usize,
+    context: Map<String, Value>,
+) -> Result<InvocationReport, InvocationError>
+where
+    D: ToolDispatcher,
+    O: PostconditionOracle,
+    L: RecipeLookup,
+{
     script
         .validate_structure()
         .map_err(InvocationError::InvalidStructure)?;
 
-    let merged_params = merge_defaults(script, params);
+    let mut merged_params = merge_defaults(script, params);
     validate_param_schema(&script.parameter_schema, &merged_params)?;
+    merged_params.extend(context);
 
     let mut outputs: BTreeMap<StepId, Map<String, Value>> = BTreeMap::new();
     let mut steps_run = Vec::new();
@@ -1283,6 +1317,43 @@ mod tests {
         assert_eq!(report.steps_run, vec![StepId::new("a")]);
         // Verify the dispatcher received the default value.
         assert_eq!(d.calls[0].1["length"], Value::from(2400));
+    }
+
+    #[test]
+    fn runtime_context_names_the_target_without_widening_closed_schemas() {
+        use super::super::authoring_script::{ScriptInstruction, Step};
+        let mut s = AuthoringScript::stub(MutationScope::None);
+        s.allowed_tools.insert(tool("t"));
+        s.parameter_schema =
+            serde_json::json!({"type":"object","additionalProperties":false,"properties":{}});
+        s.steps.push(ScriptInstruction::Call(Step {
+            id: StepId::new("relate"),
+            tool: tool("t"),
+            args: BTreeMap::from([(
+                "source".into(),
+                ArgExpr::Param {
+                    name: TARGET_ELEMENT_PARAM.into(),
+                },
+            )]),
+            bindings: BTreeMap::new(),
+            essential: true,
+            precondition: None,
+        }));
+        let o = FixtureOracle {
+            fail_relation_kind: None,
+        };
+        let context: Map<String, Value> = [(TARGET_ELEMENT_PARAM.to_string(), Value::from(42))]
+            .into_iter()
+            .collect();
+        let mut d = FixtureDispatcher::new(vec![Value::Null]);
+        replay_with_context(&s, Map::new(), &mut d, &o, &NoRecipeLookup, 0, context).unwrap();
+        assert_eq!(d.calls[0].1["source"], Value::from(42));
+        // Callers still cannot pass the reserved name through a closed schema.
+        let mut d = FixtureDispatcher::new(vec![Value::Null]);
+        let supplied: Map<String, Value> = [(TARGET_ELEMENT_PARAM.to_string(), Value::from(7))]
+            .into_iter()
+            .collect();
+        assert!(replay(&s, supplied, &mut d, &o).is_err());
     }
 
     #[test]

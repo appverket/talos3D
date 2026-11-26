@@ -13599,6 +13599,99 @@ fn gated_two_box_world_declaring(satisfied: &[(&str, &str)]) -> World {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn recipe_relations_from_the_refinement_root_follow_it_onto_the_group() {
+    use crate::plugins::modeling::assembly::SemanticRelation;
+
+    let mut world = gated_two_box_world(&[]);
+    {
+        let mut registry = world.resource_mut::<CapabilityRegistry>();
+        registry.register_factory(crate::plugins::modeling::group::GroupFactory);
+        registry.register_factory(crate::plugins::modeling::assembly::AssemblyFactory);
+        registry.register_factory(crate::plugins::modeling::assembly::RelationFactory);
+        registry.register_assembly_type(crate::capability_registry::AssemblyTypeDescriptor {
+            assembly_type: "load_path".into(),
+            label: "Load path".into(),
+            description: "Test aggregate".into(),
+            expected_member_types: Vec::new(),
+            expected_member_roles: vec!["member".into()],
+            member_role_descriptors: Vec::new(),
+            expected_relation_types: vec!["bears_on".into()],
+            parameter_schema: json!({}),
+            member_obligations: Vec::new(),
+        });
+        registry.register_relation_type(crate::capability_registry::RelationTypeDescriptor {
+            relation_type: "bears_on".into(),
+            label: "Bears On".into(),
+            description: "Load path".into(),
+            valid_source_types: vec!["wall_assembly".into()],
+            valid_target_types: vec!["box".into()],
+            parameter_schema: json!({}),
+            participates_in_dependency_graph: true,
+            external_classification: None,
+            host_contract_kind: None,
+        });
+    }
+    let foundation = handle_create_entity(
+        &mut world,
+        json!({"type":"box","centre":[0.0,-0.25,0.0],"half_extents":[4.0,0.25,1.0]}),
+    )
+    .unwrap();
+    let family = crate::capability_registry::RecipeFamilyId("two_box_wall".into());
+    let mut artifact = world
+        .resource::<crate::curation::RecipeArtifactRegistry>()
+        .get_by_family(&family)
+        .unwrap()
+        .clone();
+    let crate::curation::RecipeBody::AuthoringScript { script } = &mut artifact.body else {
+        unreachable!("two-box recipe is a script");
+    };
+    script
+        .allowed_tools
+        .insert(crate::curation::authoring_script::McpToolId::new(
+            "create_assembly",
+        ));
+    script.steps.push(
+        serde_json::from_value(json!({"id":"load_path","tool":"create_assembly","args":{
+            "assembly_type":{"expr":"literal","value":"load_path"},
+            "label":{"expr":"literal","value":"Load path"},
+            "members":{"expr":"array","items":[{"expr":"object","entries":{
+                "target":{"expr":"step_output","step_id":"box_a","path":"id_a"},
+                "role":{"expr":"literal","value":"member"}}}]},
+            "relations":{"expr":"array","items":[{"expr":"object","entries":{
+                "source":{"expr":"param","name":"target_element_id"},
+                "target":{"expr":"param","name":"foundation_id"},
+                "type":{"expr":"literal","value":"bears_on"}}}]}}}))
+        .unwrap(),
+    );
+    world
+        .resource_mut::<crate::curation::RecipeArtifactRegistry>()
+        .insert(artifact);
+
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "two_box_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: json!({"foundation_id": foundation}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect("a recipe can relate its refinement root to an existing element");
+    let group = result
+        .group_element_id
+        .expect("instantiate creates a group");
+    let bearings: Vec<(u64, u64)> = world
+        .query::<&SemanticRelation>()
+        .iter(&world)
+        .filter(|relation| relation.relation_type == "bears_on")
+        .map(|relation| (relation.source.0, relation.target.0))
+        .collect();
+    assert_eq!(bearings, vec![(group, foundation)]);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn governed_recipe_postconditions_satisfy_obligations_on_instantiate_and_promote() {
     use crate::plugins::refinement::{ObligationSet, ObligationStatus};
 

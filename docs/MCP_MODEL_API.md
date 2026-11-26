@@ -1241,6 +1241,12 @@ Obligations a recipe does not declare stay unresolved and block promotion.
 A postcondition that depends on a step its precondition skipped asserts nothing,
 so a recipe with optional steps (for example an optional host layer) can declare
 satisfiers for those steps conditionally.
+The reserved parameter `target_element_id` names the refinement root a recipe
+runs for; it is supplied after parameter validation and must not be declared.
+A recipe can relate that root to existing elements (for example `bears_on` a
+foundation passed as a parameter) through `create_assembly`'s `relations`.
+When `instantiate_recipe` moves the root's semantics onto its group, relations
+on the root move with them in the same undoable transaction.
 `install_knowledge_asset` for a recipe returns
 `execution.obligation_coverage.by_state`: for each supported state, the
 obligations in force on the target class (class minimum plus the recipe's own

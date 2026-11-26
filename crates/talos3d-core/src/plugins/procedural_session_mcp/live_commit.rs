@@ -220,13 +220,19 @@ pub(crate) fn replay_recipe(
         target: Some(target),
         declares_satisfaction: true,
     };
-    crate::curation::replay::replay_with_lookup(
+    crate::curation::replay::replay_with_context(
         script,
         params,
         &mut dispatcher,
         &oracle,
         &crate::curation::replay::NoRecipeLookup,
         0,
+        [(
+            crate::curation::replay::TARGET_ELEMENT_PARAM.to_string(),
+            Value::from(target),
+        )]
+        .into_iter()
+        .collect(),
     )
 }
 

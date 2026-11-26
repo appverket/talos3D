@@ -166,4 +166,50 @@ pub(super) fn finalize(
         .resource_mut::<PendingCommandQueue>()
         .push_command(Box::new(FinalizeRecipeMetadata { before, after }));
     flush_model_api_write_pipeline(world);
+    if let Some(group) = group {
+        retarget_anchor_relations(world, root, group);
+    }
+}
+
+/// Relations the recipe recorded for its refinement root (for example the
+/// root's bears_on to a foundation) follow the semantics onto the group, so
+/// validators reading the classed group see the same load path the
+/// promotion resolved. One undoable change inside the recipe transaction.
+fn retarget_anchor_relations(world: &mut World, anchor: ElementId, group: ElementId) {
+    use crate::plugins::modeling::assembly::{RelationSnapshot, SemanticRelation};
+    let Some(mut query) = world.try_query::<(&ElementId, &SemanticRelation)>() else {
+        return;
+    };
+    let before: Vec<RelationSnapshot> = query
+        .iter(world)
+        .filter(|(_, relation)| relation.source == anchor || relation.target == anchor)
+        .map(|(id, relation)| RelationSnapshot {
+            element_id: *id,
+            relation: relation.clone(),
+        })
+        .collect();
+    if before.is_empty() {
+        return;
+    }
+    let after = before
+        .iter()
+        .cloned()
+        .map(|mut snapshot| {
+            for end in [&mut snapshot.relation.source, &mut snapshot.relation.target] {
+                if *end == anchor {
+                    *end = group;
+                }
+            }
+            snapshot.into()
+        })
+        .collect();
+    send_event(
+        world,
+        crate::plugins::commands::ApplyEntityChangesCommand {
+            label: "Move recipe relations to the assembly",
+            before: before.into_iter().map(Into::into).collect(),
+            after,
+        },
+    );
+    flush_model_api_write_pipeline(world);
 }
