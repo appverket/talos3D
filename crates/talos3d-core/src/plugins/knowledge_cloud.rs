@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 
 pub mod declarative_prior;
 pub mod evaluation;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod local_corpus;
 pub mod registry_kinds;
 
 pub use talos3d_knowledge_protocol::{Asset, SCHEMA};
@@ -255,19 +257,30 @@ pub async fn index(
 ) -> Result<Index, String> {
     index_scoped(c, store, None).await
 }
-pub async fn index_scoped(
-    c: &AgentCorpusConnection,
-    store: &super::curation::CurationReleaseStore,
+/// Verify signed index bytes: signature against the trusted keys, supported
+/// schema, bounds and release scope. Shared by live retrieval and the local
+/// corpus cache so both apply identical admission rules.
+pub(crate) fn decode_index(
+    bytes: &[u8],
+    trusted_keys: &[String],
     scope: Option<&evaluation::Scope>,
 ) -> Result<Index, String> {
-    let bytes = cloud::request(c, "/assets", None).await?;
-    let value = cloud::verify_signed_json(&bytes, &c.trusted_public_keys)?;
+    let value = cloud::verify_signed_json(bytes, trusted_keys)?;
     let index: Index = serde_json::from_value(value).map_err(|e| e.to_string())?;
     if index.schema != SCHEMA || index.assets.len() > 1000 || index.withdrawn_asset_ids.len() > 1000
     {
         return Err("Unsupported knowledge index".into());
     }
     evaluation::validate_index(&index, scope)?;
+    Ok(index)
+}
+pub async fn index_scoped(
+    c: &AgentCorpusConnection,
+    store: &super::curation::CurationReleaseStore,
+    scope: Option<&evaluation::Scope>,
+) -> Result<Index, String> {
+    let bytes = cloud::request(c, "/assets", None).await?;
+    let index = decode_index(&bytes, &c.trusted_public_keys, scope)?;
     store.observe_knowledge_index(c, index.epoch, &index.withdrawn_asset_ids)?;
     Ok(index)
 }
@@ -277,6 +290,36 @@ pub async fn retrieve(
     request: &AssetRequest,
 ) -> Result<AdmittedAsset, String> {
     retrieve_scoped(c, store, request, None).await
+}
+/// Admit exact revision bytes for `asset_id`: the content hash must match the
+/// bytes, and the decoded asset must carry the indexed identity and kind and
+/// no private context. The only constructor of [`AdmittedAsset`].
+pub(crate) fn admit_revision(
+    bytes: &[u8],
+    asset_id: &str,
+    content_hash: &str,
+    indexed_kind: &Value,
+    scope: Option<&evaluation::Scope>,
+) -> Result<AdmittedAsset, String> {
+    if content_hash.len() != 64 || !content_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Invalid knowledge revision".into());
+    }
+    if hex::encode(Sha256::digest(bytes)) != content_hash {
+        return Err("Knowledge checksum mismatch".into());
+    }
+    let asset: Asset = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if asset.schema != SCHEMA
+        || asset.id != asset_id
+        || *indexed_kind != asset.kind
+        || asset.contains_private_context
+    {
+        return Err("Knowledge release identity mismatch".into());
+    }
+    Ok(AdmittedAsset {
+        asset,
+        revision: content_hash.to_owned(),
+        scope_sha256: scope.map(evaluation::Scope::digest),
+    })
 }
 pub async fn retrieve_scoped(
     c: &AgentCorpusConnection,
@@ -296,30 +339,20 @@ pub async fn retrieve_scoped(
         return Err("Invalid knowledge revision".into());
     }
     let bytes = cloud::request(c, &format!("/revisions/{}", request.content_hash), None).await?;
-    if hex::encode(Sha256::digest(&bytes)) != request.content_hash {
-        return Err("Knowledge checksum mismatch".into());
-    }
-    let asset: Asset = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    if asset.schema != SCHEMA
-        || asset.id != request.asset_id
-        || expected.asset["asset_kind"] != asset.kind
-        || asset.contains_private_context
-    {
-        return Err("Knowledge release identity mismatch".into());
-    }
+    let admitted = admit_revision(
+        &bytes,
+        &request.asset_id,
+        &request.content_hash,
+        &expected.asset["asset_kind"],
+        scope,
+    )?;
     let latest = index_scoped(c, store, scope).await?;
-    if !latest
-        .assets
-        .iter()
-        .any(|e| e.asset["id"] == asset.id && e.content_hash == request.content_hash)
-    {
+    if !latest.assets.iter().any(|e| {
+        e.asset["id"] == admitted.asset.id && e.content_hash == request.content_hash
+    }) {
         return Err("Knowledge changed or was withdrawn during retrieval; rediscover".into());
     }
-    Ok(AdmittedAsset {
-        asset,
-        revision: request.content_hash.clone(),
-        scope_sha256: scope.map(evaluation::Scope::digest),
-    })
+    Ok(admitted)
 }
 pub fn required_tools(admitted: &AdmittedAsset) -> &[String] {
     &admitted.asset.required_tool_ids

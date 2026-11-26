@@ -284,12 +284,17 @@ pub(crate) fn verify_signed_json(bytes: &[u8], trusted_keys: &[String]) -> Resul
 pub fn decode_index(bytes: &[u8], trusted_keys: &[String]) -> Result<SkillIndex, String> {
     serde_json::from_value(verify_signed_json(bytes, trusted_keys)?).map_err(|e| e.to_string())
 }
-pub async fn index(c: &AgentCorpusConnection) -> Result<SkillIndex, String> {
-    let i = decode_index(&request(c, "/skills", None).await?, &c.trusted_public_keys)?;
+/// Verify signed skill-index bytes and enforce the supported schema and bound.
+/// Shared by live retrieval and the verified local corpus cache.
+pub fn decode_released_index(bytes: &[u8], trusted_keys: &[String]) -> Result<SkillIndex, String> {
+    let i = decode_index(bytes, trusted_keys)?;
     if i.schema != SCHEMA || i.skills.len() > 1000 {
         return Err("Unsupported cloud corpus index".into());
     }
     Ok(i)
+}
+pub async fn index(c: &AgentCorpusConnection) -> Result<SkillIndex, String> {
+    decode_released_index(&request(c, "/skills", None).await?, &c.trusted_public_keys)
 }
 pub fn decode_bundle(bytes: &[u8], hash: &str) -> Result<SkillBundle, String> {
     if hash.len() != 64 || hex::encode(Sha256::digest(bytes)) != hash {

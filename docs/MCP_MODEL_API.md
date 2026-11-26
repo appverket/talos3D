@@ -1559,7 +1559,11 @@ project accounts, Postgres metadata/audit and immutable R2 bundles.
 - `get_agent_corpus_status`: check the live epoch on onboarding, at task
   boundaries, after learning, and before authoring. Re-fetch changed procedures.
   No tool can retroactively update text already in an agent's context. App/tool
-  schema changes still require compatible application releases.
+  schema changes still require compatible application releases. When the host
+  enables the local corpus cache, the result carries `local_cache` (see
+  "Local corpus cache" below) and triggers a non-blocking background refresh; the
+  other fields still describe the live backend, so an unreachable backend reads
+  `available: false` even while the cache serves the last verified snapshot.
 - `contribute_agent_skill`: reserved for role-bound harness-curator MCP access.
   It is not advertised to ordinary agents and fails closed on the current
   model-edit transport. Host sign-in and a capability profile do not establish
@@ -2100,3 +2104,43 @@ Scenario observation v2 transports complete native states once in
 references mean actual observed states were equal. Empty rejection scenarios
 return an explicit error observation and empty render; geometric checks are
 marked not run when no geometry exists. This is never a successful retry claim.
+
+
+## Local corpus cache
+
+A host that adds `LocalCorpusPlugin` (`talos3d_core::plugins::knowledge_cloud::local_corpus`)
+and an `AgentCorpusConnection` with a trusted public key starts from its last
+verified corpus snapshot and keeps it in sync in the background. Without the
+plugin nothing changes. `TALOS3D_CORPUS_CACHE=0` disables it; evaluation
+instances (`TALOS3D_EVALUATION_KNOWLEDGE_CONNECTION`) never use it.
+
+- **Location.** `LocalCorpusConfig::cache_dir`, else `TALOS3D_CORPUS_CACHE_DIR`,
+  else `$TALOS3D_STATE_DIR/corpus-cache`, else `<user data dir>/corpus-cache`,
+  then a per-source subdirectory derived from the corpus URL and trusted keys.
+  Inside: `indexes/assets.json` and `indexes/skills.json` (the exact signed index
+  bytes), `blobs/<sha256>` (revision bytes), `sync.json`. Writes are atomic.
+  Default bound 256 MiB; blobs no current index references are evicted.
+- **Startup.** The cached index is re-verified against the configured key (a
+  cache signed by another key, or failing verification, is ignored), every blob
+  is re-hashed, and each asset is installed through the ordinary install path in
+  `PostStartup`, before any MCP request is polled in `First`. No cache and no
+  network leaves the registries empty: discovery reports gaps as before.
+- **Sync.** A background thread fetches both indexes at startup, every
+  `sync_interval` (default 5 minutes), when the curation release sequence
+  changes, and when `get_agent_corpus_status` requests it. Only a verified index
+  not older than the cached epoch is accepted; missing blobs are downloaded,
+  verified and persisted before the index replaces the cached one. Results reach
+  the live world in bounded per-frame batches ending in the existing reconcile,
+  so new revisions replace and withdrawn assets leave the registries.
+- **Skills.** `list_agent_skills`/`get_agent_skill` fall back to the verified
+  local skill index when the backend is unreachable (`served_from_local_cache`),
+  and read immutable skill revisions from the local copy first.
+
+`get_agent_corpus_status.local_cache`: `enabled`, `disabled_reason`,
+`sync_state` (`disabled`, `pending`, `synced`, `offline`, `rejected`),
+`last_attempt_unix`, `last_success_unix`, `cache_age_seconds`, `last_error`,
+`applied_epoch`, `sync_interval_seconds`, `freshness`, `install_failures`,
+`startup` (`cache_found`, `cache_rejected`, `epoch`, `assets_listed`,
+`assets_installed`, `cache_problems`) and `cache` (`asset_epoch`, `asset_count`,
+`skill_epoch`, `skill_count`, `size_bytes`, `max_bytes`). Any state other than
+`synced` means backend freshness is unverified, not current.

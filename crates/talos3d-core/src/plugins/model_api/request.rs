@@ -1038,6 +1038,12 @@ pub(super) enum ModelApiRequest {
         response: oneshot::Sender<Option<GuidanceCardInfo>>,
     },
     AgentCorpusConnection(oneshot::Sender<crate::plugins::agent_skills::AgentCorpusConnection>),
+    /// The local verified corpus cache handle, when the host enabled it.
+    LocalCorpus(
+        #[cfg(not(target_arch = "wasm32"))]
+        oneshot::Sender<Option<crate::plugins::knowledge_cloud::local_corpus::LocalCorpus>>,
+        #[cfg(target_arch = "wasm32")] oneshot::Sender<Option<()>>,
+    ),
     EvaluationKnowledgeConnection(
         oneshot::Sender<Option<crate::plugins::knowledge_cloud::evaluation::Connection>>,
     ),
@@ -2759,6 +2765,15 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
                     .cloned()
                     .unwrap_or_default(),
             );
+        }
+        ModelApiRequest::LocalCorpus(response) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            let handle = world
+                .get_resource::<crate::plugins::knowledge_cloud::local_corpus::LocalCorpus>()
+                .cloned();
+            #[cfg(target_arch = "wasm32")]
+            let handle = None;
+            let _ = response.send(handle);
         }
         ModelApiRequest::EvaluationKnowledgeConnection(response) => {
             let _ = response.send(

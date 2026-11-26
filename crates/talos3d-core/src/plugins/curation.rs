@@ -352,6 +352,17 @@ impl CurationReleaseStore {
         state.fresh = false;
         state.error = Some(error);
     }
+    /// Sequence of the newest verified release manifest, if any. A change is the
+    /// app's existing "the backend published something" signal.
+    #[must_use]
+    pub fn release_sequence(&self) -> Option<u64> {
+        self.0
+            .lock()
+            .expect("curation state poisoned")
+            .manifest
+            .as_ref()
+            .map(|manifest| manifest.sequence)
+    }
     pub fn observe_knowledge_index(
         &self,
         connection: &super::agent_skills::AgentCorpusConnection,

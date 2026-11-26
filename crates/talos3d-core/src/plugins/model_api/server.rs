@@ -119,6 +119,16 @@ impl ModelApiServer {
             .await
             .unwrap_or_default()
     }
+    /// The verified local corpus cache, when the host enabled it.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn local_corpus(
+        &self,
+    ) -> Option<crate::plugins::knowledge_cloud::local_corpus::LocalCorpus> {
+        self.round_trip(ModelApiRequest::LocalCorpus)
+            .await
+            .ok()
+            .flatten()
+    }
     async fn knowledge_connection(
         &self,
     ) -> Result<
@@ -244,6 +254,46 @@ impl ModelApiServer {
         }
     }
 
+    /// The live skill index, or the verified local snapshot when the backend
+    /// could not be reached. The boolean reports a cache answer.
+    async fn skill_index_or_cached(
+        &self,
+        live: Result<crate::plugins::agent_skill_cloud::SkillIndex, String>,
+    ) -> (
+        Result<crate::plugins::agent_skill_cloud::SkillIndex, String>,
+        bool,
+    ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if live.is_err() {
+            if let Some(cached) = self
+                .local_corpus()
+                .await
+                .and_then(|local| local.cached_skill_index())
+            {
+                return (Ok(cached), true);
+            }
+        }
+        (live, false)
+    }
+
+    /// A skill bundle by exact revision: the verified local copy first (blobs
+    /// are immutable), then the network.
+    async fn skill_bundle_local_first(
+        &self,
+        connection: &crate::plugins::agent_skills::AgentCorpusConnection,
+        hash: &str,
+    ) -> Result<crate::plugins::agent_skill_cloud::SkillBundle, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(bundle) = self
+            .local_corpus()
+            .await
+            .and_then(|local| local.cached_skill_bundle(hash))
+        {
+            return Ok(bundle);
+        }
+        crate::plugins::agent_skill_cloud::bundle(connection, hash).await
+    }
+
     async fn cloud_skill_list(
         &self,
         filter: crate::plugins::agent_skills::AgentSkillSearch,
@@ -256,7 +306,11 @@ impl ModelApiServer {
             store.observe_skill_index(&connection, &index)?;
             Ok(index)
         });
-        let status = cloud::status(&index);
+        let mut status = cloud::status(&index);
+        let (index, from_cache) = self.skill_index_or_cached(index).await;
+        if from_cache {
+            status["served_from_local_cache"] = json!(true);
+        }
         let mut by_id = local
             .into_iter()
             .map(|s| (s.id.clone(), s))
@@ -10590,6 +10644,8 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             store.observe_skill_index(&connection, &index)?;
             Ok(index)
         });
+        let live_status = cloud::status(&index);
+        let (index, from_cache) = self.skill_index_or_cached(index).await;
         if let Ok(index) = &index {
             if index.withdrawn_skill_ids.contains(&params.skill_id) {
                 return Err(McpError::invalid_params(
@@ -10606,7 +10662,8 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                         None,
                     ));
                 }
-                let mut bundle = cloud::bundle(&connection, &entry.content_hash)
+                let mut bundle = self
+                    .skill_bundle_local_first(&connection, &entry.content_hash)
                     .await
                     .map_err(|e| McpError::internal_error(e, None))?;
                 if bundle.skill.id.0 != params.skill_id {
@@ -10622,6 +10679,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                 value["publication_evidence"] = bundle.provenance;
                 value["corpus_revision"] = json!(entry.content_hash);
                 value["corpus_epoch"] = json!(index.epoch);
+                value["served_from_local_cache"] = json!(from_cache);
                 value["resources"] = json!(bundle
                     .resources
                     .iter()
@@ -10658,7 +10716,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .map_err(|e| McpError::invalid_params(e, None))?;
         let mut value = serde_json::to_value(skill)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        value["cloud_corpus"] = cloud::status(&index);
+        value["cloud_corpus"] = live_status;
         value["delivery"] = json!("bundled_or_private_fallback");
         Ok(value)
     }
@@ -10676,6 +10734,18 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             Ok(index)
         });
         let mut status = cloud::status(&index);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            status["local_cache"] = match self.local_corpus().await {
+                Some(local) => {
+                    // Background refresh; the answer below describes the last
+                    // verified snapshot, not the result of this request.
+                    local.request_sync();
+                    local.status_json()
+                }
+                None => json!({"enabled": false, "disabled_reason": "host did not enable the local corpus cache"}),
+            };
+        }
         status["curation"] = self.curation_status(true, None, None).await;
         if let Ok((policy, pending, curation, corpus)) = self
             .round_trip(ModelApiRequest::HarnessIncidentContext)
@@ -10885,12 +10955,10 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<GetAgentSkillResourceRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let bundle = crate::plugins::agent_skill_cloud::bundle(
-            &self.corpus_connection().await,
-            &params.content_hash,
-        )
-        .await
-        .map_err(|e| McpError::internal_error(e, None))?;
+        let bundle = self
+            .skill_bundle_local_first(&self.corpus_connection().await, &params.content_hash)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
         let resource = bundle
             .resources
             .get(&params.path)
