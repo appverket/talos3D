@@ -19,6 +19,7 @@ use super::graph::{
     PublishedAnchorContract,
 };
 use super::ids::{AnchorKindId, ConceptId, PredicateId, PropositionId};
+use super::pack::ConceptGraphPack;
 
 /// Authored records plus their compiled indexes.
 ///
@@ -109,6 +110,101 @@ impl SemanticRegistry {
                 .or_default()
                 .push(proposition.id.clone());
         }
+    }
+
+    // ---- pack install / withdrawal (dynamic corpus delivery) ----
+
+    /// Install a pack's records, replacing any record with the same identity
+    /// (a corpus record wins over a compiled one), then recompile the indexes.
+    pub fn upsert_pack(&mut self, pack: &ConceptGraphPack) {
+        for concept in &pack.concepts {
+            self.concepts.insert(concept.id.clone(), concept.clone());
+        }
+        for kind in &pack.anchor_kinds {
+            self.anchor_kinds.insert(kind.id.clone(), kind.clone());
+        }
+        for publication in &pack.publications {
+            let slot = self.publications.iter_mut().find(|p| {
+                p.publisher == publication.publisher && p.anchor_kind == publication.anchor_kind
+            });
+            match slot {
+                Some(existing) => *existing = publication.clone(),
+                None => self.publications.push(publication.clone()),
+            }
+        }
+        for proposition in &pack.propositions {
+            self.propositions
+                .insert(proposition.id.clone(), proposition.clone());
+        }
+        self.rebuild_indexes();
+    }
+
+    /// Remove exactly the records a pack names, then recompile the indexes.
+    /// Nothing that was replaced by the pack is restored.
+    pub fn remove_pack(&mut self, pack: &ConceptGraphPack) {
+        for concept in &pack.concepts {
+            self.concepts.remove(&concept.id);
+        }
+        for kind in &pack.anchor_kinds {
+            self.anchor_kinds.remove(&kind.id);
+        }
+        self.publications.retain(|p| {
+            !pack
+                .publications
+                .iter()
+                .any(|q| q.publisher == p.publisher && q.anchor_kind == p.anchor_kind)
+        });
+        for proposition in &pack.propositions {
+            self.propositions.remove(&proposition.id);
+        }
+        self.rebuild_indexes();
+    }
+
+    /// Partition every authored record into independently deliverable packs.
+    ///
+    /// A concept travels with the publications it makes and the propositions it
+    /// is the subject of; anchor kinds and records whose concept is absent get
+    /// their own packs. Pack ids are the record id (prefixed by record type
+    /// where record types could otherwise collide). The partition covers every
+    /// record exactly once.
+    pub fn export_packs(&self) -> Vec<ConceptGraphPack> {
+        let mut out: BTreeMap<String, ConceptGraphPack> = BTreeMap::new();
+        fn slot(out: &mut BTreeMap<String, ConceptGraphPack>, id: String) -> &mut ConceptGraphPack {
+            out.entry(id.clone()).or_insert_with(|| ConceptGraphPack {
+                id,
+                ..Default::default()
+            })
+        }
+        for concept in self.concepts.values() {
+            slot(&mut out, concept.id.0.clone())
+                .concepts
+                .push(concept.clone());
+        }
+        for kind in self.anchor_kinds.values() {
+            slot(&mut out, format!("anchor_kind/{}", kind.id.0))
+                .anchor_kinds
+                .push(kind.clone());
+        }
+        for publication in &self.publications {
+            let owner = if self.concepts.contains_key(&publication.publisher) {
+                publication.publisher.0.clone()
+            } else {
+                format!(
+                    "publication/{}/{}",
+                    publication.publisher.0, publication.anchor_kind.0
+                )
+            };
+            slot(&mut out, owner).publications.push(publication.clone());
+        }
+        for proposition in self.propositions.values() {
+            let owner = if self.concepts.contains_key(&proposition.subject) {
+                proposition.subject.0.clone()
+            } else {
+                format!("proposition/{}", proposition.id.0)
+            };
+            slot(&mut out, owner).propositions.push(proposition.clone());
+        }
+        out.into_values().collect()
     }
 
     // ---- authored-record access ----

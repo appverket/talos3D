@@ -101,16 +101,9 @@ pub fn validate_index(index: &Index, expected: Option<&Scope>) -> Result<(), Str
             if index.evaluation_scope.as_ref() == Some(scope)
                 && index.released == Some(false)
                 && index.assets.iter().all(|e| {
-                    matches!(
-                        e.asset["asset_kind"].as_str(),
-                        Some(
-                            "catalog.v1"
-                                | "recipe.v1"
-                                | "parametric_type.v1"
-                                | "definition_library.v1"
-                                | "corpus_passage.v1"
-                        )
-                    )
+                    e.asset["asset_kind"].as_str().is_some_and(|kind| {
+                        talos3d_knowledge_protocol::portable_path_kind(kind).is_some()
+                    })
                 }) =>
         {
             Ok(())
@@ -342,6 +335,12 @@ mod tests {
             "parametric_type.v1",
             "definition_library.v1",
             "corpus_passage.v1",
+            "element_class.v1",
+            "generation_prior.v1",
+            "assembly_type.v1",
+            "relation_type.v1",
+            "assembly_pattern.v1",
+            "concept_graph.v1",
         ] {
             index.assets.push(IndexEntry {
                 content_hash: "a".repeat(64),
@@ -375,6 +374,7 @@ mod tests {
                 kind: "recipe.v1".into(),
                 runtime_id: "test".into(),
                 catalog_contract: None,
+                owned_payload: None,
             },
         );
         asset_execution(

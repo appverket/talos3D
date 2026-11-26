@@ -1852,6 +1852,20 @@ snapshot hashes and private assets. It leaves evidence and rights unresolved,
 marks the result as inspection-only, and cannot submit or release a candidate.
 Do not invent publication metadata merely to inspect geometry.
 
+`list_legacy_knowledge_assets` enumerates every compiled, not yet corpus-installed
+entry of the shared registries (including all registry kinds above) as a
+migration candidate with `kind`, `portable` and, when an entry cannot travel as
+data, a `gap` reason. `get_legacy_knowledge_asset` returns the exact `payload`
+that passes `check_knowledge_candidate` for that kind once wrapped in an
+envelope. Concept graph records are partitioned into packs: a concept with its
+publications and the propositions it is subject of (pack id = concept id), one
+pack per anchor kind (`anchor_kind/<id>`), and one pack per record whose
+concept is absent. The `coverage` block lists `portable_kinds` from the protocol
+table, an empty `inspection_only_kinds`, and the categories that remain
+unsupported (`native_recipe_bodies`, `native_generation_prior_closures`,
+`native_constraints`). Compiled generation priors are listed with a `gap`
+because their closures cannot be exported.
+
 ### Parametric document continuity
 
 Authored parametric instances retain a private copy of their portable type
@@ -1943,7 +1957,25 @@ must be discovered and actually used before a successful retry can be reported.
 `get_knowledge_payload_schema({"kind":"catalog.v1"})` returns the asset envelope
 and payload JSON schemas generated from runtime decoder types. Supported kinds are
 `catalog.v1`, `recipe.v1`, `parametric_type.v1`, `definition_library.v1` and
-`corpus_passage.v1`, including data-driven proactive guidance. These schemas contain
+`corpus_passage.v1`, including data-driven proactive guidance, plus the registry
+kinds `element_class.v1`, `generation_prior.v1`, `assembly_type.v1`,
+`relation_type.v1`, `assembly_pattern.v1` and `concept_graph.v1`.
+
+Registry kinds deliver the data compiled plugins otherwise register. The payload
+is the descriptor itself (`ElementClassDescriptor`, `AssemblyTypeDescriptor`,
+`RelationTypeDescriptor`, `AssemblyPatternDescriptor`), and its identity
+(`id`, `assembly_type`, `relation_type` or `pattern_id`) must equal the asset id.
+`generation_prior.v1` is a declarative first-match-wins decision table over
+jurisdiction, style intent, terrain slope and exact context keys, because a
+compiled prior holds a native closure that cannot travel as data.
+`concept_graph.v1` is a pack (`id`, `concepts`, `anchor_kinds`, `publications`,
+`propositions`, at most 2000 records) installed, replaced and withdrawn as one
+unit because its records reference each other and feed compiled indexes. Installing
+replaces a compiled or earlier entry with the same id (the corpus wins), is
+recorded with its exact content hash (`installed_revision`), and withdrawal
+removes the entry without restoring anything compiled. A replacement revision
+that fails validation leaves the previous one in place. Asset ids are global, so
+two registries cannot both use the same string as an asset id. These schemas contain
 wire contracts, not domain assets. Portable recipes require `authoring_script`
 bodies; native function references cannot be released as executable knowledge.
 A portable recipe may also carry `obligation_specializations` and

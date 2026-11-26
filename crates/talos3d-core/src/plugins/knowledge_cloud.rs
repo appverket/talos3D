@@ -8,7 +8,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+pub mod declarative_prior;
 pub mod evaluation;
+mod registry_kinds;
 
 pub use talos3d_knowledge_protocol::{Asset, SCHEMA};
 
@@ -50,6 +52,9 @@ struct InstalledAsset {
     kind: String,
     runtime_id: String,
     catalog_contract: Option<Value>,
+    /// Exact payload of a registry-kind asset, so withdrawal and replacement
+    /// remove precisely what this revision contributed.
+    owned_payload: Option<Value>,
 }
 
 impl InstalledAssets {
@@ -595,6 +600,10 @@ pub fn payload_schema(kind: &str) -> Result<Value, String> {
             "knowledge_observation_operations":evaluation::LIFECYCLE_OPERATIONS,"candidate_checks":candidate_checks(),"next_tool":"evaluate_knowledge_candidate"}));
     }
     let (payload, constraints) = match kind {
+        registry if registry_kinds::handler(registry).is_some() => {
+            let handler = registry_kinds::handler(registry).expect("checked above");
+            ((handler.payload_schema)(), handler.constraints.to_vec())
+        }
         "catalog.v1" => (
             serde_json::to_value(schemars::schema_for!(CatalogData)).unwrap(),
             vec![
@@ -699,6 +708,7 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
     use crate::relational::registry::ParametricRegistry;
     let a = admitted.asset;
     let mut catalog_contract = None;
+    let mut owned_payload = None;
     // Parse and validate the complete supported payload before any registry mutation.
     let mut execution = Value::Null;
     let runtime_id = match a.kind.as_str() {
@@ -937,10 +947,18 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
             registry.register_released(passage)?;
             a.id.clone()
         }
-        _ => {
-            return Err(
-                "Knowledge kind has no compatible dynamic installer; record a runtime gap".into(),
-            )
+        kind => {
+            let handler = registry_kinds::handler(kind).ok_or(
+                "Knowledge kind has no compatible dynamic installer; record a runtime gap",
+            )?;
+            let previous = world
+                .get_resource::<InstalledAssets>()
+                .and_then(|r| r.0.get(&a.id))
+                .filter(|r| r.kind == a.kind)
+                .and_then(|r| r.owned_payload.clone());
+            (handler.install)(world, &a.id, &a.payload, previous.as_ref())?;
+            owned_payload = Some(a.payload.clone());
+            a.id.clone()
         }
     };
     evaluation::record(
@@ -957,6 +975,7 @@ fn install_payload(world: &mut World, admitted: AdmittedAsset) -> Result<Value, 
             kind: a.kind.clone(),
             runtime_id,
             catalog_contract,
+            owned_payload,
         },
     );
     Ok(
@@ -1057,7 +1076,13 @@ pub fn reconcile(world: &mut World, index: &Index) -> Value {
                     r.remove_released(&a.runtime_id);
                 }
             }
-            _ => {}
+            kind => {
+                if let (Some(handler), Some(payload)) =
+                    (registry_kinds::handler(kind), &a.owned_payload)
+                {
+                    (handler.withdraw)(world, payload);
+                }
+            }
         }
         world.resource_mut::<InstalledAssets>().0.remove(id);
     }
@@ -1086,22 +1111,26 @@ pub struct LegacyRequest {
 pub fn legacy_list(world: &World) -> Value {
     let installed = world.get_resource::<InstalledAssets>();
     let mut items = Vec::new();
-    let mut add = |kind: &str, id: &str, label: &str, portable: bool| {
-        if installed.is_some_and(|r| r.0.contains_key(id)) {
+    let mut add = |kind: &str, id: &str, label: &str, portable: bool, gap: Option<&str>| {
+        if installed.is_some_and(|r| r.0.get(id).is_some_and(|a| a.kind == kind)) {
             return;
         }
-        items.push(json!({"id":id,"kind":kind,"label":label,"portable":portable,"review_required":true,"next_tool":"get_legacy_knowledge_asset","arguments":{"kind":kind,"id":id}}));
+        let mut item = json!({"id":id,"kind":kind,"label":label,"portable":portable,"review_required":true,"next_tool":"get_legacy_knowledge_asset","arguments":{"kind":kind,"id":id}});
+        if let Some(gap) = gap {
+            item["gap"] = json!(gap);
+        }
+        items.push(item);
     };
     if let Some(r) = world.get_resource::<crate::relational::registry::ParametricRegistry>() {
         for (id, label) in r.list_public() {
-            add("parametric_type.v1", &id, &label, true);
+            add("parametric_type.v1", &id, &label, true, None);
         }
     }
     if let Some(r) = world.get_resource::<super::modeling::definition::DefinitionLibraryRegistry>()
     {
         for l in r.list() {
             if l.scope == super::modeling::definition::DefinitionLibraryScope::Bundled {
-                add("definition_library.v1", &l.id.0, &l.name, true);
+                add("definition_library.v1", &l.id.0, &l.name, true, None);
             }
         }
     }
@@ -1113,6 +1142,7 @@ pub fn legacy_list(world: &World) -> Value {
                     &a.meta.id.0,
                     &a.meta.id.0,
                     a.body.is_authoring_script(),
+                    None,
                 );
             }
         }
@@ -1120,17 +1150,24 @@ pub fn legacy_list(world: &World) -> Value {
     if let Some(r) = world.get_resource::<super::corpus_gap::CorpusPassageRegistry>() {
         for (id, p) in r.iter() {
             if p.scope == crate::curation::Scope::Shipped {
-                add("corpus_passage.v1", id, id, true);
+                add("corpus_passage.v1", id, id, true, None);
             }
         }
     }
     if let Some(r) = world.get_resource::<crate::capability_registry::CapabilityRegistry>() {
         for p in r.catalog_provider_descriptors() {
-            add("catalog.v1", &p.id.0, &p.label, true);
+            add("catalog.v1", &p.id.0, &p.label, true, None);
         }
-        // Shared capability descriptors only; document-local pattern drafts are excluded.
-        for p in r.assembly_pattern_descriptors() {
-            add("assembly_pattern.v1", &p.pattern_id, &p.label, false);
+    }
+    for handler in registry_kinds::HANDLERS {
+        for item in (handler.legacy_list)(world) {
+            add(
+                handler.kind,
+                &item.id,
+                &item.label,
+                item.gap.is_none(),
+                item.gap,
+            );
         }
     }
     items.sort_by(|a, b| {
@@ -1139,7 +1176,12 @@ pub fn legacy_list(world: &World) -> Value {
             .cmp(&b["kind"].as_str())
             .then(a["id"].as_str().cmp(&b["id"].as_str()))
     });
-    json!({"assets":items,"coverage":{"portable_kinds":["catalog.v1","corpus_passage.v1","definition_library.v1","parametric_type.v1","recipe.v1"],"excluded_private_content":["document_definitions","occurrences","project_passages","private_parametric_types"],"inspection_only_kinds":["assembly_pattern.v1"],"unsupported_dynamic_kinds":["assembly_pattern.v1","native_recipe_bodies","generation_priors","native_constraints"],"procedures":"Inspect list_agent_skills and exact resources separately; this inventory is not exhaustive of every compiled registry."},"publication_authorized":false,"notice":"Legacy shared content is a migration candidate, not independently reviewed knowledge. Resolve evidence, rights, applicability and limitations before curator submission. Unsupported native bodies must become explicit gaps."})
+    let mut portable_kinds: Vec<&str> = talos3d_knowledge_protocol::KINDS
+        .iter()
+        .map(|(kind, _)| *kind)
+        .collect();
+    portable_kinds.sort_unstable();
+    json!({"assets":items,"coverage":{"portable_kinds":portable_kinds,"excluded_private_content":["document_definitions","occurrences","project_passages","private_parametric_types"],"inspection_only_kinds":[],"unsupported_dynamic_kinds":registry_kinds::UNSUPPORTED_NATIVE,"procedures":"Inspect list_agent_skills and exact resources separately; this inventory is not exhaustive of every compiled registry."},"publication_authorized":false,"notice":"Legacy shared content is a migration candidate, not independently reviewed knowledge. Resolve evidence, rights, applicability and limitations before curator submission. Unsupported native bodies must become explicit gaps."})
 }
 pub fn legacy_get(world: &World, request: LegacyRequest) -> Result<Value, String> {
     if !legacy_list(world)["assets"].as_array().is_some_and(|v| {
@@ -1192,13 +1234,6 @@ pub fn legacy_get(world: &World, request: LegacyRequest) -> Result<Value, String
                 }
             }
         }
-        "assembly_pattern.v1" => serde_json::to_value(
-            world
-                .resource::<crate::capability_registry::CapabilityRegistry>()
-                .assembly_pattern_descriptor(&request.id)
-                .ok_or("Missing shared pattern")?,
-        )
-        .map_err(|e| e.to_string())?,
         "catalog.v1" => {
             let p = world
                 .resource::<crate::capability_registry::CapabilityRegistry>()
@@ -1208,7 +1243,9 @@ pub fn legacy_get(world: &World, request: LegacyRequest) -> Result<Value, String
                 .ok_or("Missing catalog")?;
             json!({"id":p.id.0,"label":p.label,"description":p.description,"category":p.category,"region":p.region,"license":p.license,"source_version":p.source_version,"rows":(p.query_fn)(&json!({}))})
         }
-        _ => return Err("Unsupported legacy kind".into()),
+        kind => (registry_kinds::handler(kind)
+            .ok_or("Unsupported legacy kind")?
+            .legacy_get)(world, &request.id)?,
     };
     let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
     if bytes.len() > cloud::MAX_BYTES {
@@ -1556,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pattern_capture_is_exact_inspection_not_executable_admission() {
+    fn legacy_pattern_capture_is_exact_and_portable() {
         use crate::capability_registry::{AssemblyPatternDescriptor, CapabilityRegistry};
         let pattern = AssemblyPatternDescriptor {
             pattern_id: "synthetic.pattern".into(),
@@ -1577,7 +1614,7 @@ mod tests {
         world.insert_resource(registry);
         let listing = legacy_list(&world);
         let item = &listing["assets"][0];
-        assert_eq!(item["portable"], false);
+        assert_eq!(item["portable"], true);
         let capture = legacy_get(
             &world,
             LegacyRequest {
@@ -1594,7 +1631,8 @@ mod tests {
             capture["snapshot_sha256"],
             hex::encode(Sha256::digest(bytes))
         );
-        assert!(payload_schema("assembly_pattern.v1").is_err());
+        assert!(payload_schema("assembly_pattern.v1").is_ok());
+        assert!(payload_schema("native_fn_ref").is_err());
         assert!(legacy_get(
             &world,
             LegacyRequest {

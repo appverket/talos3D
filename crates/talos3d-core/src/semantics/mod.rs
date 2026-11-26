@@ -39,6 +39,7 @@ pub mod graph;
 pub mod ids;
 pub mod kernel;
 pub mod lint;
+pub mod pack;
 pub mod plan;
 pub mod registry;
 
@@ -58,6 +59,7 @@ pub use graph::{
 pub use ids::{AnchorKindId, AnchorRoleId, ConceptId, PredicateId, PropositionId};
 pub use kernel::{evaluate, PendingObligation, Refusal, Verdict};
 pub use lint::{lint_corpus, CorpusFinding, CorpusFindingKind};
+pub use pack::ConceptGraphPack;
 pub use plan::{AnchorInstanceId, BindTarget, PlanIntent, SemanticContext, SemanticPlan};
 pub use registry::SemanticRegistry;
 

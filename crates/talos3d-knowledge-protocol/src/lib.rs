@@ -4,12 +4,21 @@ use serde_json::{json, Value};
 
 pub const SCHEMA: &str = "talos3d.knowledge-asset.v1";
 pub const MAX_ASSET_BYTES: usize = 1_048_576;
-pub const KINDS: [(&str, &str); 5] = [
+/// Portable kinds and their path kinds. The last six are registry kinds: the
+/// payload is serialisable registry data (descriptors or graph records) that the
+/// runtime installs into the registry compiled plugins also fill.
+pub const KINDS: [(&str, &str); 11] = [
     ("parametric_type.v1", "parametric"),
     ("definition_library.v1", "definition"),
     ("recipe.v1", "recipe"),
     ("corpus_passage.v1", "passage"),
     ("catalog.v1", "catalog"),
+    ("element_class.v1", "element_class"),
+    ("generation_prior.v1", "prior"),
+    ("assembly_type.v1", "assembly_type"),
+    ("relation_type.v1", "relation_type"),
+    ("assembly_pattern.v1", "assembly_pattern"),
+    ("concept_graph.v1", "concept_graph"),
 ];
 pub fn portable_path_kind(kind: &str) -> Option<&'static str> {
     KINDS
@@ -307,6 +316,22 @@ mod tests {
                 assert!(!accepts(&missing), "missing {field}");
                 assert!(!validator.is_valid(&missing), "schema missing {field}");
             }
+        }
+    }
+    #[test]
+    fn registry_kinds_are_portable_and_unknown_kinds_stay_rejected() {
+        for (kind, path) in [
+            ("element_class.v1", "element_class"),
+            ("generation_prior.v1", "prior"),
+            ("assembly_type.v1", "assembly_type"),
+            ("relation_type.v1", "relation_type"),
+            ("assembly_pattern.v1", "assembly_pattern"),
+            ("concept_graph.v1", "concept_graph"),
+        ] {
+            assert_eq!(portable_path_kind(kind), Some(path));
+        }
+        for kind in ["prior.v1", "native_fn_ref", "constraint.v1", "recipe"] {
+            assert_eq!(portable_path_kind(kind), None, "{kind}");
         }
     }
     #[test]

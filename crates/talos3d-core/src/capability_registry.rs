@@ -501,6 +501,7 @@ pub struct ObligationTemplate {
 /// recipe targeting the class must honour. Concrete content (recipes, catalog
 /// rows, rule packs) registers separately; the descriptor is only the schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ElementClassDescriptor {
     /// Stable machine-readable identifier.
     pub id: ElementClassId,
@@ -901,6 +902,7 @@ impl Clone for CatalogProviderDescriptor {
 
 /// Stable identifier for a registered generation prior.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct PriorId(pub String);
 
 /// Scope of a generation prior: what it ranks or defaults.
@@ -909,6 +911,7 @@ pub struct PriorId(pub String);
 /// when `select_recipe` is called for the given element class.
 /// `ParameterDefaulting` priors suggest a value for a specific claim path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(tag = "kind")]
 pub enum PriorScope {
     /// Ranks a specific recipe family for the given element class.
@@ -968,7 +971,8 @@ impl PriorContext {
 /// `weight` is in `[0.0, 1.0]` where 1.0 = strong preference, 0.0 = veto.
 /// `suggestion` carries an optional parameter value for `ParameterDefaulting`
 /// priors. `rationale` is a short human-readable explanation for MCP callers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct PriorEvaluation {
     /// Preference weight in \[0.0, 1.0\].
     pub weight: f32,
@@ -2134,6 +2138,159 @@ impl CapabilityRegistry {
         self.generation_prior_index
             .get(id.0.as_str())
             .and_then(|&i| self.generation_priors.get(i))
+    }
+
+    // --- Upsert/remove for dynamic (corpus) registry kinds ---
+    //
+    // Compiled plugins use `register_*`, which refuses duplicates. Corpus
+    // releases replace an entry with the same id in place (corpus wins) and
+    // remove it on withdrawal; nothing compiled is restored afterwards.
+
+    /// Replace the element class with the same id in place, or register it.
+    pub fn upsert_element_class(&mut self, descriptor: ElementClassDescriptor) {
+        upsert_indexed(
+            &mut self.element_class_descriptors,
+            &mut self.element_class_index,
+            descriptor.id.0.clone(),
+            descriptor,
+            |d| d.id.0.as_str(),
+        );
+    }
+
+    /// Remove an element class; returns whether it existed.
+    pub fn remove_element_class(&mut self, id: &str) -> bool {
+        remove_indexed(
+            &mut self.element_class_descriptors,
+            &mut self.element_class_index,
+            id,
+            |d| d.id.0.as_str(),
+        )
+    }
+
+    /// Replace the assembly pattern with the same id in place, or register it.
+    pub fn upsert_assembly_pattern(&mut self, descriptor: AssemblyPatternDescriptor) {
+        upsert_indexed(
+            &mut self.assembly_pattern_descriptors,
+            &mut self.assembly_pattern_index,
+            descriptor.pattern_id.clone(),
+            descriptor,
+            |d| d.pattern_id.as_str(),
+        );
+    }
+
+    /// Remove an assembly pattern; returns whether it existed.
+    pub fn remove_assembly_pattern(&mut self, id: &str) -> bool {
+        remove_indexed(
+            &mut self.assembly_pattern_descriptors,
+            &mut self.assembly_pattern_index,
+            id,
+            |d| d.pattern_id.as_str(),
+        )
+    }
+
+    /// Replace the generation prior with the same id in place, or register it.
+    pub fn upsert_generation_prior(&mut self, descriptor: GenerationPriorDescriptor) {
+        upsert_indexed(
+            &mut self.generation_priors,
+            &mut self.generation_prior_index,
+            descriptor.id.0.clone(),
+            descriptor,
+            |d| d.id.0.as_str(),
+        );
+    }
+
+    /// Remove a generation prior; returns whether it existed.
+    pub fn remove_generation_prior(&mut self, id: &str) -> bool {
+        remove_indexed(
+            &mut self.generation_priors,
+            &mut self.generation_prior_index,
+            id,
+            |d| d.id.0.as_str(),
+        )
+    }
+
+    /// Replace every assembly type with the same id with `descriptor`, or register it.
+    pub fn upsert_assembly_type(&mut self, descriptor: AssemblyTypeDescriptor) {
+        upsert_unindexed(&mut self.assembly_type_descriptors, descriptor, |d| {
+            d.assembly_type.as_str()
+        });
+    }
+
+    /// Remove every assembly type with this id; returns whether any existed.
+    pub fn remove_assembly_type(&mut self, id: &str) -> bool {
+        let before = self.assembly_type_descriptors.len();
+        self.assembly_type_descriptors
+            .retain(|d| d.assembly_type != id);
+        before != self.assembly_type_descriptors.len()
+    }
+
+    /// Replace every relation type with the same id with `descriptor`, or register it.
+    pub fn upsert_relation_type(&mut self, descriptor: RelationTypeDescriptor) {
+        upsert_unindexed(&mut self.relation_type_descriptors, descriptor, |d| {
+            d.relation_type.as_str()
+        });
+    }
+
+    /// Remove every relation type with this id; returns whether any existed.
+    pub fn remove_relation_type(&mut self, id: &str) -> bool {
+        let before = self.relation_type_descriptors.len();
+        self.relation_type_descriptors
+            .retain(|d| d.relation_type != id);
+        before != self.relation_type_descriptors.len()
+    }
+}
+
+/// Replace the entry keyed `key` in place (keeping its position), else append.
+fn upsert_indexed<T>(
+    items: &mut Vec<T>,
+    index: &mut HashMap<String, usize>,
+    key: String,
+    item: T,
+    key_of: impl Fn(&T) -> &str,
+) {
+    match index.get(&key).copied() {
+        Some(i) => items[i] = item,
+        None => {
+            index.insert(key, items.len());
+            items.push(item);
+        }
+    }
+    debug_assert!(items.iter().all(|i| index.contains_key(key_of(i))));
+}
+
+/// Remove the entry keyed `key` and rebuild the index; returns whether it existed.
+fn remove_indexed<T>(
+    items: &mut Vec<T>,
+    index: &mut HashMap<String, usize>,
+    key: &str,
+    key_of: impl Fn(&T) -> &str,
+) -> bool {
+    let Some(i) = index.get(key).copied() else {
+        return false;
+    };
+    items.remove(i);
+    *index = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| (key_of(item).to_owned(), i))
+        .collect();
+    true
+}
+
+/// Replace the first entry with the same key in place, drop other duplicates, else append.
+fn upsert_unindexed<T>(items: &mut Vec<T>, item: T, key_of: impl Fn(&T) -> &str) {
+    let key = key_of(&item).to_owned();
+    match items.iter().position(|i| key_of(i) == key) {
+        Some(first) => {
+            items[first] = item;
+            let mut seen = 0usize;
+            items.retain(|i| {
+                let same = key_of(i) == key;
+                seen += usize::from(same);
+                !same || seen == 1
+            });
+        }
+        None => items.push(item),
     }
 }
 
