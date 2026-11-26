@@ -12,6 +12,7 @@ const ATOMIC_WRITES: &[&str] = &[
     "resolve_obligation",
     "delete_entities",
     "create_assembly",
+    "assign_material",
     "definition.create",
     "definition.instantiate",
     "occurrence.place",
@@ -215,6 +216,16 @@ mod tests {
                 .contains("Unsupported"));
         }
         assert!(!w.contains_resource::<crate::plugins::command_registry::CommandRegistry>());
+        // Recipes may assign materials but never read host texture files.
+        let textured = execute(
+            &mut w,
+            "assign_material",
+            json!({"element_ids":[1],"base_color":[0.5,0.4,0.3,1.0],
+                "base_color_texture":{"asset":{"path":"/etc/hosts"}}}),
+            true,
+        )
+        .unwrap_err();
+        assert!(textured.contains("texture"), "{textured}");
         w.insert_resource(DocumentCallBudget(0));
         assert!(execute(&mut w, "create_box", json!({}), true)
             .unwrap_err()

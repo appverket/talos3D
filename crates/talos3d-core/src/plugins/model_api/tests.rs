@@ -13598,6 +13598,58 @@ fn gated_two_box_world_declaring(satisfied: &[(&str, &str)]) -> World {
 }
 
 #[cfg(feature = "model-api")]
+#[test]
+fn governed_recipes_assign_member_materials_without_textures() {
+    use crate::plugins::materials::MaterialAssignment;
+    let mut world = gated_two_box_world(&[]);
+    world.init_resource::<crate::plugins::materials::MaterialRegistry>();
+    let family = crate::capability_registry::RecipeFamilyId("two_box_wall".into());
+    let mut artifact = world
+        .resource::<crate::curation::RecipeArtifactRegistry>()
+        .get_by_family(&family)
+        .unwrap()
+        .clone();
+    let crate::curation::RecipeBody::AuthoringScript { script } = &mut artifact.body else {
+        unreachable!("two-box recipe is a script");
+    };
+    script
+        .allowed_tools
+        .insert(crate::curation::authoring_script::McpToolId::new(
+            "assign_material",
+        ));
+    script.steps.push(
+        serde_json::from_value(json!({"id":"board_material","tool":"assign_material","args":{
+            "element_ids":{"expr":"array","items":[{"expr":"step_output","step_id":"box_a","path":"id_a"}]},
+            "name":{"expr":"literal","value":"Spruce cladding board"},
+            "base_color":{"expr":"literal","value":[0.78,0.66,0.48,1.0]}}}))
+        .unwrap(),
+    );
+    world
+        .resource_mut::<crate::curation::RecipeArtifactRegistry>()
+        .insert(artifact);
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "two_box_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: json!({}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect("a recipe can give its members a material identity");
+    let assigned = result
+        .created_element_ids
+        .iter()
+        .filter(|id| {
+            find_entity_by_element_id_readonly(&world, ElementId(**id))
+                .is_some_and(|entity| world.get::<MaterialAssignment>(entity).is_some())
+        })
+        .count();
+    assert_eq!(assigned, 1);
+}
+
+#[cfg(feature = "model-api")]
 fn registry_assembly_type(world: &mut World, assembly_type: &str) {
     world
         .resource_mut::<CapabilityRegistry>()

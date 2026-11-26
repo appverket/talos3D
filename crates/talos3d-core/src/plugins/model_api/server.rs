@@ -7857,6 +7857,22 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<AssignMaterialRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if self.document_execution
+            && [
+                &params.base_color_texture,
+                &params.normal_map_texture,
+                &params.metallic_roughness_texture,
+                &params.emissive_texture,
+                &params.occlusion_texture,
+            ]
+            .iter()
+            .any(|texture| texture.is_some())
+        {
+            return Err(McpError::invalid_params(
+                "Recipe execution cannot attach texture files; assign base_color, perceptual_roughness and metallic",
+                None,
+            ));
+        }
         let assigned = self
             .request_assign_material(params)
             .await
