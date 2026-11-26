@@ -13702,6 +13702,35 @@ fn governed_recipes_assign_member_materials_without_textures() {
         })
         .count();
     assert_eq!(assigned, 1);
+    // Repeating the same specification reuses one material identity.
+    let count = world
+        .resource::<crate::plugins::materials::MaterialRegistry>()
+        .count();
+    for _ in 0..2 {
+        handle_assign_material(
+            &mut world,
+            AssignMaterialRequest {
+                element_ids: result.created_element_ids.clone(),
+                material_id: None,
+                name: Some("Spruce cladding board".into()),
+                base_color: Some([0.78, 0.66, 0.48, 1.0]),
+                perceptual_roughness: None,
+                metallic: None,
+                base_color_texture: None,
+                normal_map_texture: None,
+                metallic_roughness_texture: None,
+                emissive_texture: None,
+                occlusion_texture: None,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        world
+            .resource::<crate::plugins::materials::MaterialRegistry>()
+            .count(),
+        count
+    );
 }
 
 #[cfg(feature = "model-api")]

@@ -1612,6 +1612,7 @@ fn handle_assign_material(
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| "Assigned Material".to_string()),
         );
+        let explicit_id = requested_id.is_some();
         if let Some(id) = requested_id {
             def.id = id;
         }
@@ -1625,13 +1626,33 @@ fn handle_assign_material(
             def.metallic = metallic;
         }
         apply_assign_material_texture_refs(&req, &mut def)?;
-        let material_id = def.id.clone();
-        let created_material = !world.resource::<MaterialRegistry>().contains(&material_id);
         if let Some(mut textures) = world.get_resource_mut::<TextureRegistry>() {
             normalize_material_textures(&mut def, &mut textures);
         }
-        world.resource_mut::<MaterialRegistry>().upsert(def);
-        (material_id, created_material)
+        // Without an explicit id, an identical existing material is reused, so
+        // repeated assignments of one specification share one material identity.
+        let identical = (!explicit_id)
+            .then(|| {
+                world
+                    .resource::<MaterialRegistry>()
+                    .all()
+                    .find(|existing| {
+                        let mut candidate = (*existing).clone();
+                        candidate.id = def.id.clone();
+                        candidate == def
+                    })
+                    .map(|existing| existing.id.clone())
+            })
+            .flatten();
+        match identical {
+            Some(material_id) => (material_id, false),
+            None => {
+                let material_id = def.id.clone();
+                let created_material = !world.resource::<MaterialRegistry>().contains(&material_id);
+                world.resource_mut::<MaterialRegistry>().upsert(def);
+                (material_id, created_material)
+            }
+        }
     } else {
         let material_id = requested_id
             .ok_or_else(|| "assign_material requires material_id or base_color".to_string())?;
