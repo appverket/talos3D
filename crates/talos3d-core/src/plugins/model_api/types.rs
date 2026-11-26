@@ -1864,7 +1864,8 @@ pub struct GetWorldAabbResult {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CheckOverlapsRequest {
     /// Subset of element ids to check.  If empty, all entities with geometry
-    /// are used (capped at 500 pairs with a truncation notice).
+    /// are used. Every pair is decided; at most 500 overlaps are reported, with
+    /// `truncated` set when more exist.
     #[serde(default)]
     pub element_ids: Vec<u64>,
 }
@@ -1886,9 +1887,9 @@ pub struct OverlapEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CheckOverlapsResult {
     pub overlaps: Vec<OverlapEntry>,
-    /// True when the candidate set was capped and results may be incomplete.
+    /// True when more than the reported maximum of overlaps exist.
     pub truncated: bool,
-    /// Number of element pairs that were checked.
+    /// Number of element pairs decided (all non-containment pairs).
     pub pairs_checked: usize,
 }
 

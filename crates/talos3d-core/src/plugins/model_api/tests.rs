@@ -14126,6 +14126,52 @@ fn check_overlaps_non_overlapping_boxes_returns_empty() {
 
 #[test]
 #[cfg(feature = "model-api")]
+fn check_overlaps_decides_every_pair_of_a_large_member_set() {
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+    world.insert_resource(registry);
+    // 120 separated boards and one overlap at the far end of the set, beyond
+    // what a 500-pair budget over all pairs would ever reach.
+    for i in 0..120u64 {
+        world.spawn((
+            ElementId(i + 1),
+            BoxPrimitive {
+                centre: Vec3::new(i as f32 * 0.2, 1.0, 0.0),
+                half_extents: Vec3::new(0.05, 1.0, 0.01),
+            },
+            ShapeRotation::default(),
+        ));
+    }
+    world.spawn((
+        ElementId(1000),
+        BoxPrimitive {
+            centre: Vec3::new(119.0 * 0.2 + 0.03, 1.0, 0.0),
+            half_extents: Vec3::new(0.05, 1.0, 0.01),
+        },
+        ShapeRotation::default(),
+    ));
+    let result = handle_check_overlaps(
+        &world,
+        CheckOverlapsRequest {
+            element_ids: Vec::new(),
+        },
+    )
+    .expect("check_overlaps must succeed");
+    assert!(!result.truncated);
+    assert_eq!(result.pairs_checked, 121 * 120 / 2);
+    assert_eq!(
+        result
+            .overlaps
+            .iter()
+            .map(|o| (o.a, o.b))
+            .collect::<Vec<_>>(),
+        vec![(120, 1000)]
+    );
+}
+
+#[test]
+#[cfg(feature = "model-api")]
 fn check_overlaps_touching_boxes_reports_overlap() {
     let mut world = World::new();
     let mut registry = CapabilityRegistry::default();

@@ -19902,28 +19902,46 @@ pub fn handle_check_overlaps(
         }
     }
 
+    // Sweep and prune along x: only pairs whose x-extents meet can intersect,
+    // so every pair is decided while work grows with real proximity rather
+    // than n². The cap bounds reported overlaps, not pairs examined, so a
+    // large member set is still checked completely.
     let n = aabbs.len();
-    let total_pairs = n.saturating_mul(n.saturating_sub(1)) / 2;
-    let truncated = total_pairs > OVERLAP_PAIR_CAP;
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| aabbs[i].min[0].total_cmp(&aabbs[j].min[0]));
+    let ids: std::collections::HashSet<u64> = aabbs.iter().map(|a| a.element_id).collect();
+    let group_pairs_in_set = group_pairs
+        .iter()
+        .filter(|(a, b)| a < b && ids.contains(a) && ids.contains(b))
+        .count();
+    let pairs_checked =
+        (n.saturating_mul(n.saturating_sub(1)) / 2).saturating_sub(group_pairs_in_set);
 
     let mut overlaps = Vec::new();
-    let mut pairs_checked = 0usize;
-    'outer: for i in 0..n {
-        for j in (i + 1)..n {
-            if pairs_checked >= OVERLAP_PAIR_CAP {
-                break 'outer;
-            }
-            let a = &aabbs[i];
+    let mut truncated = false;
+    'outer: for (position, &i) in order.iter().enumerate() {
+        let a = &aabbs[i];
+        for &j in &order[position + 1..] {
             let b = &aabbs[j];
-            // Skip group-member containment pairs.
+            if b.min[0] >= a.max[0] {
+                break;
+            }
             if group_pairs.contains(&(a.element_id, b.element_id)) {
                 continue;
             }
-            pairs_checked += 1;
             if let Some((extents, volume)) = aabb_intersection(a, b) {
+                if overlaps.len() >= OVERLAP_PAIR_CAP {
+                    truncated = true;
+                    break 'outer;
+                }
+                let (first, second) = if a.element_id <= b.element_id {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
                 overlaps.push(OverlapEntry {
-                    a: a.element_id,
-                    b: b.element_id,
+                    a: first.element_id,
+                    b: second.element_id,
                     overlap_volume: volume,
                     overlap_extents: extents,
                 });

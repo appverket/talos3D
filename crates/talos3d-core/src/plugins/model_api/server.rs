@@ -11998,8 +11998,9 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         description = "Report pairwise AABB intersections among the given elements (or all \
             authored entities when element_ids is empty). AABB-level only — rotated or angled \
             members almost always overlap here; measure their actual solids with \
-            inspect_element_geometry pairs (solid_interference). Capped at 500 pairs; sets truncated=true when the \
-            candidate set exceeds the cap. Parent/child group-containment pairs are filtered out \
+            inspect_element_geometry pairs (solid_interference). Every pair is decided (sweep and prune), \
+            so large member sets are checked completely; at most 500 overlaps are reported and truncated=true \
+            means more exist. Parent/child group-containment pairs are filtered out \
             when group membership data is available."
     )]
     pub(super) async fn check_overlaps_tool(
